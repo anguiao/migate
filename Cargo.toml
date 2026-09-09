@@ -11,5 +11,9 @@ sha2 = "0.11"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 
-[dev-dependencies]
 futures-lite = "2"
+async-io = "2"
+rand = "0.10"
+rs-matter = { git = "https://github.com/project-chip/rs-matter.git", rev = "5c111e94827e685f8052975c1c6a391cb5298b7f", features = ["astro-dnssd", "groups"] }
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+log = "0.4"

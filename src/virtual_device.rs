@@ -26,6 +26,10 @@ impl VirtualLight {
     }
 
     pub fn execute(&self, command: Command) -> Snapshot {
+        self.execute_with_revision(command).0
+    }
+
+    pub(crate) fn execute_with_revision(&self, command: Command) -> (Snapshot, u64) {
         let mut state = self.state.lock().unwrap();
         let power = match command {
             Command::On => true,
@@ -37,7 +41,7 @@ impl VirtualLight {
             state.revision = state.revision.wrapping_add(1);
             self.changed.notify(usize::MAX);
         }
-        snapshot(&state)
+        (snapshot(&state), state.revision)
     }
 
     pub fn subscribe(&self) -> Changes<'_> {
@@ -64,6 +68,10 @@ impl Changes<'_> {
     /// Wait for a real change since subscribing or the previous returned snapshot.
     /// Consecutive changes may be coalesced; cancellation does not consume a change.
     pub async fn changed(&mut self) -> Snapshot {
+        self.changed_with_revision().await.0
+    }
+
+    pub(crate) async fn changed_with_revision(&mut self) -> (Snapshot, u64) {
         loop {
             // Register first so a command between the check and await cannot be lost.
             let listener = self.light.changed.listen();
@@ -71,7 +79,7 @@ impl Changes<'_> {
                 let state = self.light.state.lock().unwrap();
                 if state.revision != self.revision {
                     self.revision = state.revision;
-                    return snapshot(&state);
+                    return (snapshot(&state), state.revision);
                 }
             }
             listener.await;

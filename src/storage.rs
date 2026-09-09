@@ -147,6 +147,10 @@ impl Store {
         })
     }
 
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     pub fn identity(&self) -> &Identity {
         &self.payload.identity
     }
