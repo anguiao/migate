@@ -17,3 +17,6 @@ rand = "0.10"
 rs-matter = { git = "https://github.com/project-chip/rs-matter.git", rev = "5c111e94827e685f8052975c1c6a391cb5298b7f", features = ["astro-dnssd", "groups"] }
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 log = "0.4"
+blocking = "1"
+async-signal = "0.2"
+env_logger = "0.11"
