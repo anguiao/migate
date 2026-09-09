@@ -1,0 +1,2 @@
+[env]
+MIGATE_DATA_DIR = { value = ".migate", relative = true }
