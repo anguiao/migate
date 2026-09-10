@@ -26,11 +26,12 @@ fn run() -> Result<(), matter::RuntimeError> {
         &env::current_dir()?,
     )?;
     let store = Store::open(&config.data_dir)?;
-    log::info!("Data directory: {}", store.directory().display());
+    let identity = store.load_identity()?;
+    log::info!("Data directory: {}", config.data_dir.display());
     log::info!(
         "MiGate bridge_id={} light_id={}",
-        store.identity().bridge_id,
-        store.identity().light_id
+        identity.bridge_id,
+        identity.light_id
     );
     log::info!(
         "endpoint 0=root, 1=Aggregator, 2=MiGate Virtual Light (virtual-light-1); initial state: off"
@@ -57,6 +58,12 @@ fn run() -> Result<(), matter::RuntimeError> {
             log::info!("Terminal input ended; bridge is still running");
             future::pending::<Result<(), matter::RuntimeError>>().await
         };
-        matter::run(&light, store, future::or(interrupt, input)).await
+        matter::run(
+            &light,
+            &identity,
+            store.matter(),
+            future::or(interrupt, input),
+        )
+        .await
     })
 }

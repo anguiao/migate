@@ -1,8 +1,8 @@
 use super::super::{
     LIGHT_ENDPOINT, NODE, basic_info,
     bridged_info::{self, BridgedHandler},
-    kv::ProtocolStore,
     light::{LightHandler, LightHooks},
+    storage::StoreAdapter,
 };
 use crate::{storage::Store, virtual_device::VirtualLight};
 use futures_lite::future::{block_on, poll_once};
@@ -201,13 +201,13 @@ fn attr(cluster_id: u32, attr_id: u32) -> AttrDetails {
 fn actual_handler_invoke_read_and_report_share_the_device() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let identity = store.identity().clone();
+    let identity = store.load_identity().unwrap();
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-    let kv = matter.kv(ProtocolStore::new(store));
+    let kv = matter.kv(StoreAdapter::new(store.matter()));
     let light = VirtualLight::new();
     let inner = on_off::OnOffHandler::new_standalone(
         Dataver::new(1),
@@ -279,14 +279,14 @@ fn actual_handler_invoke_read_and_report_share_the_device() {
 fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let identity = store.identity().clone();
+    let identity = store.load_identity().unwrap();
     let info = basic_info(&identity);
-    let label = bridged_info::load_label(&store).unwrap();
+    let label = bridged_info::load_label(&store.matter()).unwrap();
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-    let kv = matter.kv(ProtocolStore::new(store));
+    let kv = matter.kv(StoreAdapter::new(store.matter()));
     let bridged = BridgedHandler::new(Dataver::new(1), &identity.light_id, label);
     let handler = Async(bridged::HandlerAdaptor(&bridged));
     let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
@@ -297,7 +297,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     );
     bridged.set_node_label(&ctx, "Study Light").unwrap();
     assert_eq!(
-        bridged_info::load_label(&Store::open(dir.path()).unwrap()).unwrap(),
+        bridged_info::load_label(&Store::open(dir.path()).unwrap().matter()).unwrap(),
         "Study Light"
     );
     let count = ctx.changes.borrow().len();

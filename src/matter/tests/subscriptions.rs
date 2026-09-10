@@ -1,7 +1,7 @@
 use super::super::{
     LIGHT_ENDPOINT, NODE, basic_info,
-    kv::ProtocolStore,
     light::{LightHandler, LightHooks},
+    storage::StoreAdapter,
 };
 use crate::{storage::Store, virtual_device::VirtualLight};
 use event_listener::Event;
@@ -199,10 +199,10 @@ async fn wait_committed(state: &EthInteractionModelState) {
 
 fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> u32 {
     let store = Store::open(directory).unwrap();
-    let identity = store.identity().clone();
+    let identity = store.load_identity().unwrap();
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    let protocol = ProtocolStore::new(store);
+    let protocol = StoreAdapter::new(store.matter());
     let kv = matter.kv(protocol.clone());
     matter.startup(&kv).unwrap();
     let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
@@ -286,12 +286,13 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
         )
         .await
     });
-    protocol.flush().unwrap();
+    protocol.check_failure().unwrap();
     assert!(
         Store::open(directory)
             .unwrap()
-            .load(PERSISTENT_SUBSCRIPTIONS_START)
-            .is_some()
+            .matter()
+            .contains(PERSISTENT_SUBSCRIPTIONS_START)
+            .unwrap()
     );
     id
 }
@@ -303,11 +304,20 @@ fn replaced_subscription_survives_restarts_and_reports_terminal_changes() {
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
             let directory = tempfile::tempdir().unwrap();
-            let identity = Store::open(directory.path()).unwrap().identity().clone();
+            let identity = Store::open(directory.path())
+                .unwrap()
+                .load_identity()
+                .unwrap();
             let mut subscription = None;
             for boot in 1..=3 {
                 subscription = Some(run_boot(directory.path(), boot, subscription));
-                assert_eq!(Store::open(directory.path()).unwrap().identity(), &identity);
+                assert_eq!(
+                    Store::open(directory.path())
+                        .unwrap()
+                        .load_identity()
+                        .unwrap(),
+                    identity
+                );
             }
         })
         .unwrap()

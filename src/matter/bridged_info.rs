@@ -1,4 +1,4 @@
-use crate::storage::Store;
+use crate::storage::{MatterStore, StorageError};
 use rs_matter::{
     dm::{
         Cluster, Dataver, InvokeContext, ReadContext, WriteContext,
@@ -22,13 +22,23 @@ fn validate_label(label: &str) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn load_label(store: &Store) -> Result<String, Error> {
-    let Some(data) = store.load(LABEL_KEY) else {
+pub(super) fn load_label(store: &MatterStore) -> Result<String, StorageError> {
+    let Some(data) = store.get(LABEL_KEY)? else {
         return Ok(DEFAULT_LABEL.into());
     };
-    let label = TLVElement::new(data).utf8()?;
-    validate_label(label)?;
-    Ok(label.to_owned())
+    TLVElement::new(&data)
+        .utf8()
+        .and_then(|label| {
+            validate_label(label)?;
+            Ok(label.to_owned())
+        })
+        .map_err(|error| {
+            StorageError::new(
+                store.path(),
+                format!("restore bridged device label for key {LABEL_KEY}"),
+                error,
+            )
+        })
 }
 
 pub(super) struct BridgedHandler<'a> {
@@ -105,13 +115,14 @@ impl bridged::ClusterHandler for BridgedHandler<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Store;
 
     #[test]
     fn bridged_label_defaults_and_detects_corruption() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(dir.path()).unwrap();
+        let store = Store::open(dir.path()).unwrap().matter();
         assert_eq!(load_label(&store).unwrap(), "MiGate Virtual Light");
-        store.store(LABEL_KEY, &[0x15]).unwrap();
+        store.put(LABEL_KEY, &[0x15]).unwrap();
         assert!(load_label(&store).is_err());
     }
 }

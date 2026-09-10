@@ -1,0 +1,10 @@
+CREATE TABLE identity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    bridge_id TEXT NOT NULL CHECK (length(bridge_id) = 32),
+    light_id TEXT NOT NULL CHECK (length(light_id) = 32 AND light_id <> bridge_id)
+) STRICT;
+
+CREATE TABLE blobs (
+    key INTEGER PRIMARY KEY CHECK (key BETWEEN 0 AND 65535),
+    value BLOB NOT NULL
+) STRICT;

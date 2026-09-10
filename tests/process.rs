@@ -154,11 +154,14 @@ fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
         assert!(output.contains("virtual-light-1: off"), "{output}");
         assert!(output.contains("virtual-light-1: on"), "{output}");
         assert!(errors.contains(directory.path().to_str().unwrap()));
-        let restored = migate::storage::Store::open(directory.path()).unwrap();
+        let restored = migate::storage::Store::open(directory.path())
+            .unwrap()
+            .load_identity()
+            .unwrap();
         if let Some(identity) = &identity {
-            assert_eq!(identity, restored.identity());
+            assert_eq!(identity, &restored);
         } else {
-            identity = Some(restored.identity().clone());
+            identity = Some(restored);
         }
     }
 }

@@ -1,5 +1,6 @@
 use migate::{config::Config, device::Command, storage::Store, virtual_device::VirtualLight};
-use std::fs;
+use rusqlite::Connection;
+use std::{error::Error as _, fs};
 
 #[test]
 fn initializes_and_restores_identity_without_power() {
@@ -9,80 +10,171 @@ fn initializes_and_restores_identity_without_power() {
             fs::create_dir(&dir).unwrap();
         }
         let store = Store::open(&dir).unwrap();
-        let identity = store.identity().clone();
+        let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
         assert_ne!(identity.bridge_id, identity.light_id);
         let light = VirtualLight::new();
         light.execute(Command::On);
         drop(store);
-        assert_eq!(Store::open(&dir).unwrap().identity(), &identity);
+        assert_eq!(
+            Store::open(&dir).unwrap().load_identity().unwrap(),
+            identity
+        );
         assert!(!VirtualLight::new().snapshot().power);
     }
     assert_ne!(
-        Store::open(root.path().join("new")).unwrap().identity(),
-        Store::open(root.path().join("empty")).unwrap().identity()
+        Store::open(root.path().join("new"))
+            .unwrap()
+            .load_identity()
+            .unwrap(),
+        Store::open(root.path().join("empty"))
+            .unwrap()
+            .load_identity()
+            .unwrap()
     );
 }
 
 #[test]
 fn raw_blobs_are_durable_on_each_mutation() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path()).unwrap();
-    let identity = store.identity().clone();
+    let store = Store::open(dir.path()).unwrap();
+    let matter = store.matter();
+    let observer = Store::open(dir.path()).unwrap().matter();
     let blob = [0, 255, 42, 128];
-    store.store(7, &blob).unwrap();
+    matter.put(7, &blob).unwrap();
+    assert!(observer.contains(7).unwrap());
+    assert_eq!(observer.get(7).unwrap().as_deref(), Some(blob.as_slice()));
+    matter.put(7, b"updated").unwrap();
     assert_eq!(
-        Store::open(dir.path()).unwrap().load(7),
-        Some(blob.as_slice())
+        observer.get(7).unwrap().as_deref(),
+        Some(b"updated".as_slice())
     );
-    assert_eq!(store.load(8), None);
-    store.remove(8).unwrap();
-    store.remove(7).unwrap();
-    fs::write(dir.path().join(".tmp-interrupted"), b"uncommitted").unwrap();
+    matter.put(u16::MAX, &[]).unwrap();
+    assert!(observer.contains(u16::MAX).unwrap());
+    assert_eq!(observer.get(u16::MAX).unwrap(), Some(vec![]));
+    assert!(!matter.contains(8).unwrap());
+    assert_eq!(matter.get(8).unwrap(), None);
+    matter.delete(8).unwrap();
+    matter.delete(7).unwrap();
+    assert!(!observer.contains(7).unwrap());
+    assert_eq!(observer.get(7).unwrap(), None);
     let reopened = Store::open(dir.path()).unwrap();
-    assert_eq!(reopened.load(7), None);
-    assert_eq!(reopened.identity(), &identity);
-    store.flush().unwrap();
+    assert_eq!(reopened.matter().get(7).unwrap(), None);
+    assert_eq!(reopened.matter().get(u16::MAX).unwrap(), Some(vec![]));
+    assert_eq!(
+        reopened.load_identity().unwrap(),
+        store.load_identity().unwrap()
+    );
+}
+
+#[test]
+fn matter_handles_share_data_and_outlive_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let other = store.clone();
+    let first = store.matter();
+    drop(store);
+    let second = other.matter();
+    drop(other);
+
+    first.put(7, b"first").unwrap();
+    assert_eq!(second.get(7).unwrap().as_deref(), Some(b"first".as_slice()));
+    let clone = second.clone();
+    drop(second);
+    clone.put(7, b"updated").unwrap();
+    assert_eq!(
+        first.get(7).unwrap().as_deref(),
+        Some(b"updated".as_slice())
+    );
 }
 
 #[test]
 fn corruption_and_partial_initialization_are_preserved() {
-    for contents in [b"not json".as_slice(), br#"{}"#] {
+    for contents in [b"SECRET CONTENT".as_slice(), b""] {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
+        let path = dir.path().join("state.db");
         fs::write(&path, contents).unwrap();
-        let error = Store::open(dir.path()).err().unwrap().to_string();
-        assert!(error.contains(path.to_str().unwrap()));
+        let error = Store::open(dir.path())
+            .and_then(|store| store.load_identity())
+            .unwrap_err();
+        assert!(error.to_string().contains(path.to_str().unwrap()));
+        assert!(!format!("{error:?} {error}").contains("SECRET CONTENT"));
         assert_eq!(fs::read(path).unwrap(), contents);
     }
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("leftover"), b"secret").unwrap();
     assert!(Store::open(dir.path()).is_err());
-    assert!(!dir.path().join("state.json").exists());
+    assert!(!dir.path().join("state.db").exists());
     assert_eq!(fs::read(dir.path().join("leftover")).unwrap(), b"secret");
 }
 
 #[test]
-fn valid_json_corruption_is_detected() {
-    for field in ["version", "identity", "blobs"] {
-        let dir = tempfile::tempdir().unwrap();
+fn missing_identity_is_not_regenerated() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path())
+        .unwrap()
+        .matter()
+        .put(7, b"secret")
+        .unwrap();
+    let db = Connection::open(dir.path().join("state.db")).unwrap();
+    db.execute("DELETE FROM identity", []).unwrap();
+    assert!(Store::open(dir.path()).unwrap().load_identity().is_err());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM identity", [], |row| row
+            .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT value FROM blobs WHERE key = 7", [], |row| row
+            .get::<_, Vec<u8>>(0))
+            .unwrap(),
+        b"secret"
+    );
+}
+
+#[test]
+fn failed_mutations_preserve_data_without_exposing_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap().matter();
+    store.put(1, b"original").unwrap();
+    let path = dir.path().join("state.db");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER reject_update AFTER UPDATE ON blobs BEGIN
+            SELECT RAISE(ABORT, 'SECRET CONTENT');
+        END;
+        CREATE TRIGGER reject_delete AFTER DELETE ON blobs BEGIN
+            SELECT RAISE(ABORT, 'SECRET CONTENT');
+        END;",
+    )
+    .unwrap();
+    for (result, operation) in [
+        (
+            store.put(1, b"SECRET CONTENT"),
+            "write Matter data for key 1",
+        ),
+        (store.delete(1), "delete Matter data for key 1"),
+    ] {
+        let error = result.unwrap_err();
+        assert_eq!(error.path(), path);
+        assert_eq!(error.operation(), operation);
+        assert!(error.source().unwrap().is::<rusqlite::Error>());
+        assert!(!format!("{error:?} {error}").contains("SECRET CONTENT"));
+        assert_eq!(
+            store.get(1).unwrap().as_deref(),
+            Some(b"original".as_slice())
+        );
+    }
+    assert_eq!(
         Store::open(dir.path())
             .unwrap()
-            .store(7, b"secret")
-            .unwrap();
-        let path = dir.path().join("state.json");
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        match field {
-            "version" => value["payload"][field] = 99.into(),
-            "identity" => value["payload"][field]["bridge_id"] = "invalid".into(),
-            _ => value["payload"][field] = serde_json::json!({}),
-        }
-        let damaged = serde_json::to_vec(&value).unwrap();
-        fs::write(&path, &damaged).unwrap();
-        assert!(Store::open(dir.path()).is_err());
-        assert_eq!(fs::read(path).unwrap(), damaged);
-    }
+            .matter()
+            .get(1)
+            .unwrap()
+            .as_deref(),
+        Some(b"original".as_slice())
+    );
 }
 
 #[test]
@@ -95,19 +187,16 @@ fn uses_final_config_directory_and_reports_io_failure() {
         root.path(),
     )
     .unwrap();
-    let mut store = Store::open(&config.data_dir).unwrap();
-    store.store(1, b"old").unwrap();
+    Store::open(&config.data_dir).unwrap();
+    assert!(config.data_dir.join("state.db").is_file());
     assert!(!root.path().join("ignored").exists());
-    let path = config.data_dir.join("state.json");
-    fs::rename(&path, config.data_dir.join("saved.json")).unwrap();
-    fs::create_dir(&path).unwrap();
-    let error = store.store(1, b"SECRET CONTENT").unwrap_err().to_string();
-    assert!(error.contains(path.to_str().unwrap()));
-    assert!(!error.contains("SECRET CONTENT"));
-    assert_eq!(store.load(1), Some(b"old".as_slice()));
-    assert!(store.remove(1).is_err());
-    assert_eq!(store.load(1), Some(b"old".as_slice()));
-    assert!(store.flush().is_err());
+    let path = root.path().join("file");
+    fs::write(&path, b"secret").unwrap();
+    let error = Store::open(&path).err().unwrap();
+    assert_eq!(error.path(), path);
+    assert_eq!(error.operation(), "create data directory");
+    assert!(error.source().unwrap().is::<std::io::Error>());
+    assert_eq!(fs::read(path).unwrap(), b"secret");
 }
 
 #[cfg(unix)]
@@ -118,26 +207,21 @@ fn private_permissions() {
     let dir = root.path().join("private");
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
-    Store::open(&dir).unwrap().store(1, b"secret").unwrap();
+    Store::open(&dir)
+        .unwrap()
+        .matter()
+        .put(1, b"secret")
+        .unwrap();
     assert_eq!(
         fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
         0o700
     );
     assert_eq!(
-        fs::metadata(dir.join("state.json"))
+        fs::metadata(dir.join("state.db"))
             .unwrap()
             .permissions()
             .mode()
             & 0o777,
         0o600
     );
-}
-
-#[test]
-fn malformed_credential_errors_do_not_quote_contents() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("state.json");
-    fs::write(&path, br#"{"payload":"SECRET CONTENT"}"#).unwrap();
-    let error = Store::open(dir.path()).err().unwrap();
-    assert!(!format!("{error:?} {error}").contains("SECRET CONTENT"));
 }

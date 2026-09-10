@@ -1,13 +1,12 @@
 mod bridged_info;
-mod kv;
 mod light;
+mod storage;
 
 use crate::{
-    storage::{Identity, Store},
+    storage::{Identity, MatterStore},
     virtual_device::VirtualLight,
 };
 use bridged_info::BridgedHandler;
-use kv::ProtocolStore;
 use light::{LightHandler, LightHooks};
 use rs_matter::{
     MATTER_PORT, Matter, clusters,
@@ -44,6 +43,7 @@ use rs_matter::{
     },
 };
 use std::{future::Future, net::UdpSocket, time::Duration};
+use storage::StoreAdapter;
 
 pub type RuntimeError = Box<dyn std::error::Error>;
 const WINDOW_SECONDS: u16 = 900;
@@ -117,25 +117,17 @@ fn initialize_basic_info(
 /// The shutdown future may also carry fatal errors from other process tasks.
 pub async fn run(
     light: &VirtualLight,
-    store: Store,
+    identity: &Identity,
+    store: MatterStore,
     shutdown: impl Future<Output = Result<(), RuntimeError>>,
 ) -> Result<(), RuntimeError> {
-    let label = bridged_info::load_label(&store).map_err(|e| {
-        format!(
-            "Failed to restore bridged device label ({}): {e}",
-            store.directory().display()
-        )
-    })?;
-    let missing_basic_info = store.load(rs_matter::persist::BASIC_INFO_KEY).is_none();
-    let identity = store.identity().clone();
-    let directory = store.directory().display().to_string();
-    let info = basic_info(&identity);
+    let label = bridged_info::load_label(&store)?;
+    let missing_basic_info = !store.contains(rs_matter::persist::BASIC_INFO_KEY)?;
+    let info = basic_info(identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    let store = ProtocolStore::new(store);
+    let store = StoreAdapter::new(store);
     let kv = matter.kv(store.clone());
-    matter
-        .startup(&kv)
-        .map_err(|e| format!("Failed to restore Matter data ({directory}): {e}"))?;
+    store.with_context("restore Matter data", matter.startup(&kv))?;
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
@@ -194,13 +186,12 @@ pub async fn run(
             ),
     );
     let im = InteractionModel::new(&matter, &crypto, &buffers, model, &kv, &state);
-    im.startup()
-        .await
-        .map_err(|e| format!("Failed to restore Matter model ({directory}): {e}"))?;
+    store.with_context("restore Matter model", im.startup().await)?;
     // Initialize only after every existing blob has been restored successfully.
-    initialize_basic_info(&matter, &kv, missing_basic_info).map_err(|e| {
-        format!("Failed to initialize the default Matter node label ({directory}): {e}")
-    })?;
+    store.with_context(
+        "initialize the default Matter node label",
+        initialize_basic_info(&matter, &kv, missing_basic_info),
+    )?;
     let socket = async_io::Async::<UdpSocket>::bind(MATTER_SOCKET_BIND_ADDR)
         .map_err(|e| format!("Failed to bind Matter UDP port 5540: {e}"))?;
     let responder = DefaultResponder::new(&im);
@@ -222,7 +213,7 @@ pub async fn run(
         }
         std::future::pending::<Result<(), RuntimeError>>().await
     };
-    let fatal = async { Err::<(), RuntimeError>(store.failed().await.to_string().into()) };
+    let fatal = async { Err::<(), RuntimeError>(store.wait_failure().await.into()) };
     let transport = async {
         matter
             .run(&crypto, &socket, &socket, &socket)
@@ -255,13 +246,13 @@ pub async fn run(
         ),
     )
     .await;
-    // All service futures are dropped before this final synchronous durability check.
+    // All service futures are dropped before checking for a stored failure.
     finish(&store, result)
 }
 
-fn finish(store: &ProtocolStore, result: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
+fn finish(store: &StoreAdapter, result: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
     // A sticky storage failure takes precedence even when shutdown won the race.
-    store.flush().map_err(|error| error.to_string())?;
+    store.check_failure()?;
     result
 }
 
