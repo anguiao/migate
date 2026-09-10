@@ -52,7 +52,7 @@ fn basic_command(light: &VirtualLight, id: u32, data: &TLVElement<'_>) -> Result
     validate_command(id, data)?;
     let snapshot = light.execute(command);
     log::info!(
-        "Matter {} {:?} → {}",
+        "Matter {} {:?} -> {}",
         snapshot.id,
         command,
         if snapshot.power { "on" } else { "off" }

@@ -42,7 +42,7 @@ fn input_recovers_from_unknown_commands_and_returns_at_eof() {
     .unwrap();
     assert_eq!(
         String::from_utf8(output).unwrap(),
-        "virtual-light-1: on\n可用命令：on, off, status\nvirtual-light-1: on\nvirtual-light-1: off\n"
+        "virtual-light-1: on\nAvailable commands: on, off, status\nvirtual-light-1: on\nvirtual-light-1: off\n"
     );
     assert!(!light.snapshot().power);
 }

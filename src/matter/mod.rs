@@ -81,7 +81,7 @@ fn print_pairing(info: &BasicInfoConfig<'_>) -> Result<(), RuntimeError> {
     let mut output = std::io::stdout().lock();
     writeln!(
         output,
-        "请在家庭 App 添加 MiGate，配对窗口为 15 分钟。\n手动配对码：{manual}\n{text}"
+        "Add MiGate in the Home app. The pairing window is open for 15 minutes.\nManual pairing code: {manual}\n{text}"
     )?;
     let mut scratch = [0; 4096];
     let mut qr_buf = [0; 4096];
@@ -122,7 +122,7 @@ pub async fn run(
 ) -> Result<(), RuntimeError> {
     let label = bridged_info::load_label(&store).map_err(|e| {
         format!(
-            "桥接设备名称恢复失败（{}）：{e}",
+            "Failed to restore bridged device label ({}): {e}",
             store.directory().display()
         )
     })?;
@@ -135,7 +135,7 @@ pub async fn run(
     let kv = matter.kv(store.clone());
     matter
         .startup(&kv)
-        .map_err(|e| format!("Matter 数据恢复失败（{directory}）：{e}"))?;
+        .map_err(|e| format!("Failed to restore Matter data ({directory}): {e}"))?;
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
@@ -196,12 +196,13 @@ pub async fn run(
     let im = InteractionModel::new(&matter, &crypto, &buffers, model, &kv, &state);
     im.startup()
         .await
-        .map_err(|e| format!("Matter 模型恢复失败（{directory}）：{e}"))?;
+        .map_err(|e| format!("Failed to restore Matter model ({directory}): {e}"))?;
     // Initialize only after every existing blob has been restored successfully.
-    initialize_basic_info(&matter, &kv, missing_basic_info)
-        .map_err(|e| format!("Matter 默认名称初始化失败（{directory}）：{e}"))?;
+    initialize_basic_info(&matter, &kv, missing_basic_info).map_err(|e| {
+        format!("Failed to initialize the default Matter node label ({directory}): {e}")
+    })?;
     let socket = async_io::Async::<UdpSocket>::bind(MATTER_SOCKET_BIND_ADDR)
-        .map_err(|e| format!("无法绑定 Matter UDP 5540：{e}"))?;
+        .map_err(|e| format!("Failed to bind Matter UDP port 5540: {e}"))?;
     let responder = DefaultResponder::new(&im);
     let opened = !matter.has_fabrics();
     if opened {
@@ -215,7 +216,7 @@ pub async fn run(
                 use std::io::Write;
                 writeln!(
                     std::io::stdout().lock(),
-                    "配对窗口已超时；重启 MiGate 可重新打开配对窗口。"
+                    "Pairing window expired. Restart MiGate to reopen it."
                 )?;
             }
         }
@@ -226,24 +227,24 @@ pub async fn run(
         matter
             .run(&crypto, &socket, &socket, &socket)
             .await
-            .map_err(|e| format!("Matter 传输任务失败：{e}").into())
+            .map_err(|e| format!("Matter transport task failed: {e}").into())
     };
     let mdns = async {
         AstroMdns::new()
             .run(&matter)
             .await
-            .map_err(|e| format!("mDNS 服务失败：{e}").into())
+            .map_err(|e| format!("mDNS service failed: {e}").into())
     };
     let respond = async {
         responder
             .run::<4, 4>()
             .await
-            .map_err(|e| format!("Matter 响应任务失败：{e}").into())
+            .map_err(|e| format!("Matter responder task failed: {e}").into())
     };
     let job = async {
         im.run()
             .await
-            .map_err(|e| format!("Matter 模型任务失败：{e}").into())
+            .map_err(|e| format!("Matter model task failed: {e}").into())
     };
     use futures_lite::future::or;
     let result = or(

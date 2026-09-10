@@ -41,9 +41,9 @@ pub struct StorageError {
 
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}：{}", self.context, self.path.display())?;
+        write!(f, "{}: {}", self.context, self.path.display())?;
         if let Some(source) = &self.source {
-            write!(f, "：{source}")?;
+            write!(f, ": {source}")?;
         }
         Ok(())
     }
@@ -66,7 +66,7 @@ fn invalid(path: &Path, context: &'static str) -> StorageError {
 fn io_error(path: &Path, source: std::io::Error) -> StorageError {
     StorageError {
         path: path.into(),
-        context: "存储访问失败",
+        context: "Failed to access storage",
         source: Some(source),
     }
 }
@@ -97,8 +97,8 @@ impl Store {
         let payload = match fs::read(&path) {
             Ok(bytes) => {
                 // Do not include serde errors: they may quote credential contents.
-                let envelope: Envelope =
-                    serde_json::from_slice(&bytes).map_err(|_| invalid(&path, "存储格式损坏"))?;
+                let envelope: Envelope = serde_json::from_slice(&bytes)
+                    .map_err(|_| invalid(&path, "Invalid storage format"))?;
                 let valid_id = |id: &str| {
                     id.len() == 32
                         && id
@@ -111,14 +111,22 @@ impl Store {
                     || envelope.payload.identity.bridge_id == envelope.payload.identity.light_id
                     || envelope.checksum != checksum(&envelope.payload)
                 {
-                    return Err(invalid(&path, "存储版本、身份或校验和无效"));
+                    return Err(invalid(
+                        &path,
+                        "Invalid storage version, identity, or checksum",
+                    ));
                 }
                 envelope.payload
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let mut entries = fs::read_dir(directory).map_err(|e| io_error(directory, e))?;
                 match entries.next() {
-                    Some(Ok(_)) => return Err(invalid(&path, "数据目录初始化不完整")),
+                    Some(Ok(_)) => {
+                        return Err(invalid(
+                            &path,
+                            "Data directory initialization is incomplete",
+                        ));
+                    }
                     Some(Err(error)) => return Err(io_error(directory, error)),
                     None => {}
                 }

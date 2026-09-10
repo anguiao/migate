@@ -1,6 +1,6 @@
 use crate::{device::Command, virtual_device::VirtualLight};
 
-pub const COMMAND_HELP: &str = "可用命令：on, off, status";
+pub const COMMAND_HELP: &str = "Available commands: on, off, status";
 
 pub fn handle_line(light: &VirtualLight, line: &str) -> Option<String> {
     let snapshot = match line.trim() {

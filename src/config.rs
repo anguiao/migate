@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const USAGE: &str = "用法：migate [--data-dir <PATH>]";
+pub const USAGE: &str = "Usage: migate [--data-dir <PATH>]";
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Config {
@@ -36,26 +36,29 @@ impl Config {
         while let Some(arg) = args.next() {
             if arg != "--data-dir" || cli_data_dir.is_some() {
                 return Err(ConfigError(format!(
-                    "无效启动参数：{}",
+                    "Invalid argument: {}",
                     arg.to_string_lossy()
                 )));
             }
             cli_data_dir = Some(
                 args.next()
                     .filter(|value| !value.as_encoded_bytes().starts_with(b"--"))
-                    .ok_or_else(|| ConfigError("--data-dir 缺少路径".into()))?,
+                    .ok_or_else(|| ConfigError("--data-dir requires a path".into()))?,
             );
         }
         let data_dir = match cli_data_dir.or(env_data_dir) {
             Some(value) => {
                 if value.is_empty() {
-                    return Err(ConfigError("数据目录不能为空".into()));
+                    return Err(ConfigError("Data directory cannot be empty".into()));
                 }
                 PathBuf::from(value)
             }
             None => {
                 let home = home.filter(|value| !value.is_empty()).ok_or_else(|| {
-                    ConfigError("无法确定用户主目录，请指定 --data-dir 或 MIGATE_DATA_DIR".into())
+                    ConfigError(
+                        "Cannot determine the home directory; use --data-dir or MIGATE_DATA_DIR"
+                            .into(),
+                    )
                 })?;
                 PathBuf::from(home).join(".migate")
             }

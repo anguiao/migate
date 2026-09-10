@@ -15,13 +15,13 @@ cargo build --locked --release
 
 目录优先级：`--data-dir <PATH>`、运行时 `MIGATE_DATA_DIR`、`~/.migate/`。显式参数或环境变量中的相对路径按启动工作目录解析。空目录或不存在的目录会初始化新身份，非空但不完整或损坏的目录会报错退出并保留数据。
 
-仓库 `.cargo/config.toml` 为 `cargo run` 和 `cargo run --release` 注入项目根目录下 `.migate/`；已有环境变量优先。直接执行二进制不读取 Cargo 配置，因此应显式传目录，或设置环境变量。启动日志显示最终路径、持久化网桥和子设备标识，以及固定的本地标识 `virtual-light-1`。Endpoint 0 为根端点，1 为 Aggregator，2 为虚拟灯。
+仓库 `.cargo/config.toml` 为 `cargo run` 和 `cargo run --release` 注入项目根目录下 `.migate/`；已有环境变量优先。直接执行二进制不读取 Cargo 配置，因此应显式传目录，或设置环境变量。启动日志显示最终路径、持久化网桥和子设备标识，以及固定的本地标识 `virtual-light-1`。Endpoint 0 为根端点，1 为 Aggregator，2 为虚拟灯，虚拟灯默认名称为 `MiGate Virtual Light`。
 
 数据包含身份和配对凭据，请保留并避免提交或共享。仓库忽略 `.migate/` 与 `.migate-*/`。全新配对可使用新的顶层目录，例如 `cargo run --locked -- --data-dir .migate-trial-2`；新目录代表新的网桥实例，需要重新添加，原目录不会被修改。不要把新实例放在尚未初始化的 `.migate/` 内，否则该父目录会成为非空、不完整的数据目录。
 
 ## 终端与退出
 
-按行输入小写 `on`、`off`、`status`；忽略首尾空白和空行。未知命令或多余参数显示帮助，随后仍可继续输入。灯状态来自同一个虚拟设备，终端与 Matter 读写共享它。日志写标准错误，配对指引和终端结果写标准输出。日志级别固定为 info，不读取 `RUST_LOG`。
+按行输入小写 `on`、`off`、`status`；忽略首尾空白和空行。未知命令或多余参数显示帮助，随后仍可继续输入。灯状态来自同一个虚拟设备，终端与 Matter 读写共享它。程序提示与日志使用英文。日志写标准错误，配对指引和终端结果写标准输出。日志级别固定为 info，不读取 `RUST_LOG`。
 
 输入 EOF 只结束终端读取，日志提示桥接服务继续运行。Ctrl-C 停止服务并完成必要持久化；正常停止返回成功，输入输出、存储或服务故障报错并返回非零状态。每次启动灯都为 `off`，不会恢复之前的开关状态。标准 Lighting、Identify、Groups、Scenes 能力沿用协议栈；`StartUpOnOff` 只接受 Off，以保持固定的关闭启动行为。
 

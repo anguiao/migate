@@ -295,13 +295,13 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         BridgedHandler::CLUSTER.id,
         bridged::AttributeId::NodeLabel as _,
     );
-    bridged.set_node_label(&ctx, "书房灯").unwrap();
+    bridged.set_node_label(&ctx, "Study Light").unwrap();
     assert_eq!(
         bridged_info::load_label(&Store::open(dir.path()).unwrap()).unwrap(),
-        "书房灯"
+        "Study Light"
     );
     let count = ctx.changes.borrow().len();
-    bridged.set_node_label(&ctx, "书房灯").unwrap();
+    bridged.set_node_label(&ctx, "Study Light").unwrap();
     assert_eq!(ctx.changes.borrow().len(), count);
     assert!(bridged.set_node_label(&ctx, &"x".repeat(33)).is_err());
     let mut bytes = [0; 64];
@@ -312,5 +312,8 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
             Utf8StrBuilder::new(TLVWriteParent::new((), &mut writer), &TLVTag::Anonymous),
         )
         .unwrap();
-    assert_eq!(TLVElement::new(writer.as_slice()).utf8().unwrap(), "书房灯");
+    assert_eq!(
+        TLVElement::new(writer.as_slice()).utf8().unwrap(),
+        "Study Light"
+    );
 }

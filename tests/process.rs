@@ -125,7 +125,7 @@ fn invalid_arguments_exit_without_starting_services() {
         .output()
         .unwrap();
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("用法："));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Usage:"));
     assert!(result.stdout.is_empty());
 }
 
@@ -145,7 +145,10 @@ fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
         }
         process.wait_for_output(Stream::Stdout, "virtual-light-1: on\n");
         if close_input {
-            process.wait_for_output(Stream::Stderr, "终端输入结束，桥接服务继续运行");
+            process.wait_for_output(
+                Stream::Stderr,
+                "Terminal input ended; bridge is still running",
+            );
         }
         let (output, errors) = process.interrupt();
         assert!(output.contains("virtual-light-1: off"), "{output}");

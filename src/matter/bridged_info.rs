@@ -12,7 +12,7 @@ use rs_matter::{
 use std::cell::RefCell;
 
 pub(super) const LABEL_KEY: u16 = rs_matter::persist::VENDOR_KEYS_START;
-const DEFAULT_LABEL: &str = "MiGate 虚拟灯";
+const DEFAULT_LABEL: &str = "MiGate Virtual Light";
 const MAX_LABEL_BYTES: usize = 32;
 
 fn validate_label(label: &str) -> Result<(), Error> {
@@ -110,7 +110,7 @@ mod tests {
     fn bridged_label_defaults_and_detects_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path()).unwrap();
-        assert_eq!(load_label(&store).unwrap(), "MiGate 虚拟灯");
+        assert_eq!(load_label(&store).unwrap(), "MiGate Virtual Light");
         store.store(LABEL_KEY, &[0x15]).unwrap();
         assert!(load_label(&store).is_err());
     }
