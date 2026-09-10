@@ -69,3 +69,65 @@ impl Config {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(args: &[&str], env: Option<&str>, home: Option<&str>) -> Result<Config, ConfigError> {
+        Config::parse(
+            args.iter().map(OsString::from),
+            env.map(OsString::from),
+            home.map(OsString::from),
+            Path::new("/work"),
+        )
+    }
+
+    #[test]
+    fn data_directory_priority_and_relative_paths() {
+        assert_eq!(
+            config(&["--data-dir", "cli"], Some("env"), Some("/home/me"))
+                .unwrap()
+                .data_dir,
+            Path::new("/work/cli")
+        );
+        assert_eq!(
+            config(&[], Some("env"), Some("/home/me")).unwrap().data_dir,
+            Path::new("/work/env")
+        );
+        assert_eq!(
+            config(&[], None, Some("/home/me")).unwrap().data_dir,
+            Path::new("/home/me/.migate")
+        );
+        assert_eq!(
+            config(&["--data-dir", "/absolute"], Some(""), None)
+                .unwrap()
+                .data_dir,
+            Path::new("/absolute")
+        );
+        assert_eq!(
+            config(&[], Some("/env"), None).unwrap().data_dir,
+            Path::new("/env")
+        );
+    }
+
+    #[test]
+    fn invalid_configuration_is_rejected() {
+        for args in [
+            vec!["--other"],
+            vec!["--data-dir"],
+            vec!["--data-dir", "--other"],
+            vec!["--data-dir", ""],
+            vec!["--data-dir", "a", "extra"],
+            vec!["--data-dir", "a", "--data-dir", "b"],
+        ] {
+            assert!(
+                config(&args, Some("valid"), Some("/home/me")).is_err(),
+                "{args:?}"
+            );
+        }
+        assert!(config(&[], Some(""), Some("/home/me")).is_err());
+        assert!(config(&[], None, None).is_err());
+        assert!(config(&[], None, Some("")).is_err());
+    }
+}

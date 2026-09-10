@@ -1,15 +1,19 @@
+use super::LIGHT_ENDPOINT;
 use crate::{
     device::Command,
     virtual_device::{Changes, VirtualLight},
 };
-use rs_matter::dm::clusters::scenes::SceneInvalidator;
 use rs_matter::{
     dm::{
-        clusters::app::level_control::LevelControlHooks,
-        clusters::app::on_off::{
-            self, EffectVariantEnum, OnOffHooks, OutOfBandMessage, StartUpOnOffEnum,
+        AsyncHandler, Cluster, HandlerContext, InvokeContext, InvokeReply, LifecycleOp,
+        MatchContext, ReadContext, ReadReply, WriteContext,
+        clusters::{
+            app::{
+                level_control::LevelControlHooks,
+                on_off::{self, EffectVariantEnum, OnOffHooks, OutOfBandMessage, StartUpOnOffEnum},
+            },
+            scenes::SceneInvalidator,
         },
-        *,
     },
     error::{Error, ErrorCode},
     tlv::{FromTLV, Nullable, TLVElement},
@@ -37,11 +41,7 @@ fn validate_command(id: u32, data: &TLVElement<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn basic_command(
-    light: &VirtualLight,
-    id: u32,
-    data: &TLVElement<'_>,
-) -> Result<(), Error> {
+fn basic_command(light: &VirtualLight, id: u32, data: &TLVElement<'_>) -> Result<(), Error> {
     let command = match id {
         0 => Command::Off,
         1 => Command::On,
@@ -60,6 +60,8 @@ pub(super) fn basic_command(
     Ok(())
 }
 
+/// Synchronize device-side changes with the Lighting state machine and scenes.
+/// Writes from that state machine are marked so they do not loop back as external updates.
 pub(super) struct LightHooks<'a> {
     light: &'a VirtualLight,
     changes: RefCell<Option<Changes<'a>>>,
@@ -108,7 +110,7 @@ impl OnOffHooks for LightHooks<'_> {
             let (_, revision) = changes.changed_with_revision().await;
             if self.internal_update.take() != Some(revision) {
                 if let Some(scenes) = self.scenes {
-                    scenes.scenable_attribute_changed(2);
+                    scenes.scenable_attribute_changed(LIGHT_ENDPOINT);
                 }
                 notify(OutOfBandMessage::Update);
             }
@@ -117,8 +119,11 @@ impl OnOffHooks for LightHooks<'_> {
     async fn handle_off_with_effect(&self, _effect: EffectVariantEnum) {}
 }
 
+/// Route Matter operations to the device and report device state changes.
+/// Reports also cover state-machine writes, so this subscribes separately from
+/// the external-change handling in `LightHooks`.
 pub(super) struct LightHandler<'a, LH: LevelControlHooks> {
-    pub inner: &'a on_off::OnOffHandler<'a, LightHooks<'a>, LH>,
+    inner: &'a on_off::OnOffHandler<'a, LightHooks<'a>, LH>,
     light: &'a VirtualLight,
     changes: RefCell<Option<Changes<'a>>>,
 }
@@ -164,7 +169,11 @@ impl<LH: LevelControlHooks> AsyncHandler for LightHandler<'_, LH> {
         let report = async {
             loop {
                 changes.changed().await;
-                ctx.notify_attr_changed(2, LightHooks::CLUSTER.id, on_off::AttributeId::OnOff as _);
+                ctx.notify_attr_changed(
+                    LIGHT_ENDPOINT,
+                    LightHooks::CLUSTER.id,
+                    on_off::AttributeId::OnOff as _,
+                );
             }
         };
         futures_lite::future::or(on_off::HandlerAsyncAdaptor(self.inner).run(&ctx), report).await
@@ -177,6 +186,16 @@ mod tests {
     use crate::terminal::handle_line;
     use futures_lite::future::{block_on, poll_once};
     use std::pin::pin;
+
+    #[test]
+    fn commands_confirm_device_state() {
+        let light = VirtualLight::new();
+        for (id, power) in [(1, true), (0, false), (2, true), (2, false)] {
+            basic_command(&light, id, &rs_matter::tlv::TLVElement::new(&[0x15, 0x18])).unwrap();
+            assert_eq!(light.snapshot().power, power);
+        }
+    }
+
     #[test]
     fn lighting_payload_is_validated_before_dispatch() {
         let missing_on_time = TLVElement::new(&[0x15, 0x24, 0, 0, 0x25, 2, 1, 0, 0x18]);

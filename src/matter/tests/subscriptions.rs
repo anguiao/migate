@@ -1,5 +1,5 @@
-use super::{
-    NODE, basic_info,
+use super::super::{
+    LIGHT_ENDPOINT, NODE, basic_info,
     kv::ProtocolStore,
     light::{LightHandler, LightHooks},
 };
@@ -212,8 +212,11 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let light = VirtualLight::new();
-    let inner =
-        on_off::OnOffHandler::new_standalone(Dataver::new(boot.into()), 2, LightHooks::new(&light));
+    let inner = on_off::OnOffHandler::new_standalone(
+        Dataver::new(boot.into()),
+        LIGHT_ENDPOINT,
+        LightHooks::new(&light),
+    );
     let handler = LightHandler::new(&inner, &light);
     let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
     let incoming = Pipe::default();

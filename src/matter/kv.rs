@@ -78,6 +78,30 @@ impl KvBlobStore for ProtocolStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_blob_roundtrip_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut kv = ProtocolStore::new(Store::open(dir.path()).unwrap());
+        kv.store(123, &[1, 2, 3], &mut []).unwrap();
+        let mut restored = ProtocolStore::new(Store::open(dir.path()).unwrap());
+        let mut buf = [0; 10];
+        assert_eq!(restored.load(123, &mut buf).unwrap(), Some(&[1, 2, 3][..]));
+        restored.remove(123, &mut []).unwrap();
+        assert!(Store::open(dir.path()).unwrap().load(123).is_none());
+    }
+
+    #[test]
+    fn write_failure_wakes_fatal_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data");
+        let mut kv = ProtocolStore::new(Store::open(&path).unwrap());
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(kv.store(1, &[1], &mut []).is_err());
+        let message = futures_lite::future::block_on(kv.failed());
+        assert!(message.to_string().contains(path.to_str().unwrap()));
+    }
+
     #[test]
     fn observed_failure_remains_sticky_and_stops_future_writes() {
         let dir = tempfile::tempdir().unwrap();

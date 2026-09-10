@@ -1,15 +1,36 @@
-use super::*;
+use super::super::{
+    LIGHT_ENDPOINT, NODE, basic_info,
+    bridged_info::{self, BridgedHandler},
+    kv::ProtocolStore,
+    light::{LightHandler, LightHooks},
+};
+use crate::{storage::Store, virtual_device::VirtualLight};
 use futures_lite::future::{block_on, poll_once};
 use rs_matter::{
-    dm::clusters::net_comm::NetworksAccess,
+    MATTER_PORT, Matter,
+    crypto::{Crypto, default_crypto},
+    dm::{
+        Async, AsyncHandler, AttrChangeNotifier, AttrDetails, CmdDetails, Dataver, EventEmitter,
+        EventNumber, HandlerContext, InvokeContext, InvokeReplyInstance, MatchContext, Metadata,
+        OperationContext, OwnAttrChangeNotifier, OwnEventEmitter, ReadContext, ReadReplyInstance,
+        WriteContext,
+        clusters::{
+            app::on_off,
+            decl::bridged_device_basic_information::{self as bridged, ClusterHandler as _},
+            net_comm::NetworksAccess,
+        },
+        devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
+        networks::eth::EthNetwork,
+    },
+    error::Error,
     im::{
-        ImStats,
+        EthInteractionModelState, ImStats, InteractionModel,
         encoding::{EventPriority, IMBuffer},
         events::EventTLVWrite,
     },
     persist::KvBlobStoreAccess,
-    tlv::TLVElement,
-    transport::exchange::Exchange,
+    tlv::{TLVElement, TLVTag, TLVWriteParent, Utf8StrBuilder},
+    transport::exchange::{Exchange, MatterBuffers},
     utils::storage::{WriteBuf, pooled::Buffers},
 };
 use std::{
@@ -25,6 +46,19 @@ struct Context<'a, H> {
     data: TLVElement<'a>,
     changes: RefCell<Vec<(u16, u32, u32)>>,
 }
+
+impl<'a, H> Context<'a, H> {
+    fn new(base: &'a H, cluster_id: u32, attr_id: u32) -> Self {
+        Self {
+            base,
+            command: CmdDetails::new(LIGHT_ENDPOINT, cluster_id, 1, 1, false, None),
+            attribute: attr(cluster_id, attr_id),
+            data: TLVElement::new(&[0x15, 0x18]),
+            changes: RefCell::new(Vec::new()),
+        }
+    }
+}
+
 impl<H: HandlerContext> HandlerContext for Context<'_, H> {
     fn matter(&self) -> &Matter<'_> {
         self.base.matter()
@@ -86,7 +120,7 @@ impl<H: HandlerContext> EventEmitter for Context<'_, H> {
 }
 impl<H> MatchContext for Context<'_, H> {
     fn endpt(&self) -> Option<u16> {
-        Some(2)
+        Some(LIGHT_ENDPOINT)
     }
     fn cluster(&self) -> Option<u32> {
         Some(self.attribute.cluster_id)
@@ -94,13 +128,13 @@ impl<H> MatchContext for Context<'_, H> {
 }
 impl<H: HandlerContext> OwnAttrChangeNotifier for Context<'_, H> {
     fn notify_own_attr_changed(&self, a: u32) {
-        self.notify_attr_changed(2, self.attribute.cluster_id, a);
+        self.notify_attr_changed(LIGHT_ENDPOINT, self.attribute.cluster_id, a);
     }
     fn notify_own_cluster_changed(&self) {
-        self.notify_cluster_changed(2, self.attribute.cluster_id);
+        self.notify_cluster_changed(LIGHT_ENDPOINT, self.attribute.cluster_id);
     }
     fn notify_own_endpoint_changed(&self) {
-        self.notify_endpoint_changed(2);
+        self.notify_endpoint_changed(LIGHT_ENDPOINT);
     }
 }
 impl<H: HandlerContext> OwnEventEmitter for Context<'_, H> {
@@ -113,7 +147,13 @@ impl<H: HandlerContext> OwnEventEmitter for Context<'_, H> {
     where
         F: FnOnce(EventTLVWrite<'_>) -> Result<(), Error>,
     {
-        self.emit_event(2, self.attribute.cluster_id, event, priority, f)
+        self.emit_event(
+            LIGHT_ENDPOINT,
+            self.attribute.cluster_id,
+            event,
+            priority,
+            f,
+        )
     }
 }
 impl<H: HandlerContext> OperationContext for Context<'_, H> {
@@ -144,7 +184,7 @@ impl<H: HandlerContext> WriteContext for Context<'_, H> {
 }
 fn attr(cluster_id: u32, attr_id: u32) -> AttrDetails {
     AttrDetails {
-        endpoint_id: 2,
+        endpoint_id: LIGHT_ENDPOINT,
         cluster_id,
         attr_id,
         list_index: None,
@@ -169,16 +209,14 @@ fn actual_handler_invoke_read_and_report_share_the_device() {
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(ProtocolStore::new(store));
     let light = VirtualLight::new();
-    let inner = on_off::OnOffHandler::new_standalone(Dataver::new(1), 2, LightHooks::new(&light));
+    let inner = on_off::OnOffHandler::new_standalone(
+        Dataver::new(1),
+        LIGHT_ENDPOINT,
+        LightHooks::new(&light),
+    );
     let handler = LightHandler::new(&inner, &light);
     let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
-    let mut ctx = Context {
-        base: &im,
-        command: CmdDetails::new(2, 6, 1, 1, false, None),
-        attribute: attr(6, 0),
-        data: TLVElement::new(&[0x15, 0x18]),
-        changes: RefCell::new(Vec::new()),
-    };
+    let mut ctx = Context::new(&im, 6, 0);
     block_on(async {
         for (command, power) in [(1, true), (0, false), (2, true), (2, false)] {
             ctx.command.cmd_id = command;
@@ -235,23 +273,44 @@ fn actual_handler_invoke_read_and_report_share_the_device() {
         assert!(poll_once(&mut run).await.is_none());
         assert_eq!(ctx.changes.borrow().len(), count);
     });
-    let bridged = BridgedHandler {
-        dataver: Dataver::new(1),
-        identity: &identity.light_id,
-        label: RefCell::new("MiGate 虚拟灯".into()),
-    };
-    ctx.attribute = attr(
+}
+
+#[test]
+fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let identity = store.identity().clone();
+    let info = basic_info(&identity);
+    let label = bridged_info::load_label(&store).unwrap();
+    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    let buffers: MatterBuffers = MatterBuffers::new();
+    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
+    let kv = matter.kv(ProtocolStore::new(store));
+    let bridged = BridgedHandler::new(Dataver::new(1), &identity.light_id, label);
+    let handler = Async(bridged::HandlerAdaptor(&bridged));
+    let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
+    let ctx = Context::new(
+        &im,
         BridgedHandler::CLUSTER.id,
         bridged::AttributeId::NodeLabel as _,
     );
     bridged.set_node_label(&ctx, "书房灯").unwrap();
     assert_eq!(
-        load_light_label(&Store::open(dir.path()).unwrap()).unwrap(),
+        bridged_info::load_label(&Store::open(dir.path()).unwrap()).unwrap(),
         "书房灯"
     );
     let count = ctx.changes.borrow().len();
     bridged.set_node_label(&ctx, "书房灯").unwrap();
     assert_eq!(ctx.changes.borrow().len(), count);
     assert!(bridged.set_node_label(&ctx, &"x".repeat(33)).is_err());
-    assert_eq!(*bridged.label.borrow(), "书房灯");
+    let mut bytes = [0; 64];
+    let mut writer = WriteBuf::new(&mut bytes);
+    bridged
+        .node_label(
+            &ctx,
+            Utf8StrBuilder::new(TLVWriteParent::new((), &mut writer), &TLVTag::Anonymous),
+        )
+        .unwrap();
+    assert_eq!(TLVElement::new(writer.as_slice()).utf8().unwrap(), "书房灯");
 }

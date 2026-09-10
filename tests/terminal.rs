@@ -1,5 +1,34 @@
 use futures_lite::{future::block_on, io::Cursor};
-use migate::{terminal::run_input, virtual_device::VirtualLight};
+use migate::{
+    device::Command,
+    terminal::{handle_line, run_input},
+    virtual_device::VirtualLight,
+};
+
+#[test]
+fn terminal_recovers_and_reads_shared_state() {
+    let light = VirtualLight::new();
+    assert_eq!(handle_line(&light, " \n"), None);
+    assert_eq!(
+        handle_line(&light, " on \n").unwrap(),
+        "virtual-light-1: on"
+    );
+    for invalid in ["toggle", "ON", "on extra", "status extra", "off extra"] {
+        assert!(
+            handle_line(&light, invalid)
+                .unwrap()
+                .contains("on, off, status")
+        );
+        assert!(light.snapshot().power);
+    }
+    light.execute(Command::Off);
+    assert_eq!(
+        handle_line(&light, "status").unwrap(),
+        "virtual-light-1: off"
+    );
+    assert_eq!(handle_line(&light, "on").unwrap(), "virtual-light-1: on");
+    assert_eq!(handle_line(&light, "off").unwrap(), "virtual-light-1: off");
+}
 
 #[test]
 fn input_recovers_from_unknown_commands_and_returns_at_eof() {
