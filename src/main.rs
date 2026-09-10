@@ -49,6 +49,7 @@ fn run() -> Result<(), matter::RuntimeError> {
             )
             .await
             .map_err(|e| format!("终端输入输出失败：{e}"))?;
+            log::info!("终端输入结束，桥接服务继续运行");
             future::pending::<Result<(), matter::RuntimeError>>().await
         };
         matter::run(&light, store, future::or(interrupt, input)).await

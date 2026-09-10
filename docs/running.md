@@ -23,7 +23,7 @@ cargo build --locked --release
 
 按行输入小写 `on`、`off`、`status`；忽略首尾空白和空行。未知命令或多余参数显示帮助，随后仍可继续输入。灯状态来自同一个虚拟设备，终端与 Matter 读写共享它。日志写标准错误，配对指引和终端结果写标准输出。日志级别固定为 info，不读取 `RUST_LOG`。
 
-输入 EOF 只结束终端读取，桥接服务继续运行。Ctrl-C 停止服务并完成必要持久化；正常停止返回成功，输入输出、存储或服务故障报错并返回非零状态。每次启动灯都为 `off`，不会恢复之前的开关状态。标准 Lighting、Identify、Groups、Scenes 能力沿用协议栈；`StartUpOnOff` 只接受 Off，以保持固定的关闭启动行为。
+输入 EOF 只结束终端读取，日志提示桥接服务继续运行。Ctrl-C 停止服务并完成必要持久化；正常停止返回成功，输入输出、存储或服务故障报错并返回非零状态。每次启动灯都为 `off`，不会恢复之前的开关状态。标准 Lighting、Identify、Groups、Scenes 能力沿用协议栈；`StartUpOnOff` 只接受 Off，以保持固定的关闭启动行为。
 
 ## 添加到 Apple Home
 
