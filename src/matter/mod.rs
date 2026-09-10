@@ -430,6 +430,7 @@ mod recovery_tests {
                 for key in [
                     rs_matter::persist::BASIC_INFO_KEY,
                     rs_matter::persist::SCENES_KEY,
+                    rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START,
                     LIGHT_LABEL_KEY,
                 ] {
                     let dir = tempfile::tempdir().unwrap();
@@ -501,3 +502,5 @@ mod label_tests {
 }
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod subscription_tests;

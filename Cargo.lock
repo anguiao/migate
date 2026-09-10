@@ -1581,7 +1581,7 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.3.0"
-source = "git+https://github.com/project-chip/rs-matter.git?rev=5c111e94827e685f8052975c1c6a391cb5298b7f#5c111e94827e685f8052975c1c6a391cb5298b7f"
+source = "git+https://github.com/project-chip/rs-matter.git?rev=ca16b0ca3c3776272d5fa7aa3693501882ec41a3#ca16b0ca3c3776272d5fa7aa3693501882ec41a3"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -1639,7 +1639,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.3.0"
-source = "git+https://github.com/project-chip/rs-matter.git?rev=5c111e94827e685f8052975c1c6a391cb5298b7f#5c111e94827e685f8052975c1c6a391cb5298b7f"
+source = "git+https://github.com/project-chip/rs-matter.git?rev=ca16b0ca3c3776272d5fa7aa3693501882ec41a3#ca16b0ca3c3776272d5fa7aa3693501882ec41a3"
 dependencies = [
  "convert_case",
  "miette",
@@ -1658,7 +1658,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.3.0"
-source = "git+https://github.com/project-chip/rs-matter.git?rev=5c111e94827e685f8052975c1c6a391cb5298b7f#5c111e94827e685f8052975c1c6a391cb5298b7f"
+source = "git+https://github.com/project-chip/rs-matter.git?rev=ca16b0ca3c3776272d5fa7aa3693501882ec41a3#ca16b0ca3c3776272d5fa7aa3693501882ec41a3"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
