@@ -644,6 +644,21 @@ impl AuthReport {
         self.completed_at
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        authentication: AuthenticationState,
+        certificate: Option<CertificateValidity>,
+        certificate_update: CertificateUpdate,
+        completed_at: i64,
+    ) -> Self {
+        Self {
+            authentication,
+            certificate,
+            certificate_update,
+            completed_at,
+        }
+    }
+
     fn failed_auth(
         reason: FailureReason,
         certificate: Option<CertificateValidity>,
