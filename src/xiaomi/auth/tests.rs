@@ -122,7 +122,7 @@ fn login_succeeds_persists_and_restart_reuses_oauth_and_client_identity() {
     let first_uuid = first.authorization().oauth_client_uuid().to_owned();
     let first_callback = callback(&first);
     let report = block_on(auth.complete_login(first, &first_callback)).unwrap();
-    assert!(report.is_success());
+    assert!(report.is_success(), "{report:?}");
     let saved = store.xiaomi().load().unwrap().unwrap();
     assert_eq!(saved.oauth_client_uuid, first_uuid);
     assert_eq!(saved.tokens.access_token, "access-new");
@@ -275,6 +275,50 @@ fn login_http_401_is_sign_in_required() {
         report.authentication,
         AuthenticationState::SignInRequired(_)
     ));
+}
+
+#[test]
+fn login_certificate_rejection_keeps_credentials_and_classifies_only_401_as_invalid_auth() {
+    for (response, sign_in_required) in [
+        (MockResponse::json(401, "denied"), true),
+        (MockResponse::json(403, "forbidden"), false),
+        (MockResponse::json(200, r#"{"code":-9}"#), false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let previous = valid_record("old-uid", "old", NOW + 500, NOW + 1_000_000);
+        store.xiaomi().replace(&previous).unwrap();
+        let (auth, _) = service(
+            &store,
+            vec![
+                MockResponse::json(200, &token_body("candidate", "candidate-refresh")),
+                MockResponse::json(200, &home_body(Some("new-uid"), &[])),
+                response,
+            ],
+        );
+        let attempt = auth.begin_login().unwrap();
+        let input = callback(&attempt);
+        let report = block_on(auth.complete_login(attempt, &input)).unwrap();
+        assert_eq!(
+            matches!(
+                report.authentication,
+                AuthenticationState::SignInRequired(_)
+            ),
+            sign_in_required,
+            "{report:?}"
+        );
+        assert_eq!(
+            matches!(report.authentication, AuthenticationState::Authenticated),
+            !sign_in_required,
+            "{report:?}"
+        );
+        assert!(matches!(
+            report.certificate_update,
+            CertificateUpdate::Failed(_)
+        ));
+        assert!(!report.is_success());
+        assert_eq!(store.xiaomi().load().unwrap(), Some(previous));
+    }
 }
 
 #[test]
@@ -492,7 +536,7 @@ fn certificate_renewal_reuses_key_and_failure_is_independent_from_authentication
         now,
     );
     let report = block_on(auth.check()).unwrap();
-    assert!(report.is_success());
+    assert!(report.is_success(), "{report:?}");
     assert!(matches!(
         report.certificate_update,
         CertificateUpdate::Updated
@@ -611,11 +655,13 @@ fn certificate_401_refresh_failures_report_failed_renewal_and_cloud_state() {
                 report.authentication,
                 AuthenticationState::SignInRequired(_)
             ),
-            sign_in_required
+            sign_in_required,
+            "{report:?}"
         );
         assert_eq!(
             matches!(report.authentication, AuthenticationState::Unavailable(_)),
-            !sign_in_required
+            !sign_in_required,
+            "{report:?}"
         );
         assert!(matches!(
             report.certificate_update,

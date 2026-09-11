@@ -695,8 +695,14 @@ impl AuthReport {
         certificate: Option<CertificateValidity>,
         completed_at: i64,
     ) -> Self {
+        let authentication = match &reason {
+            FailureReason::Cloud(error) if error.is_unauthorized() => {
+                AuthenticationState::SignInRequired(reason.clone())
+            }
+            _ => AuthenticationState::Authenticated,
+        };
         Self {
-            authentication: AuthenticationState::Authenticated,
+            authentication,
             certificate,
             certificate_update: CertificateUpdate::Failed(reason),
             completed_at,
