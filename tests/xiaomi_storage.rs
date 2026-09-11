@@ -130,6 +130,32 @@ fn malformed_credentials_can_be_removed_without_loading_them() {
 }
 
 #[test]
+fn malformed_single_account_slot_is_not_treated_as_signed_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let identity = store.load_identity().unwrap();
+    store.matter().put(7, b"paired").unwrap();
+    store.xiaomi().replace(&record("valid")).unwrap();
+    let db = Connection::open(store.path()).unwrap();
+    db.execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE xiaomi_auth SET id = 2;")
+        .unwrap();
+
+    assert!(store.xiaomi().load().is_err());
+    store.xiaomi().logout().unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM xiaomi_auth", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(store.load_identity().unwrap(), identity);
+    assert_eq!(
+        store.matter().get(7).unwrap().as_deref(),
+        Some(b"paired".as_slice())
+    );
+}
+
+#[test]
 fn rejects_invalid_semantics_without_overwriting_credentials() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
