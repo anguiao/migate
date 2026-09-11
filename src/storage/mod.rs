@@ -1,10 +1,13 @@
 mod error;
 mod identity;
 mod matter;
+mod migration;
+mod xiaomi;
 
 pub use error::StorageError;
 pub use identity::Identity;
 pub use matter::MatterStore;
+pub use xiaomi::{TokenSet, XiaomiRecord, XiaomiStore};
 
 use rusqlite::Connection;
 use std::{
@@ -45,6 +48,13 @@ impl Store {
         if new {
             initialize(&mut connection)
                 .map_err(|e| StorageError::database(&path, "initialize database", e))?;
+        } else {
+            migration::migrate(&mut connection).map_err(|error| match error {
+                migration::MigrationError::Database(error) => {
+                    StorageError::database(&path, "migrate database", error)
+                }
+                error => StorageError::new(&path, "validate database schema", error),
+            })?;
         }
         Ok(Self {
             inner: Rc::new(Inner { path, connection }),
@@ -61,6 +71,10 @@ impl Store {
 
     pub fn matter(&self) -> MatterStore {
         MatterStore::new(self.clone())
+    }
+
+    pub fn xiaomi(&self) -> XiaomiStore {
+        XiaomiStore::new(self.clone())
     }
 
     fn database_error(&self, operation: impl Into<String>, error: rusqlite::Error) -> StorageError {
