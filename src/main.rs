@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::{env, future::Future, io::Write, process::ExitCode};
 
 use async_signal::{Signal, Signals};
