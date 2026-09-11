@@ -66,6 +66,23 @@ impl XiaomiStore {
     }
 
     pub fn load(&self) -> Result<Option<XiaomiRecord>, StorageError> {
+        let invalid_slot = self
+            .store
+            .inner
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM xiaomi_auth WHERE id <> 1)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| self.store.database_error("load Xiaomi credentials", error))?;
+        if invalid_slot {
+            return Err(StorageError::new(
+                self.path(),
+                "validate Xiaomi credentials",
+                InvalidCredentials,
+            ));
+        }
         let record = self
             .store
             .inner
@@ -178,7 +195,7 @@ impl XiaomiStore {
 
     pub fn logout(&self) -> Result<(), StorageError> {
         self.transaction("delete Xiaomi credentials", |transaction| {
-            transaction.execute("DELETE FROM xiaomi_auth WHERE id = 1", [])?;
+            transaction.execute("DELETE FROM xiaomi_auth", [])?;
             Ok(())
         })
     }
