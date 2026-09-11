@@ -2,7 +2,10 @@ use std::{env, process::ExitCode};
 
 use async_signal::{Signal, Signals};
 use futures_lite::{StreamExt, future, io::BufReader};
-use migate::{config::Config, matter, storage::Store, terminal, virtual_device::VirtualLight};
+use migate::{
+    RuntimeError, config::Config, matter::Bridge, storage::Store, terminal,
+    virtual_device::VirtualLight,
+};
 
 fn main() -> ExitCode {
     env_logger::Builder::new()
@@ -18,7 +21,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), matter::RuntimeError> {
+fn run() -> Result<(), RuntimeError> {
     let config = Config::parse(
         env::args_os().skip(1),
         env::var_os("MIGATE_DATA_DIR"),
@@ -37,6 +40,7 @@ fn run() -> Result<(), matter::RuntimeError> {
         "endpoint 0=root, 1=Aggregator, 2=MiGate Virtual Light (virtual-light-1); initial state: off"
     );
     let light = VirtualLight::new();
+    let bridge = Bridge::new(&light, &identity, store.matter());
     let mut signals = Signals::new([Signal::Int])?;
     future::block_on(async {
         let interrupt = async {
@@ -56,14 +60,11 @@ fn run() -> Result<(), matter::RuntimeError> {
             .await
             .map_err(|e| format!("Terminal I/O failed: {e}"))?;
             log::info!("Terminal input ended; bridge is still running");
-            future::pending::<Result<(), matter::RuntimeError>>().await
+            future::pending::<Result<(), RuntimeError>>().await
         };
-        matter::run(
-            &light,
-            &identity,
-            store.matter(),
-            future::or(interrupt, input),
-        )
-        .await
+        let result = future::or(bridge.run(), future::or(interrupt, input)).await;
+        // Service futures have been dropped; a recorded storage failure still takes precedence.
+        bridge.check_failure()?;
+        result
     })
 }

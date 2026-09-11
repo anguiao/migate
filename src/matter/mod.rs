@@ -3,7 +3,8 @@ mod light;
 mod storage;
 
 use crate::{
-    storage::{Identity, MatterStore},
+    RuntimeError,
+    storage::{Identity, MatterStore, StorageError},
     virtual_device::VirtualLight,
 };
 use bridged_info::BridgedHandler;
@@ -42,10 +43,9 @@ use rs_matter::{
         MATTER_SOCKET_BIND_ADDR, exchange::MatterBuffers, network::mdns::astro::AstroMdns,
     },
 };
-use std::{future::Future, net::UdpSocket, time::Duration};
+use std::{net::UdpSocket, time::Duration};
 use storage::StoreAdapter;
 
-pub type RuntimeError = Box<dyn std::error::Error>;
 const WINDOW_SECONDS: u16 = 900;
 const AGGREGATOR_ENDPOINT: u16 = 1;
 const LIGHT_ENDPOINT: u16 = 2;
@@ -113,147 +113,166 @@ fn initialize_basic_info(
     Ok(())
 }
 
-/// Run the bridge on the caller's local executor until shutdown or a fatal service error.
-/// The shutdown future may also carry fatal errors from other process tasks.
-pub async fn run(
-    light: &VirtualLight,
-    identity: &Identity,
-    store: MatterStore,
-    shutdown: impl Future<Output = Result<(), RuntimeError>>,
-) -> Result<(), RuntimeError> {
-    let label = bridged_info::load_label(&store)?;
-    let missing_basic_info = !store.contains(rs_matter::persist::BASIC_INFO_KEY)?;
-    let info = basic_info(identity);
-    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    let store = StoreAdapter::new(store);
-    let kv = matter.kv(store.clone());
-    store.with_context("restore Matter data", matter.startup(&kv))?;
-    let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
-    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-    let mut random = crypto.rand()?;
-    let scenes = scenes::ScenesState::<16>::new();
-    let identify = identify::IdentifyHandler::new(Dataver::new_rand(&mut random));
-    let on_off = on_off::OnOffHandler::new_standalone(
-        Dataver::new_rand(&mut random),
-        LIGHT_ENDPOINT,
-        LightHooks::new(light).with_scenes(&scenes),
-    )
-    .with_scene_invalidator(&scenes);
-    let model = (
-        NODE,
-        endpoints::EthSysHandlerBuilder::new()
-            .netif_diag(&SysNetifs)
-            .build(random)
-            .chain(
-                |e, c| e == AGGREGATOR_ENDPOINT && c == desc::DescHandler::CLUSTER.id,
-                Async(desc::DescHandler::new_aggregator(Dataver::new_rand(&mut random)).adapt()),
-            )
-            .chain(
-                |e, c| e == LIGHT_ENDPOINT && c == desc::DescHandler::CLUSTER.id,
-                Async(desc::DescHandler::new(Dataver::new_rand(&mut random)).adapt()),
-            )
-            .chain(
-                |e, c| e == LIGHT_ENDPOINT && c == groups::GroupsHandler::CLUSTER.id,
-                Async(
-                    groups::GroupsHandler::new_with_identify(
-                        Dataver::new_rand(&mut random),
-                        &identify,
-                    )
-                    .adapt(),
-                ),
-            )
-            .chain(
-                |e, c| e == LIGHT_ENDPOINT && c == identify::IdentifyHandler::<()>::CLUSTER.id,
-                Async(identify::HandlerAdaptor(&identify)),
-            )
-            .chain(
-                |e, c| e == LIGHT_ENDPOINT && c == scenes::ScenesHandler::<16>::CLUSTER.id,
-                scenes::ScenesHandler::new(Dataver::new_rand(&mut random), &scenes, (&on_off, ()))
-                    .adapt(),
-            )
-            .chain(
-                |e, c| e == LIGHT_ENDPOINT && c == LightHooks::CLUSTER.id,
-                LightHandler::new(&on_off, light),
-            )
-            .chain(
-                |e, c| e == LIGHT_ENDPOINT && c == BridgedHandler::CLUSTER.id,
-                Async(bridged::HandlerAdaptor(BridgedHandler::new(
-                    Dataver::new_rand(&mut random),
-                    &identity.light_id,
-                    label,
-                ))),
-            ),
-    );
-    let im = InteractionModel::new(&matter, &crypto, &buffers, model, &kv, &state);
-    store.with_context("restore Matter model", im.startup().await)?;
-    // Initialize only after every existing blob has been restored successfully.
-    store.with_context(
-        "initialize the default Matter node label",
-        initialize_basic_info(&matter, &kv, missing_basic_info),
-    )?;
-    let socket = async_io::Async::<UdpSocket>::bind(MATTER_SOCKET_BIND_ADDR)
-        .map_err(|e| format!("Failed to bind Matter UDP port 5540: {e}"))?;
-    let responder = DefaultResponder::new(&im);
-    let opened = !matter.has_fabrics();
-    if opened {
-        matter.open_basic_comm_window(WINDOW_SECONDS, &crypto, &())?;
-        print_pairing(&info)?;
-    }
-    let timeout = async {
-        if opened {
-            async_io::Timer::after(Duration::from_secs(WINDOW_SECONDS.into())).await;
-            if !matter.has_fabrics() {
-                use std::io::Write;
-                writeln!(
-                    std::io::stdout().lock(),
-                    "Pairing window expired. Restart MiGate to reopen it."
-                )?;
-            }
-        }
-        std::future::pending::<Result<(), RuntimeError>>().await
-    };
-    let fatal = async { Err::<(), RuntimeError>(store.wait_failure().await.into()) };
-    let transport = async {
-        matter
-            .run(&crypto, &socket, &socket, &socket)
-            .await
-            .map_err(|e| format!("Matter transport task failed: {e}").into())
-    };
-    let mdns = async {
-        AstroMdns::new()
-            .run(&matter)
-            .await
-            .map_err(|e| format!("mDNS service failed: {e}").into())
-    };
-    let respond = async {
-        responder
-            .run::<4, 4>()
-            .await
-            .map_err(|e| format!("Matter responder task failed: {e}").into())
-    };
-    let job = async {
-        im.run()
-            .await
-            .map_err(|e| format!("Matter model task failed: {e}").into())
-    };
-    use futures_lite::future::or;
-    let result = or(
-        shutdown,
-        or(
-            fatal,
-            or(timeout, or(transport, or(mdns, or(respond, job)))),
-        ),
-    )
-    .await;
-    // All service futures are dropped before checking for a stored failure.
-    finish(&store, result)
+/// The fixed virtual-light bridge and storage failures that outlive its run future.
+pub struct Bridge<'a> {
+    light: &'a VirtualLight,
+    identity: &'a Identity,
+    store: StoreAdapter,
 }
 
-fn finish(store: &StoreAdapter, result: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
-    // A sticky storage failure takes precedence even when shutdown won the race.
-    store.check_failure()?;
-    result
+impl<'a> Bridge<'a> {
+    pub fn new(light: &'a VirtualLight, identity: &'a Identity, store: MatterStore) -> Self {
+        Self {
+            light,
+            identity,
+            store: StoreAdapter::new(store),
+        }
+    }
+
+    /// Check for a recorded storage failure, including after cancelling `run`.
+    pub fn check_failure(&self) -> Result<(), StorageError> {
+        self.store.check_failure()
+    }
+
+    /// Run protocol services on the caller's local executor until failure or cancellation.
+    /// After dropping this future, call `check_failure` before treating cancellation as success.
+    pub async fn run(&self) -> Result<(), RuntimeError> {
+        self.check_failure()?;
+        let store = &self.store;
+        let label = bridged_info::load_label(store.storage())?;
+        let missing_basic_info = !store
+            .storage()
+            .contains(rs_matter::persist::BASIC_INFO_KEY)?;
+        let info = basic_info(self.identity);
+        let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let kv = matter.kv(store.clone());
+        store.with_context("restore Matter data", matter.startup(&kv))?;
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
+        let mut random = crypto.rand()?;
+        let scenes = scenes::ScenesState::<16>::new();
+        let identify = identify::IdentifyHandler::new(Dataver::new_rand(&mut random));
+        let on_off = on_off::OnOffHandler::new_standalone(
+            Dataver::new_rand(&mut random),
+            LIGHT_ENDPOINT,
+            LightHooks::new(self.light).with_scenes(&scenes),
+        )
+        .with_scene_invalidator(&scenes);
+        let model = (
+            NODE,
+            endpoints::EthSysHandlerBuilder::new()
+                .netif_diag(&SysNetifs)
+                .build(random)
+                .chain(
+                    |e, c| e == AGGREGATOR_ENDPOINT && c == desc::DescHandler::CLUSTER.id,
+                    Async(
+                        desc::DescHandler::new_aggregator(Dataver::new_rand(&mut random)).adapt(),
+                    ),
+                )
+                .chain(
+                    |e, c| e == LIGHT_ENDPOINT && c == desc::DescHandler::CLUSTER.id,
+                    Async(desc::DescHandler::new(Dataver::new_rand(&mut random)).adapt()),
+                )
+                .chain(
+                    |e, c| e == LIGHT_ENDPOINT && c == groups::GroupsHandler::CLUSTER.id,
+                    Async(
+                        groups::GroupsHandler::new_with_identify(
+                            Dataver::new_rand(&mut random),
+                            &identify,
+                        )
+                        .adapt(),
+                    ),
+                )
+                .chain(
+                    |e, c| e == LIGHT_ENDPOINT && c == identify::IdentifyHandler::<()>::CLUSTER.id,
+                    Async(identify::HandlerAdaptor(&identify)),
+                )
+                .chain(
+                    |e, c| e == LIGHT_ENDPOINT && c == scenes::ScenesHandler::<16>::CLUSTER.id,
+                    scenes::ScenesHandler::new(
+                        Dataver::new_rand(&mut random),
+                        &scenes,
+                        (&on_off, ()),
+                    )
+                    .adapt(),
+                )
+                .chain(
+                    |e, c| e == LIGHT_ENDPOINT && c == LightHooks::CLUSTER.id,
+                    LightHandler::new(&on_off, self.light),
+                )
+                .chain(
+                    |e, c| e == LIGHT_ENDPOINT && c == BridgedHandler::CLUSTER.id,
+                    Async(bridged::HandlerAdaptor(BridgedHandler::new(
+                        Dataver::new_rand(&mut random),
+                        &self.identity.light_id,
+                        label,
+                    ))),
+                ),
+        );
+        let im = InteractionModel::new(&matter, &crypto, &buffers, model, &kv, &state);
+        store.with_context("restore Matter model", im.startup().await)?;
+        // Initialize only after every existing blob has been restored successfully.
+        store.with_context(
+            "initialize the default Matter node label",
+            initialize_basic_info(&matter, &kv, missing_basic_info),
+        )?;
+        let socket = async_io::Async::<UdpSocket>::bind(MATTER_SOCKET_BIND_ADDR)
+            .map_err(|e| format!("Failed to bind Matter UDP port 5540: {e}"))?;
+        let responder = DefaultResponder::new(&im);
+        let opened = !matter.has_fabrics();
+        if opened {
+            matter.open_basic_comm_window(WINDOW_SECONDS, &crypto, &())?;
+            print_pairing(&info)?;
+        }
+        let timeout = async {
+            if opened {
+                async_io::Timer::after(Duration::from_secs(WINDOW_SECONDS.into())).await;
+                if !matter.has_fabrics() {
+                    use std::io::Write;
+                    writeln!(
+                        std::io::stdout().lock(),
+                        "Pairing window expired. Restart MiGate to reopen it."
+                    )?;
+                }
+            }
+            std::future::pending::<Result<(), RuntimeError>>().await
+        };
+        let fatal = async { Err::<(), RuntimeError>(store.wait_failure().await.into()) };
+        let transport = async {
+            matter
+                .run(&crypto, &socket, &socket, &socket)
+                .await
+                .map_err(|e| format!("Matter transport task failed: {e}").into())
+        };
+        let mdns = async {
+            AstroMdns::new()
+                .run(&matter)
+                .await
+                .map_err(|e| format!("mDNS service failed: {e}").into())
+        };
+        let respond = async {
+            responder
+                .run::<4, 4>()
+                .await
+                .map_err(|e| format!("Matter responder task failed: {e}").into())
+        };
+        let job = async {
+            im.run()
+                .await
+                .map_err(|e| format!("Matter model task failed: {e}").into())
+        };
+        use futures_lite::future::or;
+        let result = or(
+            fatal,
+            or(timeout, or(transport, or(mdns, or(respond, job)))),
+        )
+        .await;
+        // A protocol task may return an error before the storage watcher is polled again.
+        self.check_failure()?;
+        result
+    }
 }
 
 const NODE: Node<'static> = Node {

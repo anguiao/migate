@@ -4,3 +4,5 @@ pub mod matter;
 pub mod storage;
 pub mod terminal;
 pub mod virtual_device;
+
+pub type RuntimeError = Box<dyn std::error::Error>;

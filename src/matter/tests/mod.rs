@@ -2,10 +2,10 @@ mod handlers;
 mod subscriptions;
 
 use super::{
-    NODE, basic_info, bridged_info, initialize_basic_info, pairing_codes, run,
+    Bridge, NODE, basic_info, bridged_info, initialize_basic_info, pairing_codes,
     storage::StoreAdapter,
 };
-use crate::{storage::Store, virtual_device::VirtualLight};
+use crate::{RuntimeError, storage::Store, virtual_device::VirtualLight};
 use futures_lite::future::{block_on, or};
 use rs_matter::{
     MATTER_PORT, Matter,
@@ -14,16 +14,14 @@ use rs_matter::{
     tlv::{FromTLV, TLVElement},
 };
 
-fn startup_error(store: &Store) -> super::RuntimeError {
+fn startup_error(store: &Store) -> RuntimeError {
     let identity = store.load_identity().unwrap();
     let light = VirtualLight::new();
-    block_on(or(
-        run(&light, &identity, store.matter(), std::future::pending()),
-        async {
-            async_io::Timer::after(std::time::Duration::from_secs(5)).await;
-            panic!("startup did not report invalid storage");
-        },
-    ))
+    let bridge = Bridge::new(&light, &identity, store.matter());
+    block_on(or(bridge.run(), async {
+        async_io::Timer::after(std::time::Duration::from_secs(5)).await;
+        panic!("startup did not report invalid storage");
+    }))
     .unwrap_err()
 }
 
@@ -134,6 +132,35 @@ fn protocol_startup_preserves_the_original_database_failure() {
                 b"original"
             );
             assert_eq!(store.load_identity().unwrap(), identity);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn cancelled_run_keeps_a_recorded_storage_failure() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path()).unwrap();
+            let identity = store.load_identity().unwrap();
+            let light = VirtualLight::new();
+            let bridge = Bridge::new(&light, &identity, store.matter());
+            let running = bridge.run();
+            let mut callback_store = bridge.store.clone();
+            let db = rusqlite::Connection::open(store.path()).unwrap();
+            db.execute("ALTER TABLE blobs RENAME TO unavailable_blobs", [])
+                .unwrap();
+            assert!(callback_store.store(1, b"value", &mut []).is_err());
+            drop(callback_store);
+
+            // Let application shutdown win before the run future can report the callback failure.
+            block_on(or(async { Ok::<(), RuntimeError>(()) }, running)).unwrap();
+            let error = bridge.check_failure().unwrap_err();
+            assert_eq!(error.path(), store.path());
+            assert_eq!(error.operation(), "write Matter data for key 1");
         })
         .unwrap()
         .join()

@@ -22,6 +22,9 @@ impl StoreAdapter {
             failed: Event::new(),
         }))
     }
+    pub fn storage(&self) -> &MatterStore {
+        &self.0.store
+    }
     fn record<T>(&self, result: Result<T, StorageError>) -> Result<T, Error> {
         result.map_err(|error| {
             self.0.failure.borrow_mut().get_or_insert(error);
@@ -142,12 +145,8 @@ mod tests {
         assert!(store.store(1, &[2], &mut []).is_err());
         db.execute("ALTER TABLE unavailable_blobs RENAME TO blobs", [])
             .unwrap();
-        let error = super::super::finish(&store, Ok(())).unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<StorageError>().unwrap().operation(),
-            "write Matter data for key 1"
-        );
-        assert!(store.check_failure().is_err());
+        let error = store.check_failure().unwrap_err();
+        assert_eq!(error.operation(), "write Matter data for key 1");
         assert!(store.store(2, &[2], &mut []).is_err());
         assert!(store.remove(1, &mut []).is_err());
         assert!(store.load(1, &mut [0; 10]).is_err());
