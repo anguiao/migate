@@ -15,6 +15,32 @@ pub const AUTHORIZATION_URL: &str = "https://account.xiaomi.com/oauth2/authorize
 pub const CLOUD_BASE_URL: &str = "https://ha.api.io.mi.com";
 const CALLBACK_BASE_URL: &str = "http://homeassistant.local:8123";
 
+pub fn validate_saved_redirect_uri(value: &str) -> Result<(), CloudError> {
+    let redirect = Url::parse(value)
+        .map_err(|_| CloudError::input("validate saved authorization callback"))?;
+    let identifier = redirect
+        .path()
+        .strip_prefix("/api/webhook/")
+        .filter(|value| {
+            value.len() == 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+    if redirect.scheme() != "http"
+        || redirect.host_str() != Some("homeassistant.local")
+        || redirect.port() != Some(8123)
+        || !redirect.username().is_empty()
+        || redirect.password().is_some()
+        || redirect.query().is_some()
+        || redirect.fragment().is_some()
+        || identifier.is_none()
+    {
+        return Err(CloudError::input("validate saved authorization callback"));
+    }
+    Ok(())
+}
+
 pub struct AuthorizationAttempt {
     oauth_client_uuid: String,
     redirect_uri: String,

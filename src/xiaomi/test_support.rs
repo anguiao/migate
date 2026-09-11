@@ -87,6 +87,38 @@ pub(crate) fn mock_server(responses: Vec<MockResponse>) -> (String, Receiver<Rec
     (format!("http://{address}"), receiver)
 }
 
+pub(crate) fn dynamic_mock_server(
+    request_limit: usize,
+    mut respond: impl FnMut(&ReceivedRequest) -> MockResponse + Send + 'static,
+) -> (String, Receiver<ReceivedRequest>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for _ in 0..request_limit {
+            let Some(mut stream) = accept_until(&listener, Instant::now() + Duration::from_secs(2))
+            else {
+                return;
+            };
+            let Some(request) = read_request(&mut stream) else {
+                continue;
+            };
+            let response = respond(&request);
+            let _ = sender.send(request);
+            if let Some(split_at) = response.split_at {
+                let _ = stream.write_all(&response.wire.as_bytes()[..split_at]);
+                thread::sleep(response.delay);
+                let _ = stream.write_all(&response.wire.as_bytes()[split_at..]);
+            } else {
+                thread::sleep(response.delay);
+                let _ = stream.write_all(response.wire.as_bytes());
+            }
+        }
+    });
+    (format!("http://{address}"), receiver)
+}
+
 fn accept_until(listener: &TcpListener, deadline: Instant) -> Option<TcpStream> {
     loop {
         match listener.accept() {
