@@ -135,6 +135,7 @@ fn accept_until(listener: &TcpListener, deadline: Instant) -> Option<TcpStream> 
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<ReceivedRequest> {
+    stream.set_nonblocking(false).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     let mut bytes = Vec::new();
     let mut buffer = [0; 4096];
