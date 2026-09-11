@@ -5,11 +5,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const USAGE: &str = "Usage: migate [--data-dir <PATH>]";
+pub const USAGE: &str = "Usage: migate [--data-dir <PATH>] [auth <login|check|logout>]";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Command {
+    Bridge,
+    Auth(AuthCommand),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthCommand {
+    Login,
+    Check,
+    Logout,
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Config {
     pub data_dir: PathBuf,
+    pub command: Command,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -31,20 +45,41 @@ impl Config {
         home: Option<OsString>,
         cwd: &Path,
     ) -> Result<Self, ConfigError> {
-        let mut args = args.into_iter();
+        let args: Vec<_> = args.into_iter().collect();
+        let mut index = 0;
         let mut cli_data_dir = None;
-        while let Some(arg) = args.next() {
-            if arg != "--data-dir" || cli_data_dir.is_some() {
-                return Err(ConfigError(format!(
-                    "Invalid argument: {}",
-                    arg.to_string_lossy()
-                )));
+        if args.get(index).is_some_and(|arg| arg == "--data-dir") {
+            index += 1;
+            let value = args
+                .get(index)
+                .filter(|value| !value.as_encoded_bytes().starts_with(b"--"))
+                .ok_or_else(|| ConfigError("--data-dir requires a path".into()))?;
+            cli_data_dir = Some(value.clone());
+            index += 1;
+        }
+        let command = match args.get(index).map(|value| value.to_string_lossy()) {
+            None => Command::Bridge,
+            Some(value) if value == "auth" => {
+                index += 1;
+                let command = match args.get(index).map(|value| value.to_string_lossy()) {
+                    Some(value) if value == "login" => AuthCommand::Login,
+                    Some(value) if value == "check" => AuthCommand::Check,
+                    Some(value) if value == "logout" => AuthCommand::Logout,
+                    Some(value) => {
+                        return Err(ConfigError(format!("Invalid auth command: {value}")));
+                    }
+                    None => return Err(ConfigError("auth requires a command".into())),
+                };
+                index += 1;
+                Command::Auth(command)
             }
-            cli_data_dir = Some(
-                args.next()
-                    .filter(|value| !value.as_encoded_bytes().starts_with(b"--"))
-                    .ok_or_else(|| ConfigError("--data-dir requires a path".into()))?,
-            );
+            Some(value) => return Err(ConfigError(format!("Invalid argument: {value}"))),
+        };
+        if let Some(value) = args.get(index) {
+            return Err(ConfigError(format!(
+                "Invalid argument: {}",
+                value.to_string_lossy()
+            )));
         }
         let data_dir = match cli_data_dir.or(env_data_dir) {
             Some(value) => {
@@ -69,6 +104,7 @@ impl Config {
             } else {
                 cwd.join(data_dir)
             },
+            command,
         })
     }
 }
@@ -112,6 +148,32 @@ mod tests {
             config(&[], Some("/env"), None).unwrap().data_dir,
             Path::new("/env")
         );
+        assert_eq!(
+            config(&["--data-dir", "cli", "auth", "check"], None, None)
+                .unwrap()
+                .command,
+            Command::Auth(AuthCommand::Check)
+        );
+    }
+
+    #[test]
+    fn commands_are_parsed_only_after_global_options() {
+        assert_eq!(
+            config(&[], None, Some("/home/me")).unwrap().command,
+            Command::Bridge
+        );
+        for (name, command) in [
+            ("login", AuthCommand::Login),
+            ("check", AuthCommand::Check),
+            ("logout", AuthCommand::Logout),
+        ] {
+            assert_eq!(
+                config(&["auth", name], None, Some("/home/me"))
+                    .unwrap()
+                    .command,
+                Command::Auth(command)
+            );
+        }
     }
 
     #[test]
@@ -123,6 +185,11 @@ mod tests {
             vec!["--data-dir", ""],
             vec!["--data-dir", "a", "extra"],
             vec!["--data-dir", "a", "--data-dir", "b"],
+            vec!["auth"],
+            vec!["auth", "other"],
+            vec!["auth", "check", "extra"],
+            vec!["auth", "check", "--data-dir", "late"],
+            vec!["--data-dir", "auth", "check"],
         ] {
             assert!(
                 config(&args, Some("valid"), Some("/home/me")).is_err(),
