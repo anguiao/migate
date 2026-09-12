@@ -5,6 +5,7 @@ use isahc::{
     config::{Configurable as _, RedirectPolicy},
 };
 use serde_json::{Map, Value, json};
+use sha1::{Digest as _, Sha1};
 use std::{collections::HashSet, error::Error as StdError, fmt, time::Duration};
 use url::Url;
 use uuid::Uuid;
@@ -65,14 +66,18 @@ impl AuthorizationAttempt {
             "{CALLBACK_BASE_URL}/api/webhook/{}",
             Uuid::new_v4().simple()
         );
-        let state = Uuid::new_v4().simple().to_string();
+        let device_id = format!("ha.{uuid}");
+        let state = Sha1::digest(format!("d={device_id}").as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         let mut url = Url::parse(AUTHORIZATION_URL)
             .map_err(|_| CloudError::protocol("create authorization"))?;
         url.query_pairs_mut()
             .append_pair("redirect_uri", &redirect_uri)
             .append_pair("client_id", CLIENT_ID)
             .append_pair("response_type", "code")
-            .append_pair("device_id", &format!("ha.{uuid}"))
+            .append_pair("device_id", &device_id)
             .append_pair("state", &state)
             .append_pair("skip_confirm", "false");
         Ok(Self {
@@ -208,11 +213,16 @@ pub enum CloudErrorKind {
 pub struct CloudError {
     operation: &'static str,
     kind: CloudErrorKind,
+    oauth_code: Option<i64>,
 }
 
 impl CloudError {
     fn new(operation: &'static str, kind: CloudErrorKind) -> Self {
-        Self { operation, kind }
+        Self {
+            operation,
+            kind,
+            oauth_code: None,
+        }
     }
     fn input(operation: &'static str) -> Self {
         Self::new(operation, CloudErrorKind::InvalidInput)
@@ -249,7 +259,19 @@ impl fmt::Display for CloudError {
                 formatter.write_str("authorization was rejected (HTTP 401)")
             }
             CloudErrorKind::HttpStatus(status) => write!(formatter, "HTTP status {status}"),
-            CloudErrorKind::Business(code) => write!(formatter, "cloud business code {code}"),
+            CloudErrorKind::Business(code) => {
+                write!(formatter, "cloud business code {code}")?;
+                if let Some(oauth_code) = self.oauth_code {
+                    write!(formatter, " (OAuth error {oauth_code}")?;
+                    match oauth_code {
+                        96002 => formatter.write_str(": missing or invalid request parameters")?,
+                        96013 => formatter.write_str(": invalid authorization code")?,
+                        _ => {}
+                    }
+                    formatter.write_str(")")?;
+                }
+                Ok(())
+            }
             CloudErrorKind::Protocol => formatter.write_str("invalid cloud response"),
             CloudErrorKind::Network => formatter.write_str("network request failed"),
             CloudErrorKind::Timeout => formatter.write_str("network request timed out"),
@@ -349,7 +371,12 @@ impl CloudClient {
             .body(String::new())
             .map_err(|_| CloudError::protocol(operation))?;
         let value = self.send(request, operation).await?;
-        let result = result_object(&value, operation)?;
+        let result = result_object(&value, operation).map_err(|mut error| {
+            if matches!(error.kind, CloudErrorKind::Business(_)) {
+                error.oauth_code = oauth_error_code(&value);
+            }
+            error
+        })?;
         let access_token = token_string(result, "access_token", operation)?;
         let refresh_token = token_string(result, "refresh_token", operation)?;
         let expires_in = result
@@ -498,23 +525,27 @@ impl CloudClient {
             .bytes()
             .await
             .map_err(|error| CloudError::new(operation, response_read_error_kind(&error)))?;
-        let value: Value =
-            serde_json::from_slice(&body).map_err(|_| CloudError::protocol(operation))?;
-        let code = value
-            .get("code")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| CloudError::protocol(operation))?;
-        if code != 0 {
-            return Err(CloudError::new(operation, CloudErrorKind::Business(code)));
-        }
-        Ok(value)
+        serde_json::from_slice(&body).map_err(|_| CloudError::protocol(operation))
     }
+}
+
+fn oauth_error_code(value: &Value) -> Option<i64> {
+    let message = value.get("message")?.as_str()?;
+    let details: Value = serde_json::from_str(message).ok()?;
+    details.get("error")?.as_i64()
 }
 
 fn result_object<'a>(
     value: &'a Value,
     operation: &'static str,
 ) -> Result<&'a Map<String, Value>, CloudError> {
+    let code = value
+        .get("code")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| CloudError::protocol(operation))?;
+    if code != 0 {
+        return Err(CloudError::new(operation, CloudErrorKind::Business(code)));
+    }
     value
         .get("result")
         .and_then(Value::as_object)
@@ -617,12 +648,35 @@ mod tests {
     use url::Url;
 
     #[test]
-    fn authorization_attempts_are_unique_and_callbacks_are_exact() {
+    fn authorization_state_matches_upstream_device_binding() {
+        for (uuid, expected_state) in [
+            (
+                "550e8400-e29b-41d4-a716-446655440000",
+                "139e3d81ebea72caaec5f4bb548d66e83ecce75c",
+            ),
+            (
+                "550e8400-e29b-41d4-a716-446655440001",
+                "510dfb7675e97409da88b563551ea8d59fdc43f6",
+            ),
+        ] {
+            let attempt = AuthorizationAttempt::new(Some(uuid)).unwrap();
+            let url = Url::parse(attempt.authorization_url()).unwrap();
+            let query = url
+                .query_pairs()
+                .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(query["device_id"], format!("ha.{uuid}"));
+            assert_eq!(query["state"], expected_state);
+            assert_eq!(attempt.state(), expected_state);
+        }
+    }
+
+    #[test]
+    fn authorization_callbacks_are_bound_to_unique_paths_and_expected_state() {
         let uuid = "550e8400-e29b-41d4-a716-446655440000";
         let first = AuthorizationAttempt::new(Some(uuid)).unwrap();
         let second = AuthorizationAttempt::new(Some(uuid)).unwrap();
         assert_eq!(first.oauth_client_uuid(), uuid);
-        assert_ne!(first.state(), second.state());
+        assert_eq!(first.state(), second.state());
         assert_ne!(first.redirect_uri(), second.redirect_uri());
         let url = Url::parse(first.authorization_url()).unwrap();
         let query = url
@@ -691,6 +745,10 @@ mod tests {
         let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
         let attempt =
             AuthorizationAttempt::new(Some("550e8400-e29b-41d4-a716-446655440000")).unwrap();
+        let authorization_url = Url::parse(attempt.authorization_url()).unwrap();
+        let authorization_query = authorization_url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
         let exchanged = future::block_on(client.exchange_token(&attempt, "code-secret")).unwrap();
         let refreshed = future::block_on(client.refresh_token(
             attempt.oauth_client_uuid(),
@@ -714,6 +772,16 @@ mod tests {
             let data = url.query_pairs().find(|(key, _)| key == "data").unwrap().1;
             let data: Value = serde_json::from_str(&data).unwrap();
             assert_eq!(data["client_id"], json!(2_882_303_761_520_251_711_u64));
+            assert_eq!(
+                data["redirect_uri"].as_str().unwrap(),
+                authorization_query["redirect_uri"]
+            );
+            if expected_key == "code" {
+                assert_eq!(
+                    data["device_id"].as_str().unwrap(),
+                    authorization_query["device_id"]
+                );
+            }
             assert!(data.get(expected_key).is_some());
             assert!(data.get("grant_type").is_none());
         }
@@ -752,6 +820,138 @@ mod tests {
             let attempt = AuthorizationAttempt::new(None).unwrap();
             let error = future::block_on(client.exchange_token(&attempt, "code")).unwrap_err();
             assert_eq!(error.kind(), &CloudErrorKind::Protocol);
+            assert!(!format!("{error:?} {error}").contains("secret"));
+        }
+    }
+
+    #[test]
+    fn token_errors_preserve_oauth_codes_without_response_text() {
+        for (oauth_code, expected) in [
+            (
+                96002,
+                "cloud business code -6 (OAuth error 96002: missing or invalid request parameters)",
+            ),
+            (
+                96013,
+                "cloud business code -6 (OAuth error 96013: invalid authorization code)",
+            ),
+            (99999, "cloud business code -6 (OAuth error 99999)"),
+        ] {
+            let message = json!({
+                "error": oauth_code,
+                "error_description": "response-secret\nhttps://example.invalid/?code=secret",
+                "traceId": "trace-secret",
+                "access_token": "access-secret",
+            })
+            .to_string();
+            let body = json!({"code": -6, "message": message}).to_string();
+            let (base, _) = mock_server(vec![
+                MockResponse::json(200, &body),
+                MockResponse::json(200, &body),
+            ]);
+            let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+            let attempt = AuthorizationAttempt::new(None).unwrap();
+            let errors = [
+                future::block_on(client.exchange_token(&attempt, "code-secret")).unwrap_err(),
+                future::block_on(client.refresh_token(
+                    attempt.oauth_client_uuid(),
+                    attempt.redirect_uri(),
+                    "refresh-secret",
+                ))
+                .unwrap_err(),
+            ];
+            for (error, operation) in errors
+                .into_iter()
+                .zip(["exchange authorization code", "refresh access token"])
+            {
+                assert_eq!(error.kind(), &CloudErrorKind::Business(-6));
+                assert!(!error.is_unauthorized());
+                assert_eq!(
+                    error.to_string(),
+                    format!("Failed to {operation}: {expected}")
+                );
+                assert!(!format!("{error:?} {error}").contains("secret"));
+            }
+        }
+    }
+
+    #[test]
+    fn unusable_oauth_details_preserve_the_outer_business_error() {
+        for message in [
+            Value::Null,
+            json!("response-secret"),
+            json!({"error": 96013, "error_description": "response-secret"}),
+            json!(r#"{"error_description":"response-secret"}"#),
+            json!(r#"{"error":"96013","error_description":"response-secret"}"#),
+            json!(r#"{"error":96013.5,"error_description":"response-secret"}"#),
+            json!(r#"{"error":true,"error_description":"response-secret"}"#),
+        ] {
+            let body = json!({"code": -6, "message": message}).to_string();
+            let (base, _) = mock_server(vec![MockResponse::json(200, &body)]);
+            let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+            let attempt = AuthorizationAttempt::new(None).unwrap();
+            let error =
+                future::block_on(client.exchange_token(&attempt, "code-secret")).unwrap_err();
+            assert_eq!(error.kind(), &CloudErrorKind::Business(-6));
+            assert_eq!(
+                error.to_string(),
+                "Failed to exchange authorization code: cloud business code -6"
+            );
+            assert!(!format!("{error:?} {error}").contains("secret"));
+        }
+    }
+
+    #[test]
+    fn oauth_details_do_not_override_http_or_protocol_errors() {
+        let message = json!({"error": 96013, "error_description": "response-secret"}).to_string();
+        for (status, body, expected) in [
+            (
+                401,
+                json!({"code": -6, "message": message}),
+                CloudErrorKind::Unauthorized,
+            ),
+            (
+                403,
+                json!({"code": -6, "message": message}),
+                CloudErrorKind::HttpStatus(403),
+            ),
+            (200, json!({"message": message}), CloudErrorKind::Protocol),
+            (
+                200,
+                json!({"code": 0, "message": message}),
+                CloudErrorKind::Protocol,
+            ),
+        ] {
+            let (base, _) = mock_server(vec![MockResponse::json(status, &body.to_string())]);
+            let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+            let attempt = AuthorizationAttempt::new(None).unwrap();
+            let error =
+                future::block_on(client.exchange_token(&attempt, "code-secret")).unwrap_err();
+            assert_eq!(error.kind(), &expected);
+            assert!(!error.to_string().contains("OAuth"));
+            assert!(!format!("{error:?} {error}").contains("secret"));
+        }
+    }
+
+    #[test]
+    fn protected_requests_do_not_interpret_oauth_details() {
+        let body = json!({
+            "code": -6,
+            "message": json!({"error": 96013, "error_description": "response-secret"}).to_string(),
+        })
+        .to_string();
+        let (base, _) = mock_server(vec![
+            MockResponse::json(200, &body),
+            MockResponse::json(200, &body),
+        ]);
+        let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        for error in [
+            future::block_on(client.get_home("access-secret")).unwrap_err(),
+            future::block_on(client.get_certificate("access-secret", "csr")).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), &CloudErrorKind::Business(-6));
+            assert!(!error.is_unauthorized());
+            assert!(!error.to_string().contains("OAuth"));
             assert!(!format!("{error:?} {error}").contains("secret"));
         }
     }

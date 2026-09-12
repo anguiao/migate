@@ -81,14 +81,16 @@ EOF 或 `Ctrl-C` 结束尚未完成的登录，返回非零状态且不覆盖原
 
 ### 授权交互
 
-1. 为本次授权生成独立、不可预测的随机 `state` 和回调路径标识。完整回调地址使用上游的 `/api/webhook/<标识>` 路径形式，基址为 `http://homeassistant.local:8123`。
-2. 使用应用标识、完整回调地址、`response_type=code`、`ha.<uuid>` 形式的 OAuth 设备标识及本次 `state` 生成授权链接。有记录时复用其中的 OAuth 客户端 UUID，无记录时生成新的随机 UUID；它与授权尝试的随机状态分开管理。
+1. 为本次授权生成独立、不可预测的随机回调路径标识。完整回调地址使用上游的 `/api/webhook/<标识>` 路径形式，基址为 `http://homeassistant.local:8123`。
+2. 使用应用标识、完整回调地址、`response_type=code`、`ha.<uuid>` 形式的 OAuth 设备标识及按上游规则计算的 `state` 生成授权链接。有记录时复用其中的 OAuth 客户端 UUID，无记录时生成新的随机 UUID。
 3. 终端显示授权链接和输入指引。用户手动打开浏览器登录并授权，随后复制地址栏中的完整回调网址，粘回等待中的终端。
 4. MiGate 不提供回调 HTTP 服务，不修改 hosts 或发布回调域名。因此回调页面可能显示无法访问；输入指引应提前说明，并明确要求复制包含 `code` 和 `state` 的最终网址。
 5. 输入边界去除首尾空白并解析网址，核对协议、主机、端口、路径和本次 `state`，拒绝缺失或重复的必要参数及 OAuth 错误结果。只从网址提取授权参数，不访问用户粘贴的网址。
 6. 只接受与当前授权尝试对应的完整回调网址，每份授权回调仅对生成它的授权尝试有效。
 
-授权时与令牌交换时使用完全相同的回调地址；保存成功后继续保留该地址，供刷新令牌使用。临时 `state` 和授权码只保留在本次流程内存中，不持久化、不写日志。[上游授权与回调实现](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/custom_components/xiaomi_home/config_flow.py)、[OAuth 参数与刷新接口](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/custom_components/xiaomi_home/miot/miot_cloud.py)
+`state` 按上游公式计算：对 `d=<device_id>` 的 UTF-8 字节求 SHA-1，输出为 40 位小写十六进制字符串，其中 `device_id` 为实际提交的 `ha.<uuid>`。复用同一 OAuth 客户端 UUID 时 `state` 相同；每次随机生成的回调路径用于区分授权尝试，完整回调地址和预期 `state` 必须同时匹配。
+
+授权时与令牌交换时使用完全相同的 OAuth 设备标识和回调地址；保存成功后继续保留该回调地址，供刷新令牌使用。`state` 和授权码只保留在本次流程内存中，不持久化、不写日志。[上游授权与回调实现](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/custom_components/xiaomi_home/config_flow.py)、[OAuth 参数与刷新接口](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/custom_components/xiaomi_home/miot/miot_cloud.py)
 
 ### 云端验证与证书准备
 
@@ -279,7 +281,11 @@ src/
 
 认证错误必须有明确的 HTTP 或业务错误依据。本轮按上游已明确的映射，将受保护接口的 HTTP `401` 视为访问令牌无效，将令牌刷新接口的 HTTP `401` 视为刷新被拒绝。不将 `403`、未明确含义的非零业务码或解析失败视为令牌失效；这些结果归入对应操作失败，保留其 HTTP 状态或业务码。[上游错误映射](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/custom_components/xiaomi_home/miot/miot_cloud.py)
 
+令牌交换和刷新接口返回非零业务码时，若 `message` 为可解析的 JSON 字符串且含整数 `error`，额外显示该内层 OAuth 错误码。`96002` 使用固定英文说明 `missing or invalid request parameters`，`96013` 使用 `invalid authorization code`；未知内层码只显示数值，详情缺失或格式不符时仍保留外层业务码。这些诊断信息不改变认证状态分类、刷新次数或凭据保留规则，也不用于解释设备或证书接口的业务错误。[OAuth 错误码定义](https://dev.mi.com/docs/passport/error-code/)
+
 诊断保留操作名、HTTP 状态或业务码，不输出完整回调网址、授权参数、认证头、令牌查询串、私钥或原始响应体。登录指引中显示本次生成的授权链接属于必要交互输出，不据此允许诊断日志输出其中的参数。
+
+原始 `message`、`error_description` 和 `traceId` 不进入错误对象、诊断日志或状态输出；内层错误仅保留数字代码，并使用程序内定义的固定说明。
 
 ## 验收标准
 
@@ -287,6 +293,7 @@ src/
 
 - 独立命令沿用数据目录优先级，认证模式不启动 Matter 服务。
 - 完整回调网址必须匹配当前尝试；错误、重复或不属于本次尝试的参数被拒绝；不会访问用户粘贴的网址。
+- `state` 符合上游设备绑定摘要；授权和令牌交换的设备标识、回调地址一致。同一 OAuth UUID 的 `state` 可复用，旧尝试的回调路径仍被拒绝，且不交换令牌、不修改凭据。
 - 登录完成令牌验证、设备读取、证书准备后才整体提交；失败和取消保留原记录。
 - 有账号 UID 的空设备结果能够完成登录；缺少 UID 时明确区分云端认证和证书准备问题。
 - 私钥与 CSR 的身份正确；返回证书须匹配 UID、虚拟设备标识和私钥，并处于有效期内。
@@ -296,6 +303,7 @@ src/
 - 云端状态和证书状态独立，离线或 OAuth 失效不会自动清除仍有效的证书。
 - 数据库迁移和退出登录保留 Matter 数据；损坏的持久化数据不会被静默重建。认证内容损坏时，登录与检查报错，`auth logout` 仍能显式清除该记录，再次登录可建立新记录。
 - HTTP `401` 触发对应的认证错误处理；`403`、未知业务码和解析异常不会触发令牌失效判定，证书业务权限错误不会抹去已验证的云端认证结果。
+- 令牌接口的内层 OAuth 错误码能够安全显示；未知或格式异常的详情保留外层业务码，不泄露原始错误文字，也不改变认证分类或覆盖已有凭据。
 - 除登录所需的授权链接外，敏感认证信息不会出现在程序输出或错误日志中；认证检查不破坏网桥运行和退出行为。
 
 中国区真实账号人工验收：
