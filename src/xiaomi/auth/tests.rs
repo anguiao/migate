@@ -278,6 +278,68 @@ fn login_http_401_is_sign_in_required() {
 }
 
 #[test]
+fn login_rejects_previous_callback_when_oauth_identity_and_state_are_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let previous = valid_record("uid", "old-access", NOW + 500, NOW + 1_000_000);
+    store.xiaomi().replace(&previous).unwrap();
+    let (auth, requests) = service(&store, vec![]);
+    let first = auth.begin_login().unwrap();
+    let current = auth.begin_login().unwrap();
+    assert_eq!(
+        first.authorization().state(),
+        current.authorization().state()
+    );
+    let report = block_on(auth.complete_login(current, &callback(&first))).unwrap();
+    assert!(!report.is_success());
+    assert_eq!(store.xiaomi().load().unwrap(), Some(previous));
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn oauth_diagnostics_preserve_credentials_and_authentication_classification() {
+    for (oauth_code, login) in [(96002, true), (96002, false), (96013, true), (96013, false)] {
+        let body = json!({
+            "code": -6,
+            "message": json!({"error": oauth_code, "error_description": "response-secret"}).to_string(),
+        })
+        .to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let previous = valid_record("uid", "old-access", NOW, NOW + 1_000_000);
+        store.xiaomi().replace(&previous).unwrap();
+        let (auth, requests) = service(&store, vec![MockResponse::json(200, &body)]);
+        let report = if login {
+            let attempt = auth.begin_login().unwrap();
+            let input = callback(&attempt);
+            block_on(auth.complete_login(attempt, &input)).unwrap()
+        } else {
+            block_on(auth.check()).unwrap()
+        };
+        let AuthenticationState::Unavailable(FailureReason::Cloud(error)) = &report.authentication
+        else {
+            panic!("unexpected authentication state: {report:?}");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("OAuth error {oauth_code}: "))
+        );
+        assert!(!format!("{report:?}").contains("secret"));
+        assert_eq!(
+            report.certificate,
+            Some(CertificateValidity {
+                not_before: NOW - 60,
+                not_after: NOW + 1_000_000,
+            })
+        );
+        assert!(!report.is_success());
+        assert_eq!(store.xiaomi().load().unwrap(), Some(previous));
+        assert_eq!(requests.try_iter().count(), 1);
+    }
+}
+
+#[test]
 fn login_certificate_rejection_keeps_credentials_and_classifies_only_401_as_invalid_auth() {
     for (response, sign_in_required) in [
         (MockResponse::json(401, "denied"), true),
