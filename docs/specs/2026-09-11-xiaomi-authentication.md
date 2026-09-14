@@ -1,5 +1,5 @@
 ---
-status: implemented
+status: completed
 date: 2026-09-11
 ---
 
