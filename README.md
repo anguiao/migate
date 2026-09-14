@@ -11,3 +11,12 @@ MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（X
 米家认证协议参考[小米官方 Home Assistant 集成](https://github.com/XiaoMi/ha_xiaomi_home)，使用该集成的 OAuth 应用配置。MiGate 是个人爱好项目，该授权归属于 HA 应用，不代表小米为 MiGate 提供独立授权或官方支持。参考来源与使用前提见[米家认证方案](docs/specs/2026-09-11-xiaomi-authentication.md#认证方案与云端依赖)；注明来源不会扩大[上游许可证](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/LICENSE.md)的授权范围。
 
 后续优先覆盖灯、开关、插座、传感器、窗帘和空调，仅暴露可自然映射为标准 Matter 能力的功能。
+
+## 开发检查
+
+```sh
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+`cargo test` 包含真实网桥进程测试，使用临时数据目录和系统分配的空闲端口，验证多个实例共存、mDNS 公告、终端控制及退出和重启行为。该测试使用 macOS 的 Bonjour 与 `dns-sd`，无需停止正在运行的网桥。

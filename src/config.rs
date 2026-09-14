@@ -23,6 +23,7 @@ pub enum AuthCommand {
 #[derive(Debug, Eq, PartialEq)]
 pub struct Config {
     pub data_dir: PathBuf,
+    pub matter_port: u16,
     pub command: Command,
 }
 
@@ -42,6 +43,7 @@ impl Config {
     pub fn parse(
         args: impl IntoIterator<Item = OsString>,
         env_data_dir: Option<OsString>,
+        env_matter_port: Option<OsString>,
         home: Option<OsString>,
         cwd: &Path,
     ) -> Result<Self, ConfigError> {
@@ -98,12 +100,22 @@ impl Config {
                 PathBuf::from(home).join(".migate")
             }
         };
+        let matter_port = match env_matter_port {
+            Some(value) => value
+                .to_str()
+                .and_then(|value| value.parse::<u16>().ok())
+                .ok_or_else(|| {
+                    ConfigError("MIGATE_MATTER_PORT must be an integer from 0 to 65535".into())
+                })?,
+            None => rs_matter::MATTER_PORT,
+        };
         Ok(Self {
             data_dir: if data_dir.is_absolute() {
                 data_dir
             } else {
                 cwd.join(data_dir)
             },
+            matter_port,
             command,
         })
     }
@@ -117,9 +129,58 @@ mod tests {
         Config::parse(
             args.iter().map(OsString::from),
             env.map(OsString::from),
+            None,
             home.map(OsString::from),
             Path::new("/work"),
         )
+    }
+
+    #[test]
+    fn matter_port_defaults_and_accepts_ephemeral_or_explicit_ports() {
+        for (value, expected) in [
+            (None, 5540),
+            (Some("0"), 0),
+            (Some("5541"), 5541),
+            (Some("65535"), 65535),
+        ] {
+            let config = Config::parse(
+                [],
+                Some("/data".into()),
+                value.map(OsString::from),
+                None,
+                Path::new("/work"),
+            )
+            .unwrap();
+            assert_eq!(config.matter_port, expected);
+        }
+    }
+
+    #[test]
+    fn invalid_matter_ports_are_rejected() {
+        use std::os::unix::ffi::OsStringExt;
+
+        for value in [
+            OsString::from(""),
+            OsString::from("-1"),
+            OsString::from("65536"),
+            OsString::from("1.5"),
+            OsString::from("port"),
+            OsString::from_vec(vec![0xff]),
+        ] {
+            let error = Config::parse(
+                [],
+                Some("/data".into()),
+                Some(value),
+                None,
+                Path::new("/work"),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("MIGATE_MATTER_PORT must be an integer from 0 to 65535")
+            );
+        }
     }
 
     #[test]

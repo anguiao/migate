@@ -1,10 +1,17 @@
 use super::format_report;
 use crate::{
     RuntimeError,
+    storage::XiaomiStore,
     xiaomi::auth::{AuthReport, AuthService},
 };
 use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt};
 use std::path::Path;
+
+pub fn logout(store: &XiaomiStore, mut output: impl std::io::Write) -> Result<(), RuntimeError> {
+    store.logout()?;
+    writeln!(output, "Xiaomi credentials removed.")?;
+    Ok(())
+}
 
 pub async fn login(
     service: &AuthService,

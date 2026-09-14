@@ -4,7 +4,7 @@ use migate::{
     storage::Store,
     terminal::{
         AuthStatus,
-        bridge::{handle_line_with_status, run_input},
+        bridge::{handle_line, run_input},
     },
     virtual_device::VirtualLight,
     xiaomi::{auth::AuthService, cloud::CloudClient},
@@ -21,17 +21,52 @@ fn auth_status() -> (tempfile::TempDir, AuthStatus) {
 }
 
 #[test]
+fn startup_login_command_is_a_single_prefixed_log_record() {
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    env_logger::Builder::new()
+        .filter_module("migate::terminal::status", log::LevelFilter::Info)
+        .write_style(env_logger::WriteStyle::Never)
+        .target(env_logger::Target::Pipe(Box::new(
+            capture.reopen().unwrap(),
+        )))
+        .init();
+    let (directory, status) = auth_status();
+    status.log(0);
+
+    let output = std::fs::read_to_string(capture.path()).unwrap();
+    let lines: Vec<_> = output
+        .lines()
+        .filter(|line| line.contains(" migate::terminal::status] "))
+        .collect();
+    let expected_messages = [
+        "Xiaomi: not signed in (cn).".to_owned(),
+        "Gateway certificate: not prepared.".to_owned(),
+        format!(
+            "Sign in with: '/bin/migate' --data-dir '{}' auth login",
+            directory.path().display()
+        ),
+    ];
+    assert_eq!(lines.len(), expected_messages.len(), "{output}");
+    for (line, message) in lines.iter().zip(expected_messages) {
+        let (prefix, body) = line.split_once("] ").unwrap();
+        assert!(prefix.starts_with('['), "{line}");
+        assert!(prefix.contains(" INFO "), "{line}");
+        assert_eq!(body, message);
+    }
+}
+
+#[test]
 fn terminal_recovers_and_reads_shared_state() {
     let light = VirtualLight::new();
     let (_directory, status) = auth_status();
-    assert_eq!(handle_line_with_status(&light, &status, " \n", 0), None);
+    assert_eq!(handle_line(&light, &status, " \n", 0), None);
     assert_eq!(
-        handle_line_with_status(&light, &status, " on \n", 0).unwrap(),
+        handle_line(&light, &status, " on \n", 0).unwrap(),
         "virtual-light-1: on"
     );
     for invalid in ["toggle", "ON", "on extra", "status extra", "off extra"] {
         assert!(
-            handle_line_with_status(&light, &status, invalid, 0)
+            handle_line(&light, &status, invalid, 0)
                 .unwrap()
                 .contains("on, off, status, help")
         );
@@ -39,15 +74,15 @@ fn terminal_recovers_and_reads_shared_state() {
     }
     light.execute(Command::Off);
     assert_eq!(
-        handle_line_with_status(&light, &status, "status", 0).unwrap(),
+        handle_line(&light, &status, "status", 0).unwrap(),
         "virtual-light-1: off"
     );
     assert_eq!(
-        handle_line_with_status(&light, &status, "on", 0).unwrap(),
+        handle_line(&light, &status, "on", 0).unwrap(),
         "virtual-light-1: on"
     );
     assert_eq!(
-        handle_line_with_status(&light, &status, "off", 0).unwrap(),
+        handle_line(&light, &status, "off", 0).unwrap(),
         "virtual-light-1: off"
     );
 }

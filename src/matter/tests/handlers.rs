@@ -1,7 +1,7 @@
 use super::super::{
-    LIGHT_ENDPOINT, NODE, basic_info,
+    NODE, basic_info,
     bridged_info::{self, BridgedHandler},
-    light::{LightHandler, LightHooks},
+    model::{self, LIGHT_ENDPOINT},
     storage::StoreAdapter,
 };
 use crate::{storage::Store, virtual_device::VirtualLight};
@@ -17,7 +17,9 @@ use rs_matter::{
         clusters::{
             app::on_off,
             decl::bridged_device_basic_information::{self as bridged, ClusterHandler as _},
+            identify,
             net_comm::NetworksAccess,
+            scenes,
         },
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
         networks::eth::EthNetwork,
@@ -209,12 +211,18 @@ fn actual_handler_invoke_read_and_report_share_the_device() {
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
     let light = VirtualLight::new();
-    let inner = on_off::OnOffHandler::new_standalone(
-        Dataver::new(1),
-        LIGHT_ENDPOINT,
-        LightHooks::new(&light),
+    let scenes = scenes::ScenesState::<16>::new();
+    let identify = identify::IdentifyHandler::new(Dataver::new(1));
+    let inner = model::on_off(&light, &scenes, Dataver::new(1));
+    let handler = model::handler(
+        &light,
+        &identity.light_id,
+        bridged_info::load_label(&store.matter()).unwrap(),
+        &identify,
+        &scenes,
+        &inner,
+        rand::rng(),
     );
-    let handler = LightHandler::new(&inner, &light);
     let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
     let mut ctx = Context::new(&im, 6, 0);
     block_on(async {
@@ -229,7 +237,7 @@ fn actual_handler_invoke_read_and_report_share_the_device() {
                 .await
                 .unwrap();
             assert_eq!(
-                crate::terminal::handle_line(&light, "status").unwrap(),
+                super::terminal_command(&light, "status").unwrap(),
                 format!("virtual-light-1: {}", if power { "on" } else { "off" })
             );
         }
@@ -244,7 +252,7 @@ fn actual_handler_invoke_read_and_report_share_the_device() {
                 .is_err()
         );
         assert!(!light.snapshot().power);
-        crate::terminal::handle_line(&light, "on");
+        super::terminal_command(&light, "on");
         let mut out = [0; 128];
         let mut write = WriteBuf::new(&mut out);
         handler
@@ -269,7 +277,7 @@ fn actual_handler_invoke_read_and_report_share_the_device() {
         assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
         assert!(on_off::ClusterAsyncHandler::dataver(&inner) > 1);
         let count = ctx.changes.borrow().len();
-        crate::terminal::handle_line(&light, "on");
+        super::terminal_command(&light, "on");
         assert!(poll_once(&mut run).await.is_none());
         assert_eq!(ctx.changes.borrow().len(), count);
     });

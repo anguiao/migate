@@ -3,6 +3,8 @@ use rusqlite::Connection;
 use std::{
     fs,
     io::Write,
+    net::UdpSocket,
+    path::Path,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -24,6 +26,51 @@ struct TestProcess {
 }
 
 impl TestProcess {
+    fn bridge(directory: &Path) -> (Self, u16) {
+        let mut process = Self::spawn(
+            Command::new(env!("CARGO_BIN_EXE_migate"))
+                .env("MIGATE_MATTER_PORT", "0")
+                .arg("--data-dir")
+                .arg(directory),
+        );
+        process.wait_for_output(Stream::Stderr, "mDNS services updated");
+        let (_, stderr) = process.output();
+        let port: u16 = stderr
+            .lines()
+            .find_map(|line| line.split_once("Matter UDP listening on port "))
+            .unwrap()
+            .1
+            .parse()
+            .unwrap();
+        assert_ne!(port, 0);
+        let mut address = rs_matter::transport::MATTER_SOCKET_BIND_ADDR;
+        address.set_port(port);
+        assert_eq!(
+            UdpSocket::bind(address).unwrap_err().kind(),
+            std::io::ErrorKind::AddrInUse,
+        );
+
+        // Resolve this process's service to verify the advertised port matches its socket.
+        let service_id: u64 = stderr
+            .lines()
+            .find_map(|line| line.split_once("Registering mDNS service: Commissionable { id: "))
+            .unwrap()
+            .1
+            .split(',')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut lookup = Self::spawn(Command::new("/usr/bin/dns-sd").args([
+            "-L",
+            &format!("{service_id:016X}"),
+            "_matterc._udp",
+            "local.",
+        ]));
+        lookup.wait_for_output(Stream::Stdout, &format!(":{port} (interface"));
+        (process, port)
+    }
+
     fn spawn(command: &mut Command) -> Self {
         let stdout = NamedTempFile::new().unwrap();
         let stderr = NamedTempFile::new().unwrap();
@@ -221,6 +268,8 @@ fn auth_check_without_credentials_reports_both_states_and_quoted_login_command()
     assert!(!stdout.contains("Manual pairing code"), "{stdout}");
     assert!(!stderr.contains("bridge_id="), "{stderr}");
     assert!(!stderr.contains("endpoint 0="), "{stderr}");
+    assert!(!stderr.contains("Xiaomi:"), "{stderr}");
+    assert!(!stderr.contains("Gateway certificate:"), "{stderr}");
 }
 
 #[test]
@@ -389,14 +438,13 @@ fn ctrl_c_cancels_unfinished_login_with_failure() {
 
 #[test]
 fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
+    let peer_directory = tempfile::tempdir().unwrap();
+    let (mut peer, peer_port) = TestProcess::bridge(peer_directory.path());
     let directory = tempfile::tempdir().unwrap();
     let mut identity = None;
     for close_input in [false, true] {
-        let mut process = TestProcess::spawn(
-            Command::new(env!("CARGO_BIN_EXE_migate"))
-                .arg("--data-dir")
-                .arg(directory.path()),
-        );
+        let (mut process, port) = TestProcess::bridge(directory.path());
+        assert_ne!(port, peer_port);
         process.send("status\non\n");
         if close_input {
             process.close_input();
@@ -409,6 +457,12 @@ fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
             );
         }
         let (output, errors) = process.interrupt();
+        assert!(
+            output
+                .contains("Add MiGate in the Home app. The pairing window is open for 15 minutes."),
+            "{output}"
+        );
+        assert!(output.contains("Manual pairing code: "), "{output}");
         assert!(output.contains("virtual-light-1: off"), "{output}");
         assert!(output.contains("virtual-light-1: on"), "{output}");
         assert!(errors.contains(directory.path().to_str().unwrap()));
@@ -422,6 +476,9 @@ fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
             identity = Some(restored);
         }
     }
+    peer.send("status\n");
+    peer.wait_for_output(Stream::Stdout, "virtual-light-1: off\n");
+    peer.interrupt();
 }
 
 #[test]

@@ -1,8 +1,4 @@
-use super::super::{
-    LIGHT_ENDPOINT, NODE, basic_info,
-    light::{LightHandler, LightHooks},
-    storage::StoreAdapter,
-};
+use super::super::{NODE, basic_info, bridged_info, model, storage::StoreAdapter};
 use crate::{storage::Store, virtual_device::VirtualLight};
 use event_listener::Event;
 use futures_lite::future::{block_on, or};
@@ -12,7 +8,7 @@ use rs_matter::{
     crypto::test_only_crypto,
     dm::{
         Dataver, Privilege,
-        clusters::app::on_off,
+        clusters::{identify, scenes},
         devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET},
         networks::eth::EthNetwork,
     },
@@ -212,12 +208,18 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let light = VirtualLight::new();
-    let inner = on_off::OnOffHandler::new_standalone(
-        Dataver::new(boot.into()),
-        LIGHT_ENDPOINT,
-        LightHooks::new(&light),
+    let scenes = scenes::ScenesState::<16>::new();
+    let identify = identify::IdentifyHandler::new(Dataver::new(boot.into()));
+    let inner = model::on_off(&light, &scenes, Dataver::new(boot.into()));
+    let handler = model::handler(
+        &light,
+        &identity.light_id,
+        bridged_info::load_label(&store.matter()).unwrap(),
+        &identify,
+        &scenes,
+        &inner,
+        rand::rng(),
     );
-    let handler = LightHandler::new(&inner, &light);
     let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -262,7 +264,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
             };
             for (command, power) in [("on", true), ("off", false)] {
                 wait_committed(&state).await;
-                crate::terminal::handle_line(&light, command);
+                super::terminal_command(&light, command);
                 expect_report(&client, id, power).await.unwrap();
             }
             wait_committed(&state).await;
@@ -273,7 +275,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
                 id = replacement;
             }
             wait_committed(&state).await;
-            crate::terminal::handle_line(&light, "on");
+            super::terminal_command(&light, "on");
             expect_report(&client, id, true).await.unwrap();
             id
         };
