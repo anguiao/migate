@@ -1,4 +1,4 @@
-use super::LIGHT_ENDPOINT;
+use super::model::LIGHT_ENDPOINT;
 use crate::{
     device::Command,
     virtual_device::{Changes, VirtualLight},
@@ -183,7 +183,7 @@ impl<LH: LevelControlHooks> AsyncHandler for LightHandler<'_, LH> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::handle_line;
+    use crate::matter::tests::terminal_command as handle_line;
     use futures_lite::future::{block_on, poll_once};
     use std::pin::pin;
 

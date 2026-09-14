@@ -1,6 +1,6 @@
 #![recursion_limit = "256"]
 
-use std::{env, future::Future, io::Write, process::ExitCode};
+use std::{env, future::Future, process::ExitCode};
 
 use async_signal::{Signal, Signals};
 use futures_lite::{StreamExt, future, io::BufReader};
@@ -8,7 +8,7 @@ use migate::{
     RuntimeError,
     config::{AuthCommand, Command, Config},
     matter::Bridge,
-    storage::Store,
+    storage::{Store, XiaomiStore},
     terminal::{self, AuthStatus},
     virtual_device::VirtualLight,
     xiaomi::{auth::AuthService, cloud::CloudClient},
@@ -32,6 +32,7 @@ fn run() -> Result<(), RuntimeError> {
     let config = Config::parse(
         env::args_os().skip(1),
         env::var_os("MIGATE_DATA_DIR"),
+        env::var_os("MIGATE_MATTER_PORT"),
         env::var_os("HOME"),
         &env::current_dir()?,
     )?;
@@ -39,24 +40,32 @@ fn run() -> Result<(), RuntimeError> {
     let identity = store.load_identity()?;
     log::info!("Data directory: {}", config.data_dir.display());
     let executable = env::current_exe()?;
-    let auth = AuthService::new(store.xiaomi(), CloudClient::new()?);
     match config.command {
-        Command::Auth(command) => run_auth(command, &auth, &executable, &config.data_dir),
-        Command::Bridge => run_bridge(store, identity, auth, executable, config.data_dir),
+        Command::Auth(command) => run_auth(command, store.xiaomi(), &executable, &config.data_dir),
+        Command::Bridge => {
+            let auth = AuthService::new(store.xiaomi(), CloudClient::new()?);
+            run_bridge(
+                store,
+                identity,
+                auth,
+                executable,
+                config.data_dir,
+                config.matter_port,
+            )
+        }
     }
 }
 
 fn run_auth(
     command: AuthCommand,
-    auth: &AuthService,
+    store: XiaomiStore,
     executable: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> Result<(), RuntimeError> {
     if command == AuthCommand::Logout {
-        auth.logout()?;
-        writeln!(std::io::stdout().lock(), "Xiaomi credentials removed.")?;
-        return Ok(());
+        return terminal::auth::logout(&store, std::io::stdout().lock());
     }
+    let auth = AuthService::new(store, CloudClient::new()?);
     let mut signals = Signals::new([Signal::Int])?;
     future::block_on(async {
         let cancelled = async {
@@ -75,7 +84,7 @@ fn run_auth(
             let output = blocking::Unblock::new(std::io::stdout());
             match command {
                 AuthCommand::Login => terminal::auth::login(
-                    auth,
+                    &auth,
                     executable,
                     data_dir,
                     BufReader::new(blocking::Unblock::new(std::io::stdin())),
@@ -83,7 +92,7 @@ fn run_auth(
                 )
                 .await
                 .map(|_| ()),
-                AuthCommand::Check => terminal::auth::check(auth, executable, data_dir, output)
+                AuthCommand::Check => terminal::auth::check(&auth, executable, data_dir, output)
                     .await
                     .map(|_| ()),
                 AuthCommand::Logout => unreachable!(),
@@ -99,6 +108,7 @@ fn run_bridge(
     auth: AuthService,
     executable: std::path::PathBuf,
     data_dir: std::path::PathBuf,
+    matter_port: u16,
 ) -> Result<(), RuntimeError> {
     log::info!(
         "MiGate bridge_id={} light_id={}",
@@ -110,11 +120,7 @@ fn run_bridge(
     );
     let local_report = auth.local_status()?;
     let status = AuthStatus::new(local_report, executable, data_dir);
-    writeln!(
-        std::io::stdout().lock(),
-        "{}",
-        status.render(terminal::current_time())
-    )?;
+    status.log(terminal::current_time());
     let light = VirtualLight::new();
     let bridge = Bridge::new(&light, &identity, store.matter());
     let mut signals = Signals::new([Signal::Int])?;
@@ -142,17 +148,18 @@ fn run_bridge(
         let auth_check =
             run_once_then_pending(async { auth.check().await.map_err(Into::into) }, |report| {
                 if status.replace(report) {
-                    writeln!(
-                        std::io::stdout().lock(),
-                        "{}",
-                        status.render(terminal::current_time())
-                    )?;
+                    status.log(terminal::current_time());
                 }
                 Ok(())
             });
         let result = future::or(
             interrupt,
-            future::or(bridge.run(), future::or(auth_check, input)),
+            future::or(
+                bridge.run(matter_port, |event| {
+                    terminal::pairing::write_event(std::io::stdout().lock(), event)
+                }),
+                future::or(auth_check, input),
+            ),
         )
         .await;
         // Service futures have been dropped; a recorded storage failure still takes precedence.

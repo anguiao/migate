@@ -2,7 +2,7 @@ mod handlers;
 mod subscriptions;
 
 use super::{
-    Bridge, NODE, basic_info, bridged_info, initialize_basic_info, pairing_codes,
+    Bridge, NODE, PairingEvent, basic_info, bridged_info, initialize_basic_info, pairing,
     storage::StoreAdapter,
 };
 use crate::{RuntimeError, storage::Store, virtual_device::VirtualLight};
@@ -14,11 +14,26 @@ use rs_matter::{
     tlv::{FromTLV, TLVElement},
 };
 
+pub(super) fn terminal_command(light: &VirtualLight, line: &str) -> Option<String> {
+    use crate::{
+        terminal::{self, AuthStatus},
+        xiaomi::auth::{AuthReport, AuthenticationState, CertificateUpdate},
+    };
+    let report = AuthReport::for_test(
+        AuthenticationState::NotSignedIn,
+        None,
+        CertificateUpdate::NotNeeded,
+        0,
+    );
+    let status = AuthStatus::new(report, "/bin/migate".into(), "/data".into());
+    terminal::handle_line(light, &status, line, 0)
+}
+
 fn startup_error(store: &Store) -> RuntimeError {
     let identity = store.load_identity().unwrap();
     let light = VirtualLight::new();
     let bridge = Bridge::new(&light, &identity, store.matter());
-    block_on(or(bridge.run(), async {
+    block_on(or(bridge.run(0, |_| Ok(())), async {
         async_io::Timer::after(std::time::Duration::from_secs(5)).await;
         panic!("startup did not report invalid storage");
     }))
@@ -46,7 +61,14 @@ fn pairing_codes_use_the_same_passcode() {
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
     let info = basic_info(&identity);
-    let (qr, manual) = pairing_codes(&info).unwrap();
+    let PairingEvent::Opened {
+        qr_payload: qr,
+        manual_code: manual,
+        ..
+    } = pairing::opened(&info, 900).unwrap()
+    else {
+        panic!("expected pairing information");
+    };
     let mut buf = [0; 1024];
     let qr = rs_matter::pairing::qr::QrPayload::parse(&qr, &mut buf).unwrap();
     let manual = rs_matter::pairing::qr::QrPayload::parse_pairing_code(&manual).unwrap();
@@ -148,7 +170,7 @@ fn cancelled_run_keeps_a_recorded_storage_failure() {
             let identity = store.load_identity().unwrap();
             let light = VirtualLight::new();
             let bridge = Bridge::new(&light, &identity, store.matter());
-            let running = bridge.run();
+            let running = bridge.run(0, |_| Ok(()));
             let mut callback_store = bridge.store.clone();
             let db = rusqlite::Connection::open(store.path()).unwrap();
             db.execute("ALTER TABLE blobs RENAME TO unavailable_blobs", [])

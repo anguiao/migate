@@ -202,6 +202,7 @@ fn uses_final_config_directory_and_reports_io_failure() {
     let config = Config::parse(
         ["--data-dir".into(), "selected".into()],
         Some("ignored".into()),
+        None,
         Some("unused".into()),
         root.path(),
     )

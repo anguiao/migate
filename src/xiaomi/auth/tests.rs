@@ -862,7 +862,7 @@ fn corrupt_credentials_block_login_and_check_but_logout_does_not_load() {
         let (auth, _) = service(&store, vec![]);
         assert!(matches!(auth.begin_login(), Err(AuthError::Storage(_))));
         assert!(matches!(block_on(auth.check()), Err(AuthError::Storage(_))));
-        auth.logout().unwrap();
+        store.xiaomi().logout().unwrap();
         assert!(store.xiaomi().load().unwrap().is_none());
     }
 }

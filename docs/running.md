@@ -10,7 +10,9 @@
 cargo run --locked -- --data-dir .migate
 ```
 
-程序在前台运行，使用 Ctrl-C 停止，一次只运行一个网桥进程。
+程序在前台运行，使用 Ctrl-C 停止，同一数据目录一次只运行一个网桥进程。
+
+Matter 默认使用 UDP 5540。可通过 `MIGATE_MATTER_PORT` 设置端口（`0`–`65535`），设为 `0` 时由系统分配空闲端口；启动日志显示实际端口。运行多个网桥时，分别使用独立数据目录和不同端口。
 
 也可以构建后直接运行：
 
@@ -54,7 +56,7 @@ cargo run --locked -- --data-dir .migate auth logout
 
 ## 添加到 Apple Home
 
-Mac 与 iPhone / iPad 需处于同一局域网，网络允许 Matter UDP 5540 与 mDNS 发现，并保持 Mac 唤醒。虚拟灯配对与控制可以在未登录米家账号时使用。
+Mac 与 iPhone / iPad 需处于同一局域网，网络允许 Matter 使用的 UDP 端口（默认 5540）与 mDNS 发现，并保持 Mac 唤醒。虚拟灯配对与控制可以在未登录米家账号时使用。
 
 1. 启动网桥；尚未配对时，终端会显示二维码和手动配对码。
 2. 在「家庭」App 中添加配件，扫描二维码或输入终端显示的手动配对码。
