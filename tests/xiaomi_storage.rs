@@ -197,3 +197,31 @@ fn xiaomi_credentials_remain_inside_private_storage() {
         0o600
     );
 }
+
+#[test]
+fn stale_cross_connection_writes_cannot_replace_new_credentials_or_logout() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = Store::open(dir.path()).unwrap();
+    let second = Store::open(dir.path()).unwrap();
+    first.xiaomi().replace(&record("old")).unwrap();
+    let stale = first.xiaomi().snapshot().unwrap().revision;
+    second.xiaomi().replace(&record("new")).unwrap();
+    assert!(
+        first
+            .xiaomi()
+            .replace_if_revision(stale, &record("stale"))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(first.xiaomi().load().unwrap(), Some(record("new")));
+    let stale = first.xiaomi().snapshot().unwrap().revision;
+    second.xiaomi().logout().unwrap();
+    assert!(
+        first
+            .xiaomi()
+            .update_tokens_if_revision(stale, &tokens("stale"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(first.xiaomi().load().unwrap().is_none());
+}

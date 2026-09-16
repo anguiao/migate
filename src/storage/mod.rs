@@ -1,3 +1,4 @@
+mod device;
 mod error;
 mod identity;
 mod matter;
@@ -7,7 +8,11 @@ mod xiaomi;
 pub use error::StorageError;
 pub use identity::Identity;
 pub use matter::MatterStore;
-pub use xiaomi::{TokenSet, XiaomiRecord, XiaomiStore};
+pub use xiaomi::{
+    AuthRevision, AuthSessionGeneration, AuthSnapshot, SessionCheckError, SessionCheckErrorKind,
+    SessionCheckFailure, TokenSet, VersionedXiaomiRecord, XiaomiAuthObservation,
+    XiaomiAuthObserver, XiaomiRecord, XiaomiStore,
+};
 
 use rusqlite::Connection;
 use std::{
@@ -15,6 +20,8 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
 };
+
+pub(crate) const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Application storage. Clones share one connection on the local executor.
 #[derive(Clone)]
@@ -41,11 +48,11 @@ impl Store {
 
         let mut connection = Connection::open(&path)
             .map_err(|e| StorageError::database(&path, "open database", e))?;
-        private_permissions(&path, 0o600)?;
         connection
-            .execute_batch("PRAGMA journal_mode = DELETE; PRAGMA synchronous = EXTRA;")
+            .busy_timeout(BUSY_TIMEOUT)
             .map_err(|e| StorageError::database(&path, "configure database", e))?;
         if new {
+            private_permissions(&path, 0o600)?;
             initialize(&mut connection)
                 .map_err(|e| StorageError::database(&path, "initialize database", e))?;
         } else {
@@ -55,7 +62,15 @@ impl Store {
                 }
                 error => StorageError::new(&path, "validate database schema", error),
             })?;
+            private_permissions(&path, 0o600)?;
         }
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA journal_mode = DELETE;
+                 PRAGMA synchronous = EXTRA;",
+            )
+            .map_err(|e| StorageError::database(&path, "configure database", e))?;
         Ok(Self {
             inner: Rc::new(Inner { path, connection }),
         })
@@ -75,6 +90,10 @@ impl Store {
 
     pub fn xiaomi(&self) -> XiaomiStore {
         XiaomiStore::new(self.clone())
+    }
+
+    pub fn devices(&self) -> DeviceStore {
+        DeviceStore::new(self.clone())
     }
 
     fn database_error(&self, operation: impl Into<String>, error: rusqlite::Error) -> StorageError {
@@ -126,3 +145,8 @@ fn private_permissions(path: &Path, mode: u32) -> Result<(), StorageError> {
     }
     Ok(())
 }
+pub use device::{
+    CachedSpec, CatalogDeviceMetadata, CatalogHomeRecord, CatalogRoomRecord, CatalogSnapshot,
+    DeviceRecord, DeviceStore, DeviceToken, FeatureIdentity, HomeBinding, PersistedState,
+    PublishedFeatureDefinition, PublishedTopologyDelta, StoredCatalog,
+};

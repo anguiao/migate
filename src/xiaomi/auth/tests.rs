@@ -967,3 +967,108 @@ fn completion_clock_is_read_after_network_operations() {
     assert_eq!(tokens.expires_at, NOW + 1050);
     assert_eq!(tokens.refresh_at, NOW + 750);
 }
+
+#[test]
+fn pending_login_cannot_restore_credentials_after_cross_connection_logout() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .xiaomi()
+        .replace(&valid_record("uid", "old", NOW + 500, NOW + 1_000_000))
+        .unwrap();
+    let other = Store::open(dir.path()).unwrap();
+    let requested = Arc::new(AtomicBool::new(false));
+    let signal = requested.clone();
+    let (base, _) = dynamic_mock_server(3, move |request| {
+        if request.target.contains("get_token") {
+            signal.store(true, Ordering::SeqCst);
+            MockResponse::json(200, &token_body("candidate", "candidate-refresh"))
+                .delayed(Duration::from_millis(50))
+        } else if request.target.ends_with("gethome") {
+            MockResponse::json(200, &home_body(Some("uid"), &[]))
+        } else {
+            certificate_response(request)
+        }
+    });
+    let auth = AuthService::with_clock(
+        store.xiaomi(),
+        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        now,
+    );
+    let attempt = auth.begin_login().unwrap();
+    let input = callback(&attempt);
+    let (report, ()) = block_on(future::zip(
+        auth.complete_login(attempt, &input),
+        async move {
+            wait_for_signal(requested).await;
+            other.xiaomi().logout().unwrap()
+        },
+    ));
+    assert!(matches!(
+        report.unwrap().authentication,
+        AuthenticationState::NotSignedIn
+    ));
+    assert!(store.xiaomi().load().unwrap().is_none());
+}
+
+#[test]
+fn pending_check_refresh_cannot_restore_credentials_after_logout() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .xiaomi()
+        .replace(&valid_record("uid", "old", NOW, NOW + 1_000_000))
+        .unwrap();
+    let other = Store::open(dir.path()).unwrap();
+    let requested = Arc::new(AtomicBool::new(false));
+    let signal = requested.clone();
+    let (base, _) = dynamic_mock_server(1, move |_| {
+        signal.store(true, Ordering::SeqCst);
+        MockResponse::json(200, &token_body("candidate", "candidate-refresh"))
+            .delayed(Duration::from_millis(50))
+    });
+    let auth = AuthService::with_clock(
+        store.xiaomi(),
+        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        now,
+    );
+    let (report, ()) = block_on(future::zip(auth.check(), async move {
+        wait_for_signal(requested).await;
+        other.xiaomi().logout().unwrap()
+    }));
+    assert!(matches!(
+        report.unwrap().authentication,
+        AuthenticationState::NotSignedIn
+    ));
+    assert!(store.xiaomi().load().unwrap().is_none());
+}
+
+#[test]
+fn pending_successful_check_reports_logout_instead_of_stale_authentication() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .xiaomi()
+        .replace(&valid_record("uid", "old", NOW + 500, NOW + 1_000_000))
+        .unwrap();
+    let other = Store::open(dir.path()).unwrap();
+    let requested = Arc::new(AtomicBool::new(false));
+    let signal = requested.clone();
+    let (base, _) = dynamic_mock_server(1, move |_| {
+        signal.store(true, Ordering::SeqCst);
+        MockResponse::json(200, &home_body(Some("uid"), &[])).delayed(Duration::from_millis(50))
+    });
+    let auth = AuthService::with_clock(
+        store.xiaomi(),
+        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        now,
+    );
+    let (report, ()) = block_on(future::zip(auth.check(), async move {
+        wait_for_signal(requested).await;
+        other.xiaomi().logout().unwrap()
+    }));
+    assert!(matches!(
+        report.unwrap().authentication,
+        AuthenticationState::NotSignedIn
+    ));
+}

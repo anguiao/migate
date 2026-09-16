@@ -19,6 +19,7 @@ pub(crate) struct ReceivedRequest {
     pub body: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct MockResponse {
     wire: String,
     delay: Duration,
@@ -60,14 +61,20 @@ impl MockResponse {
 }
 
 pub(crate) fn mock_server(responses: Vec<MockResponse>) -> (String, Receiver<ReceivedRequest>) {
+    mock_server_with_accept_timeout(responses, Duration::from_secs(2))
+}
+
+pub(crate) fn mock_server_with_accept_timeout(
+    responses: Vec<MockResponse>,
+    accept_timeout: Duration,
+) -> (String, Receiver<ReceivedRequest>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         for response in responses {
-            let Some(mut stream) = accept_until(&listener, Instant::now() + Duration::from_secs(2))
-            else {
+            let Some(mut stream) = accept_until(&listener, Instant::now() + accept_timeout) else {
                 return;
             };
             let Some(request) = read_request(&mut stream) else {

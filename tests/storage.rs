@@ -27,7 +27,7 @@ fn initializes_and_restores_identity_without_power() {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            1
+            6
         );
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
@@ -247,7 +247,7 @@ fn private_permissions() {
 }
 
 #[test]
-fn migrates_unversioned_storage_without_changing_existing_data() {
+fn rejects_unversioned_storage_without_changing_existing_data() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.db");
     let db = Connection::open(&path).unwrap();
@@ -267,22 +267,13 @@ fn migrates_unversioned_storage_without_changing_existing_data() {
     .unwrap();
     drop(db);
 
-    let store = Store::open(dir.path()).unwrap();
-    assert_eq!(
-        store.load_identity().unwrap().bridge_id,
-        "11111111111111111111111111111111"
-    );
-    assert_eq!(
-        store.matter().get(7).unwrap().as_deref(),
-        Some(b"matter".as_slice())
-    );
-    assert!(store.xiaomi().load().unwrap().is_none());
+    assert!(Store::open(dir.path()).is_err());
 
     let db = Connection::open(path).unwrap();
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        1
+        0
     );
 }
 
@@ -290,7 +281,11 @@ fn migrates_unversioned_storage_without_changing_existing_data() {
 fn rejects_unsupported_or_damaged_schemas_without_changing_data() {
     for (setup, expected) in [
         (
-            "PRAGMA user_version = 2; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
+            "PRAGMA user_version = 5; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('previous');",
+            "previous",
+        ),
+        (
+            "PRAGMA user_version = 3; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
             "future",
         ),
         (

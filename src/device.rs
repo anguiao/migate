@@ -1,14 +1,11 @@
-pub const VIRTUAL_LIGHT_ID: &str = "virtual-light-1";
+mod capability;
+mod identity;
+mod legacy;
+mod service;
+mod state;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Command {
-    On,
-    Off,
-    Toggle,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Snapshot {
-    pub id: &'static str,
-    pub power: bool,
-}
+pub use capability::*;
+pub use identity::*;
+pub use legacy::*;
+pub use service::*;
+pub use state::*;

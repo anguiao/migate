@@ -4,7 +4,7 @@ mod tokens;
 pub use report::{AuthError, AuthReport, AuthenticationState, CertificateUpdate, FailureReason};
 
 use crate::{
-    storage::{StorageError, TokenSet, XiaomiRecord, XiaomiStore},
+    storage::{AuthRevision, StorageError, TokenSet, XiaomiRecord, XiaomiStore},
     xiaomi::{
         certificate::{CertificateValidity, ClientIdentity, validate_certificate},
         cloud::{
@@ -36,7 +36,7 @@ impl AuthService {
     }
 
     pub fn begin_login(&self) -> Result<LoginAttempt, AuthError> {
-        let previous = self.load_validated()?;
+        let (previous, revision) = self.load_validated()?;
         let authorization = AuthorizationAttempt::new(
             previous
                 .as_ref()
@@ -45,12 +45,13 @@ impl AuthService {
         .map_err(AuthError::Cloud)?;
         Ok(LoginAttempt {
             previous,
+            revision,
             authorization,
         })
     }
 
     pub fn local_status(&self) -> Result<AuthReport, AuthError> {
-        let status = self.load_validated()?;
+        let (status, _) = self.load_validated()?;
         Ok(match status {
             Some(stored) => AuthReport {
                 authentication: AuthenticationState::Checking,
@@ -152,7 +153,14 @@ impl AuthService {
             record.oauth_client_uuid = attempt.authorization.oauth_client_uuid().to_owned();
             record.redirect_uri = attempt.authorization.redirect_uri().to_owned();
             record.tokens = tokens;
-            self.store.replace(&record).map_err(AuthError::Storage)?;
+            if self
+                .store
+                .replace_if_revision(attempt.revision, &record)
+                .map_err(AuthError::Storage)?
+                .is_none()
+            {
+                return self.local_status();
+            }
             return Ok(AuthReport {
                 authentication: AuthenticationState::Authenticated,
                 certificate: Some(previous.validity),
@@ -226,7 +234,14 @@ impl AuthService {
             private_key_pem: identity.private_key_pem,
             certificate_pem,
         };
-        self.store.replace(&record).map_err(AuthError::Storage)?;
+        if self
+            .store
+            .replace_if_revision(attempt.revision, &record)
+            .map_err(AuthError::Storage)?
+            .is_none()
+        {
+            return self.local_status();
+        }
         Ok(AuthReport {
             authentication: AuthenticationState::Authenticated,
             certificate: Some(validity),
@@ -236,7 +251,8 @@ impl AuthService {
     }
 
     pub async fn check(&self) -> Result<AuthReport, AuthError> {
-        let Some(stored) = self.load_validated()? else {
+        let (stored, _) = self.load_validated()?;
+        let Some(stored) = stored else {
             return Ok(AuthReport {
                 authentication: AuthenticationState::NotSignedIn,
                 certificate: None,
@@ -244,6 +260,7 @@ impl AuthService {
                 completed_at: (self.now)(),
             });
         };
+        let mut revision = stored.revision;
         let record = stored.record;
         let old_validity = stored.validity;
         let mut tokens = record.tokens.clone();
@@ -251,7 +268,7 @@ impl AuthService {
 
         if (self.now)() >= tokens.refresh_at
             && let Err(failure) = self
-                .refresh_once(&record, &mut tokens, &mut refreshed)
+                .refresh_once(&record, &mut tokens, &mut refreshed, &mut revision)
                 .await
         {
             return self.request_failure_report(failure, old_validity);
@@ -261,7 +278,7 @@ impl AuthService {
             Ok(home) => home,
             Err(error) if error.is_unauthorized() && !refreshed => {
                 if let Err(failure) = self
-                    .refresh_once(&record, &mut tokens, &mut refreshed)
+                    .refresh_once(&record, &mut tokens, &mut refreshed, &mut revision)
                     .await
                 {
                     return self.request_failure_report(failure, old_validity);
@@ -285,7 +302,7 @@ impl AuthService {
         {
             if error.is_unauthorized() && !refreshed {
                 if let Err(failure) = self
-                    .refresh_once(&record, &mut tokens, &mut refreshed)
+                    .refresh_once(&record, &mut tokens, &mut refreshed, &mut revision)
                     .await
                 {
                     return self.request_failure_report(failure, old_validity);
@@ -319,6 +336,9 @@ impl AuthService {
 
         let renewal_time = (self.now)();
         if !old_validity.renewal_due(renewal_time) {
+            if self.store.revision().map_err(AuthError::Storage)? != revision {
+                return self.local_status();
+            }
             return Ok(AuthReport {
                 authentication: AuthenticationState::Authenticated,
                 certificate: Some(old_validity),
@@ -343,7 +363,7 @@ impl AuthService {
                 return Ok(self.certificate_protected_failure_report(error, old_validity, true));
             }
             if let Err(failure) = self
-                .refresh_once(&record, &mut tokens, &mut refreshed)
+                .refresh_once(&record, &mut tokens, &mut refreshed, &mut revision)
                 .await
             {
                 return self.certificate_request_failure_report(failure, old_validity);
@@ -393,9 +413,14 @@ impl AuthService {
                 completed_at,
             ));
         }
-        self.store
-            .update_certificate(&certificate_pem)
-            .map_err(AuthError::Storage)?;
+        if self
+            .store
+            .update_certificate_if_revision(revision, &certificate_pem)
+            .map_err(AuthError::Storage)?
+            .is_none()
+        {
+            return self.local_status();
+        }
         Ok(AuthReport {
             authentication: AuthenticationState::Authenticated,
             certificate: Some(new_validity),
@@ -409,6 +434,7 @@ impl AuthService {
         record: &XiaomiRecord,
         tokens: &mut TokenSet,
         refreshed: &mut bool,
+        revision: &mut AuthRevision,
     ) -> Result<(), RequestFailure> {
         *refreshed = true;
         let response = self
@@ -428,16 +454,19 @@ impl AuthService {
             })?;
         let replacement = tokens::from_response(response, (self.now)())
             .map_err(|error| RequestFailure::Unavailable(FailureReason::Cloud(error)))?;
-        self.store
-            .update_tokens(&replacement)
-            .map_err(RequestFailure::Storage)?;
+        *revision = self
+            .store
+            .update_tokens_if_revision(*revision, &replacement)
+            .map_err(RequestFailure::Storage)?
+            .ok_or(RequestFailure::Superseded)?;
         *tokens = replacement;
         Ok(())
     }
 
-    fn load_validated(&self) -> Result<Option<StoredRecord>, AuthError> {
-        let Some(record) = self.store.load().map_err(AuthError::Storage)? else {
-            return Ok(None);
+    fn load_validated(&self) -> Result<(Option<StoredRecord>, AuthRevision), AuthError> {
+        let snapshot = self.store.snapshot().map_err(AuthError::Storage)?;
+        let Some(record) = snapshot.record else {
+            return Ok((None, snapshot.revision));
         };
         validate_saved_redirect_uri(&record.redirect_uri)
             .map_err(|error| AuthError::Storage(self.corrupt_record(error)))?;
@@ -448,7 +477,14 @@ impl AuthService {
             &record.certificate_pem,
         )
         .map_err(|error| AuthError::Storage(self.corrupt_record(error)))?;
-        Ok(Some(StoredRecord { record, validity }))
+        Ok((
+            Some(StoredRecord {
+                record,
+                validity,
+                revision: snapshot.revision,
+            }),
+            snapshot.revision,
+        ))
     }
 
     fn corrupt_record(&self, source: impl Into<Box<dyn StdError>>) -> StorageError {
@@ -477,6 +513,7 @@ impl AuthService {
                 (self.now)(),
             )),
             RequestFailure::Storage(error) => Err(AuthError::Storage(error)),
+            RequestFailure::Superseded => self.local_status(),
         }
     }
 
@@ -518,6 +555,7 @@ impl AuthService {
                 completed_at: (self.now)(),
             }),
             RequestFailure::Storage(error) => Err(AuthError::Storage(error)),
+            RequestFailure::Superseded => self.local_status(),
         }
     }
 
@@ -550,11 +588,13 @@ fn current_time() -> i64 {
 struct StoredRecord {
     record: XiaomiRecord,
     validity: CertificateValidity,
+    revision: AuthRevision,
 }
 
 pub struct LoginAttempt {
     previous: Option<StoredRecord>,
     authorization: AuthorizationAttempt,
+    revision: AuthRevision,
 }
 
 impl LoginAttempt {
@@ -577,6 +617,7 @@ enum RequestFailure {
     SignInRequired(FailureReason),
     Unavailable(FailureReason),
     Storage(StorageError),
+    Superseded,
 }
 
 #[cfg(test)]
