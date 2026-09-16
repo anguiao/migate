@@ -20,6 +20,11 @@ CREATE TABLE matter_feature_labels (
     label TEXT NOT NULL CHECK (length(CAST(label AS BLOB)) <= 32),
     FOREIGN KEY (endpoint) REFERENCES feature_identities(endpoint) ON DELETE CASCADE
 ) STRICT;
+CREATE TABLE matter_endpoint_scenes (
+    endpoint INTEGER PRIMARY KEY CHECK (endpoint BETWEEN 2 AND 65534),
+    value BLOB NOT NULL CHECK (length(value) <= 4096),
+    FOREIGN KEY (endpoint) REFERENCES feature_identities(endpoint) ON DELETE CASCADE
+) STRICT;
 
 CREATE TABLE xiaomi_auth (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -153,4 +158,4 @@ CREATE TABLE feature_states (
             account_uid, home_id, parent_did, service_instance, role
         )
 ) STRICT;
-PRAGMA user_version = 7;
+PRAGMA user_version = 8;

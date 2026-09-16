@@ -74,6 +74,47 @@ impl MatterStore {
             })
     }
 
+    pub fn endpoint_scenes(&self, endpoint: u16) -> Result<Option<Vec<u8>>, StorageError> {
+        self.store
+            .inner
+            .connection
+            .query_row(
+                "SELECT value FROM matter_endpoint_scenes WHERE endpoint = ?1",
+                [endpoint],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.store.database_error("read Matter endpoint scenes", e))
+    }
+
+    pub fn save_endpoint_scenes(&self, endpoint: u16, value: &[u8]) -> Result<(), StorageError> {
+        self.store
+            .inner
+            .connection
+            .execute(
+                "INSERT INTO matter_endpoint_scenes (endpoint, value) VALUES (?1, ?2)
+                 ON CONFLICT (endpoint) DO UPDATE SET value = excluded.value",
+                (endpoint, value),
+            )
+            .map(|_| ())
+            .map_err(|e| self.store.database_error("write Matter endpoint scenes", e))
+    }
+
+    pub fn delete_endpoint_scenes(&self, endpoint: u16) -> Result<(), StorageError> {
+        self.store
+            .inner
+            .connection
+            .execute(
+                "DELETE FROM matter_endpoint_scenes WHERE endpoint = ?1",
+                [endpoint],
+            )
+            .map(|_| ())
+            .map_err(|e| {
+                self.store
+                    .database_error("delete Matter endpoint scenes", e)
+            })
+    }
+
     pub fn topology_signature(&self) -> Result<String, StorageError> {
         let signature: String = self
             .store
@@ -189,6 +230,76 @@ impl MatterStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::{
+        AccountId, DeviceDid, FeatureIdentity, FeatureRole, HomeId, PhysicalDeviceId,
+    };
+
+    fn feature(service_instance: u32) -> FeatureIdentity {
+        FeatureIdentity {
+            physical: PhysicalDeviceId {
+                account: AccountId::new("u").unwrap(),
+                home: HomeId::new("h").unwrap(),
+                parent_did: DeviceDid::new("d").unwrap(),
+            },
+            service_instance,
+            role: FeatureRole::Light,
+        }
+    }
+
+    #[test]
+    fn endpoint_scenes_are_isolated_bounded_and_restored() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let first = store
+            .devices()
+            .allocate_feature(&feature(2))
+            .unwrap()
+            .endpoint;
+        let second = store
+            .devices()
+            .allocate_feature(&feature(3))
+            .unwrap()
+            .endpoint;
+        store
+            .matter()
+            .save_endpoint_scenes(first, b"first")
+            .unwrap();
+        store
+            .matter()
+            .save_endpoint_scenes(second, b"second")
+            .unwrap();
+        assert!(
+            store
+                .matter()
+                .save_endpoint_scenes(first, &[0; 4097])
+                .is_err()
+        );
+        drop(store);
+
+        let reopened = Store::open(directory.path()).unwrap();
+        assert_eq!(
+            reopened.matter().endpoint_scenes(first).unwrap().as_deref(),
+            Some(b"first".as_slice())
+        );
+        assert_eq!(
+            reopened
+                .matter()
+                .endpoint_scenes(second)
+                .unwrap()
+                .as_deref(),
+            Some(b"second".as_slice())
+        );
+        reopened.matter().delete_endpoint_scenes(first).unwrap();
+        assert_eq!(reopened.matter().endpoint_scenes(first).unwrap(), None);
+        assert_eq!(
+            reopened
+                .matter()
+                .endpoint_scenes(second)
+                .unwrap()
+                .as_deref(),
+            Some(b"second".as_slice())
+        );
+    }
 
     #[test]
     fn topology_blob_and_signature_commit_or_roll_back_together() {

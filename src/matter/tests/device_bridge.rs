@@ -1,26 +1,48 @@
-use super::super::{DeviceBridgeModel, device_bridge::config_signature, sensors};
+use super::super::{
+    DeviceBridgeModel,
+    device_bridge::config_signature,
+    lighting::{LightingHandler, SceneOnOff, rgb_to_xy},
+    sensors,
+};
 use super::handlers::Context;
-use super::subscriptions::{Pipe, ReceivePipe, SendPipe, connect};
+use super::subscriptions::{Pipe, ReceivePipe, SendPipe, connect, connect_at};
 use crate::{
     device::{
-        AccountId, Capability, DeviceDid, DeviceService, FeatureCapabilities, FeatureIdentity,
-        FeatureRole, HomeId, NumericRange, NumericUnit, Percent, PhysicalDeviceId, Property,
-        PropertyValue, SensingModality, StateReport, StateSource,
+        AccountId, Capability, CommandOutcome, DeviceCommand, DeviceCommandSink, DeviceDid,
+        DeviceService, FeatureCapabilities, FeatureIdentity, FeatureRole, HomeId, NumericRange,
+        NumericUnit, Percent, PhysicalDeviceId, Property, PropertyValue, RgbColor, SensingModality,
+        StateReport, StateSource,
     },
     storage::{MatterStore, Store},
+    xiaomi::{
+        catalog::{WireOperation, WireValue, compile_spec},
+        runtime::{
+            CommandRuntime, CommandTransport, ControlPath, OperationPaths, RuntimeFeature,
+            SendGuard, TransportCommand, TransportFailure,
+        },
+    },
 };
-use futures_lite::future::{block_on, or};
+use event_listener::Event;
+use futures_lite::future::{block_on, or, poll_once, zip};
 use rs_matter::{
     MATTER_PORT, Matter,
     crypto::test_only_crypto,
     dm::{
-        Metadata,
-        clusters::decl::{occupancy_sensing, power_source, temperature_measurement},
+        AsyncHandler, InvokeContext, InvokeReplyInstance, Metadata,
+        clusters::{
+            app::color_control::{RgbGamma, SetDeviceColor},
+            decl::{
+                color_control, groups, level_control, occupancy_sensing, on_off, power_source,
+                scenes_management, temperature_measurement,
+            },
+            scenes::{AttributeValuePairStruct, SceneClusterHandler},
+        },
         devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET},
         endpoints,
         networks::{SysNetifs, eth::EthNetwork},
     },
-    error::Error,
+    error::{Error, ErrorCode},
+    fabric::GroupKeyMapping,
     im::{
         AttrDataTag, AttrPath, CmdDataTag, EthInteractionModelState, EventPath, GenericPath,
         IMStatusCode, InteractionModel, OpCode, StatusResp,
@@ -28,13 +50,117 @@ use rs_matter::{
         encoding::ReportDataResp,
     },
     respond::DefaultResponder,
-    tlv::{FromTLV, Nullable, TLVElement, TLVTag, TLVWrite, ToTLV, Utf8Str},
+    tlv::{FromTLV, Nullable, TLVArray, TLVElement, TLVTag, TLVWrite, ToTLV, Utf8Str},
     transport::{
         exchange::{Exchange, MatterBuffers},
         network::NoNetwork,
     },
+    utils::storage::WriteBuf,
 };
-use std::{cell::Cell, collections::BTreeMap, num::NonZeroU8, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroU8,
+    rc::Rc,
+    time::Duration,
+};
+
+#[derive(Default)]
+struct RecordingCommands(RefCell<Vec<(FeatureIdentity, Vec<DeviceCommand>)>>);
+
+impl DeviceCommandSink for RecordingCommands {
+    fn submit(
+        &self,
+        feature: FeatureIdentity,
+        commands: Vec<DeviceCommand>,
+    ) -> futures_util::future::LocalBoxFuture<'static, CommandOutcome> {
+        self.0.borrow_mut().push((feature, commands));
+        Box::pin(async { CommandOutcome::Accepted })
+    }
+
+    fn stop_adjustment(&self, _feature: &FeatureIdentity, _property: Property) {}
+}
+
+struct CapturingTransport(Rc<RefCell<Vec<TransportCommand>>>);
+
+impl CommandTransport for CapturingTransport {
+    fn available_paths(&self, _device: &PhysicalDeviceId) -> OperationPaths {
+        OperationPaths {
+            gateway: true,
+            ..OperationPaths::default()
+        }
+    }
+
+    fn send(
+        &self,
+        _path: ControlPath,
+        command: TransportCommand,
+        _timeout: Duration,
+        guard: SendGuard,
+    ) -> futures_util::future::LocalBoxFuture<'static, Result<(), TransportFailure>> {
+        let calls = self.0.clone();
+        Box::pin(async move {
+            if !guard.permitted() {
+                return Err(TransportFailure::Unavailable);
+            }
+            guard.shared_state().mark_sent();
+            calls.borrow_mut().push(command);
+            Ok(())
+        })
+    }
+}
+
+struct ControlledCommands {
+    calls: RefCell<Vec<(FeatureIdentity, Vec<DeviceCommand>)>>,
+    outcomes: RefCell<VecDeque<CommandOutcome>>,
+    released: Rc<Cell<usize>>,
+    wake: Rc<Event>,
+}
+
+impl ControlledCommands {
+    fn new(outcomes: impl IntoIterator<Item = CommandOutcome>) -> Self {
+        Self {
+            calls: RefCell::new(Vec::new()),
+            outcomes: RefCell::new(outcomes.into_iter().collect()),
+            released: Rc::new(Cell::new(0)),
+            wake: Rc::new(Event::new()),
+        }
+    }
+
+    fn release_next(&self) {
+        self.released.set(self.released.get() + 1);
+        self.wake.notify(usize::MAX);
+    }
+}
+
+impl DeviceCommandSink for ControlledCommands {
+    fn submit(
+        &self,
+        feature: FeatureIdentity,
+        commands: Vec<DeviceCommand>,
+    ) -> futures_util::future::LocalBoxFuture<'static, CommandOutcome> {
+        let index = self.calls.borrow().len();
+        self.calls.borrow_mut().push((feature, commands));
+        let outcome = self
+            .outcomes
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(CommandOutcome::Accepted);
+        let released = self.released.clone();
+        let wake = self.wake.clone();
+        Box::pin(async move {
+            while released.get() <= index {
+                let listener = wake.listen();
+                if released.get() <= index {
+                    listener.await;
+                }
+            }
+            outcome
+        })
+    }
+
+    fn stop_adjustment(&self, _feature: &FeatureIdentity, _property: Property) {}
+}
 
 fn feature(role: FeatureRole) -> FeatureIdentity {
     FeatureIdentity {
@@ -73,6 +199,1795 @@ fn empty_bridge_has_only_root_and_aggregator() {
             [0, 1]
         )
     });
+}
+
+#[test]
+fn color_temperature_light_declares_complete_lighting_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let service = DeviceService::new();
+    let id = feature(FeatureRole::Light);
+    service.publish(
+        id.clone(),
+        "Ceiling light",
+        FeatureCapabilities(vec![
+            Capability::Power { writable: true },
+            Capability::Brightness(NumericRange {
+                minimum: 0.0,
+                maximum: 100.0,
+                step: 1.0,
+                unit: NumericUnit::Percent,
+            }),
+            Capability::ColorTemperature(NumericRange {
+                minimum: 2700.0,
+                maximum: 6500.0,
+                step: 1.0,
+                unit: NumericUnit::Kelvin,
+            }),
+        ]),
+    );
+    let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+    let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
+
+    model.access(|node| {
+        let light = node.endpoint(endpoint).expect("light endpoint");
+        assert!(light.device_types.iter().any(|item| item.dtype == 0x010c));
+        for cluster in [3, 4, 0x62, 6, 8, 0x0300, 57] {
+            assert!(
+                light.cluster(cluster).is_some(),
+                "missing cluster {cluster:#x}"
+            );
+        }
+    });
+}
+
+#[test]
+fn lighting_shape_preserves_xy_without_inventing_level_or_temperature() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let service = DeviceService::new();
+    let mut rgb = feature(FeatureRole::Light);
+    rgb.service_instance = 3;
+    service.publish(
+        rgb.clone(),
+        "RGB light",
+        FeatureCapabilities(vec![
+            Capability::Power { writable: true },
+            Capability::Color,
+        ]),
+    );
+    let rgb_endpoint = store.devices().allocate_feature(&rgb).unwrap().endpoint;
+    let mut ct = feature(FeatureRole::Light);
+    ct.service_instance = 4;
+    service.publish(
+        ct.clone(),
+        "CT light",
+        FeatureCapabilities(vec![
+            Capability::Power { writable: true },
+            Capability::ColorTemperature(NumericRange {
+                minimum: 2700.0,
+                maximum: 6500.0,
+                step: 100.0,
+                unit: NumericUnit::Kelvin,
+            }),
+        ]),
+    );
+    let ct_endpoint = store.devices().allocate_feature(&ct).unwrap().endpoint;
+    let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
+
+    model.access(|node| {
+        let rgb = node.endpoint(rgb_endpoint).unwrap();
+        assert!(rgb.device_types.iter().any(|device| device.dtype == 0x0100));
+        assert!(rgb.cluster(8).is_none());
+        let color = rgb.cluster(0x0300).unwrap();
+        assert_ne!(color.feature_map & color_control::Feature::XY.bits(), 0);
+        assert_eq!(
+            color.feature_map & color_control::Feature::COLOR_TEMPERATURE.bits(),
+            0
+        );
+
+        let ct = node.endpoint(ct_endpoint).unwrap();
+        assert!(ct.device_types.iter().any(|device| device.dtype == 0x0100));
+        assert!(ct.cluster(8).is_none());
+        let color = ct.cluster(0x0300).unwrap();
+        assert_eq!(color.feature_map & color_control::Feature::XY.bits(), 0);
+        assert_ne!(
+            color.feature_map & color_control::Feature::COLOR_TEMPERATURE.bits(),
+            0
+        );
+    });
+}
+
+#[test]
+fn on_off_commands_use_the_queue_without_optimistic_state() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::Load);
+        service.publish(
+            id.clone(),
+            "Relay",
+            FeatureCapabilities(vec![Capability::Power { writable: true }]),
+        );
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        report(
+            &service,
+            &id,
+            [(Property::Power, PropertyValue::Power(false))],
+        );
+        let commands = Rc::new(RecordingCommands::default());
+        service.set_command_sink(commands.clone());
+        let model =
+            DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
+        let basic_info = super::super::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
+        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+        let mut ctx = Context::new_at(&im, endpoint, 6, 0);
+        ctx.set_command(1, TLVElement::new(&[0x15, 0x18]));
+        model
+            .invoke(
+                &ctx,
+                InvokeReplyInstance::new(ctx.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands.0.borrow().as_slice(),
+            &[(id.clone(), vec![DeviceCommand::SetPower(true)])]
+        );
+        let value = Context::new_at(&im, endpoint, 6, 0).read_tlv(&model).await;
+        assert!(!value_element(&value).bool().unwrap());
+
+        report(
+            &service,
+            &id,
+            [(Property::Power, PropertyValue::Power(true))],
+        );
+        let value = Context::new_at(&im, endpoint, 6, 0).read_tlv(&model).await;
+        assert!(value_element(&value).bool().unwrap());
+
+        service.apply_unknown(&id, Property::Power, service.next_report_version());
+        ctx.set_command(2, TLVElement::new(&[0x15, 0x18]));
+        assert!(
+            model
+                .invoke(
+                    &ctx,
+                    InvokeReplyInstance::new(ctx.cmd(), WriteBuf::new(&mut [0; 128])),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(commands.0.borrow().len(), 1);
+    });
+}
+
+#[test]
+fn level_and_color_temperature_use_confirmed_values_and_typed_commands() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::Light);
+        service.publish(
+            id.clone(),
+            "Light",
+            FeatureCapabilities(vec![
+                Capability::Power { writable: true },
+                Capability::Brightness(NumericRange {
+                    minimum: 0.0,
+                    maximum: 100.0,
+                    step: 1.0,
+                    unit: NumericUnit::Percent,
+                }),
+                Capability::ColorTemperature(NumericRange {
+                    minimum: 2700.0,
+                    maximum: 6500.0,
+                    step: 100.0,
+                    unit: NumericUnit::Kelvin,
+                }),
+            ]),
+        );
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        report(
+            &service,
+            &id,
+            [
+                (Property::Power, PropertyValue::Power(true)),
+                (
+                    Property::Brightness,
+                    PropertyValue::Percent(Percent::new(0.001526).unwrap()),
+                ),
+                (
+                    Property::ColorTemperature,
+                    PropertyValue::ColorTemperature(4000),
+                ),
+            ],
+        );
+        let commands = Rc::new(RecordingCommands::default());
+        service.set_command_sink(commands.clone());
+        let model =
+            DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
+        let basic_info = super::super::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
+        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+
+        let level = Context::new_at(
+            &im,
+            endpoint,
+            8,
+            level_control::AttributeId::CurrentLevel as _,
+        )
+        .read_tlv(&model)
+        .await;
+        assert_eq!(
+            Nullable::<u8>::from_tlv(&value_element(&level)).unwrap(),
+            Nullable::some(1)
+        );
+        let temperature = Context::new_at(
+            &im,
+            endpoint,
+            0x0300,
+            color_control::AttributeId::ColorTemperatureMireds as _,
+        )
+        .read_tlv(&model)
+        .await;
+        assert_eq!(value_element(&temperature).u16().unwrap(), 250);
+
+        let on_level = scalar_data(|writer| writer.u8(&TLVTag::Anonymous, 100).unwrap());
+        let write = Context::write_at(
+            &im,
+            endpoint,
+            8,
+            level_control::AttributeId::OnLevel as _,
+            &on_level,
+        );
+        model.write(&write).await.unwrap();
+        let on = Context::command_at(&im, endpoint, 6, 1, &[0x15, 0x18]);
+        model
+            .invoke(
+                &on,
+                InvokeReplyInstance::new(on.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands.0.borrow()[0].1,
+            vec![
+                DeviceCommand::SetBrightness(Percent::new(39.0).unwrap()),
+                DeviceCommand::SetPower(true),
+            ]
+        );
+        commands.0.borrow_mut().clear();
+        assert!(
+            Context::new_at(
+                &im,
+                endpoint,
+                6,
+                rs_matter::dm::clusters::decl::on_off::AttributeId::StartUpOnOff as _,
+            )
+            .read_tlv_result(&model)
+            .await
+            .is_err()
+        );
+
+        let step = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 0).unwrap();
+            writer.u8(&TLVTag::Context(1), 10).unwrap();
+            writer.null(&TLVTag::Context(2)).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+            writer.u8(&TLVTag::Context(4), 0).unwrap();
+        });
+        let ctx = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::StepWithOnOff as _,
+            &step,
+        );
+        model
+            .invoke(
+                &ctx,
+                InvokeReplyInstance::new(ctx.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(commands.0.borrow().len(), 1);
+        commands.0.borrow_mut().clear();
+        let step_down = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 1).unwrap();
+            writer.u8(&TLVTag::Context(1), 10).unwrap();
+            writer.null(&TLVTag::Context(2)).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+            writer.u8(&TLVTag::Context(4), 0).unwrap();
+        });
+        let step_down = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::StepWithOnOff as _,
+            &step_down,
+        );
+        model
+            .invoke(
+                &step_down,
+                InvokeReplyInstance::new(step_down.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(commands.0.borrow()[0].1, [DeviceCommand::SetPower(false)]);
+        commands.0.borrow_mut().clear();
+
+        let ct = command_data(|writer| {
+            writer.u16(&TLVTag::Context(0), 200).unwrap();
+            writer.u16(&TLVTag::Context(1), 0).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let ctx = Context::command_at(
+            &im,
+            endpoint,
+            0x0300,
+            color_control::CommandId::MoveToColorTemperature as _,
+            &ct,
+        );
+        model
+            .invoke(
+                &ctx,
+                InvokeReplyInstance::new(ctx.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands.0.borrow()[0],
+            (id.clone(), vec![DeviceCommand::SetColorTemperature(5000)])
+        );
+        commands.0.borrow_mut().clear();
+
+        let stepped_ct = command_data(|writer| {
+            writer.u16(&TLVTag::Context(0), 270).unwrap();
+            writer.u16(&TLVTag::Context(1), 0).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let stepped_ct = Context::command_at(
+            &im,
+            endpoint,
+            0x0300,
+            color_control::CommandId::MoveToColorTemperature as _,
+            &stepped_ct,
+        );
+        model
+            .invoke(
+                &stepped_ct,
+                InvokeReplyInstance::new(stepped_ct.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands.0.borrow()[0].1,
+            [DeviceCommand::SetColorTemperature(3700)]
+        );
+        commands.0.borrow_mut().clear();
+
+        let invalid_level = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 255).unwrap();
+            writer.u16(&TLVTag::Context(1), 0).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let invalid_level = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::MoveToLevel as _,
+            &invalid_level,
+        );
+        assert!(
+            model
+                .invoke(
+                    &invalid_level,
+                    InvokeReplyInstance::new(invalid_level.cmd(), WriteBuf::new(&mut [0; 128]),),
+                )
+                .await
+                .is_err()
+        );
+        assert!(commands.0.borrow().is_empty());
+
+        let long_transition = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 100).unwrap();
+            writer.u16(&TLVTag::Context(1), 40_000).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let long_transition = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::MoveToLevel as _,
+            &long_transition,
+        );
+        model
+            .invoke(
+                &long_transition,
+                InvokeReplyInstance::new(long_transition.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert!(commands.0.borrow().is_empty());
+
+        let fade_off = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 0).unwrap();
+            writer.u16(&TLVTag::Context(1), 1).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let fade_off = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::MoveToLevelWithOnOff as _,
+            &fade_off,
+        );
+        model
+            .invoke(
+                &fade_off,
+                InvokeReplyInstance::new(fade_off.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert!(commands.0.borrow().is_empty());
+        or(
+            async {
+                model.run(&fade_off).await.unwrap();
+            },
+            async {
+                async_io::Timer::after(Duration::from_millis(150)).await;
+            },
+        )
+        .await;
+        assert_eq!(
+            commands.0.borrow().last().unwrap().1,
+            [DeviceCommand::SetPower(false)]
+        );
+
+        let scene_handler = LightingHandler::new(
+            service,
+            id,
+            vec![Capability::Power { writable: true }],
+            endpoint,
+            1,
+        );
+        scene_handler.begin_scene_recall(NonZeroU8::new(1).unwrap(), 1, 1);
+        let mut bytes = vec![0; 64];
+        let mut writer = WriteBuf::new(&mut bytes);
+        writer.start_array(&TLVTag::Anonymous).unwrap();
+        writer.start_struct(&TLVTag::Anonymous).unwrap();
+        writer
+            .u32(&TLVTag::Context(0), on_off::AttributeId::OnOff as _)
+            .unwrap();
+        writer.u8(&TLVTag::Context(1), 2).unwrap();
+        writer.end_container().unwrap();
+        writer.end_container().unwrap();
+        let values =
+            TLVArray::<AttributeValuePairStruct<'_>>::new(TLVElement::new(writer.as_slice()))
+                .unwrap();
+        assert!(
+            SceneOnOff(&scene_handler)
+                .apply(&fade_off, &values, 0)
+                .await
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn move_color_preserves_each_axis_rate_until_its_own_boundary() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::Light);
+        service.publish(
+            id.clone(),
+            "RGB light",
+            FeatureCapabilities(vec![
+                Capability::Power { writable: true },
+                Capability::Color,
+            ]),
+        );
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        let initial = RgbColor {
+            red: 255,
+            green: 0,
+            blue: 0,
+        };
+        report(
+            &service,
+            &id,
+            [
+                (Property::Power, PropertyValue::Power(true)),
+                (Property::Color, PropertyValue::Color(initial)),
+            ],
+        );
+        let commands = Rc::new(RecordingCommands::default());
+        service.set_command_sink(commands.clone());
+        let model =
+            DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
+        let basic_info = super::super::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
+        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+        let move_color = command_data(|writer| {
+            writer.i16(&TLVTag::Context(0), 30_000).unwrap();
+            writer.i16(&TLVTag::Context(1), 30_000).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let ctx = Context::command_at(
+            &im,
+            endpoint,
+            color_control::FULL_CLUSTER.id,
+            color_control::CommandId::MoveColor as _,
+            &move_color,
+        );
+        model
+            .invoke(
+                &ctx,
+                InvokeReplyInstance::new(ctx.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        or(
+            async {
+                model.run(&ctx).await.unwrap();
+            },
+            async {
+                async_io::Timer::after(Duration::from_millis(850)).await;
+            },
+        )
+        .await;
+        let actual = match &commands.0.borrow().last().unwrap().1[0] {
+            DeviceCommand::SetColor(color) => *color,
+            command => panic!("unexpected command: {command:?}"),
+        };
+        let (start_x, start_y) = rgb_to_xy(initial);
+        let expected = (650_u64..=900).any(|elapsed_ms| {
+            let advance = |start: u16| {
+                (f64::from(start) + 30_000.0 * elapsed_ms as f64 / 1000.0)
+                    .round()
+                    .clamp(0.0, f64::from(0xfeff_u16)) as u16
+            };
+            let (red, green, blue) = SetDeviceColor::Xy {
+                x: advance(start_x),
+                y: advance(start_y),
+            }
+            .to_rgb(RgbGamma::SRgb);
+            actual == RgbColor { red, green, blue }
+        });
+        assert!(expected, "each XY axis must advance at its requested rate");
+    });
+}
+
+#[test]
+fn level_options_couple_temperature_and_global_scene_recalls_confirmed_values() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::Light);
+        service.publish(
+            id.clone(),
+            "Light",
+            FeatureCapabilities(vec![
+                Capability::Power { writable: true },
+                Capability::Brightness(NumericRange {
+                    minimum: 0.0,
+                    maximum: 100.0,
+                    step: 1.0,
+                    unit: NumericUnit::Percent,
+                }),
+                Capability::ColorTemperature(NumericRange {
+                    minimum: 2700.0,
+                    maximum: 6500.0,
+                    step: 100.0,
+                    unit: NumericUnit::Kelvin,
+                }),
+            ]),
+        );
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        report(
+            &service,
+            &id,
+            [
+                (Property::Power, PropertyValue::Power(true)),
+                (
+                    Property::Brightness,
+                    PropertyValue::Percent(Percent::new(40.0).unwrap()),
+                ),
+                (
+                    Property::ColorTemperature,
+                    PropertyValue::ColorTemperature(4000),
+                ),
+            ],
+        );
+        let commands = Rc::new(RecordingCommands::default());
+        service.set_command_sink(commands.clone());
+        let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
+        let basic_info = super::super::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
+        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+        let options = scalar_data(|writer| {
+            writer
+                .u8(
+                    &TLVTag::Anonymous,
+                    (level_control::OptionsBitmap::EXECUTE_IF_OFF
+                        | level_control::OptionsBitmap::COUPLE_COLOR_TEMP_TO_LEVEL)
+                        .bits(),
+                )
+                .unwrap()
+        });
+        model
+            .write(&Context::write_at(
+                &im,
+                endpoint,
+                8,
+                level_control::AttributeId::Options as _,
+                &options,
+            ))
+            .await
+            .unwrap();
+        let move_to = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 127).unwrap();
+            writer.u16(&TLVTag::Context(1), 0).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let level = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::MoveToLevel as _,
+            &move_to,
+        );
+        model
+            .invoke(
+                &level,
+                InvokeReplyInstance::new(level.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands.0.borrow()[0].1,
+            [
+                DeviceCommand::SetBrightness(Percent::new(50.0).unwrap()),
+                DeviceCommand::SetColorTemperature(3800),
+            ]
+        );
+        let effect_data = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 0).unwrap();
+            writer.u8(&TLVTag::Context(1), 0).unwrap();
+        });
+        let effect = Context::command_at(
+            &im,
+            endpoint,
+            6,
+            on_off::CommandId::OffWithEffect as _,
+            &effect_data,
+        );
+        model
+            .invoke(
+                &effect,
+                InvokeReplyInstance::new(effect.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        let global = Context::new_at(
+            &im,
+            endpoint,
+            6,
+            on_off::AttributeId::GlobalSceneControl as _,
+        )
+        .read_tlv(&model)
+        .await;
+        assert!(!value_element(&global).bool().unwrap());
+        let recall = Context::command_at(
+            &im,
+            endpoint,
+            6,
+            on_off::CommandId::OnWithRecallGlobalScene as _,
+            &[0x15, 0x18],
+        );
+        model
+            .invoke(
+                &recall,
+                InvokeReplyInstance::new(recall.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands.0.borrow()[2].1,
+            [
+                DeviceCommand::SetPower(true),
+                DeviceCommand::SetBrightness(Percent::new(40.0).unwrap()),
+                DeviceCommand::SetColorTemperature(4000),
+            ]
+        );
+        let global = Context::new_at(
+            &im,
+            endpoint,
+            6,
+            on_off::AttributeId::GlobalSceneControl as _,
+        )
+        .read_tlv(&model)
+        .await;
+        assert!(value_element(&global).bool().unwrap());
+    });
+}
+
+#[test]
+fn matter_light_commands_reach_real_runtime_with_light3_wire_values() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let descriptor = compile_spec(
+            "yeelink.light.light3",
+            include_str!("../../../tests/fixtures/miot_specs/yeelink.light.light3.json"),
+        )
+        .unwrap()
+        .features
+        .into_iter()
+        .find(|feature| feature.role == FeatureRole::Light)
+        .unwrap();
+        let mut id = feature(FeatureRole::Light);
+        id.service_instance = descriptor.service_instance;
+        service.publish(
+            id.clone(),
+            descriptor.name.clone(),
+            descriptor.capabilities.clone(),
+        );
+        report(
+            &service,
+            &id,
+            [
+                (Property::Power, PropertyValue::Power(true)),
+                (
+                    Property::Brightness,
+                    PropertyValue::Percent(Percent::new(25.0).unwrap()),
+                ),
+                (
+                    Property::ColorTemperature,
+                    PropertyValue::ColorTemperature(4000),
+                ),
+            ],
+        );
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let runtime =
+            CommandRuntime::new(service.clone(), Rc::new(CapturingTransport(calls.clone())));
+        runtime.register(RuntimeFeature {
+            identity: id.clone(),
+            descriptor,
+            authority_generation: 1,
+            auth_session_generation: store.xiaomi().snapshot().unwrap().session_generation,
+        });
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
+        let basic_info = super::super::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
+        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+
+        let level = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 127).unwrap();
+            writer.u16(&TLVTag::Context(1), 0).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let level = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::MoveToLevel as _,
+            &level,
+        );
+        let (result, ()) = zip(
+            model.invoke(
+                &level,
+                InvokeReplyInstance::new(level.cmd(), WriteBuf::new(&mut [0; 128])),
+            ),
+            runtime.run_until_idle(),
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(
+            calls.borrow()[0],
+            TransportCommand {
+                device: id.physical.clone(),
+                typed: DeviceCommand::SetBrightness(Percent::new(50.0).unwrap()),
+                operation: WireOperation::SetProperty {
+                    siid: 2,
+                    piid: 2,
+                    value: WireValue::Integer(32_768),
+                },
+            }
+        );
+
+        let color_temperature = command_data(|writer| {
+            writer.u16(&TLVTag::Context(0), 200).unwrap();
+            writer.u16(&TLVTag::Context(1), 0).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let color_temperature = Context::command_at(
+            &im,
+            endpoint,
+            0x0300,
+            color_control::CommandId::MoveToColorTemperature as _,
+            &color_temperature,
+        );
+        let (result, ()) = zip(
+            model.invoke(
+                &color_temperature,
+                InvokeReplyInstance::new(color_temperature.cmd(), WriteBuf::new(&mut [0; 128])),
+            ),
+            runtime.run_until_idle(),
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(
+            calls.borrow()[1],
+            TransportCommand {
+                device: id.physical,
+                typed: DeviceCommand::SetColorTemperature(5000),
+                operation: WireOperation::SetProperty {
+                    siid: 2,
+                    piid: 3,
+                    value: WireValue::Integer(5000),
+                },
+            }
+        );
+    });
+}
+
+#[test]
+fn reconcile_refreshes_lighting_ranges_without_rebuilding_the_endpoint() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::Light);
+        let capabilities = |step| {
+            FeatureCapabilities(vec![
+                Capability::Power { writable: true },
+                Capability::Brightness(NumericRange {
+                    minimum: 0.0,
+                    maximum: 100.0,
+                    step,
+                    unit: NumericUnit::Percent,
+                }),
+            ])
+        };
+        service.publish(id.clone(), "Light", capabilities(1.0));
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        report(
+            &service,
+            &id,
+            [
+                (Property::Power, PropertyValue::Power(true)),
+                (
+                    Property::Brightness,
+                    PropertyValue::Percent(Percent::new(10.0).unwrap()),
+                ),
+            ],
+        );
+        let commands = Rc::new(RecordingCommands::default());
+        service.set_command_sink(commands.clone());
+        let model =
+            DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
+        let basic_info = super::super::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
+        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+        let data = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 127).unwrap();
+            writer.u16(&TLVTag::Context(1), 0).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let command = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::MoveToLevel as _,
+            &data,
+        );
+        let mut run = std::pin::pin!(model.run(&command));
+        assert!(poll_once(&mut run).await.is_none());
+        service.publish(id.clone(), "Light", capabilities(30.0));
+        assert!(poll_once(&mut run).await.is_none());
+        model
+            .invoke(
+                &command,
+                InvokeReplyInstance::new(command.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            commands.0.borrow()[0].1,
+            [DeviceCommand::SetBrightness(Percent::new(60.0).unwrap())]
+        );
+        assert_eq!(model.endpoint_for(&id), Some(endpoint));
+        assert!(!model.take_rebuild_request());
+    });
+}
+
+#[test]
+fn lighting_adjustment_survives_state_reports_without_duplicate_dispatch() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::Light);
+        service.publish(
+            id.clone(),
+            "Light",
+            FeatureCapabilities(vec![
+                Capability::Power { writable: true },
+                Capability::Brightness(NumericRange {
+                    minimum: 0.0,
+                    maximum: 100.0,
+                    step: 1.0,
+                    unit: NumericUnit::Percent,
+                }),
+            ]),
+        );
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        report(
+            &service,
+            &id,
+            [
+                (Property::Power, PropertyValue::Power(true)),
+                (
+                    Property::Brightness,
+                    PropertyValue::Percent(Percent::new(10.0).unwrap()),
+                ),
+            ],
+        );
+        let commands = Rc::new(ControlledCommands::new([
+            CommandOutcome::Accepted,
+            CommandOutcome::Accepted,
+        ]));
+        service.set_command_sink(commands.clone());
+        let model =
+            DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
+        let basic_info = super::super::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
+        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+        let move_to = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 200).unwrap();
+            writer.u16(&TLVTag::Context(1), 10).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let ctx = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::MoveToLevel as _,
+            &move_to,
+        );
+        model
+            .invoke(
+                &ctx,
+                InvokeReplyInstance::new(ctx.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        assert!(ctx.has_change(endpoint, 8, level_control::AttributeId::RemainingTime as _,));
+
+        let exercise = async {
+            let deadline = async_io::Timer::after(Duration::from_secs(2));
+            futures_lite::pin!(deadline);
+            while commands.calls.borrow().is_empty() {
+                assert!(
+                    poll_once(&mut deadline).await.is_none(),
+                    "first step timed out"
+                );
+                async_io::Timer::after(Duration::from_millis(5)).await;
+            }
+            report(
+                &service,
+                &id,
+                [(
+                    Property::Brightness,
+                    PropertyValue::Percent(Percent::new(11.0).unwrap()),
+                )],
+            );
+            async_io::Timer::after(Duration::from_millis(10)).await;
+            report(
+                &service,
+                &id,
+                [(
+                    Property::Brightness,
+                    PropertyValue::Percent(Percent::new(12.0).unwrap()),
+                )],
+            );
+            async_io::Timer::after(Duration::from_millis(150)).await;
+            assert_eq!(
+                commands.calls.borrow().len(),
+                1,
+                "held step was dispatched twice"
+            );
+            commands.release_next();
+            while commands.calls.borrow().len() < 2 {
+                assert!(
+                    poll_once(&mut deadline).await.is_none(),
+                    "next step timed out"
+                );
+                async_io::Timer::after(Duration::from_millis(5)).await;
+            }
+        };
+        or(
+            async {
+                let result = model.run(&ctx).await;
+                panic!("bridge background stopped: {result:?}");
+            },
+            exercise,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn rejected_adjustment_step_does_not_stop_lighting_background() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::Light);
+        service.publish(
+            id.clone(),
+            "Light",
+            FeatureCapabilities(vec![
+                Capability::Power { writable: true },
+                Capability::Brightness(NumericRange {
+                    minimum: 0.0,
+                    maximum: 100.0,
+                    step: 1.0,
+                    unit: NumericUnit::Percent,
+                }),
+            ]),
+        );
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        report(
+            &service,
+            &id,
+            [
+                (Property::Power, PropertyValue::Power(true)),
+                (
+                    Property::Brightness,
+                    PropertyValue::Percent(Percent::new(10.0).unwrap()),
+                ),
+            ],
+        );
+        let commands = Rc::new(ControlledCommands::new([
+            CommandOutcome::Rejected(-1),
+            CommandOutcome::Accepted,
+        ]));
+        service.set_command_sink(commands.clone());
+        let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
+        let basic_info = super::super::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
+        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+        let first = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 200).unwrap();
+            writer.u16(&TLVTag::Context(1), 10).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let second = command_data(|writer| {
+            writer.u8(&TLVTag::Context(0), 150).unwrap();
+            writer.u16(&TLVTag::Context(1), 10).unwrap();
+            writer.u8(&TLVTag::Context(2), 0).unwrap();
+            writer.u8(&TLVTag::Context(3), 0).unwrap();
+        });
+        let run_ctx = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::MoveToLevel as _,
+            &first,
+        );
+        model
+            .invoke(
+                &run_ctx,
+                InvokeReplyInstance::new(run_ctx.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        let next_ctx = Context::command_at(
+            &im,
+            endpoint,
+            8,
+            level_control::CommandId::MoveToLevel as _,
+            &second,
+        );
+        let exercise = async {
+            let deadline = async_io::Timer::after(Duration::from_secs(2));
+            futures_lite::pin!(deadline);
+            while commands.calls.borrow().is_empty() {
+                assert!(poll_once(&mut deadline).await.is_none());
+                async_io::Timer::after(Duration::from_millis(5)).await;
+            }
+            commands.release_next();
+            async_io::Timer::after(Duration::from_millis(30)).await;
+            model
+                .invoke(
+                    &next_ctx,
+                    InvokeReplyInstance::new(next_ctx.cmd(), WriteBuf::new(&mut [0; 128])),
+                )
+                .await
+                .unwrap();
+            while commands.calls.borrow().len() < 2 {
+                assert!(poll_once(&mut deadline).await.is_none());
+                async_io::Timer::after(Duration::from_millis(5)).await;
+            }
+            commands.release_next();
+        };
+        or(
+            async {
+                let result = model.run(&run_ctx).await;
+                panic!("bridge background stopped: {result:?}");
+            },
+            exercise,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn timed_off_extends_on_time_tracks_off_wait_and_honors_accept_only_when_on() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::Load);
+        service.publish(
+            id.clone(),
+            "Relay",
+            FeatureCapabilities(vec![Capability::Power { writable: true }]),
+        );
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        report(
+            &service,
+            &id,
+            [(Property::Power, PropertyValue::Power(true))],
+        );
+        let commands = Rc::new(RecordingCommands::default());
+        service.set_command_sink(commands.clone());
+        let model =
+            DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
+        let basic_info = super::super::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
+        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+        let timed = |control, on_time, off_wait| {
+            command_data(|writer| {
+                writer.u8(&TLVTag::Context(0), control).unwrap();
+                writer.u16(&TLVTag::Context(1), on_time).unwrap();
+                writer.u16(&TLVTag::Context(2), off_wait).unwrap();
+            })
+        };
+        let first_data = timed(0, 1, 2);
+        let first = Context::command_at(
+            &im,
+            endpoint,
+            6,
+            on_off::CommandId::OnWithTimedOff as _,
+            &first_data,
+        );
+        model
+            .invoke(
+                &first,
+                InvokeReplyInstance::new(first.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        let exercise = async {
+            async_io::Timer::after(Duration::from_millis(30)).await;
+            let extend_data = timed(0, 3, 2);
+            let extend = Context::command_at(
+                &im,
+                endpoint,
+                6,
+                on_off::CommandId::OnWithTimedOff as _,
+                &extend_data,
+            );
+            model
+                .invoke(
+                    &extend,
+                    InvokeReplyInstance::new(extend.cmd(), WriteBuf::new(&mut [0; 128])),
+                )
+                .await
+                .unwrap();
+            async_io::Timer::after(Duration::from_millis(130)).await;
+            assert_eq!(commands.0.borrow().len(), 2, "timer was not extended");
+            while commands.0.borrow().len() < 3 {
+                async_io::Timer::after(Duration::from_millis(10)).await;
+            }
+            assert_eq!(commands.0.borrow()[2].1, [DeviceCommand::SetPower(false)]);
+            let off_wait = Context::new_at(&im, endpoint, 6, on_off::AttributeId::OffWaitTime as _)
+                .read_tlv(&model)
+                .await;
+            assert!(value_element(&off_wait).u16().unwrap() > 0);
+            report(
+                &service,
+                &id,
+                [(Property::Power, PropertyValue::Power(false))],
+            );
+            let accept_data = timed(on_off::OnOffControlBitmap::ACCEPT_ONLY_WHEN_ON.bits(), 5, 5);
+            let accept = Context::command_at(
+                &im,
+                endpoint,
+                6,
+                on_off::CommandId::OnWithTimedOff as _,
+                &accept_data,
+            );
+            model
+                .invoke(
+                    &accept,
+                    InvokeReplyInstance::new(accept.cmd(), WriteBuf::new(&mut [0; 128])),
+                )
+                .await
+                .unwrap();
+            assert_eq!(commands.0.borrow().len(), 3);
+            async_io::Timer::after(Duration::from_millis(230)).await;
+            let off_wait = Context::new_at(&im, endpoint, 6, on_off::AttributeId::OffWaitTime as _)
+                .read_tlv(&model)
+                .await;
+            assert_eq!(value_element(&off_wait).u16().unwrap(), 0);
+        };
+        or(
+            async {
+                let result = model.run(&first).await;
+                panic!("bridge background stopped: {result:?}");
+            },
+            exercise,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn real_im_scenes_are_endpoint_and_fabric_scoped_and_require_confirmed_state() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let store = Store::open(directory.path()).unwrap();
+                let identity = store.load_identity().unwrap();
+                let service = DeviceService::new();
+                let first = feature(FeatureRole::Light);
+                let mut second = first.clone();
+                second.service_instance = 3;
+                let capabilities = FeatureCapabilities(vec![
+                    Capability::Power { writable: true },
+                    Capability::Brightness(NumericRange {
+                        minimum: 0.0,
+                        maximum: 100.0,
+                        step: 1.0,
+                        unit: NumericUnit::Percent,
+                    }),
+                ]);
+                service.publish(first.clone(), "First", capabilities.clone());
+                service.publish(second.clone(), "Second", capabilities);
+                let first_endpoint = store.devices().allocate_feature(&first).unwrap().endpoint;
+                let second_endpoint = store.devices().allocate_feature(&second).unwrap().endpoint;
+                let scene_level = Percent::new(30.000_762_951_094_835).unwrap();
+                for id in [&first, &second] {
+                    report(
+                        &service,
+                        id,
+                        [
+                            (Property::Power, PropertyValue::Power(true)),
+                            (Property::Brightness, PropertyValue::Percent(scene_level)),
+                        ],
+                    );
+                }
+                let commands = Rc::new(ControlledCommands::new([
+                    CommandOutcome::Accepted,
+                    CommandOutcome::Accepted,
+                ]));
+                service.set_command_sink(commands.clone());
+                let model =
+                    DeviceBridgeModel::new(service.clone(), store.devices(), store.matter())
+                        .unwrap();
+                let basic_info = super::super::basic_info(&identity);
+                let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+                let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+                let crypto = test_only_crypto();
+                let buffers: MatterBuffers = MatterBuffers::new();
+                let state: EthInteractionModelState =
+                    EthInteractionModelState::new(EthNetwork::new_default());
+                let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
+                super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+                connect(&server, 123456, 445566, 71);
+                connect(&client, 445566, 123456, 71);
+                let fabric_two = NonZeroU8::new(2).unwrap();
+                connect_at(&server, fabric_two, 123456, 445577, 72);
+                connect_at(&client, fabric_two, 445577, 123456, 72);
+                server.with_state(|state| {
+                    for fabric in [NonZeroU8::new(1).unwrap(), fabric_two] {
+                        state
+                            .fabrics
+                            .fabric_mut(fabric)
+                            .unwrap()
+                            .groups_mut()
+                            .key_map_add(GroupKeyMapping {
+                                group_id: 0x0329,
+                                group_key_set_id: 1,
+                            })
+                            .unwrap();
+                    }
+                });
+                let mut random = rand::rng();
+                let handler = endpoints::EthSysHandlerBuilder::new()
+                    .netif_diag(&SysNetifs)
+                    .build(&mut random)
+                    .chain(|endpoint, _| endpoint != 0, &model);
+                let im = InteractionModel::new(
+                    &server,
+                    &crypto,
+                    &buffers,
+                    (&model, &handler),
+                    &kv,
+                    &state,
+                );
+                let incoming = Pipe::default();
+                let outgoing = Pipe::default();
+                let responder = DefaultResponder::new(&im);
+                im.startup().await.unwrap();
+                let services = async {
+                    or(
+                        server.run(
+                            &crypto,
+                            SendPipe(&outgoing),
+                            ReceivePipe(&incoming),
+                            NoNetwork,
+                        ),
+                        or(
+                            client.run(
+                                &crypto,
+                                SendPipe(&incoming),
+                                ReceivePipe(&outgoing),
+                                NoNetwork,
+                            ),
+                            or(responder.run::<4, 4>(), im.run()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    panic!("Matter service loop stopped before the scene test completed");
+                };
+                let controller = async {
+                    async_io::Timer::after(Duration::from_millis(10)).await;
+                    let fabric_one = NonZeroU8::new(1).unwrap();
+                    let group_id = 0x0329;
+                    let add_group = command_data(|writer| {
+                        writer.u16(&TLVTag::Context(0), group_id).unwrap();
+                        writer.utf8(&TLVTag::Context(1), "Room").unwrap();
+                    });
+                    let scene = |scene_id| {
+                        command_data(|writer| {
+                            writer.u16(&TLVTag::Context(0), group_id).unwrap();
+                            writer.u8(&TLVTag::Context(1), scene_id).unwrap();
+                        })
+                    };
+                    for (fabric, endpoint) in [
+                        (fabric_one, first_endpoint),
+                        (fabric_one, second_endpoint),
+                        (fabric_two, first_endpoint),
+                    ] {
+                        invoke_command(
+                            &client,
+                            fabric,
+                            endpoint,
+                            4,
+                            groups::CommandId::AddGroup as _,
+                            &add_group,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    invoke_command(
+                        &client,
+                        fabric_one,
+                        first_endpoint,
+                        scenes_management::FULL_CLUSTER.id,
+                        scenes_management::CommandId::StoreScene as _,
+                        &scene(1),
+                    )
+                    .await
+                    .unwrap();
+                    report(
+                        &service,
+                        &first,
+                        [(
+                            Property::Brightness,
+                            PropertyValue::Percent(Percent::new(60.0).unwrap()),
+                        )],
+                    );
+                    futures_lite::future::yield_now().await;
+                    invoke_command(
+                        &client,
+                        fabric_one,
+                        first_endpoint,
+                        scenes_management::FULL_CLUSTER.id,
+                        scenes_management::CommandId::StoreScene as _,
+                        &scene(2),
+                    )
+                    .await
+                    .unwrap();
+                    invoke_command(
+                        &client,
+                        fabric_one,
+                        second_endpoint,
+                        scenes_management::FULL_CLUSTER.id,
+                        scenes_management::CommandId::StoreScene as _,
+                        &scene(1),
+                    )
+                    .await
+                    .unwrap();
+                    invoke_command(
+                        &client,
+                        fabric_two,
+                        first_endpoint,
+                        scenes_management::FULL_CLUSTER.id,
+                        scenes_management::CommandId::StoreScene as _,
+                        &scene(1),
+                    )
+                    .await
+                    .unwrap();
+                    for scene_id in 3..=16 {
+                        invoke_command(
+                            &client,
+                            fabric_one,
+                            first_endpoint,
+                            scenes_management::FULL_CLUSTER.id,
+                            scenes_management::CommandId::StoreScene as _,
+                            &scene(scene_id),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    assert_eq!(
+                        scene_info(&client, fabric_one, first_endpoint)
+                            .await
+                            .unwrap(),
+                        (16, 16, group_id, true, 0)
+                    );
+                    assert_eq!(
+                        scene_info(&client, fabric_one, second_endpoint)
+                            .await
+                            .unwrap(),
+                        (1, 1, group_id, true, 15)
+                    );
+                    assert_eq!(
+                        scene_info(&client, fabric_two, first_endpoint)
+                            .await
+                            .unwrap(),
+                        (1, 1, group_id, true, 15)
+                    );
+                    report(
+                        &service,
+                        &first,
+                        [
+                            (Property::Power, PropertyValue::Power(false)),
+                            (
+                                Property::Brightness,
+                                PropertyValue::Percent(Percent::new(60.0).unwrap()),
+                            ),
+                        ],
+                    );
+                    futures_lite::future::yield_now().await;
+                    let scene_one = scene(1);
+                    let recall = invoke_command(
+                        &client,
+                        fabric_one,
+                        first_endpoint,
+                        scenes_management::FULL_CLUSTER.id,
+                        scenes_management::CommandId::RecallScene as _,
+                        &scene_one,
+                    );
+                    futures_lite::pin!(recall);
+                    while commands.calls.borrow().is_empty() {
+                        assert!(poll_once(&mut recall).await.is_none());
+                        futures_lite::future::yield_now().await;
+                    }
+                    commands.release_next();
+                    while commands.calls.borrow().len() < 2 {
+                        assert!(poll_once(&mut recall).await.is_none());
+                        futures_lite::future::yield_now().await;
+                    }
+                    report(
+                        &service,
+                        &first,
+                        [(Property::Power, PropertyValue::Power(true))],
+                    );
+                    futures_lite::future::yield_now().await;
+                    assert!(
+                        !scene_info(&client, fabric_one, first_endpoint)
+                            .await
+                            .unwrap()
+                            .3,
+                        "a partial scene report must not confirm recall before every cluster applies"
+                    );
+                    commands.release_next();
+                    recall.await.unwrap();
+                    assert!(
+                        !scene_info(&client, fabric_one, first_endpoint)
+                            .await
+                            .unwrap()
+                            .3
+                    );
+                    assert_eq!(
+                        scene_info(&client, fabric_one, first_endpoint)
+                            .await
+                            .unwrap()
+                            .2,
+                        group_id
+                    );
+                    report(
+                        &service,
+                        &first,
+                        [
+                            (Property::Power, PropertyValue::Power(true)),
+                            (Property::Brightness, PropertyValue::Percent(scene_level)),
+                        ],
+                    );
+                    futures_lite::future::yield_now().await;
+                    assert!(
+                        scene_info(&client, fabric_one, first_endpoint)
+                            .await
+                            .unwrap()
+                            .3
+                    );
+                    report(
+                        &service,
+                        &first,
+                        [(
+                            Property::Brightness,
+                            PropertyValue::Percent(Percent::new(40.0).unwrap()),
+                        )],
+                    );
+                    futures_lite::future::yield_now().await;
+                    assert!(
+                        !scene_info(&client, fabric_one, first_endpoint)
+                            .await
+                            .unwrap()
+                            .3
+                    );
+                };
+                or(services, controller).await;
+
+                let restored_commands = Rc::new(RecordingCommands::default());
+                service.set_command_sink(restored_commands.clone());
+                let restored_model =
+                    DeviceBridgeModel::new(service.clone(), store.devices(), store.matter())
+                        .unwrap();
+                let restored_server =
+                    Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+                let restored_client =
+                    Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+                let restored_crypto = test_only_crypto();
+                let restored_buffers: MatterBuffers = MatterBuffers::new();
+                let restored_state: EthInteractionModelState =
+                    EthInteractionModelState::new(EthNetwork::new_default());
+                let restored_kv = restored_server
+                    .kv(super::super::storage::StoreAdapter::new(store.matter()));
+                super::super::model::initialize_basic_info(&restored_server, &restored_kv, true)
+                    .unwrap();
+                connect(&restored_server, 123456, 445566, 73);
+                connect(&restored_client, 445566, 123456, 73);
+                let fabric_two = NonZeroU8::new(2).unwrap();
+                connect_at(&restored_server, fabric_two, 123456, 445577, 74);
+                connect_at(&restored_client, fabric_two, 445577, 123456, 74);
+                restored_server.with_state(|state| {
+                    for fabric in [NonZeroU8::new(1).unwrap(), fabric_two] {
+                        state
+                            .fabrics
+                            .fabric_mut(fabric)
+                            .unwrap()
+                            .groups_mut()
+                            .key_map_add(GroupKeyMapping {
+                                group_id: 0x0329,
+                                group_key_set_id: 1,
+                            })
+                            .unwrap();
+                    }
+                });
+                let mut restored_random = rand::rng();
+                let restored_handler = endpoints::EthSysHandlerBuilder::new()
+                    .netif_diag(&SysNetifs)
+                    .build(&mut restored_random)
+                    .chain(|endpoint, _| endpoint != 0, &restored_model);
+                let restored_im = InteractionModel::new(
+                    &restored_server,
+                    &restored_crypto,
+                    &restored_buffers,
+                    (&restored_model, &restored_handler),
+                    &restored_kv,
+                    &restored_state,
+                );
+                let restored_incoming = Pipe::default();
+                let restored_outgoing = Pipe::default();
+                let restored_responder = DefaultResponder::new(&restored_im);
+                restored_im.startup().await.unwrap();
+                let restored_services = async {
+                    or(
+                        restored_server.run(
+                            &restored_crypto,
+                            SendPipe(&restored_outgoing),
+                            ReceivePipe(&restored_incoming),
+                            NoNetwork,
+                        ),
+                        or(
+                            restored_client.run(
+                                &restored_crypto,
+                                SendPipe(&restored_incoming),
+                                ReceivePipe(&restored_outgoing),
+                                NoNetwork,
+                            ),
+                            or(restored_responder.run::<4, 4>(), restored_im.run()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    panic!("restored Matter scene service stopped unexpectedly");
+                };
+                let restored_controller = async {
+                    async_io::Timer::after(Duration::from_millis(10)).await;
+                    let fabric_one = NonZeroU8::new(1).unwrap();
+                    assert_eq!(
+                        scene_info(&restored_client, fabric_one, first_endpoint)
+                            .await
+                            .unwrap(),
+                        (16, 1, 0x0329, false, 0)
+                    );
+                    assert_eq!(
+                        scene_info(&restored_client, fabric_two, first_endpoint)
+                            .await
+                            .unwrap()
+                            .0,
+                        1
+                    );
+                    let add_group = command_data(|writer| {
+                        writer.u16(&TLVTag::Context(0), 0x0329).unwrap();
+                        writer.utf8(&TLVTag::Context(1), "Room").unwrap();
+                    });
+                    invoke_command(
+                        &restored_client,
+                        fabric_two,
+                        first_endpoint,
+                        groups::FULL_CLUSTER.id,
+                        groups::CommandId::AddGroup as _,
+                        &add_group,
+                    )
+                    .await
+                    .unwrap();
+                    let scene = command_data(|writer| {
+                        writer.u16(&TLVTag::Context(0), 0x0329).unwrap();
+                        writer.u8(&TLVTag::Context(1), 1).unwrap();
+                    });
+                    invoke_command(
+                        &restored_client,
+                        fabric_two,
+                        first_endpoint,
+                        scenes_management::FULL_CLUSTER.id,
+                        scenes_management::CommandId::RecallScene as _,
+                        &scene,
+                    )
+                    .await
+                    .unwrap();
+                    assert!(restored_commands.0.borrow().iter().any(|(_, commands)| {
+                        commands.iter().any(|command| {
+                            matches!(command, DeviceCommand::SetBrightness(_))
+                        })
+                    }));
+
+                    restored_model
+                        .lifecycle(
+                            &restored_im,
+                            rs_matter::dm::LifecycleOp::FabricRemoval {
+                                fab_idx: fabric_one,
+                            },
+                        )
+                        .unwrap();
+                    assert!(
+                        scene_info(&restored_client, fabric_one, first_endpoint)
+                            .await
+                            .is_err()
+                    );
+                    assert!(
+                        scene_info(&restored_client, fabric_one, second_endpoint)
+                            .await
+                            .is_err()
+                    );
+                    assert_eq!(
+                        scene_info(&restored_client, fabric_two, first_endpoint)
+                            .await
+                            .unwrap()
+                            .0,
+                        1
+                    );
+                };
+                or(restored_services, restored_controller).await;
+            })
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -164,6 +2079,22 @@ fn value_element(bytes: &[u8]) -> TLVElement<'_> {
         .unwrap()
         .find_ctx(2)
         .unwrap()
+}
+
+fn command_data(write: impl FnOnce(&mut WriteBuf<'_>)) -> Vec<u8> {
+    let mut bytes = vec![0; 128];
+    let mut writer = WriteBuf::new(&mut bytes);
+    writer.start_struct(&TLVTag::Anonymous).unwrap();
+    write(&mut writer);
+    writer.end_container().unwrap();
+    writer.as_slice().to_vec()
+}
+
+fn scalar_data(write: impl FnOnce(&mut WriteBuf<'_>)) -> Vec<u8> {
+    let mut bytes = vec![0; 16];
+    let mut writer = WriteBuf::new(&mut bytes);
+    write(&mut writer);
+    writer.as_slice().to_vec()
 }
 
 #[test]
@@ -517,6 +2448,48 @@ async fn subscribe_temperature(client: &Matter<'_>, endpoint: u16) -> Result<u32
     }
 }
 
+async fn subscribe_level(client: &Matter<'_>, endpoint: u16) -> Result<u32, Error> {
+    let paths = [AttrPath::from_gp(&GenericPath::new(
+        Some(endpoint),
+        Some(8),
+        Some(level_control::AttributeId::CurrentLevel as _),
+    ))];
+    let exchange = Exchange::initiate(
+        client,
+        test_only_crypto(),
+        NonZeroU8::new(1).unwrap(),
+        123456,
+    )
+    .await?;
+    let mut sender = exchange.subscribe_sender().await?;
+    let mut chunk = loop {
+        match sender.tx().await? {
+            TxOutcome::BuildRequest(builder) => {
+                sender = builder
+                    .keep_subs(false)?
+                    .min_int_floor(0)?
+                    .max_int_ceil(60)?
+                    .attr_requests_from(&paths)?
+                    .fabric_filtered(false)?
+                    .end()?;
+            }
+            TxOutcome::GotResponse(chunk) => break chunk,
+        }
+    };
+    loop {
+        let values = chunk
+            .response()?
+            .attrs::<Nullable<u8>>(8, level_control::AttributeId::CurrentLevel as _)
+            .map(|(_, value)| value.unwrap().into_option())
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1);
+        match chunk.complete().await? {
+            SubscribeOutcome::NextChunk(next) => chunk = next,
+            SubscribeOutcome::Established(subscription) => return Ok(subscription.subscription_id),
+        }
+    }
+}
+
 async fn invoke_identify(client: &Matter<'_>, endpoint: u16, seconds: u16) -> Result<(), Error> {
     let exchange = Exchange::initiate(
         client,
@@ -563,6 +2536,115 @@ async fn invoke_identify(client: &Matter<'_>, endpoint: u16, seconds: u16) -> Re
         match chunk.complete().await? {
             Some(next) => chunk = next,
             None => return Ok(()),
+        }
+    }
+}
+
+async fn invoke_command(
+    client: &Matter<'_>,
+    fabric: NonZeroU8,
+    endpoint: u16,
+    cluster: u32,
+    command: u32,
+    data: &[u8],
+) -> Result<(), Error> {
+    let exchange = Exchange::initiate(client, test_only_crypto(), fabric, 123456).await?;
+    let mut sender = exchange.invoke_sender(None).await?;
+    let mut chunk = loop {
+        match sender.tx().await? {
+            TxOutcome::BuildRequest(builder) => {
+                sender = builder
+                    .suppress_response(false)?
+                    .timed_request(false)?
+                    .invoke_requests()?
+                    .push()?
+                    .path(endpoint, cluster, command)?
+                    .data(|writer| {
+                        TLVElement::new(data)
+                            .to_tlv(&TLVTag::Context(CmdDataTag::Data as u8), writer)
+                    })?
+                    .end()?
+                    .end()?
+                    .end()?;
+            }
+            TxOutcome::GotResponse(chunk) => break chunk,
+        }
+    };
+    loop {
+        if let Some(response) = chunk.response()?
+            && let Some(items) = &response.invoke_responses
+        {
+            for item in items.iter() {
+                match item? {
+                    rs_matter::im::CmdResp::Status(status) => assert_eq!(
+                        status.status.status,
+                        IMStatusCode::Success,
+                        "endpoint {endpoint} cluster {cluster:#x} command {command:#x}"
+                    ),
+                    rs_matter::im::CmdResp::Cmd(response) => {
+                        if let Ok(status) = response.data.structure()?.ctx(0)?.u8() {
+                            assert_eq!(
+                                status, 0,
+                                "endpoint {endpoint} cluster {cluster:#x} command {command:#x}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        match chunk.complete().await? {
+            Some(next) => chunk = next,
+            None => return Ok(()),
+        }
+    }
+}
+
+async fn scene_info(
+    client: &Matter<'_>,
+    fabric: NonZeroU8,
+    endpoint: u16,
+) -> Result<(u8, u8, u16, bool, u8), Error> {
+    let exchange = Exchange::initiate(client, test_only_crypto(), fabric, 123456).await?;
+    let mut sender = exchange.read_sender().await?;
+    let paths = [AttrPath::from_gp(&GenericPath::new(
+        Some(endpoint),
+        Some(scenes_management::FULL_CLUSTER.id),
+        Some(scenes_management::AttributeId::FabricSceneInfo as _),
+    ))];
+    let mut chunk = loop {
+        match sender.tx().await? {
+            TxOutcome::BuildRequest(builder) => {
+                sender = builder
+                    .attr_requests_from(&paths)?
+                    .fabric_filtered(true)?
+                    .end()?;
+            }
+            TxOutcome::GotResponse(chunk) => break chunk,
+        }
+    };
+    loop {
+        let report = chunk.response()?;
+        if let Some((_, value)) = report
+            .attrs::<rs_matter::tlv::TLVArray<'_, scenes_management::SceneInfoStruct<'_>>>(
+                scenes_management::FULL_CLUSTER.id,
+                scenes_management::AttributeId::FabricSceneInfo as _,
+            )
+            .next()
+        {
+            let value = value?;
+            let mut rows = value.iter();
+            let row = rows.next().ok_or(ErrorCode::InvalidData)??;
+            return Ok((
+                row.scene_count()?,
+                row.current_scene()?.ok_or(ErrorCode::InvalidData)?,
+                row.current_group()?.ok_or(ErrorCode::InvalidData)?,
+                row.scene_valid()?.ok_or(ErrorCode::InvalidData)?,
+                row.remaining_capacity()?,
+            ));
+        }
+        match chunk.complete().await? {
+            Some(next) => chunk = next,
+            None => return Err(ErrorCode::InvalidData.into()),
         }
     }
 }
@@ -965,6 +3047,183 @@ fn real_im_temperature_subscription_reports_changes_once_and_ignores_same_value(
             panic!("timed out waiting for dynamic sensor subscription");
         })).await;
     })).unwrap().join().unwrap();
+}
+
+#[test]
+fn real_im_level_subscription_throttles_rapid_reports_and_flushes_latest_value() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let store = Store::open(directory.path()).unwrap();
+                let identity = store.load_identity().unwrap();
+                let service = DeviceService::new();
+                let id = feature(FeatureRole::Light);
+                service.publish(
+                    id.clone(),
+                    "Light",
+                    FeatureCapabilities(vec![
+                        Capability::Power { writable: true },
+                        Capability::Brightness(NumericRange {
+                            minimum: 0.0,
+                            maximum: 100.0,
+                            step: 1.0,
+                            unit: NumericUnit::Percent,
+                        }),
+                    ]),
+                );
+                let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+                report(
+                    &service,
+                    &id,
+                    [
+                        (Property::Power, PropertyValue::Power(true)),
+                        (
+                            Property::Brightness,
+                            PropertyValue::Percent(Percent::new(10.0).unwrap()),
+                        ),
+                    ],
+                );
+                let model =
+                    DeviceBridgeModel::new(service.clone(), store.devices(), store.matter())
+                        .unwrap();
+                let basic_info = super::super::basic_info(&identity);
+                let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+                let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+                let crypto = test_only_crypto();
+                let buffers: MatterBuffers = MatterBuffers::new();
+                let state: EthInteractionModelState =
+                    EthInteractionModelState::new(EthNetwork::new_default());
+                let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
+                super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+                connect(&server, 123456, 445566, 81);
+                connect(&client, 445566, 123456, 81);
+                let mut random = rand::rng();
+                let handler = endpoints::EthSysHandlerBuilder::new()
+                    .netif_diag(&SysNetifs)
+                    .build(&mut random)
+                    .chain(|endpoint, _| endpoint != 0, &model);
+                let im = InteractionModel::new(
+                    &server,
+                    &crypto,
+                    &buffers,
+                    (&model, &handler),
+                    &kv,
+                    &state,
+                );
+                let incoming = Pipe::default();
+                let outgoing = Pipe::default();
+                let responder = DefaultResponder::new(&im);
+                im.startup().await.unwrap();
+                let services = async {
+                    or(
+                        server.run(
+                            &crypto,
+                            SendPipe(&outgoing),
+                            ReceivePipe(&incoming),
+                            NoNetwork,
+                        ),
+                        or(
+                            client.run(
+                                &crypto,
+                                SendPipe(&incoming),
+                                ReceivePipe(&outgoing),
+                                NoNetwork,
+                            ),
+                            or(responder.run::<4, 4>(), im.run()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    panic!("Matter service loop stopped before the level test completed");
+                };
+                let controller = async {
+                    async_io::Timer::after(Duration::from_millis(10)).await;
+                    let subscription = subscribe_level(&client, endpoint).await.unwrap();
+                    while !state
+                        .subscriptions()
+                        .has_subscription_for(NonZeroU8::new(1).unwrap(), 445566)
+                    {
+                        futures_lite::future::yield_now().await;
+                    }
+                    report(
+                        &service,
+                        &id,
+                        [(
+                            Property::Brightness,
+                            PropertyValue::Percent(Percent::new(20.0).unwrap()),
+                        )],
+                    );
+                    let mut exchange = Exchange::accept(&client).await.unwrap();
+                    exchange.recv_fetch().await.unwrap();
+                    let report_data = ReportDataResp::from_tlv(&TLVElement::new(
+                        exchange.rx().unwrap().payload(),
+                    ))
+                    .unwrap();
+                    assert_eq!(report_data.subscription_id, Some(subscription));
+                    assert_eq!(
+                        report_data
+                            .attrs::<Nullable<u8>>(
+                                8,
+                                level_control::AttributeId::CurrentLevel as _,
+                            )
+                            .map(|(_, value)| value.unwrap().into_option())
+                            .collect::<Vec<_>>(),
+                        [Some(51)]
+                    );
+                    exchange
+                        .send_with(|_, buffer| {
+                            StatusResp::write(buffer, IMStatusCode::Success)?;
+                            Ok(Some(OpCode::StatusResponse.into()))
+                        })
+                        .await
+                        .unwrap();
+                    exchange.acknowledge().await.unwrap();
+                    drop(exchange);
+                    for value in [21.0, 22.0] {
+                        report(
+                            &service,
+                            &id,
+                            [(
+                                Property::Brightness,
+                                PropertyValue::Percent(Percent::new(value).unwrap()),
+                            )],
+                        );
+                    }
+                    let early = or(
+                        async { Exchange::accept(&client).await.map(|_| true) },
+                        async {
+                            async_io::Timer::after(Duration::from_millis(150)).await;
+                            Ok(false)
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    assert!(!early, "rapid level reports were not throttled");
+                    let mut exchange = Exchange::accept(&client).await.unwrap();
+                    exchange.recv_fetch().await.unwrap();
+                    let report_data = ReportDataResp::from_tlv(&TLVElement::new(
+                        exchange.rx().unwrap().payload(),
+                    ))
+                    .unwrap();
+                    assert_eq!(
+                        report_data
+                            .attrs::<Nullable<u8>>(
+                                8,
+                                level_control::AttributeId::CurrentLevel as _,
+                            )
+                            .map(|(_, value)| value.unwrap().into_option())
+                            .collect::<Vec<_>>(),
+                        [Some(56)]
+                    );
+                };
+                or(services, controller).await;
+            })
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

@@ -2,6 +2,7 @@ mod bridged_info;
 mod common;
 mod device_bridge;
 mod light;
+mod lighting;
 mod model;
 mod pairing;
 mod sensors;

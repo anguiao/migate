@@ -1,6 +1,6 @@
 use super::{
-    common, model, sensors,
-    storage::{StoreAdapter, TopologyStore},
+    common, lighting, model, sensors,
+    storage::{EndpointSceneStore, StoreAdapter, TopologyStore},
 };
 use crate::{
     RuntimeError,
@@ -18,33 +18,43 @@ use rs_matter::{
     Matter,
     crypto::{Crypto, default_crypto},
     dm::{
-        AsyncHandler, Cluster, Dataver, DeviceType, Endpoint, Handler, HandlerContext,
-        InvokeContext, InvokeReply, MatchContext, Metadata, Node, ReadContext, ReadReply,
-        WriteContext,
+        AsyncHandler, AttrChangeNotifier, AttrDetails, Cluster, CmdDetails, Dataver, DeviceType,
+        Endpoint, EventEmitter, EventNumber, Handler, HandlerContext, InvokeContext, InvokeReply,
+        MatchContext, Metadata, Node, OperationContext, OwnAttrChangeNotifier, OwnEventEmitter,
+        ReadContext, ReadReply, Reply, WriteContext,
         clusters::decl::{
             boolean_state, bridged_device_basic_information as bridged, illuminance_measurement,
             occupancy_sensing, power_source, relative_humidity_measurement,
             temperature_measurement,
         },
-        clusters::{desc, identify},
+        clusters::{desc, groups, identify, scenes},
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
         devices::{DEV_TYPE_BRIDGED_NODE, DEV_TYPE_POWER_SOURCE},
         endpoints,
         networks::{SysNetifs, eth::EthNetwork},
     },
     error::{Error, ErrorCode},
-    im::{EthInteractionModelState, InteractionModel},
-    persist::BASIC_INFO_KEY,
-    respond::DefaultResponder,
-    transport::{
-        MATTER_SOCKET_BIND_ADDR, exchange::MatterBuffers, network::mdns::astro::AstroMdns,
+    im::{
+        EthInteractionModelState, ImStats, InteractionModel,
+        encoding::{EventPriority, IMBuffer},
+        events::EventTLVWrite,
     },
+    persist::{BASIC_INFO_KEY, KvBlobStoreAccess},
+    respond::DefaultResponder,
+    tlv::{TLVControl, TLVElement, TLVTagType, TLVValueType, TLVWrite, TagType, ToTLV},
+    transport::{
+        MATTER_SOCKET_BIND_ADDR,
+        exchange::{Exchange, MatterBuffers},
+        network::mdns::astro::AstroMdns,
+    },
+    utils::storage::pooled::Buffers,
 };
 use sha1::{Digest, Sha1};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
     net::UdpSocket,
+    num::NonZeroU8,
     rc::Rc,
     time::Duration,
 };
@@ -71,6 +81,246 @@ const DEV_TYPE_CONTACT_SENSOR: DeviceType = DeviceType {
     dtype: 0x0015,
     drev: 2,
 };
+const DEV_TYPE_ON_OFF_LIGHT: DeviceType = DeviceType {
+    dtype: 0x0100,
+    drev: 3,
+};
+const DEV_TYPE_DIMMABLE_LIGHT: DeviceType = DeviceType {
+    dtype: 0x0101,
+    drev: 3,
+};
+const DEV_TYPE_COLOR_TEMPERATURE_LIGHT: DeviceType = DeviceType {
+    dtype: 0x010c,
+    drev: 3,
+};
+const DEV_TYPE_EXTENDED_COLOR_LIGHT: DeviceType = DeviceType {
+    dtype: 0x010d,
+    drev: 4,
+};
+const DEV_TYPE_ON_OFF_PLUGIN_UNIT: DeviceType = DeviceType {
+    dtype: 0x010a,
+    drev: 3,
+};
+
+struct SceneContext<'a, C> {
+    base: &'a C,
+    store: EndpointSceneStore,
+}
+
+impl<'a, C> SceneContext<'a, C> {
+    fn new(base: &'a C, store: StoreAdapter, endpoint: u16) -> Self {
+        Self {
+            base,
+            store: EndpointSceneStore::new(store, endpoint),
+        }
+    }
+}
+
+impl<C: HandlerContext> HandlerContext for SceneContext<'_, C> {
+    fn matter(&self) -> &Matter<'_> {
+        self.base.matter()
+    }
+    fn crypto(&self) -> impl Crypto + '_ {
+        self.base.crypto()
+    }
+    fn kv(&self) -> impl KvBlobStoreAccess + '_ {
+        self.base.matter().kv(self.store.clone())
+    }
+    fn networks(&self) -> impl rs_matter::dm::clusters::net_comm::NetworksAccess + '_ {
+        self.base.networks()
+    }
+    fn metadata(&self) -> impl Metadata + '_ {
+        self.base.metadata()
+    }
+    fn handler(&self) -> impl AsyncHandler + '_ {
+        self.base.handler()
+    }
+    fn buffers(&self) -> impl Buffers<IMBuffer> + '_ {
+        self.base.buffers()
+    }
+    fn im_stats(&self) -> impl ImStats + '_ {
+        self.base.im_stats()
+    }
+    fn notify_fabric_removed(&self, fab_idx: NonZeroU8) {
+        self.base.notify_fabric_removed(fab_idx);
+    }
+}
+
+impl<C: AttrChangeNotifier> AttrChangeNotifier for SceneContext<'_, C> {
+    fn notify_attr_changed(&self, endpoint: u16, cluster: u32, attribute: u32) {
+        self.base.notify_attr_changed(endpoint, cluster, attribute);
+    }
+    fn notify_cluster_changed(&self, endpoint: u16, cluster: u32) {
+        self.base.notify_cluster_changed(endpoint, cluster);
+    }
+    fn notify_endpoint_changed(&self, endpoint: u16) {
+        self.base.notify_endpoint_changed(endpoint);
+    }
+    fn notify_all_changed(&self) {
+        self.base.notify_all_changed();
+    }
+}
+
+impl<C: EventEmitter> EventEmitter for SceneContext<'_, C> {
+    fn emit_event<F>(
+        &self,
+        endpoint: u16,
+        cluster: u32,
+        event: u32,
+        priority: EventPriority,
+        f: F,
+    ) -> Result<EventNumber, Error>
+    where
+        F: FnOnce(EventTLVWrite<'_>) -> Result<(), Error>,
+    {
+        self.base.emit_event(endpoint, cluster, event, priority, f)
+    }
+}
+
+impl<C: MatchContext> MatchContext for SceneContext<'_, C> {
+    fn endpt(&self) -> Option<u16> {
+        self.base.endpt()
+    }
+    fn cluster(&self) -> Option<u32> {
+        self.base.cluster()
+    }
+}
+
+impl<C: OwnAttrChangeNotifier> OwnAttrChangeNotifier for SceneContext<'_, C> {
+    fn notify_own_attr_changed(&self, attribute: u32) {
+        self.base.notify_own_attr_changed(attribute);
+    }
+    fn notify_own_cluster_changed(&self) {
+        self.base.notify_own_cluster_changed();
+    }
+    fn notify_own_endpoint_changed(&self) {
+        self.base.notify_own_endpoint_changed();
+    }
+}
+
+impl<C: OwnEventEmitter> OwnEventEmitter for SceneContext<'_, C> {
+    fn emit_own_event<F>(
+        &self,
+        event: u32,
+        priority: EventPriority,
+        f: F,
+    ) -> Result<EventNumber, Error>
+    where
+        F: FnOnce(EventTLVWrite<'_>) -> Result<(), Error>,
+    {
+        self.base.emit_own_event(event, priority, f)
+    }
+}
+
+impl<C: OperationContext> OperationContext for SceneContext<'_, C> {
+    fn exchange(&self) -> &Exchange<'_> {
+        self.base.exchange()
+    }
+    fn accessor(&self) -> Result<rs_matter::acl::Accessor<'_>, Error> {
+        self.base.accessor()
+    }
+}
+
+impl<C: ReadContext> ReadContext for SceneContext<'_, C> {
+    fn attr(&self) -> &AttrDetails {
+        self.base.attr()
+    }
+}
+
+impl<C: WriteContext> WriteContext for SceneContext<'_, C> {
+    fn attr(&self) -> &AttrDetails {
+        self.base.attr()
+    }
+    fn data(&self) -> &TLVElement<'_> {
+        self.base.data()
+    }
+}
+
+impl<C: InvokeContext> InvokeContext for SceneContext<'_, C> {
+    fn cmd(&self) -> &CmdDetails {
+        self.base.cmd()
+    }
+    fn data(&self) -> &TLVElement<'_> {
+        self.base.data()
+    }
+}
+
+struct SceneValidReadReply<R>(R);
+
+impl<R: ReadReply> ReadReply for SceneValidReadReply<R> {
+    fn with_dataver(self, dataver: u32) -> Result<Option<impl Reply>, Error> {
+        Ok(self.0.with_dataver(dataver)?.map(|inner| SceneValidReply {
+            inner,
+            encoded: Vec::new(),
+        }))
+    }
+}
+
+struct SceneValidReply<R> {
+    inner: R,
+    encoded: Vec<u8>,
+}
+
+impl<R: Reply> Reply for SceneValidReply<R> {
+    const TAG: TagType = R::TAG;
+
+    fn set<T: ToTLV>(mut self, value: T) -> Result<(), Error> {
+        value.to_tlv(&Self::TAG, SceneBufferWriter(&mut self.encoded))?;
+        self.complete()
+    }
+
+    fn reset(&mut self) {
+        self.encoded.clear();
+        self.inner.reset();
+    }
+
+    fn writer(&mut self) -> impl TLVWrite + Send + '_ {
+        SceneBufferWriter(&mut self.encoded)
+    }
+
+    fn complete(mut self) -> Result<(), Error> {
+        force_scene_valid_false(&mut self.encoded)?;
+        {
+            let mut writer = self.inner.writer();
+            writer.write_raw_data(self.encoded.iter().copied())?;
+        }
+        self.inner.complete()
+    }
+}
+
+fn force_scene_valid_false(encoded: &mut [u8]) -> Result<(), Error> {
+    let base = encoded.as_ptr() as usize;
+    let root = TLVElement::new(encoded);
+    let mut offsets = Vec::new();
+    for entry in root.array()?.iter() {
+        let scene_valid = entry?.structure()?.ctx(3)?;
+        scene_valid.bool()?;
+        offsets.push(scene_valid.raw_data().as_ptr() as usize - base);
+    }
+    for offset in offsets {
+        encoded[offset] = TLVControl::new(TLVTagType::Context, TLVValueType::False).as_raw();
+    }
+    Ok(())
+}
+
+struct SceneBufferWriter<'a>(&'a mut Vec<u8>);
+
+impl TLVWrite for SceneBufferWriter<'_> {
+    type Position = usize;
+
+    fn write(&mut self, byte: u8) -> Result<(), Error> {
+        self.0.push(byte);
+        Ok(())
+    }
+
+    fn get_tail(&self) -> Self::Position {
+        self.0.len()
+    }
+
+    fn rewind_to(&mut self, position: Self::Position) {
+        self.0.truncate(position);
+    }
+}
 
 struct FeatureRuntime {
     allocation: AllocatedFeature,
@@ -84,6 +334,18 @@ struct FeatureRuntime {
     identify: identify::IdentifyHandler,
     common: common::CommonHandler,
     sensor: sensors::SensorHandler,
+    lighting: Option<lighting::LightingHandler>,
+    groups: groups::GroupsHandler<'static>,
+    scenes: scenes::ScenesState<33, 96>,
+    scenes_dataver: Dataver,
+}
+
+impl FeatureRuntime {
+    fn lighting(&self) -> &lighting::LightingHandler {
+        self.lighting
+            .as_ref()
+            .expect("lighting clusters require a lighting handler")
+    }
 }
 
 /// Dynamic Matter metadata and handlers backed by the authoritative device service.
@@ -100,6 +362,28 @@ pub struct DeviceBridgeModel {
 }
 
 impl DeviceBridgeModel {
+    async fn run_feature_backgrounds(
+        runtimes: Rc<Vec<Rc<FeatureRuntime>>>,
+        ctx: &impl HandlerContext,
+    ) -> Result<(), Error> {
+        let mut futures = Vec::with_capacity(runtimes.len() * 2);
+        for runtime in runtimes.iter() {
+            futures.push(
+                Box::pin(identify::ClusterHandler::run(&runtime.identify, ctx))
+                    as std::pin::Pin<Box<dyn Future<Output = Result<(), Error>> + '_>>,
+            );
+            if let Some(lighting) = &runtime.lighting {
+                futures.push(Box::pin(lighting.run(ctx)));
+            }
+        }
+        if futures.is_empty() {
+            std::future::pending().await
+        } else {
+            let (result, _, _) = futures_util::future::select_all(futures).await;
+            result
+        }
+    }
+
     pub fn new(
         service: DeviceService,
         devices: DeviceStore,
@@ -169,7 +453,10 @@ impl DeviceBridgeModel {
     ) -> Result<Option<FeatureRuntime>, StorageError> {
         if !matches!(
             allocation.feature.role,
-            FeatureRole::TemperatureSensor
+            FeatureRole::Light
+                | FeatureRole::BathHeaterLight
+                | FeatureRole::Load
+                | FeatureRole::TemperatureSensor
                 | FeatureRole::HumiditySensor
                 | FeatureRole::IlluminanceSensor
                 | FeatureRole::MotionSensor
@@ -203,10 +490,55 @@ impl DeviceBridgeModel {
         let has_battery = capabilities
             .iter()
             .any(|cap| matches!(cap, Capability::Battery(_)));
-        if !(has_temperature || has_humidity || has_lux || has_occupancy || has_contact) {
+        let has_power = matches!(
+            allocation.feature.role,
+            FeatureRole::Light | FeatureRole::BathHeaterLight | FeatureRole::Load
+        ) && capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::Power { writable: true }));
+        let has_level = has_power
+            && capabilities
+                .iter()
+                .any(|cap| matches!(cap, Capability::Brightness(_)));
+        let has_temperature_color = has_power
+            && capabilities
+                .iter()
+                .any(|cap| matches!(cap, Capability::ColorTemperature(_)));
+        let has_xy = has_power && capabilities.contains(&Capability::Color);
+        if !(has_temperature
+            || has_humidity
+            || has_lux
+            || has_occupancy
+            || has_contact
+            || has_power)
+        {
             return Ok(None);
         }
         clusters.push(identify::IdentifyHandler::<()>::CLUSTER);
+        if has_power {
+            clusters.extend([
+                lighting::GROUPS_CLUSTER,
+                lighting::SCENES_CLUSTER,
+                lighting::ON_OFF_CLUSTER,
+            ]);
+            if has_level {
+                clusters.push(lighting::LEVEL_CLUSTER);
+            }
+            if has_temperature_color || has_xy {
+                clusters.push(lighting::color_cluster(has_xy, has_temperature_color));
+            }
+            if allocation.feature.role == FeatureRole::Load {
+                device_types.push(DEV_TYPE_ON_OFF_PLUGIN_UNIT);
+            } else if has_xy && has_temperature_color && has_level {
+                device_types.push(DEV_TYPE_EXTENDED_COLOR_LIGHT);
+            } else if has_temperature_color && has_level {
+                device_types.push(DEV_TYPE_COLOR_TEMPERATURE_LIGHT);
+            } else if has_level {
+                device_types.push(DEV_TYPE_DIMMABLE_LIGHT);
+            } else {
+                device_types.push(DEV_TYPE_ON_OFF_LIGHT);
+            }
+        }
         if has_temperature {
             device_types.push(DEV_TYPE_TEMPERATURE_SENSOR);
             clusters.push(sensors::TEMPERATURE_CLUSTER);
@@ -246,7 +578,7 @@ impl DeviceBridgeModel {
             .capture(self.store.storage().feature_label(allocation.endpoint))?;
         let seed = rand::rng().random::<u32>();
         let reachable = self.service.is_available(&allocation.feature);
-        let exposed_values = sensor_properties(&capabilities, &clusters)
+        let exposed_values = exposed_properties(&capabilities, &clusters)
             .into_iter()
             .map(|property| {
                 let value = self
@@ -276,10 +608,22 @@ impl DeviceBridgeModel {
             sensor: sensors::SensorHandler::new(
                 self.service.clone(),
                 allocation.feature.clone(),
-                capabilities,
+                capabilities.clone(),
                 allocation.endpoint,
                 seed.wrapping_add(3),
             ),
+            lighting: has_power.then(|| {
+                lighting::LightingHandler::new(
+                    self.service.clone(),
+                    allocation.feature.clone(),
+                    capabilities.clone(),
+                    allocation.endpoint,
+                    seed.wrapping_add(9),
+                )
+            }),
+            groups: groups::GroupsHandler::new(Dataver::new(seed.wrapping_add(12))),
+            scenes: scenes::ScenesState::new(),
+            scenes_dataver: Dataver::new(seed.wrapping_add(13)),
             allocation,
             device_types,
             clusters,
@@ -324,7 +668,11 @@ impl DeviceBridgeModel {
         topology_signature_for(&runtimes)
     }
 
-    fn dispatch_read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+    async fn dispatch_read(
+        &self,
+        ctx: impl ReadContext,
+        reply: impl ReadReply,
+    ) -> Result<(), Error> {
         let endpoint = ctx.endpt().ok_or(ErrorCode::AttributeNotFound)?;
         let cluster = ctx.cluster().ok_or(ErrorCode::AttributeNotFound)?;
         if endpoint == 1 && cluster == desc::DescHandler::CLUSTER.id {
@@ -335,6 +683,15 @@ impl DeviceBridgeModel {
             .iter()
             .find(|runtime| runtime.allocation.endpoint == endpoint)
             .ok_or(ErrorCode::AttributeNotFound)?;
+        if runtime
+            .clusters
+            .iter()
+            .find(|candidate| candidate.id == cluster)
+            .and_then(|candidate| candidate.attribute(ctx.attr().attr_id))
+            .is_none()
+        {
+            return Err(ErrorCode::AttributeNotFound.into());
+        }
         match cluster {
             id if id == desc::DescHandler::CLUSTER.id => {
                 Handler::read(&runtime.desc.clone().adapt(), ctx, reply)
@@ -371,7 +728,107 @@ impl DeviceBridgeModel {
             id if id == sensors::POWER_SOURCE_CLUSTER.id => {
                 Handler::read(&power_source::HandlerAdaptor(&runtime.sensor), ctx, reply)
             }
+            id if id == lighting::ON_OFF_CLUSTER.id => Handler::read(
+                &rs_matter::dm::clusters::decl::on_off::HandlerAdaptor(runtime.lighting()),
+                ctx,
+                reply,
+            ),
+            id if id == lighting::LEVEL_CLUSTER.id => Handler::read(
+                &rs_matter::dm::clusters::decl::level_control::HandlerAdaptor(runtime.lighting()),
+                ctx,
+                reply,
+            ),
+            id if id == lighting::GROUPS_CLUSTER.id => {
+                Handler::read(&groups::HandlerAdaptor(&runtime.groups), ctx, reply)
+            }
+            id if id == lighting::SCENES_CLUSTER.id => self.read_scenes(runtime, ctx, reply).await,
+            id if id == rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id => {
+                Handler::read(
+                    &rs_matter::dm::clusters::decl::color_control::HandlerAdaptor(
+                        runtime.lighting(),
+                    ),
+                    ctx,
+                    reply,
+                )
+            }
             _ => Err(ErrorCode::AttributeNotFound.into()),
+        }
+    }
+
+    async fn read_scenes(
+        &self,
+        runtime: &FeatureRuntime,
+        ctx: impl ReadContext,
+        reply: impl ReadReply,
+    ) -> Result<(), Error> {
+        use rs_matter::dm::clusters::decl::scenes_management::AttributeId;
+
+        if ctx.attr().attr_id == AttributeId::FabricSceneInfo as u32 {
+            let fabric = ctx.accessor()?.fab_idx()?;
+            if runtime.lighting().pending_scene(fabric).is_some() {
+                return self
+                    .read_scenes_inner(runtime, ctx, SceneValidReadReply(reply))
+                    .await;
+            }
+        }
+        self.read_scenes_inner(runtime, ctx, reply).await
+    }
+
+    async fn read_scenes_inner(
+        &self,
+        runtime: &FeatureRuntime,
+        ctx: impl ReadContext,
+        reply: impl ReadReply,
+    ) -> Result<(), Error> {
+        let scoped = SceneContext::new(&ctx, self.store.clone(), runtime.allocation.endpoint);
+        let dataver = Dataver::new(runtime.scenes_dataver.get());
+        let has_level = runtime
+            .clusters
+            .iter()
+            .any(|cluster| cluster.id == lighting::LEVEL_CLUSTER.id);
+        let has_color = runtime.clusters.iter().any(|cluster| {
+            cluster.id == rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id
+        });
+        if has_level && has_color {
+            let handler = scenes::ScenesHandler::new(
+                dataver,
+                &runtime.scenes,
+                (
+                    lighting::SceneOnOff(runtime.lighting()),
+                    (
+                        lighting::SceneLevel(runtime.lighting()),
+                        (lighting::SceneColor(runtime.lighting()), ()),
+                    ),
+                ),
+            );
+            AsyncHandler::read(&handler.adapt(), &scoped, reply).await
+        } else if has_level {
+            let handler = scenes::ScenesHandler::new(
+                dataver,
+                &runtime.scenes,
+                (
+                    lighting::SceneOnOff(runtime.lighting()),
+                    (lighting::SceneLevel(runtime.lighting()), ()),
+                ),
+            );
+            AsyncHandler::read(&handler.adapt(), &scoped, reply).await
+        } else if has_color {
+            let handler = scenes::ScenesHandler::new(
+                dataver,
+                &runtime.scenes,
+                (
+                    lighting::SceneOnOff(runtime.lighting()),
+                    (lighting::SceneColor(runtime.lighting()), ()),
+                ),
+            );
+            AsyncHandler::read(&handler.adapt(), &scoped, reply).await
+        } else {
+            let handler = scenes::ScenesHandler::new(
+                dataver,
+                &runtime.scenes,
+                (lighting::SceneOnOff(runtime.lighting()), ()),
+            );
+            AsyncHandler::read(&handler.adapt(), &scoped, reply).await
         }
     }
 
@@ -383,6 +840,15 @@ impl DeviceBridgeModel {
             .iter()
             .find(|runtime| runtime.allocation.endpoint == endpoint)
             .ok_or(ErrorCode::AttributeNotFound)?;
+        if runtime
+            .clusters
+            .iter()
+            .find(|candidate| candidate.id == cluster)
+            .and_then(|candidate| candidate.attribute(ctx.attr().attr_id))
+            .is_none()
+        {
+            return Err(ErrorCode::AttributeNotFound.into());
+        }
         match cluster {
             id if id == identify::IdentifyHandler::<()>::CLUSTER.id => {
                 Handler::write(&identify::HandlerAdaptor(&runtime.identify), ctx)
@@ -390,11 +856,27 @@ impl DeviceBridgeModel {
             id if id == common::BRIDGED_CLUSTER.id => {
                 Handler::write(&bridged::HandlerAdaptor(&runtime.common), ctx)
             }
+            id if id == lighting::ON_OFF_CLUSTER.id => Handler::write(
+                &rs_matter::dm::clusters::decl::on_off::HandlerAdaptor(runtime.lighting()),
+                ctx,
+            ),
+            id if id == lighting::LEVEL_CLUSTER.id => Handler::write(
+                &rs_matter::dm::clusters::decl::level_control::HandlerAdaptor(runtime.lighting()),
+                ctx,
+            ),
+            id if id == rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id => {
+                Handler::write(
+                    &rs_matter::dm::clusters::decl::color_control::HandlerAdaptor(
+                        runtime.lighting(),
+                    ),
+                    ctx,
+                )
+            }
             _ => Err(ErrorCode::AttributeNotFound.into()),
         }
     }
 
-    fn dispatch_invoke(
+    async fn dispatch_invoke(
         &self,
         ctx: impl InvokeContext,
         reply: impl InvokeReply,
@@ -406,12 +888,144 @@ impl DeviceBridgeModel {
             .iter()
             .find(|runtime| runtime.allocation.endpoint == endpoint)
             .ok_or(ErrorCode::AttributeNotFound)?;
+        if runtime
+            .clusters
+            .iter()
+            .find(|candidate| candidate.id == cluster)
+            .and_then(|candidate| candidate.command(ctx.cmd().cmd_id))
+            .is_none()
+        {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
         match cluster {
             id if id == identify::IdentifyHandler::<()>::CLUSTER.id => {
                 Handler::invoke(&identify::HandlerAdaptor(&runtime.identify), ctx, reply)
             }
+            id if id == lighting::GROUPS_CLUSTER.id => {
+                let handler = groups::GroupsHandler::new_with_identify(
+                    Dataver::new(groups::ClusterHandler::dataver(&runtime.groups)),
+                    &runtime.identify,
+                );
+                let result = Handler::invoke(&groups::HandlerAdaptor(&handler), ctx, reply);
+                if result.is_ok() {
+                    groups::ClusterHandler::dataver_changed(&runtime.groups);
+                }
+                result
+            }
+            id if id == lighting::SCENES_CLUSTER.id => {
+                self.invoke_scenes(runtime, ctx, reply).await
+            }
+            id if id == lighting::ON_OFF_CLUSTER.id => runtime.lighting().invoke_on_off(ctx).await,
+            id if id == lighting::LEVEL_CLUSTER.id => {
+                let lighting = runtime.lighting();
+                let was_active = lighting.adjustment_active();
+                let result = lighting.invoke_level(&ctx).await;
+                if result.is_ok() {
+                    lighting.adjustment_command_completed(&ctx, was_active);
+                }
+                result
+            }
+            id if id == rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id => {
+                let lighting = runtime.lighting();
+                let was_active = lighting.adjustment_active();
+                let result = lighting.invoke_color(&ctx).await;
+                if result.is_ok() {
+                    lighting.adjustment_command_completed(&ctx, was_active);
+                }
+                result
+            }
             _ => Err(ErrorCode::CommandNotFound.into()),
         }
+    }
+
+    async fn invoke_scenes(
+        &self,
+        runtime: &FeatureRuntime,
+        ctx: impl InvokeContext,
+        reply: impl InvokeReply,
+    ) -> Result<(), Error> {
+        use rs_matter::dm::clusters::decl::scenes_management::CommandId;
+        let recall = ctx.cmd().cmd_id == CommandId::RecallScene as u32;
+        if recall {
+            use rs_matter::dm::clusters::scenes::SceneInvalidator as _;
+
+            let request = rs_matter::dm::clusters::decl::scenes_management::RecallSceneRequest::new(
+                ctx.data().clone(),
+            );
+            runtime
+                .scenes
+                .scenable_attribute_changed(runtime.allocation.endpoint);
+            runtime.lighting().begin_scene_recall(
+                ctx.accessor()?.fab_idx()?,
+                request.group_id()?,
+                request.scene_id()?,
+            );
+        }
+        let scoped = SceneContext::new(&ctx, self.store.clone(), runtime.allocation.endpoint);
+        let dataver = Dataver::new(runtime.scenes_dataver.get());
+        let has_level = runtime
+            .clusters
+            .iter()
+            .any(|cluster| cluster.id == lighting::LEVEL_CLUSTER.id);
+        let has_color = runtime.clusters.iter().any(|cluster| {
+            cluster.id == rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id
+        });
+        let result = if has_level && has_color {
+            let handler = scenes::ScenesHandler::new(
+                dataver,
+                &runtime.scenes,
+                (
+                    lighting::SceneOnOff(runtime.lighting()),
+                    (
+                        lighting::SceneLevel(runtime.lighting()),
+                        (lighting::SceneColor(runtime.lighting()), ()),
+                    ),
+                ),
+            );
+            AsyncHandler::invoke(&handler.adapt(), &scoped, reply).await
+        } else if has_level {
+            let handler = scenes::ScenesHandler::new(
+                dataver,
+                &runtime.scenes,
+                (
+                    lighting::SceneOnOff(runtime.lighting()),
+                    (lighting::SceneLevel(runtime.lighting()), ()),
+                ),
+            );
+            AsyncHandler::invoke(&handler.adapt(), &scoped, reply).await
+        } else if has_color {
+            let handler = scenes::ScenesHandler::new(
+                dataver,
+                &runtime.scenes,
+                (
+                    lighting::SceneOnOff(runtime.lighting()),
+                    (lighting::SceneColor(runtime.lighting()), ()),
+                ),
+            );
+            AsyncHandler::invoke(&handler.adapt(), &scoped, reply).await
+        } else {
+            let handler = scenes::ScenesHandler::new(
+                dataver,
+                &runtime.scenes,
+                (lighting::SceneOnOff(runtime.lighting()), ()),
+            );
+            AsyncHandler::invoke(&handler.adapt(), &scoped, reply).await
+        };
+        if recall {
+            let scene_change = runtime.lighting().finish_scene_recall(result.is_ok());
+            if scene_change != 0 {
+                ctx.notify_attr_changed(
+                    runtime.allocation.endpoint,
+                    lighting::SCENES_CLUSTER.id,
+                    rs_matter::dm::clusters::decl::scenes_management::AttributeId::FabricSceneInfo
+                        as _,
+                );
+            }
+        }
+        if result.is_ok() {
+            runtime.scenes_dataver.changed();
+        }
+        result
     }
 
     fn process_state_change(
@@ -451,9 +1065,35 @@ impl DeviceBridgeModel {
                     if exposed.get(&property) == Some(&current) {
                         continue;
                     }
-                    exposed.insert(property, current);
-                    if let Some((cluster, attribute)) = sensor_path(property) {
-                        ctx.notify_attr_changed(endpoint, cluster, attribute);
+                    let previous = exposed.insert(property, current.clone()).flatten();
+                    if matches!(
+                        property,
+                        Property::Power
+                            | Property::Brightness
+                            | Property::ColorTemperature
+                            | Property::Color
+                    ) {
+                        use rs_matter::dm::clusters::scenes::SceneInvalidator as _;
+                        let scene_change = runtime.lighting().scene_state_changed();
+                        if scene_change < 0 {
+                            runtime.scenes.scenable_attribute_changed(endpoint);
+                        }
+                        if scene_change != 0 {
+                            ctx.notify_attr_changed(
+                                endpoint,
+                                lighting::SCENES_CLUSTER.id,
+                                rs_matter::dm::clusters::decl::scenes_management::AttributeId::FabricSceneInfo as _,
+                            );
+                        }
+                    }
+                    let report_property = property != Property::Brightness
+                        || runtime
+                            .lighting()
+                            .should_report_brightness(previous.as_ref(), current.as_ref());
+                    if report_property {
+                        for (cluster, attribute) in property_paths(property) {
+                            ctx.notify_attr_changed(endpoint, cluster, attribute);
+                        }
                     }
                 }
             }
@@ -532,7 +1172,10 @@ impl DeviceBridgeModel {
             let capabilities = candidate.sensor.capabilities();
             let capabilities_changed = capabilities != runtime.sensor.capabilities();
             runtime.sensor.set_capabilities(capabilities.clone());
-            for property in sensor_properties(&capabilities, &runtime.clusters) {
+            if let Some(lighting) = &runtime.lighting {
+                lighting.set_capabilities(capabilities.clone());
+            }
+            for property in exposed_properties(&capabilities, &runtime.clusters) {
                 let current = self
                     .service
                     .snapshot(&runtime.allocation.feature)
@@ -544,7 +1187,7 @@ impl DeviceBridgeModel {
                 let mut exposed = runtime.exposed_values.borrow_mut();
                 if exposed.get(&property) != Some(&current) {
                     exposed.insert(property, current);
-                    if let Some((cluster, attribute)) = sensor_path(property) {
+                    for (cluster, attribute) in property_paths(property) {
                         ctx.notify_attr_changed(runtime.allocation.endpoint, cluster, attribute);
                     }
                 }
@@ -832,20 +1475,20 @@ impl Metadata for DeviceBridgeModel {
 
 impl AsyncHandler for DeviceBridgeModel {
     fn read_awaits(&self, _ctx: impl ReadContext) -> bool {
-        false
+        true
     }
     fn write_awaits(&self, _ctx: impl WriteContext) -> bool {
         false
     }
     fn invoke_awaits(&self, _ctx: impl InvokeContext) -> bool {
-        false
+        true
     }
     fn read(
         &self,
         ctx: impl ReadContext,
         reply: impl ReadReply,
     ) -> impl Future<Output = Result<(), Error>> {
-        future::ready(self.dispatch_read(ctx, reply))
+        self.dispatch_read(ctx, reply)
     }
     fn write(&self, ctx: impl WriteContext) -> impl Future<Output = Result<(), Error>> {
         future::ready(self.dispatch_write(ctx))
@@ -855,7 +1498,7 @@ impl AsyncHandler for DeviceBridgeModel {
         ctx: impl InvokeContext,
         reply: impl InvokeReply,
     ) -> impl Future<Output = Result<(), Error>> {
-        future::ready(self.dispatch_invoke(ctx, reply))
+        self.dispatch_invoke(ctx, reply)
     }
     fn bump_dataver(&self, ctx: impl MatchContext) {
         if ctx.endpt().is_none_or(|endpoint| endpoint == 1)
@@ -888,6 +1531,37 @@ impl AsyncHandler for DeviceBridgeModel {
             {
                 identify::ClusterHandler::dataver_changed(&runtime.identify);
             }
+            if ctx
+                .cluster()
+                .is_none_or(|cluster| cluster == lighting::GROUPS_CLUSTER.id)
+            {
+                groups::ClusterHandler::dataver_changed(&runtime.groups);
+            }
+            if ctx
+                .cluster()
+                .is_none_or(|cluster| cluster == lighting::SCENES_CLUSTER.id)
+            {
+                runtime.scenes_dataver.changed();
+            }
+            if let Some(cluster) = ctx.cluster() {
+                if let Some(dataver) = runtime
+                    .lighting
+                    .as_ref()
+                    .and_then(|lighting| lighting.dataver_for(cluster))
+                {
+                    dataver.changed();
+                }
+            } else {
+                for cluster in &runtime.clusters {
+                    if let Some(dataver) = runtime
+                        .lighting
+                        .as_ref()
+                        .and_then(|lighting| lighting.dataver_for(cluster.id))
+                    {
+                        dataver.changed();
+                    }
+                }
+            }
             if let Some(cluster) = ctx.cluster() {
                 if let Some(dataver) = runtime.sensor.dataver(cluster) {
                     dataver.changed();
@@ -901,37 +1575,59 @@ impl AsyncHandler for DeviceBridgeModel {
             }
         }
     }
+    fn lifecycle(
+        &self,
+        ctx: impl HandlerContext,
+        op: rs_matter::dm::LifecycleOp,
+    ) -> Result<(), Error> {
+        use rs_matter::dm::clusters::decl::scenes_management::ClusterAsyncHandler as _;
+        use rs_matter::dm::clusters::scenes::SceneInvalidator as _;
+
+        for runtime in self.snapshot().iter() {
+            groups::ClusterHandler::lifecycle(&runtime.groups, &ctx, op)?;
+            if runtime
+                .clusters
+                .iter()
+                .any(|cluster| cluster.id == lighting::SCENES_CLUSTER.id)
+            {
+                let scoped =
+                    SceneContext::new(&ctx, self.store.clone(), runtime.allocation.endpoint);
+                let handler = scenes::ScenesHandler::<33, (), 96>::new(
+                    Dataver::new(runtime.scenes_dataver.get()),
+                    &runtime.scenes,
+                    (),
+                );
+                handler.lifecycle(&scoped, op)?;
+                if matches!(op, rs_matter::dm::LifecycleOp::Startup) {
+                    runtime
+                        .scenes
+                        .scenable_attribute_changed(runtime.allocation.endpoint);
+                }
+            }
+        }
+        Ok(())
+    }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         let mut subscription = self.service.subscribe();
         self.reconcile(&ctx)?;
+        let mut background_runtimes = self.snapshot();
+        let mut background = Box::pin(Self::run_feature_backgrounds(
+            background_runtimes.clone(),
+            &ctx,
+        ));
         loop {
-            let snapshot = self.snapshot();
             enum Next {
                 Changes(Vec<DeviceChange>),
-                IdentifyStopped(Result<(), Error>),
+                BackgroundStopped(Result<(), Error>),
             }
             let next = future::or(
                 async { Next::Changes(subscription.changed().await) },
-                async {
-                    let futures = snapshot
-                        .iter()
-                        .map(|runtime| {
-                            Box::pin(identify::ClusterHandler::run(&runtime.identify, &ctx))
-                                as std::pin::Pin<Box<dyn Future<Output = Result<(), Error>> + '_>>
-                        })
-                        .collect::<Vec<_>>();
-                    if futures.is_empty() {
-                        std::future::pending::<Next>().await
-                    } else {
-                        let (result, _, _) = futures_util::future::select_all(futures).await;
-                        Next::IdentifyStopped(result)
-                    }
-                },
+                async { Next::BackgroundStopped(background.as_mut().await) },
             )
             .await;
             let changes = match next {
                 Next::Changes(changes) => changes,
-                Next::IdentifyStopped(result) => return result,
+                Next::BackgroundStopped(result) => return result,
             };
             let reconcile = changes.iter().any(|change| {
                 matches!(
@@ -947,39 +1643,76 @@ impl AsyncHandler for DeviceBridgeModel {
             }
             if reconcile {
                 self.reconcile(&ctx)?;
+                let latest = self.snapshot();
+                let same_runtimes = latest.len() == background_runtimes.len()
+                    && latest
+                        .iter()
+                        .zip(background_runtimes.iter())
+                        .all(|(left, right)| Rc::ptr_eq(left, right));
+                if !same_runtimes {
+                    drop(background);
+                    background_runtimes = latest;
+                    background = Box::pin(Self::run_feature_backgrounds(
+                        background_runtimes.clone(),
+                        &ctx,
+                    ));
+                }
             }
         }
     }
 }
 
-fn sensor_path(property: Property) -> Option<(u32, u32)> {
-    Some(match property {
-        Property::Temperature => (
+fn property_paths(property: Property) -> Vec<(u32, u32)> {
+    let single = |path| vec![path];
+    match property {
+        Property::Power => single((
+            lighting::ON_OFF_CLUSTER.id,
+            rs_matter::dm::clusters::decl::on_off::AttributeId::OnOff as _,
+        )),
+        Property::Brightness => single((
+            lighting::LEVEL_CLUSTER.id,
+            rs_matter::dm::clusters::decl::level_control::AttributeId::CurrentLevel as _,
+        )),
+        Property::ColorTemperature => single((
+            rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id,
+            rs_matter::dm::clusters::decl::color_control::AttributeId::ColorTemperatureMireds as _,
+        )),
+        Property::Color => vec![
+            (
+                rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id,
+                rs_matter::dm::clusters::decl::color_control::AttributeId::CurrentX as _,
+            ),
+            (
+                rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id,
+                rs_matter::dm::clusters::decl::color_control::AttributeId::CurrentY as _,
+            ),
+        ],
+        Property::Temperature => single((
             sensors::TEMPERATURE_CLUSTER.id,
             temperature_measurement::AttributeId::MeasuredValue as _,
-        ),
-        Property::Humidity => (
+        )),
+        Property::Humidity => single((
             sensors::HUMIDITY_CLUSTER.id,
             relative_humidity_measurement::AttributeId::MeasuredValue as _,
-        ),
-        Property::Illuminance => (
+        )),
+        Property::Illuminance => single((
             sensors::ILLUMINANCE_CLUSTER.id,
             illuminance_measurement::AttributeId::MeasuredValue as _,
-        ),
-        Property::Motion | Property::Occupancy => (
+        )),
+        Property::Motion | Property::Occupancy => single((
             occupancy_sensing::FULL_CLUSTER.id,
             occupancy_sensing::AttributeId::Occupancy as _,
-        ),
-        Property::Contact => (
+        )),
+        Property::Contact => single((
             sensors::BOOLEAN_STATE_CLUSTER.id,
             boolean_state::AttributeId::StateValue as _,
-        ),
-        Property::Battery => (
+        )),
+        Property::Battery => single((
             sensors::POWER_SOURCE_CLUSTER.id,
             power_source::AttributeId::BatPercentRemaining as _,
-        ),
-        _ => return None,
-    })
+        )),
+        _ => Vec::new(),
+    }
 }
 
 fn shape_signature(device_types: &[DeviceType], clusters: &[Cluster<'_>]) -> String {
@@ -1073,7 +1806,7 @@ fn topology_signature_for(runtimes: &[Rc<FeatureRuntime>]) -> String {
     hex_digest(digest.finalize().as_slice())
 }
 
-fn sensor_properties(capabilities: &[Capability], clusters: &[Cluster<'_>]) -> Vec<Property> {
+fn exposed_properties(capabilities: &[Capability], clusters: &[Cluster<'_>]) -> Vec<Property> {
     capabilities
         .iter()
         .filter_map(|capability| {
@@ -1089,6 +1822,16 @@ fn sensor_properties(capabilities: &[Capability], clusters: &[Cluster<'_>]) -> V
                 Capability::Occupancy => (Property::Occupancy, occupancy_sensing::FULL_CLUSTER.id),
                 Capability::Contact => (Property::Contact, sensors::BOOLEAN_STATE_CLUSTER.id),
                 Capability::Battery(_) => (Property::Battery, sensors::POWER_SOURCE_CLUSTER.id),
+                Capability::Power { .. } => (Property::Power, lighting::ON_OFF_CLUSTER.id),
+                Capability::Brightness(_) => (Property::Brightness, lighting::LEVEL_CLUSTER.id),
+                Capability::ColorTemperature(_) => (
+                    Property::ColorTemperature,
+                    rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id,
+                ),
+                Capability::Color => (
+                    Property::Color,
+                    rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id,
+                ),
                 _ => return None,
             };
             clusters

@@ -85,6 +85,57 @@ impl KvBlobStore for StoreAdapter {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct EndpointSceneStore {
+    store: StoreAdapter,
+    endpoint: u16,
+}
+
+impl EndpointSceneStore {
+    pub(super) fn new(store: StoreAdapter, endpoint: u16) -> Self {
+        Self { store, endpoint }
+    }
+}
+
+impl KvBlobStore for EndpointSceneStore {
+    fn load<'a>(&mut self, key: u16, buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, Error> {
+        if key != rs_matter::persist::SCENES_KEY {
+            return self.store.load(key, buf);
+        }
+        self.store
+            .check_failure()
+            .map_err(|_| ErrorCode::StdIoError)?;
+        let Some(data) = self
+            .store
+            .record(self.store.storage().endpoint_scenes(self.endpoint))?
+        else {
+            return Ok(None);
+        };
+        let target = buf.get_mut(..data.len()).ok_or(ErrorCode::NoSpace)?;
+        target.copy_from_slice(&data);
+        Ok(Some(target))
+    }
+
+    fn store(&mut self, key: u16, data: &[u8], buf: &mut [u8]) -> Result<(), Error> {
+        if key != rs_matter::persist::SCENES_KEY {
+            return self.store.store(key, data, buf);
+        }
+        self.store.record(
+            self.store
+                .storage()
+                .save_endpoint_scenes(self.endpoint, data),
+        )
+    }
+
+    fn remove(&mut self, key: u16, buf: &mut [u8]) -> Result<(), Error> {
+        if key != rs_matter::persist::SCENES_KEY {
+            return self.store.remove(key, buf);
+        }
+        self.store
+            .record(self.store.storage().delete_endpoint_scenes(self.endpoint))
+    }
+}
+
 pub(super) struct TopologyStore {
     store: StoreAdapter,
     signature: String,

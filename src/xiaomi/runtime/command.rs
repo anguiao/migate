@@ -1866,6 +1866,33 @@ mod tests {
     }
 
     #[test]
+    fn retained_lighting_intent_is_superseded_by_a_newer_off_before_transport() {
+        let (_directory, _store, service, runtime, calls) =
+            setup(Behavior::Accept, CommandLimits::default());
+        let feature = identity("device-a", 2);
+        register_light(
+            &service,
+            &runtime,
+            feature.clone(),
+            OperationPaths {
+                gateway: true,
+                ..OperationPaths::default()
+            },
+        );
+        let intent = service.begin_command_intent(&feature, [Property::Brightness]);
+        let old_step = intent.command_batch(vec![DeviceCommand::SetBrightness(
+            Percent::new(25.0).unwrap(),
+        )]);
+        let off = service.command(&feature, DeviceCommand::SetPower(false));
+        assert!(!intent.is_current());
+        future::block_on(runtime.run_until_idle());
+        assert_eq!(future::block_on(old_step), CommandOutcome::Superseded);
+        assert_eq!(future::block_on(off), CommandOutcome::Accepted);
+        assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(calls.borrow()[0].1.typed, DeviceCommand::SetPower(false));
+    }
+
+    #[test]
     fn timeout_before_write_is_expired_and_after_write_is_ambiguous() {
         let limits = CommandLimits {
             total: Duration::from_millis(30),

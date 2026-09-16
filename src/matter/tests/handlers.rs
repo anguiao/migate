@@ -50,6 +50,12 @@ pub(super) struct Context<'a, H> {
 }
 
 impl<'a, H> Context<'a, H> {
+    pub(super) fn has_change(&self, endpoint: u16, cluster: u32, attribute: u32) -> bool {
+        self.changes
+            .borrow()
+            .contains(&(endpoint, cluster, attribute))
+    }
+
     fn new(base: &'a H, cluster_id: u32, attr_id: u32) -> Self {
         Self::new_at(base, LIGHT_ENDPOINT, cluster_id, attr_id)
     }
@@ -62,6 +68,35 @@ impl<'a, H> Context<'a, H> {
             data: TLVElement::new(&[0x15, 0x18]),
             changes: RefCell::new(Vec::new()),
         }
+    }
+
+    pub(super) fn command_at(
+        base: &'a H,
+        endpoint: u16,
+        cluster_id: u32,
+        command_id: u32,
+        data: &'a [u8],
+    ) -> Self {
+        let mut context = Self::new_at(base, endpoint, cluster_id, 0);
+        context.set_command(command_id, TLVElement::new(data));
+        context
+    }
+
+    pub(super) fn write_at(
+        base: &'a H,
+        endpoint: u16,
+        cluster_id: u32,
+        attribute_id: u32,
+        data: &'a [u8],
+    ) -> Self {
+        let mut context = Self::new_at(base, endpoint, cluster_id, attribute_id);
+        context.data = TLVElement::new(data);
+        context
+    }
+
+    pub(super) fn set_command(&mut self, command_id: u32, data: TLVElement<'a>) {
+        self.command.cmd_id = command_id;
+        self.data = data;
     }
 
     pub(super) async fn read_tlv(&self, handler: &impl AsyncHandler) -> Vec<u8>

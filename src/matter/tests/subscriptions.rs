@@ -81,9 +81,20 @@ impl NetworkReceive for ReceivePipe<'_> {
 // As in upstream's IM tests, install a test CASE session instead of testing
 // commissioning. Each boot has fresh Matter instances and a new session ID.
 pub(super) fn connect(matter: &Matter<'_>, local: u64, peer: u64, session_id: u16) {
-    let fabric = NonZeroU8::new(1).unwrap();
+    connect_at(matter, NonZeroU8::new(1).unwrap(), local, peer, session_id);
+}
+
+pub(super) fn connect_at(
+    matter: &Matter<'_>,
+    fabric: NonZeroU8,
+    local: u64,
+    peer: u64,
+    session_id: u16,
+) {
     matter.with_state(|state| {
-        state.fabrics.add_with_post_init(|_| Ok(())).unwrap();
+        while state.fabrics.iter().count() < usize::from(fabric.get()) {
+            state.fabrics.add_with_post_init(|_| Ok(())).unwrap();
+        }
         let mut acl = AclEntry::new(None, Privilege::ADMIN, AuthMode::Case);
         acl.add_subject(peer).unwrap();
         state

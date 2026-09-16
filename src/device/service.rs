@@ -70,6 +70,7 @@ struct ServiceState {
     next_report_version: Cell<u64>,
     command_sink: Option<Rc<dyn DeviceCommandSink>>,
     state_availability: BTreeMap<FeatureIdentity, bool>,
+    command_generations: BTreeMap<(FeatureIdentity, Property), u64>,
 }
 impl Default for DeviceService {
     fn default() -> Self {
@@ -89,6 +90,7 @@ impl Default for ServiceState {
             next_report_version: Cell::new(0),
             command_sink: None,
             state_availability: BTreeMap::new(),
+            command_generations: BTreeMap::new(),
         }
     }
 }
@@ -96,6 +98,58 @@ pub struct DeviceSubscription {
     inner: Rc<RefCell<ServiceState>>,
     event: Rc<Event>,
     cursor: u64,
+}
+
+#[derive(Clone)]
+pub struct CommandIntent {
+    service: DeviceService,
+    feature: FeatureIdentity,
+    generations: Vec<(Property, u64)>,
+}
+
+impl CommandIntent {
+    pub fn is_current(&self) -> bool {
+        let state = self.service.inner.borrow();
+        state
+            .features
+            .get(&self.feature)
+            .is_some_and(|feature| feature.admitted)
+            && state
+                .state_availability
+                .get(&self.feature)
+                .copied()
+                .unwrap_or(true)
+            && self.generations.iter().all(|(property, generation)| {
+                state
+                    .command_generations
+                    .get(&(self.feature.clone(), *property))
+                    == Some(generation)
+            })
+    }
+
+    pub fn command_batch(
+        &self,
+        commands: Vec<DeviceCommand>,
+    ) -> LocalBoxFuture<'static, CommandOutcome> {
+        if !self.is_current() || commands.is_empty() || commands.len() > MAX_COMMAND_BATCH {
+            return Box::pin(async { CommandOutcome::Superseded });
+        }
+        for command in &commands {
+            if self
+                .service
+                .validate_command(&self.feature, command)
+                .is_err()
+            {
+                return Box::pin(async { CommandOutcome::Unsupported });
+            }
+        }
+        let sink = self.service.inner.borrow().command_sink.clone();
+        let feature = self.feature.clone();
+        match sink {
+            Some(sink) => sink.submit(feature, commands),
+            None => Box::pin(async { CommandOutcome::Unavailable }),
+        }
+    }
 }
 impl DeviceSubscription {
     pub fn drain(&mut self) -> Vec<DeviceChange> {
@@ -257,11 +311,44 @@ impl DeviceService {
                 return Box::pin(async move { outcome });
             }
         }
-        let sink = self.inner.borrow().command_sink.clone();
+        let mut state = self.inner.borrow_mut();
+        for property in command_properties(&commands) {
+            let generation = state
+                .command_generations
+                .entry((id.clone(), property))
+                .or_default();
+            *generation = generation.wrapping_add(1);
+        }
+        let sink = state.command_sink.clone();
+        drop(state);
         let id = id.clone();
         match sink {
             Some(sink) => sink.submit(id, commands),
             None => Box::pin(async { CommandOutcome::Unavailable }),
+        }
+    }
+
+    pub fn begin_command_intent(
+        &self,
+        id: &FeatureIdentity,
+        properties: impl IntoIterator<Item = Property>,
+    ) -> CommandIntent {
+        let mut state = self.inner.borrow_mut();
+        let generations = properties
+            .into_iter()
+            .map(|property| {
+                let generation = state
+                    .command_generations
+                    .entry((id.clone(), property))
+                    .or_default();
+                *generation = generation.wrapping_add(1);
+                (property, *generation)
+            })
+            .collect();
+        CommandIntent {
+            service: self.clone(),
+            feature: id.clone(),
+            generations,
         }
     }
     pub fn stop_adjustment(&self, id: &FeatureIdentity, property: Property) {
@@ -294,6 +381,7 @@ impl DeviceService {
         };
         if feature.admitted {
             feature.admitted = false;
+            invalidate_command_generations(&mut state, id);
             notify(
                 &mut state,
                 &self.event,
@@ -307,6 +395,7 @@ impl DeviceService {
     pub fn remove(&self, id: &FeatureIdentity) {
         let mut s = self.inner.borrow_mut();
         if s.features.remove(id).is_some() {
+            invalidate_command_generations(&mut s, id);
             s.state_availability.remove(id);
             s.snapshots.remove(id);
             notify(
@@ -325,6 +414,7 @@ impl DeviceService {
                 feature.admitted = false;
                 was_admitted
             }) {
+                invalidate_command_generations(&mut s, &id);
                 notify(
                     &mut s,
                     &self.event,
@@ -513,4 +603,47 @@ fn notify(s: &mut ServiceState, event: &Event, change: DeviceChange) {
         s.changes.pop_front();
     }
     event.notify(usize::MAX);
+}
+
+fn command_properties(commands: &[DeviceCommand]) -> Vec<Property> {
+    let mut properties = Vec::new();
+    for command in commands {
+        let affected: &[Property] = match command {
+            DeviceCommand::SetPower(_) => &[
+                Property::Power,
+                Property::Brightness,
+                Property::ColorTemperature,
+                Property::Color,
+            ],
+            DeviceCommand::SetBrightness(_) => &[Property::Brightness],
+            DeviceCommand::SetColorTemperature(_) => &[Property::ColorTemperature],
+            DeviceCommand::SetColor(_) => &[Property::Color],
+            DeviceCommand::SetTargetTemperature(_) => &[Property::TargetTemperature],
+            DeviceCommand::SetHvacMode(_) => &[Property::HvacMode],
+            DeviceCommand::SetFanSpeed(_) => &[Property::FanSpeed],
+            DeviceCommand::SetSwingMode(_) => &[Property::SwingMode],
+            DeviceCommand::SetCurtainPosition(_) | DeviceCommand::StopCurtain => {
+                &[Property::CurtainPosition]
+            }
+            DeviceCommand::SetOscillation(_) => &[Property::Oscillation],
+            DeviceCommand::StartVacuum
+            | DeviceCommand::StopVacuum
+            | DeviceCommand::ReturnVacuumToDock => &[Property::VacuumOperationalState],
+            DeviceCommand::SetVacuumCleanMode(_) => &[Property::VacuumCleanMode],
+        };
+        for property in affected {
+            if !properties.contains(property) {
+                properties.push(*property);
+            }
+        }
+    }
+    properties
+}
+
+fn invalidate_command_generations(state: &mut ServiceState, id: &FeatureIdentity) {
+    for ((feature, _), generation) in &mut state.command_generations {
+        if feature == id {
+            *generation = generation.wrapping_add(1);
+        }
+    }
 }

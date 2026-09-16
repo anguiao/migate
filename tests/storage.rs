@@ -27,7 +27,7 @@ fn initializes_and_restores_identity_without_power() {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
