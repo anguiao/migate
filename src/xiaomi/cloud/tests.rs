@@ -1,5 +1,5 @@
 use super::*;
-use crate::xiaomi::test_support::{MockResponse, mock_server};
+use crate::xiaomi::test_support::{MockResponse, dynamic_mock_server, mock_server};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_lite::future;
 use serde_json::{Value, json};
@@ -342,6 +342,37 @@ fn floating_point_uid_is_a_protocol_error() {
 }
 
 #[test]
+fn owned_catalog_rejects_control_characters_at_the_cloud_boundary() {
+    let bad_home = json!({"code":0,"result":{"homelist":[{
+        "id":"1","uid":"42","name":"Bad\nHome","dids":[],"roomlist":[]
+    }],"has_more":false}});
+    let (base, _) = mock_server(vec![MockResponse::json(200, &bad_home.to_string())]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(client.get_owned_catalog("access"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+
+    let home = r#"{"code":0,"result":{"homelist":[{"id":"1","uid":"42","name":"Home","dids":["a"],"roomlist":[]}],"has_more":false}}"#;
+    let bad_device = json!({"code":0,"result":{"list":[{
+        "did":"a","uid":"42","name":"Bad\nDevice","model":"vendor.light.x"
+    }],"has_more":false}});
+    let (base, _) = mock_server(vec![
+        MockResponse::json(200, home),
+        MockResponse::json(200, &bad_device.to_string()),
+    ]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(client.get_owned_catalog("access"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+}
+
+#[test]
 fn cloud_errors_are_classified_and_sanitized() {
     for (status, body, unauthorized) in [
         (401, "token-secret", true),
@@ -413,5 +444,253 @@ fn requests_time_out_and_do_not_follow_redirects() {
             .unwrap_err()
             .http_status(),
         Some(302)
+    );
+}
+
+#[test]
+fn owned_catalog_reads_all_home_and_device_pages_without_shared_flags() {
+    let (base, requests) = mock_server(vec![
+        MockResponse::json(
+            200,
+            r#"{"code":0,"result":{"homelist":[{"id":1,"uid":42,"name":"Home","dids":["a"],"roomlist":[{"id":10,"name":"Room","dids":["a"]}]}],"share_home_list":[{"id":9,"uid":99,"name":"Shared","dids":["x"],"roomlist":[]}],"has_more":true,"max_id":"h1"}}"#,
+        ),
+        MockResponse::json(
+            200,
+            r#"{"code":0,"result":{"info":[{"id":1,"dids":["b"],"roomlist":[{"id":11,"dids":["b"]}]}],"has_more":false}}"#,
+        ),
+        MockResponse::json(
+            200,
+            r#"{"code":0,"result":{"list":[{"did":"a","uid":42,"name":"Lamp","model":"vendor.light.x","spec_type":"urn:light","pid":0,"token":"00112233445566778899aabbccddeeff","local_ip":"192.168.1.2"}],"has_more":true,"next_start_did":"a"}}"#,
+        ),
+        MockResponse::json(
+            200,
+            r#"{"code":0,"result":{"list":[{"did":"b","uid":42,"name":"Switch","model":"vendor.switch.x","spec_type":"urn:switch","pid":8,"isOnline":false}],"has_more":false}}"#,
+        ),
+    ]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let catalog = future::block_on(client.get_owned_catalog("access")).unwrap();
+    assert_eq!(catalog.uid, "42");
+    assert_eq!(catalog.homes.len(), 1);
+    assert_eq!(catalog.homes[0].group_id, "c7fe21bb97b206e2");
+    assert_eq!(catalog.homes[0].rooms[1].name, "");
+    assert_eq!(catalog.devices.len(), 2);
+    assert_eq!(
+        catalog.devices[0].token.as_ref().unwrap().0,
+        vec![
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff
+        ]
+    );
+    assert_eq!(catalog.devices[1].online, Some(false));
+    let first: Value = serde_json::from_str(&requests.recv().unwrap().body).unwrap();
+    assert_eq!(first["fetch_share"], false);
+    assert_eq!(first["fetch_share_dev"], false);
+}
+
+#[test]
+fn owned_catalog_rejects_repeated_cursors_missing_details_and_shared_devices() {
+    let home = r#"{"code":0,"result":{"homelist":[{"id":"1","uid":"42","name":"Home","dids":["a"],"roomlist":[]}],"has_more":true,"max_id":"same"}}"#;
+    let repeated = r#"{"code":0,"result":{"info":[],"has_more":true,"max_id":"same"}}"#;
+    let (base, _) = mock_server(vec![
+        MockResponse::json(200, home),
+        MockResponse::json(200, repeated),
+    ]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(client.get_owned_catalog("access"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+
+    let complete_home = r#"{"code":0,"result":{"homelist":[{"id":"1","uid":"42","name":"Home","dids":["a"],"roomlist":[]}],"has_more":false}}"#;
+    let missing = r#"{"code":0,"result":{"list":[],"has_more":false}}"#;
+    let (base, _) = mock_server(vec![
+        MockResponse::json(200, complete_home),
+        MockResponse::json(200, missing),
+    ]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(client.get_owned_catalog("access"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+
+    let shared = r#"{"code":0,"result":{"list":[{"did":"a","uid":"99","name":"Shared","model":"vendor.light.x","spec_type":"urn:light","owner":{"userid":"99","nickname":"Other"}}],"has_more":false}}"#;
+    let (base, _) = mock_server(vec![
+        MockResponse::json(200, complete_home),
+        MockResponse::json(200, shared),
+    ]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(client.get_owned_catalog("access"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+}
+
+#[test]
+fn owned_catalog_rejects_non_ascii_token_without_panicking() {
+    let home = r#"{"code":0,"result":{"homelist":[{"id":"1","uid":"42","name":"Home","dids":["a"],"roomlist":[]}],"has_more":false}}"#;
+    let token = format!("{}aa", "aé".repeat(10));
+    assert_eq!(token.len(), 32);
+    let details = json!({
+        "code": 0,
+        "result": {
+            "list": [{
+                "did": "a",
+                "uid": "42",
+                "name": "Device",
+                "model": "vendor.light.x",
+                "token": token
+            }],
+            "has_more": false
+        }
+    })
+    .to_string();
+    let (base, _) = mock_server(vec![
+        MockResponse::json(200, home),
+        MockResponse::json(200, &details),
+    ]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(client.get_owned_catalog("access"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+}
+
+#[test]
+fn owned_catalog_rejects_repeated_device_cursor() {
+    let home = r#"{"code":0,"result":{"homelist":[{"id":"1","uid":"42","name":"Home","dids":["a"],"roomlist":[]}],"has_more":false}}"#;
+    let page = r#"{"code":0,"result":{"list":[{"did":"a","uid":"42","name":"Device","model":"vendor.light.x"}],"has_more":true,"next_start_did":"same"}}"#;
+    let (base, _) = mock_server(vec![
+        MockResponse::json(200, home),
+        MockResponse::json(200, page),
+        MockResponse::json(200, page),
+    ]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(client.get_owned_catalog("access"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+}
+
+#[test]
+fn owned_catalog_accepts_split_detail_as_conservative_parent_metadata() {
+    let home = r#"{"code":0,"result":{"homelist":[{"id":"1","uid":"42","name":"Home","dids":["a","a.s2"],"roomlist":[]}],"has_more":false}}"#;
+    let details = r#"{"code":0,"result":{"list":[{"did":"a.s2","uid":"42","name":"Channel","model":"vendor.switch.x","spec_type":"urn:miot-spec-v2:device:switch:0000:test:1","parent_id":"a"}],"has_more":false}}"#;
+    let (base, _) = mock_server(vec![
+        MockResponse::json(200, home),
+        MockResponse::json(200, details),
+    ]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let catalog = future::block_on(client.get_owned_catalog("access")).unwrap();
+    assert_eq!(catalog.devices.len(), 1);
+    assert_eq!(catalog.devices[0].did, "a.s2");
+}
+
+#[test]
+fn owned_catalog_rejects_missing_split_details_without_same_parent_evidence() {
+    let home = r#"{"code":0,"result":{"homelist":[{"id":"1","uid":"42","name":"Home","dids":["a.s2"],"roomlist":[]}],"has_more":false}}"#;
+    let details = r#"{"code":0,"result":{"list":[],"has_more":false}}"#;
+    let (base, _) = mock_server(vec![
+        MockResponse::json(200, home),
+        MockResponse::json(200, details),
+    ]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(client.get_owned_catalog("access"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+}
+
+#[test]
+fn spec_instance_request_preserves_urn_and_validates_document() {
+    let urn = "urn:miot-spec-v2:device:light:0000:test:1";
+    let body = format!(r#"{{"type":"{urn}","description":"Light","services":[]}}"#);
+    let (base, requests) = mock_server(vec![MockResponse::json(200, &body)]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&future::block_on(client.get_spec_instance(urn)).unwrap())
+            .unwrap(),
+        serde_json::from_str::<Value>(&body).unwrap()
+    );
+    let request = requests.recv().unwrap();
+    let url = Url::parse(&format!("http://test{}", request.target)).unwrap();
+    assert_eq!(url.path(), "/miot-spec-v2/instance");
+    assert_eq!(
+        url.query_pairs().find(|(key, _)| key == "type").unwrap().1,
+        urn
+    );
+}
+
+#[test]
+fn authenticated_uid_allows_an_empty_owned_catalog_and_rejects_typed_paging_flags() {
+    let (base, _) = mock_server(vec![MockResponse::json(
+        200,
+        r#"{"code":0,"result":{"homelist":null,"has_more":false}}"#,
+    )]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let catalog = future::block_on(client.get_owned_catalog_for_uid("access", "42")).unwrap();
+    assert_eq!(catalog.uid, "42");
+    assert!(catalog.homes.is_empty());
+    assert!(catalog.devices.is_empty());
+
+    let (base, _) = mock_server(vec![MockResponse::json(
+        200,
+        r#"{"code":0,"result":{"homelist":[],"has_more":"false"}}"#,
+    )]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(client.get_owned_catalog_for_uid("access", "42"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+}
+
+#[test]
+fn owned_catalog_batches_more_than_150_dids() {
+    let dids = (0..151)
+        .map(|index| format!("d{index}"))
+        .collect::<Vec<_>>();
+    let home_dids = dids.clone();
+    let (base, requests) = dynamic_mock_server(3, move |request| {
+        if request.target.contains("gethome") {
+            MockResponse::json(200, &json!({"code":0,"result":{"homelist":[{"id":"1","uid":"42","name":"Home","dids":home_dids,"roomlist":[]}],"has_more":false}}).to_string())
+        } else {
+            let body: Value = serde_json::from_str(&request.body).unwrap();
+            let list = body["dids"].as_array().unwrap().iter().map(|did| json!({"did":did,"uid":"42","name":"Device","model":"vendor.light.x","spec_type":"urn:miot-spec-v2:device:light:0000:test:1"})).collect::<Vec<_>>();
+            MockResponse::json(
+                200,
+                &json!({"code":0,"result":{"list":list,"has_more":false}}).to_string(),
+            )
+        }
+    });
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let catalog = future::block_on(client.get_owned_catalog("access")).unwrap();
+    assert_eq!(catalog.devices.len(), 151);
+    let requests = requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(
+        serde_json::from_str::<Value>(&requests[1].body).unwrap()["dids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        150
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&requests[2].body).unwrap()["dids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
 }
