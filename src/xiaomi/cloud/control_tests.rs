@@ -1,10 +1,14 @@
 use super::*;
-use crate::xiaomi::{
-    catalog::WireValue,
-    test_support::{MockResponse, dynamic_mock_server, mock_server},
+use crate::{
+    xiaomi::catalog::WireValue,
+    xiaomi::gateway::EventArguments,
+    xiaomi::mqtt::MqttErrorKind,
+    xiaomi::test_support::{MockResponse, dynamic_mock_server, mock_server},
 };
+use bytes::BytesMut;
 use futures_lite::future::{self, block_on};
 use futures_util::FutureExt;
+use mqttbytes::{QoS, v5};
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
@@ -19,6 +23,44 @@ fn deadline() -> Instant {
 
 fn property(did: &str, siid: u32, piid: u32) -> CloudProperty {
     CloudProperty::new(did, siid, piid)
+}
+
+fn notification_packet(stream: &mut TcpStream, buffer: &mut BytesMut) -> v5::Packet {
+    loop {
+        match v5::read(buffer, 256 * 1024) {
+            Ok(packet) => return packet,
+            Err(mqttbytes::Error::InsufficientBytes(_)) => {
+                let mut bytes = [0; 4096];
+                let count = stream.read(&mut bytes).unwrap();
+                assert!(count > 0, "cloud notification connection closed early");
+                buffer.extend_from_slice(&bytes[..count]);
+            }
+            Err(mqttbytes::Error::PayloadRequired) => {
+                return v5::Packet::Disconnect(v5::Disconnect::new());
+            }
+            Err(error) => panic!("invalid cloud notification packet: {error:?}"),
+        }
+    }
+}
+
+fn write_notification_packet(stream: &mut TcpStream, packet: &v5::Packet) {
+    let mut bytes = BytesMut::new();
+    match packet {
+        v5::Packet::ConnAck(value) => {
+            bytes.extend_from_slice(&[0x20, 0x03, value.session_present as u8, value.code as u8, 0])
+        }
+        v5::Packet::SubAck(value) => {
+            value.write(&mut bytes).unwrap();
+        }
+        v5::Packet::UnsubAck(value) => {
+            value.write(&mut bytes).unwrap();
+        }
+        v5::Packet::Publish(value) => {
+            value.write(&mut bytes).unwrap();
+        }
+        _ => panic!("unsupported cloud notification test packet"),
+    }
+    stream.write_all(&bytes).unwrap();
 }
 
 #[test]
@@ -380,4 +422,328 @@ fn control_timeout_does_not_replace_the_general_http_timeout() {
     );
     block_on(client.invoke_action("access", &CloudAction::new("did", 2, 1, vec![]), deadline()))
         .unwrap();
+}
+
+#[test]
+fn cloud_notifications_use_selected_topics_and_preserve_keyed_or_positional_events() {
+    let selected = vec!["did".to_owned()];
+    let property = CloudNotificationSession::parse(
+        "device/did/up/properties_changed/2/3",
+        br#"{"params":{"siid":2,"piid":3,"value":24}}"#,
+        false,
+        &selected,
+        4,
+    )
+    .unwrap();
+    assert!(matches!(
+        property,
+        CloudNotification::Property {
+            value: Some(WireValue::Integer(24)),
+            generation: 4,
+            ..
+        }
+    ));
+    let keyed = CloudNotificationSession::parse(
+        "device/did/up/event_occured/2/4",
+        br#"{"params":{"did":"did","siid":2,"eiid":4,"arguments":[{"piid":7,"value":true}]}}"#,
+        false,
+        &selected,
+        5,
+    )
+    .unwrap();
+    assert!(
+        matches!(keyed, CloudNotification::Event { arguments: EventArguments::Keyed(values), .. } if values == vec![(7, WireValue::Boolean(true))])
+    );
+    let positional = CloudNotificationSession::parse(
+        "device/did/up/event_occured/2/4",
+        br#"{"params":{"siid":2,"eiid":4,"arguments":[{"value":[1,false]}]}}"#,
+        false,
+        &selected,
+        6,
+    )
+    .unwrap();
+    assert!(
+        matches!(positional, CloudNotification::Event { arguments: EventArguments::Positional(values), .. } if values == vec![WireValue::Integer(1), WireValue::Boolean(false)])
+    );
+    for (topic, payload, retained) in [
+        (
+            "device/foreign/up/properties_changed/2/3",
+            br#"{"params":{"siid":2,"piid":3,"value":1}}"#.as_slice(),
+            false,
+        ),
+        (
+            "device/did/up/properties_changed/2/9",
+            br#"{"params":{"siid":2,"piid":3,"value":1}}"#.as_slice(),
+            false,
+        ),
+        (
+            "device/did/up/event_occurred/2/4",
+            br#"{"params":{"siid":2,"eiid":4}}"#.as_slice(),
+            false,
+        ),
+        (
+            "device/did/up/event_occured/2/4",
+            br#"{"params":{"siid":2,"eiid":4}}"#.as_slice(),
+            false,
+        ),
+        (
+            "device/did/up/event_occured/2/4",
+            br#"{"params":{"siid":2,"eiid":4,"arguments":[]}}"#.as_slice(),
+            true,
+        ),
+        (
+            "device/did/up/properties_changed/2/3",
+            br#"{"params":{"did":"foreign","siid":2,"piid":3,"value":1}}"#.as_slice(),
+            false,
+        ),
+    ] {
+        assert!(CloudNotificationSession::parse(topic, payload, retained, &selected, 7).is_err());
+    }
+    let state = CloudNotificationSession::parse(
+        "device/did/state/change",
+        br#"{"device_id":"did","event":"offline"}"#,
+        false,
+        &selected,
+        8,
+    )
+    .unwrap();
+    assert!(matches!(
+        state,
+        CloudNotification::State {
+            online: false,
+            generation: 8,
+            ..
+        }
+    ));
+    assert!(
+        CloudNotificationSession::parse(
+            "device/did/state/change",
+            br#"{"device_id":"did","event":"unknown"}"#,
+            false,
+            &selected,
+            8,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn cloud_selection_coalesces_while_suback_is_held_and_filters_removed_dids() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (first_seen, first_ready) = flume::bounded(1);
+    let (release_first, release) = flume::bounded(1);
+    let (abandoned_seen, abandoned_ready) = flume::bounded(1);
+    let (release_abandoned, abandoned_release) = flume::bounded(1);
+    let (done, broker_done) = flume::bounded(1);
+    let broker = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut buffer = BytesMut::new();
+        assert!(matches!(
+            notification_packet(&mut stream, &mut buffer),
+            v5::Packet::Connect(_)
+        ));
+        write_notification_packet(
+            &mut stream,
+            &v5::Packet::ConnAck(v5::ConnAck::new(v5::ConnectReturnCode::Success, false)),
+        );
+        let v5::Packet::Subscribe(first) = notification_packet(&mut stream, &mut buffer) else {
+            panic!("expected first cloud subscription")
+        };
+        assert!(
+            first
+                .filters
+                .iter()
+                .all(|filter| filter.path.contains("old.did"))
+        );
+        first_seen.send(()).unwrap();
+        release.recv_timeout(Duration::from_secs(3)).unwrap();
+        write_notification_packet(
+            &mut stream,
+            &v5::Packet::SubAck(v5::SubAck::new(
+                first.pkid,
+                vec![v5::SubscribeReasonCode::QoS2; first.filters.len()],
+            )),
+        );
+        let latest = loop {
+            match notification_packet(&mut stream, &mut buffer) {
+                v5::Packet::Unsubscribe(remove) => {
+                    assert!(remove.filters.iter().all(|topic| topic.contains("old.did")));
+                    let mut unsuback = v5::UnsubAck::new(remove.pkid);
+                    unsuback.reasons = vec![v5::UnsubAckReason::Success; remove.filters.len()];
+                    write_notification_packet(&mut stream, &v5::Packet::UnsubAck(unsuback));
+                }
+                v5::Packet::Subscribe(latest) => break latest,
+                packet => panic!("unexpected cloud selection packet: {packet:?}"),
+            }
+        };
+        assert!(
+            latest
+                .filters
+                .iter()
+                .all(|filter| filter.path.contains("new.did"))
+        );
+        write_notification_packet(
+            &mut stream,
+            &v5::Packet::SubAck(v5::SubAck::new(
+                latest.pkid,
+                vec![v5::SubscribeReasonCode::QoS2; latest.filters.len()],
+            )),
+        );
+        for did in ["old.did", "new.did"] {
+            write_notification_packet(
+                &mut stream,
+                &v5::Packet::Publish(v5::Publish::new(
+                    format!("device/{did}/up/properties_changed/2/3"),
+                    QoS::AtMostOnce,
+                    format!(r#"{{"params":{{"did":"{did}","siid":2,"piid":3,"value":7}}}}"#),
+                )),
+            );
+        }
+        let third = loop {
+            match notification_packet(&mut stream, &mut buffer) {
+                v5::Packet::Unsubscribe(remove) => {
+                    assert!(remove.filters.iter().all(|topic| topic.contains("new.did")));
+                    let mut ack = v5::UnsubAck::new(remove.pkid);
+                    ack.reasons = vec![v5::UnsubAckReason::Success; remove.filters.len()];
+                    write_notification_packet(&mut stream, &v5::Packet::UnsubAck(ack));
+                }
+                v5::Packet::Subscribe(third) => break third,
+                packet => panic!("unexpected abandoned cloud selection packet: {packet:?}"),
+            }
+        };
+        assert!(
+            third
+                .filters
+                .iter()
+                .all(|filter| filter.path.contains("abandoned.did"))
+        );
+        abandoned_seen.send(()).unwrap();
+        abandoned_release
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        write_notification_packet(
+            &mut stream,
+            &v5::Packet::SubAck(v5::SubAck::new(
+                third.pkid,
+                vec![v5::SubscribeReasonCode::QoS2; third.filters.len()],
+            )),
+        );
+        let final_selection = loop {
+            match notification_packet(&mut stream, &mut buffer) {
+                v5::Packet::Unsubscribe(remove) => {
+                    assert!(
+                        remove
+                            .filters
+                            .iter()
+                            .all(|topic| topic.contains("abandoned.did"))
+                    );
+                    let mut ack = v5::UnsubAck::new(remove.pkid);
+                    ack.reasons = vec![v5::UnsubAckReason::Success; remove.filters.len()];
+                    write_notification_packet(&mut stream, &v5::Packet::UnsubAck(ack));
+                }
+                v5::Packet::Subscribe(final_selection) => break final_selection,
+                packet => panic!("unexpected final cloud selection packet: {packet:?}"),
+            }
+        };
+        assert!(
+            final_selection
+                .filters
+                .iter()
+                .all(|filter| filter.path.contains("final.did"))
+        );
+        write_notification_packet(
+            &mut stream,
+            &v5::Packet::SubAck(v5::SubAck::new(
+                final_selection.pkid,
+                vec![v5::SubscribeReasonCode::QoS2; final_selection.filters.len()],
+            )),
+        );
+        broker_done.recv_timeout(Duration::from_secs(3)).unwrap();
+    });
+
+    block_on(async {
+        let completed = future::or(
+            async {
+                let (connection, session, handle, notifications) = CloudNotificationSession::new(
+                    "test-client",
+                    "token",
+                    Duration::from_secs(5),
+                    &address.ip().to_string(),
+                    address.port(),
+                    None,
+                )
+                .unwrap();
+                let mut driver = Box::pin(connection.run());
+                let mut session = Box::pin(session.run());
+                let app = async {
+                    let mut first = Box::pin(handle.select_dids(
+                        vec!["old.did".into()],
+                        Instant::now() + Duration::from_secs(2),
+                    ));
+                    assert!(future::poll_once(first.as_mut()).await.is_none());
+                    first_ready.recv_async().await.unwrap();
+                    let mut latest = Box::pin(handle.select_dids(
+                        vec!["new.did".into()],
+                        Instant::now() + Duration::from_secs(2),
+                    ));
+                    assert!(future::poll_once(latest.as_mut()).await.is_none());
+                    release_first.send_async(()).await.unwrap();
+                    assert_eq!(first.await.unwrap_err().kind(), &MqttErrorKind::Superseded);
+                    let latest_generation = latest.await.unwrap();
+                    let notification = notifications.recv_async().await.unwrap();
+                    assert!(matches!(
+                        notification,
+                        CloudNotification::Property { did, generation, .. }
+                            if did == "new.did" && generation == latest_generation
+                    ));
+                    let mut abandoned = Box::pin(handle.select_dids(
+                        vec!["abandoned.did".into()],
+                        Instant::now() + Duration::from_secs(2),
+                    ));
+                    assert!(future::poll_once(abandoned.as_mut()).await.is_none());
+                    abandoned_ready.recv_async().await.unwrap();
+                    drop(abandoned);
+                    let mut final_selection = Box::pin(handle.select_dids(
+                        vec!["final.did".into()],
+                        Instant::now() + Duration::from_secs(2),
+                    ));
+                    assert!(future::poll_once(final_selection.as_mut()).await.is_none());
+                    release_abandoned.send_async(()).await.unwrap();
+                    final_selection.await.unwrap();
+                    done.send_async(()).await.unwrap();
+                };
+                futures_lite::pin!(app);
+                enum Ready {
+                    App,
+                    Driver,
+                    Session,
+                }
+                match future::or(
+                    app.map(|()| Ready::App),
+                    future::or(
+                        driver.as_mut().map(|_| Ready::Driver),
+                        session.as_mut().map(|_| Ready::Session),
+                    ),
+                )
+                .await
+                {
+                    Ready::App => {}
+                    Ready::Driver => panic!("MQTT driver exited before cloud assertions"),
+                    Ready::Session => panic!("cloud session exited before assertions"),
+                }
+                true
+            },
+            async {
+                async_io::Timer::after(Duration::from_secs(5)).await;
+                false
+            },
+        )
+        .await;
+        assert!(completed, "cloud selection scenario exceeded its deadline");
+    });
+    broker.join().unwrap();
 }

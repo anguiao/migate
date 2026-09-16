@@ -1,6 +1,7 @@
 mod client;
 mod control;
 mod error;
+mod notification;
 mod oauth;
 
 pub use client::{
@@ -12,6 +13,10 @@ pub use control::{
     PropertyWriteOutcome, PropertyWriteResult,
 };
 pub use error::{CloudError, CloudErrorKind};
+pub use notification::{
+    CLOUD_MQTT_HOST, CLOUD_MQTT_PORT, CloudNotification, CloudNotificationError,
+    CloudNotificationHandle, CloudNotificationSession,
+};
 pub use oauth::{AUTHORIZATION_URL, AuthorizationAttempt, validate_saved_redirect_uri};
 
 pub const REGION: &str = "cn";
