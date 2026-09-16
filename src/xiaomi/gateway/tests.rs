@@ -10,6 +10,11 @@ use crate::{
         catalog::compile_spec,
         discovery::NetworkEpoch,
         mqtt::{MqttConfig, MqttConnection, MqttSendGuard},
+        runtime::{
+            AdmissionFeature, AdmissionSnapshot, AdmissionStatus, CommandRuntime,
+            CurrentSessionRegistry, OperationPaths, RuntimeFeature, RuntimeTransports,
+            SessionAuthority, StateRuntime,
+        },
     },
 };
 use bytes::BytesMut;
@@ -587,6 +592,401 @@ fn real_mqtt_gateway_get_dev_list_is_the_only_session_evidence() {
             completed,
             "gateway MQTT scenario exceeded its hard deadline"
         );
+    });
+    broker.join().unwrap();
+}
+
+#[test]
+fn runtime_transport_uses_the_real_gateway_once_and_preserves_sent_results() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (complete_tx, complete_rx) = flume::bounded(1);
+    let broker = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buffer = BytesMut::new();
+        acknowledge_connect(&mut stream, &mut buffer);
+        acknowledge_subscribe(&mut stream, &mut buffer);
+        for step in 0..4 {
+            let request = receive_mips_request(&mut stream, &mut buffer, "master/proxy/rpcReq");
+            let value: serde_json::Value = serde_json::from_str(&request.payload).unwrap();
+            let rpc = &value["rpc"];
+            match step {
+                0 | 2 | 3 => {
+                    assert_eq!(rpc["method"], "set_properties");
+                    assert_eq!(rpc["params"].as_array().unwrap().len(), 1);
+                    let item = &rpc["params"][0];
+                    assert_eq!(item["did"], "b.did");
+                    assert_eq!(item["siid"], 2);
+                    assert_eq!(item["piid"], 1);
+                    assert_eq!(item["value"], step == 2);
+                    let reply = if step == 2 {
+                        serde_json::json!({"result":[{"did":item["did"],"siid":item["siid"],"piid":999,"code":0}]})
+                    } else if step == 3 {
+                        serde_json::json!({"error":{"code":-7}})
+                    } else {
+                        serde_json::json!({"result":[{"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":0}]})
+                    };
+                    send_mips_reply(
+                        &mut stream,
+                        &mut buffer,
+                        80 + step,
+                        request.mid,
+                        &reply.to_string(),
+                    );
+                }
+                1 => {
+                    assert_eq!(rpc["method"], "action");
+                    let item = &rpc["params"];
+                    assert_eq!(item["did"], "b.did");
+                    assert_eq!(item["siid"], 2);
+                    assert_eq!(item["aiid"], 1);
+                    assert_eq!(item["in"], serde_json::json!([]));
+                    let reply = serde_json::json!({"result":{"did":item["did"],"siid":item["siid"],"aiid":item["aiid"],"code":0}});
+                    send_mips_reply(
+                        &mut stream,
+                        &mut buffer,
+                        81,
+                        request.mid,
+                        &reply.to_string(),
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+        complete_tx.send(()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        finish_mqtt(&mut stream, &mut buffer);
+    });
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        store
+            .xiaomi()
+            .replace(&XiaomiRecord {
+                uid: "10001".into(),
+                region: "cn".into(),
+                oauth_client_uuid: "123e4567-e89b-12d3-a456-426614174000".into(),
+                redirect_uri: "http://127.0.0.1/callback".into(),
+                tokens: TokenSet {
+                    access_token: "a".into(),
+                    refresh_token: "r".into(),
+                    expires_at: 2_000_000_000,
+                    refresh_at: 1_900_000_000,
+                },
+                virtual_did: "123456789012345".into(),
+                private_key_pem: "k".into(),
+                certificate_pem: "c".into(),
+            })
+            .unwrap();
+        let generation = store.xiaomi().snapshot().unwrap().session_generation;
+        let physical = |did: &str| crate::device::PhysicalDeviceId {
+            account: AccountId::new("10001").unwrap(),
+            home: HomeId::new("home").unwrap(),
+            parent_did: DeviceDid::new(did).unwrap(),
+        };
+        let a = physical("a.did");
+        let b = physical("b.did");
+        let (mqtt, mqtt_handle, messages) = MqttConnection::new(
+            MqttConfig::new("runtime-gateway", None, Duration::from_secs(5))
+                .with_endpoint(address.ip().to_string(), address.port()),
+        )
+        .unwrap();
+        let (session, handle, _) = GatewaySession::new(
+            "virtual",
+            123,
+            "192.0.2.10",
+            NetworkEpoch::new(9),
+            mqtt_handle.clone(),
+            messages,
+        )
+        .unwrap();
+        let authority = SessionAuthority::new();
+        let registry = CurrentSessionRegistry::default();
+        registry.install_gateway(a.clone(), handle.clone(), authority.clone());
+        registry.install_gateway(b.clone(), handle.clone(), authority.clone());
+        registry.revoke_device(&a);
+        registry.install_gateway(b.clone(), handle.clone(), authority);
+        let service = DeviceService::new();
+        let light = compile_spec(
+            "yeelink.light.ml9",
+            include_str!("../../../tests/fixtures/miot_specs/yeelink.light.ml9.json"),
+        )
+        .unwrap()
+        .features
+        .remove(0);
+        let vacuum = compile_spec(
+            "xiaomi.vacuum.c104",
+            include_str!("../../../tests/fixtures/miot_specs/xiaomi.vacuum.c104.json"),
+        )
+        .unwrap()
+        .features
+        .into_iter()
+        .find(|f| f.role == crate::device::FeatureRole::Vacuum)
+        .unwrap();
+        let make = |descriptor: &crate::xiaomi::catalog::FeatureDescriptor| FeatureIdentity {
+            physical: b.clone(),
+            service_instance: descriptor.service_instance,
+            role: descriptor.role,
+        };
+        let light_id = make(&light);
+        let vacuum_id = make(&vacuum);
+        service.publish(light_id.clone(), "Light", light.capabilities.clone());
+        service.set_state_availability(&light_id, true);
+        service.publish(vacuum_id.clone(), "Vacuum", vacuum.capabilities.clone());
+        service.set_state_availability(&vacuum_id, true);
+        let runtime =
+            CommandRuntime::new(service.clone(), Rc::new(RuntimeTransports::new(registry)));
+        for (id, descriptor) in [
+            (light_id.clone(), light.clone()),
+            (vacuum_id.clone(), vacuum.clone()),
+        ] {
+            runtime.register(RuntimeFeature {
+                identity: id,
+                descriptor,
+                authority_generation: 1,
+                auth_session_generation: generation,
+            });
+        }
+        let app = async {
+            for (id, command, expected) in [
+                (
+                    &light_id,
+                    DeviceCommand::SetPower(false),
+                    CommandOutcome::Accepted,
+                ),
+                (
+                    &vacuum_id,
+                    DeviceCommand::StartVacuum,
+                    CommandOutcome::Accepted,
+                ),
+                (
+                    &light_id,
+                    DeviceCommand::SetPower(true),
+                    CommandOutcome::Ambiguous,
+                ),
+                (
+                    &light_id,
+                    DeviceCommand::SetPower(false),
+                    CommandOutcome::Rejected(-7),
+                ),
+            ] {
+                let ticket = service.command(id, command);
+                runtime.run_until_idle().await;
+                assert_eq!(ticket.await, expected);
+            }
+            complete_rx.recv_async().await.unwrap();
+            mqtt_handle.stop().await;
+        };
+        let completed = future::or(
+            async {
+                let (_mqtt_result, (_session_result, ())) = future::zip(
+                    mqtt.run(),
+                    future::zip(session.run(Instant::now() + Duration::from_secs(3)), app),
+                )
+                .await;
+                true
+            },
+            async {
+                async_io::Timer::after(Duration::from_secs(5)).await;
+                false
+            },
+        )
+        .await;
+        assert!(completed, "gateway runtime scenario timed out");
+    });
+    broker.join().unwrap();
+}
+
+#[test]
+fn runtime_state_gateway_keeps_core_success_when_optional_read_is_rejected() {
+    let descriptor = compile_spec(
+        "xiaomi.vacuum.c104",
+        include_str!("../../../tests/fixtures/miot_specs/xiaomi.vacuum.c104.json"),
+    )
+    .unwrap()
+    .features
+    .remove(0);
+    let mut readable = descriptor
+        .properties
+        .iter()
+        .filter(|p| p.readable)
+        .map(|p| (p.siid, p.piid, p.property))
+        .collect::<Vec<_>>();
+    readable.sort_by_key(|item| (item.0, item.1));
+    assert!(readable.iter().any(|item| item.2 == Property::Battery));
+    let broker_targets = readable.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (complete_tx, complete_rx) = flume::bounded(1);
+    let broker = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buffer = BytesMut::new();
+        acknowledge_connect(&mut stream, &mut buffer);
+        acknowledge_subscribe(&mut stream, &mut buffer);
+        for (siid, piid, property) in broker_targets {
+            let request = receive_mips_request(&mut stream, &mut buffer, "master/proxy/get");
+            let value: serde_json::Value = serde_json::from_str(&request.payload).unwrap();
+            assert_eq!(value["siid"], siid);
+            assert_eq!(value["piid"], piid);
+            let reply = match property {
+                Property::VacuumOperationalState => serde_json::json!({"value":10}),
+                Property::VacuumCleanMode | Property::VacuumFault => {
+                    serde_json::json!({"value":0})
+                }
+                Property::Battery => serde_json::json!({"error":{"code":-7}}),
+                _ => panic!("unexpected vacuum property {property:?}"),
+            };
+            send_mips_reply(
+                &mut stream,
+                &mut buffer,
+                (100 + piid) as u16,
+                request.mid,
+                &reply.to_string(),
+            );
+        }
+        complete_tx.send(()).unwrap();
+    });
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        store
+            .xiaomi()
+            .replace(&XiaomiRecord {
+                uid: "10001".into(),
+                region: "cn".into(),
+                oauth_client_uuid: "123e4567-e89b-12d3-a456-426614174000".into(),
+                redirect_uri: "http://127.0.0.1/callback".into(),
+                tokens: TokenSet {
+                    access_token: "a".into(),
+                    refresh_token: "r".into(),
+                    expires_at: 2_000_000_000,
+                    refresh_at: 1_900_000_000,
+                },
+                virtual_did: "123456789012345".into(),
+                private_key_pem: "k".into(),
+                certificate_pem: "c".into(),
+            })
+            .unwrap();
+        let generation = store.xiaomi().snapshot().unwrap().session_generation;
+        let physical = crate::device::PhysicalDeviceId {
+            account: AccountId::new("10001").unwrap(),
+            home: HomeId::new("home").unwrap(),
+            parent_did: DeviceDid::new("vacuum.did").unwrap(),
+        };
+        let identity = FeatureIdentity {
+            physical: physical.clone(),
+            service_instance: descriptor.service_instance,
+            role: descriptor.role,
+        };
+        store.devices().allocate_feature(&identity).unwrap();
+        let service = DeviceService::new();
+        service.publish(identity.clone(), "Vacuum", descriptor.capabilities.clone());
+        let (mqtt, mqtt_handle, messages) = MqttConnection::new(
+            MqttConfig::new("state-gateway", None, Duration::from_secs(5))
+                .with_endpoint(address.ip().to_string(), address.port()),
+        )
+        .unwrap();
+        let (session, handle, _) = GatewaySession::new(
+            "virtual",
+            123,
+            "192.0.2.10",
+            NetworkEpoch::new(9),
+            mqtt_handle.clone(),
+            messages,
+        )
+        .unwrap();
+        let registry = CurrentSessionRegistry::default();
+        registry.install_gateway(physical.clone(), handle, SessionAuthority::new());
+        let transports = Rc::new(RuntimeTransports::new(registry));
+        let commands = CommandRuntime::new(service.clone(), transports.clone());
+        let state = StateRuntime::new(
+            service.clone(),
+            store.devices(),
+            transports,
+            commands.execution_gate(),
+            commands.subscribe_completions(),
+        );
+        let runtime = RuntimeFeature {
+            identity: identity.clone(),
+            descriptor: descriptor.clone(),
+            authority_generation: 1,
+            auth_session_generation: generation,
+        };
+        state.reconcile(&AdmissionSnapshot {
+            binding: None,
+            status: AdmissionStatus::Active,
+            epoch: NetworkEpoch::new(9),
+            features: vec![AdmissionFeature {
+                identity: identity.clone(),
+                runtime,
+                paths: OperationPaths {
+                    gateway: true,
+                    ..OperationPaths::default()
+                },
+                gateways: Vec::new(),
+                lan_evidence: None,
+            }],
+        });
+        let app = async {
+            state.run_until_idle().await;
+            let snapshot = service.snapshot(&identity).unwrap();
+            assert!(matches!(
+                snapshot.property(Property::VacuumOperationalState),
+                Some(PropertyState::Current {
+                    value: crate::device::PropertyValue::VacuumOperationalState(
+                        VacuumOperationalState::Docked
+                    ),
+                    ..
+                })
+            ));
+            assert!(matches!(
+                snapshot.property(Property::VacuumCleanMode),
+                Some(PropertyState::Current {
+                    value: crate::device::PropertyValue::VacuumCleanMode(
+                        crate::device::VacuumCleanMode::Vacuum
+                    ),
+                    ..
+                })
+            ));
+            assert!(matches!(
+                snapshot.property(Property::VacuumFault),
+                Some(PropertyState::Current {
+                    value: crate::device::PropertyValue::VacuumFault(value),
+                    ..
+                }) if value == "0"
+            ));
+            assert!(matches!(
+                snapshot.property(Property::Battery),
+                Some(PropertyState::Unknown { .. })
+            ));
+            assert!(service.is_available(&identity));
+            complete_rx.recv_async().await.unwrap();
+            mqtt_handle.stop().await;
+        };
+        let completed = future::or(
+            async {
+                let _ = future::zip(
+                    mqtt.run(),
+                    future::zip(session.run(Instant::now() + Duration::from_secs(3)), app),
+                )
+                .await;
+                true
+            },
+            async {
+                async_io::Timer::after(Duration::from_secs(5)).await;
+                false
+            },
+        )
+        .await;
+        assert!(completed, "gateway state scenario timed out");
     });
     broker.join().unwrap();
 }

@@ -900,6 +900,249 @@ fn legacy_mcn02_uses_only_verified_traditional_shape() {
 }
 
 #[test]
+fn mcn02_udp_runtime_transport_updates_state_and_sends_one_typed_command() {
+    use crate::{
+        device::{
+            AccountId, CommandOutcome, DeviceDid, DeviceService, FeatureIdentity, FeatureRole,
+            HomeId, HvacMode, PhysicalDeviceId, Property, PropertyState, PropertyValue, SwingMode,
+        },
+        storage::{Store, TokenSet, XiaomiRecord},
+        xiaomi::{
+            catalog::compile_spec,
+            runtime::{
+                AdmissionFeature, AdmissionSnapshot, AdmissionStatus, CommandLimits,
+                CommandRuntime, CurrentSessionRegistry, OperationPaths, RouteFailure,
+                RuntimeFeature, RuntimeTransports, SessionAuthority, StateRuntime,
+            },
+        },
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    store
+        .xiaomi()
+        .replace(&XiaomiRecord {
+            uid: "10001".into(),
+            region: "cn".into(),
+            oauth_client_uuid: "123e4567-e89b-12d3-a456-426614174000".into(),
+            redirect_uri: "http://127.0.0.1/callback".into(),
+            tokens: TokenSet {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: 2_000_000_000,
+                refresh_at: 1_900_000_000,
+            },
+            virtual_did: "123456789012345".into(),
+            private_key_pem: "key".into(),
+            certificate_pem: "certificate".into(),
+        })
+        .unwrap();
+    let auth = store.xiaomi().snapshot().unwrap();
+    let descriptor = compile_spec(
+        "lumi.acpartner.mcn02",
+        include_str!("../../../tests/fixtures/miot_specs/lumi.acpartner.mcn02.json"),
+    )
+    .unwrap()
+    .features
+    .into_iter()
+    .find(|feature| feature.role == FeatureRole::Climate)
+    .unwrap();
+    let identity = FeatureIdentity {
+        physical: PhysicalDeviceId {
+            account: AccountId::new("10001").unwrap(),
+            home: HomeId::new("home-a").unwrap(),
+            parent_did: DeviceDid::new("42").unwrap(),
+        },
+        service_instance: descriptor.service_instance,
+        role: descriptor.role,
+    };
+    store.devices().allocate_feature(&identity).unwrap();
+    let service = DeviceService::new();
+    service.publish(
+        identity.clone(),
+        "Loopback air conditioner",
+        descriptor.capabilities.clone(),
+    );
+    let registry = CurrentSessionRegistry::default();
+    let transports = Rc::new(RuntimeTransports::new(registry.clone()));
+    let commands = CommandRuntime::with_limits(
+        service.clone(),
+        transports.clone(),
+        CommandLimits {
+            total: Duration::from_millis(150),
+            local_attempt: Duration::from_millis(100),
+            ..CommandLimits::default()
+        },
+    );
+    let state = StateRuntime::new(
+        service.clone(),
+        store.devices(),
+        transports,
+        commands.execution_gate(),
+        commands.subscribe_completions(),
+    );
+    let runtime_feature = RuntimeFeature {
+        identity: identity.clone(),
+        descriptor: descriptor.clone(),
+        authority_generation: 1,
+        auth_session_generation: auth.session_generation,
+    };
+    commands.register(runtime_feature.clone());
+
+    let (session, handle, _events, device, token) = session_pair("lumi.acpartner.mcn02");
+    let application = async {
+        let evidence = handle
+            .authenticate(
+                LanProperty { siid: 2, piid: 1 },
+                Instant::now() + Duration::from_secs(1),
+                LanSendGuard::new(),
+            )
+            .await
+            .unwrap();
+        registry.install_lan(
+            identity.physical.clone(),
+            handle.clone(),
+            SessionAuthority::new(),
+            Some(descriptor.clone()),
+        );
+        state.reconcile(&AdmissionSnapshot {
+            binding: None,
+            status: AdmissionStatus::Active,
+            epoch: NetworkEpoch::new(7),
+            features: vec![AdmissionFeature {
+                identity: identity.clone(),
+                runtime: runtime_feature,
+                paths: OperationPaths {
+                    lan: true,
+                    ..OperationPaths::default()
+                },
+                gateways: Vec::new(),
+                lan_evidence: Some(evidence),
+            }],
+        });
+        state.run_until_idle().await;
+
+        let snapshot = service.snapshot(&identity).unwrap();
+        let current = |property| match snapshot.property(property) {
+            Some(PropertyState::Current { value, .. }) => value.clone(),
+            other => panic!("expected current {property:?}, got {other:?}"),
+        };
+        assert_eq!(current(Property::Power), PropertyValue::Power(true));
+        assert_eq!(
+            current(Property::HvacMode),
+            PropertyValue::HvacMode(HvacMode::Cool)
+        );
+        assert_eq!(
+            current(Property::TargetTemperature),
+            PropertyValue::Temperature(25.0)
+        );
+        assert_eq!(current(Property::FanSpeed), PropertyValue::FanSpeed(1));
+        assert_eq!(
+            current(Property::SwingMode),
+            PropertyValue::SwingMode(SwingMode::Off)
+        );
+
+        let command = service.command(&identity, DeviceCommand::SetPower(false));
+        commands.run_until_idle().await;
+        assert_eq!(command.await, CommandOutcome::Accepted);
+        assert!(
+            matches!(
+                service
+                    .snapshot(&identity)
+                    .unwrap()
+                    .property(Property::Power),
+                Some(PropertyState::Current {
+                    value: PropertyValue::Power(true),
+                    ..
+                })
+            ),
+            "accepted commands must not optimistically overwrite current state"
+        );
+
+        Timer::after(Duration::from_millis(50)).await;
+        let failed = service.command(&identity, DeviceCommand::SetPower(true));
+        commands.run_until_idle().await;
+        let failed = failed.await;
+        assert!(
+            matches!(
+                failed,
+                CommandOutcome::Expired | CommandOutcome::Unavailable | CommandOutcome::Ambiguous
+            ),
+            "unexpected failed outcome: {failed:?}"
+        );
+        let failures = registry.drain_route_failures();
+        assert!(matches!(
+            failures.as_slice(),
+            [RouteFailure::Lan { device, .. }] if device == &identity.physical
+        ));
+        handle.stop();
+    };
+    let simulated_device = async {
+        let (auth_request, source) = receive_request(&device, &token).await;
+        reply(
+            &device,
+            &token,
+            source,
+            40,
+            json!({"id":auth_request["id"],"error":{"code":-1}}),
+        )
+        .await;
+
+        let (read, _) = receive_request(&device, &token).await;
+        assert_eq!(read["method"], "get_prop");
+        assert_eq!(
+            read["params"],
+            json!(["power", "mode", "tar_temp", "fan_level", "ver_swing"])
+        );
+        reply(
+            &device,
+            &token,
+            source,
+            41,
+            json!({"id":read["id"],"result":["on","cool",25,"small_fan","off"]}),
+        )
+        .await;
+
+        let (command, _) = receive_request(&device, &token).await;
+        assert_eq!(command["method"], "set_power");
+        assert_eq!(command["params"], json!(["off"]));
+        reply(
+            &device,
+            &token,
+            source,
+            42,
+            json!({"id":command["id"],"result":["ok"]}),
+        )
+        .await;
+        let mut extra = [0_u8; 1401];
+        let received_extra = future::race(
+            async {
+                device.recv_from(&mut extra).await.unwrap();
+                true
+            },
+            async {
+                Timer::after(Duration::from_millis(20)).await;
+                false
+            },
+        )
+        .await;
+        assert!(
+            !received_extra,
+            "typed command must send exactly one datagram"
+        );
+    };
+    future::block_on(future::race(
+        future::zip(session.run(), future::zip(application, simulated_device)),
+        async {
+            Timer::after(Duration::from_secs(2)).await;
+            panic!("mcn02 runtime integration exceeded its bounded deadline");
+        },
+    ))
+    .0
+    .unwrap();
+}
+
+#[test]
 fn multi_property_push_preserves_all_items_and_rejects_bad_event_arrays() {
     let notifications = super::protocol::parse_notifications(
         42,
