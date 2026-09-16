@@ -43,13 +43,13 @@ const ADDRESS: Address = Address::Udp(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr:
 
 // Exercise real Matter exchanges without binding the live bridge's UDP port.
 #[derive(Default)]
-struct Pipe {
+pub(super) struct Pipe {
     packets: RefCell<VecDeque<Vec<u8>>>,
     ready: Event,
 }
 
-struct SendPipe<'a>(&'a Pipe);
-struct ReceivePipe<'a>(&'a Pipe);
+pub(super) struct SendPipe<'a>(pub(super) &'a Pipe);
+pub(super) struct ReceivePipe<'a>(pub(super) &'a Pipe);
 
 impl NetworkSend for SendPipe<'_> {
     async fn send_to(&mut self, data: &[u8], _address: Address) -> Result<(), Error> {
@@ -80,7 +80,7 @@ impl NetworkReceive for ReceivePipe<'_> {
 
 // As in upstream's IM tests, install a test CASE session instead of testing
 // commissioning. Each boot has fresh Matter instances and a new session ID.
-fn connect(matter: &Matter<'_>, local: u64, peer: u64, session_id: u16) {
+pub(super) fn connect(matter: &Matter<'_>, local: u64, peer: u64, session_id: u16) {
     let fabric = NonZeroU8::new(1).unwrap();
     matter.with_state(|state| {
         state.fabrics.add_with_post_init(|_| Ok(())).unwrap();

@@ -9,6 +9,18 @@ CREATE TABLE blobs (
     value BLOB NOT NULL
 ) STRICT;
 
+CREATE TABLE matter_topology (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    signature TEXT NOT NULL CHECK (signature = '' OR length(signature) = 40)
+) STRICT;
+INSERT INTO matter_topology (id, signature) VALUES (1, '');
+
+CREATE TABLE matter_feature_labels (
+    endpoint INTEGER PRIMARY KEY CHECK (endpoint BETWEEN 2 AND 65534),
+    label TEXT NOT NULL CHECK (length(CAST(label AS BLOB)) <= 32),
+    FOREIGN KEY (endpoint) REFERENCES feature_identities(endpoint) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE xiaomi_auth (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     uid TEXT NOT NULL,
@@ -141,4 +153,4 @@ CREATE TABLE feature_states (
             account_uid, home_id, parent_did, service_instance, role
         )
 ) STRICT;
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;

@@ -2,7 +2,7 @@ use super::codec::*;
 use super::compiler::{ActionSpec, PropertySpec, Service, numeric_format};
 use crate::device::{
     Capability, FeatureCapabilities, FeatureRole, HvacMode, NumericRange, NumericUnit, Property,
-    SwingMode, VacuumCleanMode, VacuumOperationalState,
+    SensingModality, SwingMode, VacuumCleanMode, VacuumOperationalState,
 };
 
 pub(super) fn compile_lights(
@@ -394,6 +394,10 @@ pub(super) fn compile_motion(
     }
     let mut feature = base_feature(service, FeatureRole::MotionSensor);
     feature.capabilities.0.push(Capability::Motion);
+    feature
+        .capabilities
+        .0
+        .push(Capability::SensingModalities(sensing_modalities(model)));
     if let Some(duration) = readable_property(service, "no-motion-duration")
         .filter(|property| property.unit == Some("seconds"))
         && let Some((minimum, maximum, step)) = duration.range
@@ -412,12 +416,16 @@ pub(super) fn compile_motion(
             },
         ));
     }
+    let mut illuminance = base_feature(service, FeatureRole::IlluminanceSensor);
     if let Some(illumination) =
         readable_property(service, "illumination").filter(|property| property.unit == Some("lux"))
         && let Some(range) = numeric_range(illumination, NumericUnit::Lux)
     {
-        feature.capabilities.0.push(Capability::Illuminance(range));
-        feature.properties.push(mapping(
+        illuminance
+            .capabilities
+            .0
+            .push(Capability::Illuminance(range));
+        illuminance.properties.push(mapping(
             service.iid,
             illumination,
             Property::Illuminance,
@@ -437,7 +445,7 @@ pub(super) fn compile_motion(
         let arguments = event_argument_mappings(service, event, PropertyClass::Core);
         for argument in &arguments {
             if argument.mapping.property == Property::Illuminance
-                && !feature
+                && !illuminance
                     .capabilities
                     .0
                     .iter()
@@ -448,7 +456,7 @@ pub(super) fn compile_motion(
                     step,
                 } = argument.mapping.codec
             {
-                feature
+                illuminance
                     .capabilities
                     .0
                     .push(Capability::Illuminance(NumericRange {
@@ -465,8 +473,26 @@ pub(super) fn compile_motion(
             argument_iids: event.arguments.clone(),
             argument_count: event.arguments.len(),
             effect: EventEffect::Motion(true),
-            arguments,
+            arguments: arguments
+                .iter()
+                .filter(|argument| argument.mapping.property != Property::Illuminance)
+                .cloned()
+                .collect(),
         });
+        let lux_arguments = arguments
+            .into_iter()
+            .filter(|argument| argument.mapping.property == Property::Illuminance)
+            .collect::<Vec<_>>();
+        if !lux_arguments.is_empty() {
+            illuminance.events.push(EventMapping {
+                siid: service.iid,
+                eiid: event.iid,
+                argument_iids: event.arguments.clone(),
+                argument_count: event.arguments.len(),
+                effect: EventEffect::ArgumentsOnly,
+                arguments: lux_arguments,
+            });
+        }
     }
     if model == "xiaomi.motion.pir1"
         && let Some(custom) = services.iter().find(|service| service.iid == 5)
@@ -482,10 +508,19 @@ pub(super) fn compile_motion(
         });
     }
     output.push(feature);
+    if illuminance
+        .capabilities
+        .0
+        .iter()
+        .any(|capability| matches!(capability, Capability::Illuminance(_)))
+    {
+        attach_battery(services, &mut illuminance);
+        output.push(illuminance);
+    }
     Ok(())
 }
 pub(super) fn compile_occupancy(
-    _model: &str,
+    model: &str,
     services: &[Service<'_>],
     output: &mut Vec<FeatureDescriptor>,
 ) {
@@ -501,6 +536,10 @@ pub(super) fn compile_occupancy(
     };
     let mut feature = base_feature(service, FeatureRole::OccupancySensor);
     feature.capabilities.0.push(Capability::Occupancy);
+    feature
+        .capabilities
+        .0
+        .push(Capability::SensingModalities(sensing_modalities(model)));
     feature.properties.push(mapping(
         service.iid,
         status,
@@ -510,12 +549,16 @@ pub(super) fn compile_occupancy(
             occupied: enum_values(status, &["has one", "show", "occupied"]),
         },
     ));
+    let mut illuminance = base_feature(service, FeatureRole::IlluminanceSensor);
     if let Some(illumination) =
         readable_property(service, "illumination").filter(|property| property.unit == Some("lux"))
         && let Some(range) = numeric_range(illumination, NumericUnit::Lux)
     {
-        feature.capabilities.0.push(Capability::Illuminance(range));
-        feature.properties.push(mapping(
+        illuminance
+            .capabilities
+            .0
+            .push(Capability::Illuminance(range));
+        illuminance.properties.push(mapping(
             service.iid,
             illumination,
             Property::Illuminance,
@@ -528,6 +571,10 @@ pub(super) fn compile_occupancy(
     }
     attach_battery(services, &mut feature);
     output.push(feature);
+    if !illuminance.properties.is_empty() {
+        attach_battery(services, &mut illuminance);
+        output.push(illuminance);
+    }
 }
 pub(super) fn compile_contact(services: &[Service<'_>], output: &mut Vec<FeatureDescriptor>) {
     let Some(service) = services
@@ -1078,4 +1125,19 @@ fn event_argument_mappings(
             })
         })
         .collect()
+}
+
+fn sensing_modalities(model: &str) -> Vec<SensingModality> {
+    match model {
+        "xiaomi.motion.pir1" => vec![SensingModality::Pir],
+        "linp.sensor_occupy.hb01" | "izq.sensor_occupy.trio" => {
+            vec![SensingModality::Radar]
+        }
+        "xiaomi.sensor_occupy.03" | "xiaomi.sensor_occupy.p1" => {
+            vec![SensingModality::Pir, SensingModality::Radar]
+        }
+        // Generic models remain explicitly unclassified. Matter represents
+        // this protocol-neutral value using its Other modality feature.
+        _ => vec![SensingModality::Unspecified],
+    }
 }

@@ -64,6 +64,14 @@ pub enum VacuumOperationalState {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum SensingModality {
+    /// The sensor reports presence through a modality not classified by the catalog.
+    Unspecified,
+    Pir,
+    Radar,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Capability {
     Power { writable: bool },
@@ -81,6 +89,7 @@ pub enum Capability {
     Illuminance(NumericRange),
     Motion,
     Occupancy,
+    SensingModalities(Vec<SensingModality>),
     Contact,
     Battery(NumericRange),
     VacuumCleanModes(Vec<VacuumCleanMode>),
@@ -90,6 +99,16 @@ pub enum Capability {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FeatureCapabilities(pub Vec<Capability>);
 impl FeatureCapabilities {
+    pub fn sensing_modalities(&self) -> &[SensingModality] {
+        self.0
+            .iter()
+            .find_map(|capability| match capability {
+                Capability::SensingModalities(modalities) => Some(modalities.as_slice()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     pub fn light(dimmable: bool, color_temperature: bool) -> Self {
         let mut v = vec![Capability::Power { writable: true }];
         if dimmable {

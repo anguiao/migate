@@ -37,6 +37,7 @@ pub struct EventArgumentMapping {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum EventEffect {
     Motion(bool),
+    ArgumentsOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,6 +236,7 @@ impl FeatureDescriptor {
             EventEffect::Motion(value) => {
                 vec![(Property::Motion, Some(PropertyValue::Motion(value)))]
             }
+            EventEffect::ArgumentsOnly => Vec::new(),
         };
         updates.extend(mapping.arguments.iter().map(|argument| {
             let mapping = &argument.mapping;

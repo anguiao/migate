@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use std::{error::Error as StdError, fmt};
 
-const CURRENT_VERSION: i64 = 6;
+const CURRENT_VERSION: i64 = 7;
 
 #[derive(Debug)]
 pub(super) enum MigrationError {

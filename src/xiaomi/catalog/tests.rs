@@ -1,7 +1,7 @@
 use super::*;
 use crate::device::{
     Capability, DeviceCommand, FeatureRole, Percent, PresenceState, Property, PropertyValue,
-    RgbColor,
+    RgbColor, SensingModality,
 };
 use serde_json::Value;
 use serde_json::json;
@@ -241,11 +241,11 @@ fn all_approved_models_compile_the_expected_core_features() {
         ("miaomiaoce.sensor_ht.t8", 2),
         ("miaomiaoce.sensor_ht.t9", 2),
         ("xiaomi.sensor_ht.mini", 2),
-        ("xiaomi.motion.pir1", 1),
-        ("izq.sensor_occupy.trio", 1),
-        ("linp.sensor_occupy.hb01", 1),
-        ("xiaomi.sensor_occupy.03", 1),
-        ("xiaomi.sensor_occupy.p1", 1),
+        ("xiaomi.motion.pir1", 2),
+        ("izq.sensor_occupy.trio", 2),
+        ("linp.sensor_occupy.hb01", 2),
+        ("xiaomi.sensor_occupy.03", 2),
+        ("xiaomi.sensor_occupy.p1", 2),
         ("isa.magnet.dw2hl", 1),
         ("linp.magnet.m1", 1),
         ("xiaomi.vacuum.c104", 1),
@@ -550,17 +550,35 @@ fn vacuum_actions_require_empty_inputs_and_dock_capability_is_independent() {
 #[test]
 fn motion_events_decode_arguments_and_model_absence_without_reading_config() {
     let compiled = compile_spec("xiaomi.motion.pir1", &public_spec("xiaomi.motion.pir1")).unwrap();
-    let feature = &compiled.features[0];
+    assert_eq!(
+        compiled
+            .features
+            .iter()
+            .map(|feature| feature.role)
+            .collect::<Vec<_>>(),
+        [FeatureRole::MotionSensor, FeatureRole::IlluminanceSensor]
+    );
+    let feature = compiled
+        .features
+        .iter()
+        .find(|feature| feature.role == FeatureRole::MotionSensor)
+        .unwrap();
+    let illuminance = compiled
+        .features
+        .iter()
+        .find(|feature| feature.role == FeatureRole::IlluminanceSensor)
+        .unwrap();
     assert_eq!(feature.events.len(), 2);
     assert_eq!(
         feature.decode_event(2, 1008, &[WireValue::Number(12.5)]),
-        Some(vec![
-            (Property::Motion, Some(PropertyValue::Motion(true))),
-            (
-                Property::Illuminance,
-                Some(PropertyValue::Illuminance(12.5))
-            ),
-        ])
+        Some(vec![(Property::Motion, Some(PropertyValue::Motion(true)))])
+    );
+    assert_eq!(
+        illuminance.decode_event(2, 1008, &[WireValue::Number(12.5)]),
+        Some(vec![(
+            Property::Illuminance,
+            Some(PropertyValue::Illuminance(12.5))
+        )])
     );
     assert_eq!(
         feature.decode_event(5, 1022, &[]),
@@ -583,6 +601,48 @@ fn motion_events_decode_arguments_and_model_absence_without_reading_config() {
 }
 
 #[test]
+fn approved_presence_models_publish_grounded_sensing_modalities() {
+    for (model, expected) in [
+        ("xiaomi.motion.pir1", vec![SensingModality::Pir]),
+        ("linp.sensor_occupy.hb01", vec![SensingModality::Radar]),
+        ("izq.sensor_occupy.trio", vec![SensingModality::Radar]),
+        (
+            "xiaomi.sensor_occupy.03",
+            vec![SensingModality::Pir, SensingModality::Radar],
+        ),
+        (
+            "xiaomi.sensor_occupy.p1",
+            vec![SensingModality::Pir, SensingModality::Radar],
+        ),
+    ] {
+        let compiled = compile_spec(model, &public_spec(model)).unwrap();
+        assert_eq!(
+            compiled.features[0].capabilities.sensing_modalities(),
+            expected,
+            "{model}"
+        );
+    }
+
+    let mut occupancy = property(1, "occupancy-status", "uint8", &["read", "notify"]);
+    occupancy["value-list"] = json!([
+        {"value": 0, "description": "Vacant"},
+        {"value": 1, "description": "Occupied"},
+    ]);
+    let generic = compile_spec(
+        "vendor.sensor.future",
+        &spec(
+            "occupancy-sensor",
+            json!([service(2, "occupancy-sensor", json!([occupancy]))]),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        generic.features[0].capabilities.sensing_modalities(),
+        [SensingModality::Unspecified]
+    );
+}
+
+#[test]
 fn event_arguments_keep_wire_positions_when_unknown_parameters_are_present() {
     let mut ignored = property(7, "vendor-sequence", "uint8", &[]);
     ignored["value-range"] = json!([0, 255, 1]);
@@ -598,10 +658,20 @@ fn event_arguments_keep_wire_positions_when_unknown_parameters_are_present() {
     }]);
     let compiled =
         compile_spec("vendor.motion.new", &spec("motion-sensor", json!([motion]))).unwrap();
-    let feature = &compiled.features[0];
+    let feature = compiled
+        .features
+        .iter()
+        .find(|feature| feature.role == FeatureRole::MotionSensor)
+        .unwrap();
+    let illuminance = compiled
+        .features
+        .iter()
+        .find(|feature| feature.role == FeatureRole::IlluminanceSensor)
+        .unwrap();
     assert_eq!(feature.events[0].argument_iids, vec![7, 8]);
+    assert_eq!(illuminance.events[0].argument_iids, vec![7, 8]);
     assert!(
-        feature
+        illuminance
             .capabilities
             .0
             .iter()
@@ -609,21 +679,22 @@ fn event_arguments_keep_wire_positions_when_unknown_parameters_are_present() {
     );
     assert_eq!(
         feature.decode_event(2, 1, &[WireValue::Integer(9), WireValue::Number(12.5)]),
-        Some(vec![
-            (Property::Motion, Some(PropertyValue::Motion(true))),
-            (
-                Property::Illuminance,
-                Some(PropertyValue::Illuminance(12.5))
-            )
-        ])
+        Some(vec![(Property::Motion, Some(PropertyValue::Motion(true)))])
     );
     assert_eq!(
-        feature.decode_keyed_event(
+        illuminance.decode_event(2, 1, &[WireValue::Integer(9), WireValue::Number(12.5)]),
+        Some(vec![(
+            Property::Illuminance,
+            Some(PropertyValue::Illuminance(12.5))
+        )])
+    );
+    assert_eq!(
+        illuminance.decode_keyed_event(
             2,
             1,
             &[(8, WireValue::Number(12.5)), (7, WireValue::Integer(9))],
         ),
-        feature.decode_event(2, 1, &[WireValue::Integer(9), WireValue::Number(12.5)])
+        illuminance.decode_event(2, 1, &[WireValue::Integer(9), WireValue::Number(12.5)])
     );
     assert!(
         feature

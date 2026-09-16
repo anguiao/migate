@@ -1,9 +1,13 @@
 mod bridged_info;
+mod common;
+mod device_bridge;
 mod light;
 mod model;
 mod pairing;
+mod sensors;
 mod storage;
 
+pub use device_bridge::{DeviceBridge, DeviceBridgeModel};
 pub use pairing::PairingEvent;
 
 use crate::{

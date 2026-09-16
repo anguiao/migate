@@ -41,7 +41,7 @@ use std::{
     pin::pin,
 };
 
-struct Context<'a, H> {
+pub(super) struct Context<'a, H> {
     base: &'a H,
     command: CmdDetails,
     attribute: AttrDetails,
@@ -51,13 +51,39 @@ struct Context<'a, H> {
 
 impl<'a, H> Context<'a, H> {
     fn new(base: &'a H, cluster_id: u32, attr_id: u32) -> Self {
+        Self::new_at(base, LIGHT_ENDPOINT, cluster_id, attr_id)
+    }
+
+    pub(super) fn new_at(base: &'a H, endpoint: u16, cluster_id: u32, attr_id: u32) -> Self {
         Self {
             base,
-            command: CmdDetails::new(LIGHT_ENDPOINT, cluster_id, 1, 1, false, None),
-            attribute: attr(cluster_id, attr_id),
+            command: CmdDetails::new(endpoint, cluster_id, 1, 1, false, None),
+            attribute: attr(endpoint, cluster_id, attr_id),
             data: TLVElement::new(&[0x15, 0x18]),
             changes: RefCell::new(Vec::new()),
         }
+    }
+
+    pub(super) async fn read_tlv(&self, handler: &impl AsyncHandler) -> Vec<u8>
+    where
+        H: HandlerContext,
+    {
+        self.read_tlv_result(handler).await.unwrap()
+    }
+
+    pub(super) async fn read_tlv_result(
+        &self,
+        handler: &impl AsyncHandler,
+    ) -> Result<Vec<u8>, Error>
+    where
+        H: HandlerContext,
+    {
+        let mut out = vec![0; 512];
+        let mut write = WriteBuf::new(&mut out);
+        handler
+            .read(self, ReadReplyInstance::new(&self.attribute, &mut write))
+            .await?;
+        Ok(write.as_slice().to_vec())
     }
 }
 
@@ -122,7 +148,7 @@ impl<H: HandlerContext> EventEmitter for Context<'_, H> {
 }
 impl<H> MatchContext for Context<'_, H> {
     fn endpt(&self) -> Option<u16> {
-        Some(LIGHT_ENDPOINT)
+        Some(self.attribute.endpoint_id)
     }
     fn cluster(&self) -> Option<u32> {
         Some(self.attribute.cluster_id)
@@ -130,13 +156,13 @@ impl<H> MatchContext for Context<'_, H> {
 }
 impl<H: HandlerContext> OwnAttrChangeNotifier for Context<'_, H> {
     fn notify_own_attr_changed(&self, a: u32) {
-        self.notify_attr_changed(LIGHT_ENDPOINT, self.attribute.cluster_id, a);
+        self.notify_attr_changed(self.attribute.endpoint_id, self.attribute.cluster_id, a);
     }
     fn notify_own_cluster_changed(&self) {
-        self.notify_cluster_changed(LIGHT_ENDPOINT, self.attribute.cluster_id);
+        self.notify_cluster_changed(self.attribute.endpoint_id, self.attribute.cluster_id);
     }
     fn notify_own_endpoint_changed(&self) {
-        self.notify_endpoint_changed(LIGHT_ENDPOINT);
+        self.notify_endpoint_changed(self.attribute.endpoint_id);
     }
 }
 impl<H: HandlerContext> OwnEventEmitter for Context<'_, H> {
@@ -150,7 +176,7 @@ impl<H: HandlerContext> OwnEventEmitter for Context<'_, H> {
         F: FnOnce(EventTLVWrite<'_>) -> Result<(), Error>,
     {
         self.emit_event(
-            LIGHT_ENDPOINT,
+            self.attribute.endpoint_id,
             self.attribute.cluster_id,
             event,
             priority,
@@ -184,9 +210,9 @@ impl<H: HandlerContext> WriteContext for Context<'_, H> {
         &self.data
     }
 }
-fn attr(cluster_id: u32, attr_id: u32) -> AttrDetails {
+fn attr(endpoint_id: u16, cluster_id: u32, attr_id: u32) -> AttrDetails {
     AttrDetails {
-        endpoint_id: LIGHT_ENDPOINT,
+        endpoint_id,
         cluster_id,
         attr_id,
         list_index: None,

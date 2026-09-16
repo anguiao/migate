@@ -1,3 +1,4 @@
+mod device_bridge;
 mod handlers;
 mod subscriptions;
 
