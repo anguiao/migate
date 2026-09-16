@@ -21,6 +21,20 @@ cargo build --locked --release
 ./target/release/migate --data-dir .migate
 ```
 
+### 调试构建
+
+默认开发构建仅为项目代码保留回溯所需的行号信息，第三方依赖不生成调试信息。需要使用 LLDB/GDB 检查变量或进入依赖源码时，使用 `debugging` profile：
+
+```sh
+cargo build --locked --profile debugging
+```
+
+产物位于 `target/debugging/migate`，项目和第三方依赖均启用完整调试信息。首次使用该 profile 会重新构建并额外占用磁盘空间。也可通过以下命令构建并启动：
+
+```sh
+cargo run --locked --profile debugging -- --data-dir .migate
+```
+
 ## 米家账号认证
 
 认证需要联网，目前仅支持中国大陆服务区（`cn`），每个数据目录保存一个账号。以下认证命令在 shell 中执行。
