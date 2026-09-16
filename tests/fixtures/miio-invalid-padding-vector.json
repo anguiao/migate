@@ -1,0 +1,7 @@
+{
+  "provenance": "Artificial independent OpenSSL AES-CBC block; valid header/checksum but invalid zero-length PKCS7 padding",
+  "token_hex": "000102030405060708090a0b0c0d0e0f",
+  "did": 123456789,
+  "timestamp": 1234567890,
+  "packet_hex": "2131003000000000075bcd15499602d20ec4702b616ddb50a81838381992d5cb71c40397169486862b7a6a2e672aef78"
+}

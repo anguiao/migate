@@ -1,0 +1,12 @@
+{
+  "token_hex": "000102030405060708090a0b0c0d0e0f",
+  "did": 123456789,
+  "timestamp": 1234567890,
+  "plaintext": "{\"id\":173,\"method\":\"get_properties\",\"params\":[{\"did\":\"123456789\",\"siid\":2,\"piid\":1}]}",
+  "key_hex": "1ac1ef01e96caf1be0d329331a4fc2a8",
+  "iv_hex": "9ae5383e3c6e0606c15da7847fcd1d42",
+  "ciphertext_hex": "a4337bf62ad18c2e27aba5595fcaaede2c126cc4083041a630093a2b430b1771edb5a3e85cae95dd81cf744d661f3ac4100941f24963efd1c2a1fee3dc8010003e86c35d757e8777741b41d470c7064fac6a7e320e66b126feb5b7ef8d6e76c7",
+  "checksum_hex": "842e8100787c50732d7dacbe1ca66489",
+  "packet_hex": "2131008000000000075bcd15499602d2842e8100787c50732d7dacbe1ca66489a4337bf62ad18c2e27aba5595fcaaede2c126cc4083041a630093a2b430b1771edb5a3e85cae95dd81cf744d661f3ac4100941f24963efd1c2a1fee3dc8010003e86c35d757e8777741b41d470c7064fac6a7e320e66b126feb5b7ef8d6e76c7",
+  "packet_length": 128
+}
