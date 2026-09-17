@@ -563,6 +563,106 @@ fn non_boolean_swing_does_not_advertise_boolean_control() {
 }
 
 #[test]
+fn string_climate_fan_level_with_values_does_not_advertise_speed_control() {
+    let mut malformed: serde_json::Value =
+        serde_json::from_str(&public_spec("lumi.acpartner.mcn04")).unwrap();
+    for service in malformed["services"].as_array_mut().unwrap() {
+        if !service["type"]
+            .as_str()
+            .unwrap()
+            .contains(":service:fan-control:")
+        {
+            continue;
+        }
+        for property in service["properties"].as_array_mut().unwrap() {
+            let kind = property["type"].as_str().unwrap();
+            if kind.contains(":property:fan-level:") {
+                property["format"] = json!("string");
+            }
+        }
+    }
+    let compiled = compile_spec("lumi.acpartner.mcn04", &malformed.to_string()).unwrap();
+    let feature = compiled
+        .features
+        .iter()
+        .find(|feature| feature.role == FeatureRole::Climate)
+        .unwrap();
+    assert!(
+        !feature
+            .capabilities
+            .0
+            .iter()
+            .any(|capability| matches!(capability, Capability::FanSpeeds(_)))
+    );
+}
+
+#[test]
+fn empty_integer_climate_fan_level_does_not_advertise_speed_control() {
+    let mut malformed: serde_json::Value =
+        serde_json::from_str(&public_spec("lumi.acpartner.mcn04")).unwrap();
+    for service in malformed["services"].as_array_mut().unwrap() {
+        let Some(properties) = service["properties"].as_array_mut() else {
+            continue;
+        };
+        for property in properties {
+            if property["type"]
+                .as_str()
+                .unwrap()
+                .contains(":property:fan-level:")
+            {
+                property["value-list"] = json!([]);
+            }
+        }
+    }
+    let compiled = compile_spec("lumi.acpartner.mcn04", &malformed.to_string()).unwrap();
+    let feature = compiled
+        .features
+        .iter()
+        .find(|feature| feature.role == FeatureRole::Climate)
+        .unwrap();
+    assert!(
+        !feature
+            .capabilities
+            .0
+            .iter()
+            .any(|capability| matches!(capability, Capability::FanSpeeds(_)))
+    );
+}
+
+#[test]
+fn non_boolean_climate_swing_does_not_advertise_swing_control() {
+    let mut malformed: serde_json::Value =
+        serde_json::from_str(&public_spec("lumi.acpartner.mcn04")).unwrap();
+    for service in malformed["services"].as_array_mut().unwrap() {
+        let Some(properties) = service["properties"].as_array_mut() else {
+            continue;
+        };
+        for property in properties {
+            if property["type"]
+                .as_str()
+                .unwrap()
+                .contains(":property:vertical-swing:")
+            {
+                property["format"] = json!("string");
+            }
+        }
+    }
+    let compiled = compile_spec("lumi.acpartner.mcn04", &malformed.to_string()).unwrap();
+    let feature = compiled
+        .features
+        .iter()
+        .find(|feature| feature.role == FeatureRole::Climate)
+        .unwrap();
+    assert!(
+        !feature
+            .capabilities
+            .0
+            .iter()
+            .any(|capability| matches!(capability, Capability::SwingModes(_)))
+    );
+}
+
+#[test]
 fn vacuum_actions_require_empty_inputs_and_dock_capability_is_independent() {
     let mut parameterized = service(2, "vacuum", json!([]));
     parameterized["actions"] = json!([

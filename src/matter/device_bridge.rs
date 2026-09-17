@@ -1,6 +1,7 @@
 use super::{
     common, fan, lighting, model, sensors,
     storage::{EndpointSceneStore, StoreAdapter, TopologyStore},
+    thermostat as thermostat_handler,
 };
 use crate::{
     RuntimeError,
@@ -25,7 +26,7 @@ use rs_matter::{
         clusters::decl::{
             boolean_state, bridged_device_basic_information as bridged, fan_control,
             illuminance_measurement, occupancy_sensing, power_source,
-            relative_humidity_measurement, temperature_measurement,
+            relative_humidity_measurement, temperature_measurement, thermostat,
         },
         clusters::{desc, groups, identify, scenes},
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
@@ -104,6 +105,10 @@ const DEV_TYPE_ON_OFF_PLUGIN_UNIT: DeviceType = DeviceType {
 const DEV_TYPE_FAN: DeviceType = DeviceType {
     dtype: 0x002b,
     drev: 3,
+};
+const DEV_TYPE_THERMOSTAT: DeviceType = DeviceType {
+    dtype: 0x0301,
+    drev: 4,
 };
 
 struct SceneContext<'a, C> {
@@ -340,6 +345,7 @@ struct FeatureRuntime {
     sensor: sensors::SensorHandler,
     lighting: Option<lighting::LightingHandler>,
     fan: Option<fan::FanHandler>,
+    thermostat: Option<thermostat_handler::ThermostatHandler>,
     groups: groups::GroupsHandler<'static>,
     scenes: scenes::ScenesState<33, 96>,
     scenes_dataver: Dataver,
@@ -356,6 +362,12 @@ impl FeatureRuntime {
         self.fan
             .as_ref()
             .expect("fan clusters require a fan handler")
+    }
+
+    fn thermostat(&self) -> &thermostat_handler::ThermostatHandler {
+        self.thermostat
+            .as_ref()
+            .expect("thermostat clusters require a thermostat handler")
     }
 }
 
@@ -476,6 +488,8 @@ impl DeviceBridgeModel {
                 | FeatureRole::Fan
                 | FeatureRole::BathHeaterSupplyFan
                 | FeatureRole::BathHeaterExhaustFan
+                | FeatureRole::Climate
+                | FeatureRole::BathHeaterClimate
         ) {
             return Ok(None);
         }
@@ -526,13 +540,30 @@ impl DeviceBridgeModel {
             .iter()
             .any(|capability| matches!(capability, Capability::Power { writable: true }));
         let (fan_multi_speed, fan_auto, fan_rocking) = fan::capability_shape(&capabilities);
+        let thermostat_role = matches!(
+            allocation.feature.role,
+            FeatureRole::Climate | FeatureRole::BathHeaterClimate
+        );
+        let (thermostat_heating, thermostat_cooling, thermostat_local_temperature) =
+            thermostat_handler::capability_shape(&capabilities, allocation.feature.role);
+        let has_thermostat = thermostat_role
+            && (thermostat_heating || thermostat_cooling)
+            && capabilities
+                .iter()
+                .any(|capability| matches!(capability, Capability::Power { writable: true }))
+            && capabilities
+                .iter()
+                .any(|capability| matches!(capability, Capability::TargetTemperature(_)));
+        let has_climate_fan =
+            allocation.feature.role == FeatureRole::Climate && (fan_multi_speed || fan_rocking);
         if !(has_temperature
             || has_humidity
             || has_lux
             || has_occupancy
             || has_contact
             || has_power
-            || has_fan)
+            || has_fan
+            || has_thermostat)
         {
             return Ok(None);
         }
@@ -567,6 +598,20 @@ impl DeviceBridgeModel {
                 lighting::GROUPS_CLUSTER,
                 fan::cluster(fan_multi_speed, fan_auto, fan_rocking),
             ]);
+        }
+        if has_thermostat {
+            device_types.push(DEV_TYPE_THERMOSTAT);
+            clusters.extend([
+                lighting::GROUPS_CLUSTER,
+                thermostat_handler::cluster(
+                    thermostat_heating,
+                    thermostat_cooling,
+                    thermostat_local_temperature,
+                ),
+            ]);
+            if has_climate_fan {
+                clusters.push(fan::cluster(fan_multi_speed, fan_auto, fan_rocking));
+            }
         }
         if has_temperature {
             device_types.push(DEV_TYPE_TEMPERATURE_SENSOR);
@@ -650,12 +695,20 @@ impl DeviceBridgeModel {
                     seed.wrapping_add(9),
                 )
             }),
-            fan: has_fan.then(|| {
+            fan: (has_fan || has_climate_fan).then(|| {
                 fan::FanHandler::new(
                     self.service.clone(),
                     allocation.feature.clone(),
                     capabilities.clone(),
                     seed.wrapping_add(10),
+                )
+            }),
+            thermostat: has_thermostat.then(|| {
+                thermostat_handler::ThermostatHandler::new(
+                    self.service.clone(),
+                    allocation.feature.clone(),
+                    capabilities.clone(),
+                    seed.wrapping_add(11),
                 )
             }),
             groups: groups::GroupsHandler::new(Dataver::new(seed.wrapping_add(12))),
@@ -768,6 +821,14 @@ impl DeviceBridgeModel {
             id if id == fan_control::FULL_CLUSTER.id => {
                 AsyncHandler::read(&fan_control::HandlerAsyncAdaptor(runtime.fan()), ctx, reply)
                     .await
+            }
+            id if id == thermostat::FULL_CLUSTER.id => {
+                AsyncHandler::read(
+                    &thermostat::HandlerAsyncAdaptor(runtime.thermostat()),
+                    ctx,
+                    reply,
+                )
+                .await
             }
             id if id == lighting::ON_OFF_CLUSTER.id => Handler::read(
                 &rs_matter::dm::clusters::decl::on_off::HandlerAdaptor(runtime.lighting()),
@@ -900,6 +961,10 @@ impl DeviceBridgeModel {
             id if id == fan_control::FULL_CLUSTER.id => {
                 AsyncHandler::write(&fan_control::HandlerAsyncAdaptor(runtime.fan()), ctx).await
             }
+            id if id == thermostat::FULL_CLUSTER.id => {
+                AsyncHandler::write(&thermostat::HandlerAsyncAdaptor(runtime.thermostat()), ctx)
+                    .await
+            }
             id if id == lighting::ON_OFF_CLUSTER.id => Handler::write(
                 &rs_matter::dm::clusters::decl::on_off::HandlerAdaptor(runtime.lighting()),
                 ctx,
@@ -955,6 +1020,14 @@ impl DeviceBridgeModel {
                     groups::ClusterHandler::dataver_changed(&runtime.groups);
                 }
                 result
+            }
+            id if id == thermostat::FULL_CLUSTER.id => {
+                AsyncHandler::invoke(
+                    &thermostat::HandlerAsyncAdaptor(runtime.thermostat()),
+                    ctx,
+                    reply,
+                )
+                .await
             }
             id if id == lighting::SCENES_CLUSTER.id => {
                 self.invoke_scenes(runtime, ctx, reply).await
@@ -1226,6 +1299,9 @@ impl DeviceBridgeModel {
             if let Some(fan) = &runtime.fan {
                 fan.set_capabilities(capabilities.clone());
             }
+            if let Some(thermostat) = &runtime.thermostat {
+                thermostat.set_capabilities(capabilities.clone());
+            }
             for property in exposed_properties(&capabilities, &runtime.clusters) {
                 let current = self
                     .service
@@ -1246,6 +1322,7 @@ impl DeviceBridgeModel {
             if capabilities_changed {
                 self.notify_sensor_configuration(ctx, runtime);
                 self.notify_fan_configuration(ctx, runtime);
+                self.notify_thermostat_configuration(ctx, runtime);
             }
             if config_changed {
                 *runtime.config_signature.borrow_mut() =
@@ -1322,6 +1399,36 @@ impl DeviceBridgeModel {
                 ctx.notify_attr_changed(
                     runtime.allocation.endpoint,
                     fan_control::FULL_CLUSTER.id,
+                    attribute as _,
+                );
+            }
+        }
+    }
+
+    fn notify_thermostat_configuration(&self, ctx: &impl HandlerContext, runtime: &FeatureRuntime) {
+        if runtime.thermostat.is_none() {
+            return;
+        }
+        for attribute in [
+            thermostat::AttributeId::AbsMinHeatSetpointLimit,
+            thermostat::AttributeId::AbsMaxHeatSetpointLimit,
+            thermostat::AttributeId::AbsMinCoolSetpointLimit,
+            thermostat::AttributeId::AbsMaxCoolSetpointLimit,
+            thermostat::AttributeId::OccupiedHeatingSetpoint,
+            thermostat::AttributeId::OccupiedCoolingSetpoint,
+            thermostat::AttributeId::ControlSequenceOfOperation,
+            thermostat::AttributeId::SystemMode,
+        ] {
+            if runtime
+                .clusters
+                .iter()
+                .find(|cluster| cluster.id == thermostat::FULL_CLUSTER.id)
+                .and_then(|cluster| cluster.attribute(attribute as _))
+                .is_some()
+            {
+                ctx.notify_attr_changed(
+                    runtime.allocation.endpoint,
+                    thermostat::FULL_CLUSTER.id,
                     attribute as _,
                 );
             }
@@ -1633,6 +1740,13 @@ impl AsyncHandler for DeviceBridgeModel {
             {
                 fan.dataver().changed();
             }
+            if ctx
+                .cluster()
+                .is_none_or(|cluster| cluster == thermostat::FULL_CLUSTER.id)
+                && let Some(thermostat) = &runtime.thermostat
+            {
+                thermostat.dataver().changed();
+            }
             if let Some(cluster) = ctx.cluster() {
                 if let Some(dataver) = runtime
                     .lighting
@@ -1755,36 +1869,42 @@ impl AsyncHandler for DeviceBridgeModel {
 fn property_paths(runtime: &FeatureRuntime, property: Property) -> Vec<(u32, u32)> {
     let single = |path| vec![path];
     let paths = match property {
-        Property::Power | Property::FanSpeed if runtime.fan.is_some() => vec![
-            (
-                fan_control::FULL_CLUSTER.id,
-                fan_control::AttributeId::FanMode as _,
-            ),
-            (
-                fan_control::FULL_CLUSTER.id,
-                fan_control::AttributeId::PercentSetting as _,
-            ),
-            (
-                fan_control::FULL_CLUSTER.id,
-                fan_control::AttributeId::PercentCurrent as _,
-            ),
-            (
-                fan_control::FULL_CLUSTER.id,
-                fan_control::AttributeId::SpeedSetting as _,
-            ),
-            (
-                fan_control::FULL_CLUSTER.id,
-                fan_control::AttributeId::SpeedCurrent as _,
-            ),
-        ],
+        Property::Power => {
+            let mut paths = Vec::new();
+            if runtime.fan.is_some() {
+                paths.extend(fan_state_paths());
+            }
+            if runtime.thermostat.is_some() {
+                paths.extend(thermostat_state_paths());
+            }
+            if runtime.lighting.is_some() {
+                paths.push((
+                    lighting::ON_OFF_CLUSTER.id,
+                    rs_matter::dm::clusters::decl::on_off::AttributeId::OnOff as _,
+                ));
+            }
+            paths
+        }
+        Property::FanSpeed if runtime.fan.is_some() => fan_state_paths(),
         Property::Oscillation | Property::SwingMode if runtime.fan.is_some() => single((
             fan_control::FULL_CLUSTER.id,
             fan_control::AttributeId::RockSetting as _,
         )),
-        Property::Power => single((
-            lighting::ON_OFF_CLUSTER.id,
-            rs_matter::dm::clusters::decl::on_off::AttributeId::OnOff as _,
+        Property::CurrentTemperature => single((
+            thermostat::FULL_CLUSTER.id,
+            thermostat::AttributeId::LocalTemperature as _,
         )),
+        Property::TargetTemperature => vec![
+            (
+                thermostat::FULL_CLUSTER.id,
+                thermostat::AttributeId::OccupiedHeatingSetpoint as _,
+            ),
+            (
+                thermostat::FULL_CLUSTER.id,
+                thermostat::AttributeId::OccupiedCoolingSetpoint as _,
+            ),
+        ],
+        Property::HvacMode => thermostat_state_paths(),
         Property::Brightness => single((
             lighting::LEVEL_CLUSTER.id,
             rs_matter::dm::clusters::decl::level_control::AttributeId::CurrentLevel as _,
@@ -1840,6 +1960,30 @@ fn property_paths(runtime: &FeatureRuntime, property: Property) -> Vec<(u32, u32
                 .is_some()
         })
         .collect()
+}
+
+fn fan_state_paths() -> Vec<(u32, u32)> {
+    [
+        fan_control::AttributeId::FanMode,
+        fan_control::AttributeId::PercentSetting,
+        fan_control::AttributeId::PercentCurrent,
+        fan_control::AttributeId::SpeedSetting,
+        fan_control::AttributeId::SpeedCurrent,
+    ]
+    .into_iter()
+    .map(|attribute| (fan_control::FULL_CLUSTER.id, attribute as _))
+    .collect()
+}
+
+fn thermostat_state_paths() -> Vec<(u32, u32)> {
+    [
+        thermostat::AttributeId::SystemMode,
+        thermostat::AttributeId::OccupiedHeatingSetpoint,
+        thermostat::AttributeId::OccupiedCoolingSetpoint,
+    ]
+    .into_iter()
+    .map(|attribute| (thermostat::FULL_CLUSTER.id, attribute as _))
+    .collect()
 }
 
 fn shape_signature(device_types: &[DeviceType], clusters: &[Cluster<'_>]) -> String {
@@ -1931,6 +2075,18 @@ pub(super) fn config_signature(shape: &str, capabilities: &[Capability]) -> Stri
                     digest.update([*value as u8]);
                 }
             }
+            Capability::TargetTemperature(range) => {
+                digest.update(b"target-temperature");
+                digest.update(range.minimum.to_bits().to_be_bytes());
+                digest.update(range.maximum.to_bits().to_be_bytes());
+                digest.update(range.step.to_bits().to_be_bytes());
+            }
+            Capability::HvacModes(values) => {
+                digest.update(b"hvac-modes");
+                for value in values {
+                    digest.update([*value as u8]);
+                }
+            }
             _ => {}
         }
     }
@@ -1948,48 +2104,77 @@ fn topology_signature_for(runtimes: &[Rc<FeatureRuntime>]) -> String {
 }
 
 fn exposed_properties(capabilities: &[Capability], clusters: &[Cluster<'_>]) -> Vec<Property> {
-    capabilities
-        .iter()
-        .filter_map(|capability| {
-            let (property, cluster) = match capability {
-                Capability::Temperature(_) => {
-                    (Property::Temperature, sensors::TEMPERATURE_CLUSTER.id)
-                }
-                Capability::Humidity(_) => (Property::Humidity, sensors::HUMIDITY_CLUSTER.id),
-                Capability::Illuminance(_) => {
-                    (Property::Illuminance, sensors::ILLUMINANCE_CLUSTER.id)
-                }
-                Capability::Motion => (Property::Motion, occupancy_sensing::FULL_CLUSTER.id),
-                Capability::Occupancy => (Property::Occupancy, occupancy_sensing::FULL_CLUSTER.id),
-                Capability::Contact => (Property::Contact, sensors::BOOLEAN_STATE_CLUSTER.id),
-                Capability::Battery(_) => (Property::Battery, sensors::POWER_SOURCE_CLUSTER.id),
-                Capability::Power { .. }
-                    if clusters
-                        .iter()
-                        .any(|cluster| cluster.id == fan_control::FULL_CLUSTER.id) =>
-                {
-                    (Property::Power, fan_control::FULL_CLUSTER.id)
-                }
-                Capability::Power { .. } => (Property::Power, lighting::ON_OFF_CLUSTER.id),
-                Capability::FanSpeeds(_) => (Property::FanSpeed, fan_control::FULL_CLUSTER.id),
-                Capability::SwingModes(_) => (Property::Oscillation, fan_control::FULL_CLUSTER.id),
-                Capability::Brightness(_) => (Property::Brightness, lighting::LEVEL_CLUSTER.id),
-                Capability::ColorTemperature(_) => (
-                    Property::ColorTemperature,
-                    rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id,
-                ),
-                Capability::Color => (
-                    Property::Color,
-                    rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id,
-                ),
-                _ => return None,
-            };
-            clusters
-                .iter()
-                .any(|item| item.id == cluster)
-                .then_some(property)
-        })
-        .collect()
+    let has = |cluster| clusters.iter().any(|item| item.id == cluster);
+    let mut properties = Vec::new();
+    let mut push = |property| {
+        if !properties.contains(&property) {
+            properties.push(property);
+        }
+    };
+    for capability in capabilities {
+        match capability {
+            Capability::Temperature(_) if has(sensors::TEMPERATURE_CLUSTER.id) => {
+                push(Property::Temperature)
+            }
+            Capability::Temperature(_) if has(thermostat::FULL_CLUSTER.id) => {
+                push(Property::CurrentTemperature)
+            }
+            Capability::Humidity(_) if has(sensors::HUMIDITY_CLUSTER.id) => {
+                push(Property::Humidity)
+            }
+            Capability::Illuminance(_) if has(sensors::ILLUMINANCE_CLUSTER.id) => {
+                push(Property::Illuminance)
+            }
+            Capability::Motion if has(occupancy_sensing::FULL_CLUSTER.id) => push(Property::Motion),
+            Capability::Occupancy if has(occupancy_sensing::FULL_CLUSTER.id) => {
+                push(Property::Occupancy)
+            }
+            Capability::Contact if has(sensors::BOOLEAN_STATE_CLUSTER.id) => {
+                push(Property::Contact)
+            }
+            Capability::Battery(_) if has(sensors::POWER_SOURCE_CLUSTER.id) => {
+                push(Property::Battery)
+            }
+            Capability::Power { .. }
+                if has(fan_control::FULL_CLUSTER.id)
+                    || has(thermostat::FULL_CLUSTER.id)
+                    || has(lighting::ON_OFF_CLUSTER.id) =>
+            {
+                push(Property::Power)
+            }
+            Capability::TargetTemperature(_) if has(thermostat::FULL_CLUSTER.id) => {
+                push(Property::TargetTemperature)
+            }
+            Capability::HvacModes(_) if has(thermostat::FULL_CLUSTER.id) => {
+                push(Property::HvacMode)
+            }
+            Capability::FanSpeeds(_) if has(fan_control::FULL_CLUSTER.id) => {
+                push(Property::FanSpeed)
+            }
+            Capability::SwingModes(_) if has(fan_control::FULL_CLUSTER.id) => {
+                push(if has(thermostat::FULL_CLUSTER.id) {
+                    Property::SwingMode
+                } else {
+                    Property::Oscillation
+                })
+            }
+            Capability::Brightness(_) if has(lighting::LEVEL_CLUSTER.id) => {
+                push(Property::Brightness)
+            }
+            Capability::ColorTemperature(_)
+                if has(rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id) =>
+            {
+                push(Property::ColorTemperature)
+            }
+            Capability::Color
+                if has(rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id) =>
+            {
+                push(Property::Color)
+            }
+            _ => {}
+        }
+    }
+    properties
 }
 
 fn hex_digest(bytes: &[u8]) -> String {

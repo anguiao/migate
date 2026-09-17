@@ -167,6 +167,21 @@ impl FanHandler {
         support
     }
 
+    fn current_rocking(&self) -> Option<bool> {
+        if self.feature.role == crate::device::FeatureRole::Climate {
+            match self.current(Property::SwingMode) {
+                Some(PropertyValue::SwingMode(SwingMode::Off)) => Some(false),
+                Some(PropertyValue::SwingMode(_)) => Some(true),
+                _ => None,
+            }
+        } else {
+            match self.current(Property::Oscillation) {
+                Some(PropertyValue::Oscillation(value)) => Some(value),
+                _ => None,
+            }
+        }
+    }
+
     fn speed_index(&self) -> Result<Option<u8>, Error> {
         if self.power() == Some(false) {
             return Ok(Some(0));
@@ -368,9 +383,9 @@ impl fan_control::ClusterAsyncHandler for FanHandler {
     }
 
     async fn rock_setting(&self, _ctx: impl ReadContext) -> Result<fan_control::RockBitmap, Error> {
-        match self.current(Property::Oscillation) {
-            Some(PropertyValue::Oscillation(false)) => Ok(fan_control::RockBitmap::empty()),
-            Some(PropertyValue::Oscillation(true)) => Ok(self.rock_support_value()),
+        match self.current_rocking() {
+            Some(false) => Ok(fan_control::RockBitmap::empty()),
+            Some(true) => Ok(self.rock_support_value()),
             _ => Err(ErrorCode::Failure.into()),
         }
     }
@@ -422,8 +437,17 @@ impl fan_control::ClusterAsyncHandler for FanHandler {
         if !(value & !support).is_empty() {
             return Err(ErrorCode::ConstraintError.into());
         }
-        self.command_batch(vec![DeviceCommand::SetOscillation(!value.is_empty())])
-            .await
+        let enabled = !value.is_empty();
+        let command = if self.feature.role == crate::device::FeatureRole::Climate {
+            DeviceCommand::SetSwingMode(if enabled {
+                SwingMode::Vertical
+            } else {
+                SwingMode::Off
+            })
+        } else {
+            DeviceCommand::SetOscillation(enabled)
+        };
+        self.command_batch(vec![command]).await
     }
 
     async fn handle_step(

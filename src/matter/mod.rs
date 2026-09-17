@@ -8,6 +8,7 @@ mod model;
 mod pairing;
 mod sensors;
 mod storage;
+mod thermostat;
 
 pub use device_bridge::{DeviceBridge, DeviceBridgeModel};
 pub use pairing::PairingEvent;

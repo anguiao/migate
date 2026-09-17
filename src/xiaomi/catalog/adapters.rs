@@ -159,25 +159,31 @@ pub(super) fn compile_climate(
         .iter()
         .find(|service| service.kind == "fan-control")
     {
-        if let Some(property) = writable_property(fan, "fan-level") {
+        if let Some(property) =
+            writable_property(fan, "fan-level").filter(|property| integer_format(property.format))
+        {
             let values = fan_levels(property);
-            feature.capabilities.0.push(Capability::FanSpeeds(
-                values.iter().map(|(_, value)| *value).collect(),
-            ));
-            feature.properties.push(mapping(
-                fan.iid,
-                property,
-                Property::FanSpeed,
-                ValueCodec::FanSpeed(values.clone()),
-            ));
-            feature.commands.push(command(
-                fan.iid,
-                property,
-                CommandKind::FanSpeed,
-                ValueCodec::FanSpeed(values),
-            ));
+            if !values.is_empty() {
+                feature.capabilities.0.push(Capability::FanSpeeds(
+                    values.iter().map(|(_, value)| *value).collect(),
+                ));
+                feature.properties.push(mapping(
+                    fan.iid,
+                    property,
+                    Property::FanSpeed,
+                    ValueCodec::FanSpeed(values.clone()),
+                ));
+                feature.commands.push(command(
+                    fan.iid,
+                    property,
+                    CommandKind::FanSpeed,
+                    ValueCodec::FanSpeed(values),
+                ));
+            }
         }
-        if let Some(property) = writable_property(fan, "vertical-swing") {
+        if let Some(property) =
+            writable_property(fan, "vertical-swing").filter(|property| property.format == "bool")
+        {
             feature.capabilities.0.push(Capability::SwingModes(vec![
                 SwingMode::Off,
                 SwingMode::Vertical,
