@@ -1,5 +1,5 @@
 use super::{
-    common, lighting, model, sensors,
+    common, fan, lighting, model, sensors,
     storage::{EndpointSceneStore, StoreAdapter, TopologyStore},
 };
 use crate::{
@@ -23,9 +23,9 @@ use rs_matter::{
         MatchContext, Metadata, Node, OperationContext, OwnAttrChangeNotifier, OwnEventEmitter,
         ReadContext, ReadReply, Reply, WriteContext,
         clusters::decl::{
-            boolean_state, bridged_device_basic_information as bridged, illuminance_measurement,
-            occupancy_sensing, power_source, relative_humidity_measurement,
-            temperature_measurement,
+            boolean_state, bridged_device_basic_information as bridged, fan_control,
+            illuminance_measurement, occupancy_sensing, power_source,
+            relative_humidity_measurement, temperature_measurement,
         },
         clusters::{desc, groups, identify, scenes},
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
@@ -99,6 +99,10 @@ const DEV_TYPE_EXTENDED_COLOR_LIGHT: DeviceType = DeviceType {
 };
 const DEV_TYPE_ON_OFF_PLUGIN_UNIT: DeviceType = DeviceType {
     dtype: 0x010a,
+    drev: 3,
+};
+const DEV_TYPE_FAN: DeviceType = DeviceType {
+    dtype: 0x002b,
     drev: 3,
 };
 
@@ -335,6 +339,7 @@ struct FeatureRuntime {
     common: common::CommonHandler,
     sensor: sensors::SensorHandler,
     lighting: Option<lighting::LightingHandler>,
+    fan: Option<fan::FanHandler>,
     groups: groups::GroupsHandler<'static>,
     scenes: scenes::ScenesState<33, 96>,
     scenes_dataver: Dataver,
@@ -345,6 +350,12 @@ impl FeatureRuntime {
         self.lighting
             .as_ref()
             .expect("lighting clusters require a lighting handler")
+    }
+
+    fn fan(&self) -> &fan::FanHandler {
+        self.fan
+            .as_ref()
+            .expect("fan clusters require a fan handler")
     }
 }
 
@@ -462,6 +473,9 @@ impl DeviceBridgeModel {
                 | FeatureRole::MotionSensor
                 | FeatureRole::OccupancySensor
                 | FeatureRole::ContactSensor
+                | FeatureRole::Fan
+                | FeatureRole::BathHeaterSupplyFan
+                | FeatureRole::BathHeaterExhaustFan
         ) {
             return Ok(None);
         }
@@ -505,12 +519,20 @@ impl DeviceBridgeModel {
                 .iter()
                 .any(|cap| matches!(cap, Capability::ColorTemperature(_)));
         let has_xy = has_power && capabilities.contains(&Capability::Color);
+        let has_fan = matches!(
+            allocation.feature.role,
+            FeatureRole::Fan | FeatureRole::BathHeaterSupplyFan | FeatureRole::BathHeaterExhaustFan
+        ) && capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::Power { writable: true }));
+        let (fan_multi_speed, fan_auto, fan_rocking) = fan::capability_shape(&capabilities);
         if !(has_temperature
             || has_humidity
             || has_lux
             || has_occupancy
             || has_contact
-            || has_power)
+            || has_power
+            || has_fan)
         {
             return Ok(None);
         }
@@ -538,6 +560,13 @@ impl DeviceBridgeModel {
             } else {
                 device_types.push(DEV_TYPE_ON_OFF_LIGHT);
             }
+        }
+        if has_fan {
+            device_types.push(DEV_TYPE_FAN);
+            clusters.extend([
+                lighting::GROUPS_CLUSTER,
+                fan::cluster(fan_multi_speed, fan_auto, fan_rocking),
+            ]);
         }
         if has_temperature {
             device_types.push(DEV_TYPE_TEMPERATURE_SENSOR);
@@ -619,6 +648,14 @@ impl DeviceBridgeModel {
                     capabilities.clone(),
                     allocation.endpoint,
                     seed.wrapping_add(9),
+                )
+            }),
+            fan: has_fan.then(|| {
+                fan::FanHandler::new(
+                    self.service.clone(),
+                    allocation.feature.clone(),
+                    capabilities.clone(),
+                    seed.wrapping_add(10),
                 )
             }),
             groups: groups::GroupsHandler::new(Dataver::new(seed.wrapping_add(12))),
@@ -728,6 +765,10 @@ impl DeviceBridgeModel {
             id if id == sensors::POWER_SOURCE_CLUSTER.id => {
                 Handler::read(&power_source::HandlerAdaptor(&runtime.sensor), ctx, reply)
             }
+            id if id == fan_control::FULL_CLUSTER.id => {
+                AsyncHandler::read(&fan_control::HandlerAsyncAdaptor(runtime.fan()), ctx, reply)
+                    .await
+            }
             id if id == lighting::ON_OFF_CLUSTER.id => Handler::read(
                 &rs_matter::dm::clusters::decl::on_off::HandlerAdaptor(runtime.lighting()),
                 ctx,
@@ -832,7 +873,7 @@ impl DeviceBridgeModel {
         }
     }
 
-    fn dispatch_write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+    async fn dispatch_write(&self, ctx: impl WriteContext) -> Result<(), Error> {
         let endpoint = ctx.endpt().ok_or(ErrorCode::AttributeNotFound)?;
         let cluster = ctx.cluster().ok_or(ErrorCode::AttributeNotFound)?;
         let runtimes = self.snapshot();
@@ -855,6 +896,9 @@ impl DeviceBridgeModel {
             }
             id if id == common::BRIDGED_CLUSTER.id => {
                 Handler::write(&bridged::HandlerAdaptor(&runtime.common), ctx)
+            }
+            id if id == fan_control::FULL_CLUSTER.id => {
+                AsyncHandler::write(&fan_control::HandlerAsyncAdaptor(runtime.fan()), ctx).await
             }
             id if id == lighting::ON_OFF_CLUSTER.id => Handler::write(
                 &rs_matter::dm::clusters::decl::on_off::HandlerAdaptor(runtime.lighting()),
@@ -1066,13 +1110,15 @@ impl DeviceBridgeModel {
                         continue;
                     }
                     let previous = exposed.insert(property, current.clone()).flatten();
-                    if matches!(
-                        property,
-                        Property::Power
-                            | Property::Brightness
-                            | Property::ColorTemperature
-                            | Property::Color
-                    ) {
+                    if runtime.lighting.is_some()
+                        && matches!(
+                            property,
+                            Property::Power
+                                | Property::Brightness
+                                | Property::ColorTemperature
+                                | Property::Color
+                        )
+                    {
                         use rs_matter::dm::clusters::scenes::SceneInvalidator as _;
                         let scene_change = runtime.lighting().scene_state_changed();
                         if scene_change < 0 {
@@ -1088,10 +1134,12 @@ impl DeviceBridgeModel {
                     }
                     let report_property = property != Property::Brightness
                         || runtime
-                            .lighting()
+                            .lighting
+                            .as_ref()
+                            .expect("brightness requires a lighting handler")
                             .should_report_brightness(previous.as_ref(), current.as_ref());
                     if report_property {
-                        for (cluster, attribute) in property_paths(property) {
+                        for (cluster, attribute) in property_paths(runtime, property) {
                             ctx.notify_attr_changed(endpoint, cluster, attribute);
                         }
                     }
@@ -1175,6 +1223,9 @@ impl DeviceBridgeModel {
             if let Some(lighting) = &runtime.lighting {
                 lighting.set_capabilities(capabilities.clone());
             }
+            if let Some(fan) = &runtime.fan {
+                fan.set_capabilities(capabilities.clone());
+            }
             for property in exposed_properties(&capabilities, &runtime.clusters) {
                 let current = self
                     .service
@@ -1187,13 +1238,14 @@ impl DeviceBridgeModel {
                 let mut exposed = runtime.exposed_values.borrow_mut();
                 if exposed.get(&property) != Some(&current) {
                     exposed.insert(property, current);
-                    for (cluster, attribute) in property_paths(property) {
+                    for (cluster, attribute) in property_paths(runtime, property) {
                         ctx.notify_attr_changed(runtime.allocation.endpoint, cluster, attribute);
                     }
                 }
             }
             if capabilities_changed {
                 self.notify_sensor_configuration(ctx, runtime);
+                self.notify_fan_configuration(ctx, runtime);
             }
             if config_changed {
                 *runtime.config_signature.borrow_mut() =
@@ -1241,6 +1293,37 @@ impl DeviceBridgeModel {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn notify_fan_configuration(&self, ctx: &impl HandlerContext, runtime: &FeatureRuntime) {
+        if runtime.fan.is_none() {
+            return;
+        }
+        for attribute in [
+            fan_control::AttributeId::FanMode,
+            fan_control::AttributeId::FanModeSequence,
+            fan_control::AttributeId::PercentSetting,
+            fan_control::AttributeId::PercentCurrent,
+            fan_control::AttributeId::SpeedMax,
+            fan_control::AttributeId::SpeedSetting,
+            fan_control::AttributeId::SpeedCurrent,
+            fan_control::AttributeId::RockSupport,
+            fan_control::AttributeId::RockSetting,
+        ] {
+            if runtime
+                .clusters
+                .iter()
+                .find(|cluster| cluster.id == fan_control::FULL_CLUSTER.id)
+                .and_then(|cluster| cluster.attribute(attribute as _))
+                .is_some()
+            {
+                ctx.notify_attr_changed(
+                    runtime.allocation.endpoint,
+                    fan_control::FULL_CLUSTER.id,
+                    attribute as _,
+                );
             }
         }
     }
@@ -1478,7 +1561,7 @@ impl AsyncHandler for DeviceBridgeModel {
         true
     }
     fn write_awaits(&self, _ctx: impl WriteContext) -> bool {
-        false
+        true
     }
     fn invoke_awaits(&self, _ctx: impl InvokeContext) -> bool {
         true
@@ -1491,7 +1574,7 @@ impl AsyncHandler for DeviceBridgeModel {
         self.dispatch_read(ctx, reply)
     }
     fn write(&self, ctx: impl WriteContext) -> impl Future<Output = Result<(), Error>> {
-        future::ready(self.dispatch_write(ctx))
+        self.dispatch_write(ctx)
     }
     fn invoke(
         &self,
@@ -1542,6 +1625,13 @@ impl AsyncHandler for DeviceBridgeModel {
                 .is_none_or(|cluster| cluster == lighting::SCENES_CLUSTER.id)
             {
                 runtime.scenes_dataver.changed();
+            }
+            if ctx
+                .cluster()
+                .is_none_or(|cluster| cluster == fan_control::FULL_CLUSTER.id)
+                && let Some(fan) = &runtime.fan
+            {
+                fan.dataver().changed();
             }
             if let Some(cluster) = ctx.cluster() {
                 if let Some(dataver) = runtime
@@ -1662,9 +1752,35 @@ impl AsyncHandler for DeviceBridgeModel {
     }
 }
 
-fn property_paths(property: Property) -> Vec<(u32, u32)> {
+fn property_paths(runtime: &FeatureRuntime, property: Property) -> Vec<(u32, u32)> {
     let single = |path| vec![path];
-    match property {
+    let paths = match property {
+        Property::Power | Property::FanSpeed if runtime.fan.is_some() => vec![
+            (
+                fan_control::FULL_CLUSTER.id,
+                fan_control::AttributeId::FanMode as _,
+            ),
+            (
+                fan_control::FULL_CLUSTER.id,
+                fan_control::AttributeId::PercentSetting as _,
+            ),
+            (
+                fan_control::FULL_CLUSTER.id,
+                fan_control::AttributeId::PercentCurrent as _,
+            ),
+            (
+                fan_control::FULL_CLUSTER.id,
+                fan_control::AttributeId::SpeedSetting as _,
+            ),
+            (
+                fan_control::FULL_CLUSTER.id,
+                fan_control::AttributeId::SpeedCurrent as _,
+            ),
+        ],
+        Property::Oscillation | Property::SwingMode if runtime.fan.is_some() => single((
+            fan_control::FULL_CLUSTER.id,
+            fan_control::AttributeId::RockSetting as _,
+        )),
         Property::Power => single((
             lighting::ON_OFF_CLUSTER.id,
             rs_matter::dm::clusters::decl::on_off::AttributeId::OnOff as _,
@@ -1712,7 +1828,18 @@ fn property_paths(property: Property) -> Vec<(u32, u32)> {
             power_source::AttributeId::BatPercentRemaining as _,
         )),
         _ => Vec::new(),
-    }
+    };
+    paths
+        .into_iter()
+        .filter(|(cluster, attribute)| {
+            runtime
+                .clusters
+                .iter()
+                .find(|candidate| candidate.id == *cluster)
+                .and_then(|candidate| candidate.attribute(*attribute))
+                .is_some()
+        })
+        .collect()
 }
 
 fn shape_signature(device_types: &[DeviceType], clusters: &[Cluster<'_>]) -> String {
@@ -1790,6 +1917,20 @@ pub(super) fn config_signature(shape: &str, capabilities: &[Capability]) -> Stri
                     digest.update(maximum.to_be_bytes());
                 }
             }
+            Capability::FanSpeeds(values) => {
+                digest.update(b"fan-speeds");
+                digest.update((values.len() as u32).to_be_bytes());
+                for value in values {
+                    digest.update(value.to_be_bytes());
+                }
+            }
+            Capability::SwingModes(values) => {
+                digest.update(b"swing-modes");
+                digest.update((values.len() as u32).to_be_bytes());
+                for value in values {
+                    digest.update([*value as u8]);
+                }
+            }
             _ => {}
         }
     }
@@ -1822,7 +1963,16 @@ fn exposed_properties(capabilities: &[Capability], clusters: &[Cluster<'_>]) -> 
                 Capability::Occupancy => (Property::Occupancy, occupancy_sensing::FULL_CLUSTER.id),
                 Capability::Contact => (Property::Contact, sensors::BOOLEAN_STATE_CLUSTER.id),
                 Capability::Battery(_) => (Property::Battery, sensors::POWER_SOURCE_CLUSTER.id),
+                Capability::Power { .. }
+                    if clusters
+                        .iter()
+                        .any(|cluster| cluster.id == fan_control::FULL_CLUSTER.id) =>
+                {
+                    (Property::Power, fan_control::FULL_CLUSTER.id)
+                }
                 Capability::Power { .. } => (Property::Power, lighting::ON_OFF_CLUSTER.id),
+                Capability::FanSpeeds(_) => (Property::FanSpeed, fan_control::FULL_CLUSTER.id),
+                Capability::SwingModes(_) => (Property::Oscillation, fan_control::FULL_CLUSTER.id),
                 Capability::Brightness(_) => (Property::Brightness, lighting::LEVEL_CLUSTER.id),
                 Capability::ColorTemperature(_) => (
                     Property::ColorTemperature,

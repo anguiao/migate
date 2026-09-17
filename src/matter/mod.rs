@@ -1,6 +1,7 @@
 mod bridged_info;
 mod common;
 mod device_bridge;
+mod fan;
 mod light;
 mod lighting;
 mod model;

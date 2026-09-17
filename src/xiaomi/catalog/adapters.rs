@@ -283,26 +283,34 @@ pub(super) fn compile_fan(services: &[Service<'_>], output: &mut Vec<FeatureDesc
     let Some(mut feature) = powered_feature(service, FeatureRole::Fan) else {
         return;
     };
-    if let Some(property) = writable_property(service, "fan-level") {
+    if let Some(property) =
+        writable_property(service, "fan-level").filter(|property| integer_format(property.format))
+    {
         let values = fan_levels(property);
-        feature.capabilities.0.push(Capability::FanSpeeds(
-            values.iter().map(|(_, value)| *value).collect(),
-        ));
-        feature.properties.push(mapping(
-            service.iid,
-            property,
-            Property::FanSpeed,
-            ValueCodec::FanSpeed(values.clone()),
-        ));
-        feature.commands.push(command(
-            service.iid,
-            property,
-            CommandKind::FanSpeed,
-            ValueCodec::FanSpeed(values),
-        ));
+        if !values.is_empty() {
+            feature.capabilities.0.push(Capability::FanSpeeds(
+                values.iter().map(|(_, value)| *value).collect(),
+            ));
+            feature.properties.push(mapping(
+                service.iid,
+                property,
+                Property::FanSpeed,
+                ValueCodec::FanSpeed(values.clone()),
+            ));
+            feature.commands.push(command(
+                service.iid,
+                property,
+                CommandKind::FanSpeed,
+                ValueCodec::FanSpeed(values),
+            ));
+        }
     }
     if let Some(property) = writable_property(service, "horizontal-swing")
-        .or_else(|| writable_property(service, "vertical-swing"))
+        .filter(|property| property.format == "bool")
+        .or_else(|| {
+            writable_property(service, "vertical-swing")
+                .filter(|property| property.format == "bool")
+        })
     {
         let axis = if property.kind == "vertical-swing" {
             SwingMode::Vertical
@@ -1030,6 +1038,12 @@ fn fan_levels(property: &PropertySpec<'_>) -> Vec<(i64, u16)> {
             (*raw, core)
         })
         .collect()
+}
+fn integer_format(format: &str) -> bool {
+    matches!(
+        format,
+        "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
+    )
 }
 fn hvac_mode(value: &str) -> Option<HvacMode> {
     match value.to_ascii_lowercase().as_str() {

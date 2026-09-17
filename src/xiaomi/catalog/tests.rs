@@ -494,6 +494,75 @@ fn curtain_vacuum_and_fan_commands_use_real_discrete_endpoints() {
 }
 
 #[test]
+fn invalid_optional_fan_speed_does_not_advertise_empty_speed_capability() {
+    for (format, remove_levels) in [("uint8", true), ("string", false)] {
+        let mut document: serde_json::Value =
+            serde_json::from_str(&public_spec("dmaker.fan.p5c")).unwrap();
+        for service in document["services"].as_array_mut().unwrap() {
+            if !service["type"].as_str().unwrap().contains(":service:fan:") {
+                continue;
+            }
+            for property in service["properties"].as_array_mut().unwrap() {
+                if property["type"]
+                    .as_str()
+                    .unwrap()
+                    .contains(":property:fan-level:")
+                {
+                    property["format"] = json!(format);
+                    if remove_levels {
+                        property.as_object_mut().unwrap().remove("value-range");
+                        property.as_object_mut().unwrap().remove("value-list");
+                    }
+                }
+            }
+        }
+        let compiled = compile_spec("dmaker.fan.p5c", &document.to_string()).unwrap();
+        let feature = compiled
+            .features
+            .iter()
+            .find(|feature| feature.role == FeatureRole::Fan)
+            .unwrap();
+        assert!(
+            !feature
+                .capabilities
+                .0
+                .iter()
+                .any(|capability| matches!(capability, Capability::FanSpeeds(_)))
+        );
+    }
+}
+
+#[test]
+fn non_boolean_swing_does_not_advertise_boolean_control() {
+    let mut wrong_swing: serde_json::Value =
+        serde_json::from_str(&public_spec("dmaker.fan.p5c")).unwrap();
+    for service in wrong_swing["services"].as_array_mut().unwrap() {
+        for property in service["properties"].as_array_mut().unwrap() {
+            if property["type"]
+                .as_str()
+                .unwrap()
+                .contains(":property:horizontal-swing:")
+            {
+                property["format"] = json!("string");
+            }
+        }
+    }
+    let compiled = compile_spec("dmaker.fan.p5c", &wrong_swing.to_string()).unwrap();
+    let feature = compiled
+        .features
+        .iter()
+        .find(|feature| feature.role == FeatureRole::Fan)
+        .unwrap();
+    assert!(
+        !feature
+            .capabilities
+            .0
+            .iter()
+            .any(|capability| matches!(capability, Capability::SwingModes(_)))
+    );
+}
+
+#[test]
 fn vacuum_actions_require_empty_inputs_and_dock_capability_is_independent() {
     let mut parameterized = service(2, "vacuum", json!([]));
     parameterized["actions"] = json!([
@@ -829,6 +898,13 @@ fn decoders_reject_invalid_wire_values_and_do_not_confirm_targets() {
 
 #[test]
 fn generic_vertical_fan_reports_vertical_swing() {
+    let mut invalid_horizontal = property(
+        2,
+        "horizontal-swing",
+        "string",
+        &["read", "write", "notify"],
+    );
+    invalid_horizontal["description"] = json!("Invalid horizontal swing");
     let mut swing = property(3, "vertical-swing", "bool", &["read", "write", "notify"]);
     swing["description"] = json!("Vertical swing");
     let document = spec(
@@ -838,6 +914,7 @@ fn generic_vertical_fan_reports_vertical_swing() {
             "fan",
             json!([
                 property(1, "on", "bool", &["read", "write", "notify"]),
+                invalid_horizontal,
                 swing
             ])
         )]),
