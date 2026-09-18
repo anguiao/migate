@@ -687,12 +687,20 @@ pub(super) fn compile_vacuum(services: &[Service<'_>], output: &mut Vec<FeatureD
             ValueCodec::VacuumState(enum_map(&status.values, vacuum_state)),
         ));
     }
-    if let Some(fault) = readable_property(service, "fault") {
+    if let Some(fault) = readable_property(service, "fault").filter(|property| {
+        integer_format(property.format)
+            && (property.range.is_some_and(|(minimum, maximum, step)| {
+                minimum.fract() == 0. && maximum.fract() == 0. && step.fract() == 0.
+            }) || !property.values.is_empty())
+    }) {
         feature.properties.push(mapping(
             service.iid,
             fault,
             Property::VacuumFault,
-            ValueCodec::Fault,
+            ValueCodec::Fault {
+                range: fault.range,
+                values: fault.values.iter().map(|(value, _)| *value).collect(),
+            },
         ));
     }
     attach_battery(services, &mut feature);

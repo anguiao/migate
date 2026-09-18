@@ -7,6 +7,7 @@ mod light;
 mod lighting;
 mod model;
 mod pairing;
+mod rvc;
 mod sensors;
 mod storage;
 mod thermostat;

@@ -159,7 +159,10 @@ pub(super) enum ValueCodec {
     },
     VacuumClean(Vec<(i64, VacuumCleanMode)>),
     VacuumState(Vec<(i64, VacuumOperationalState)>),
-    Fault,
+    Fault {
+        range: Option<(f64, f64, f64)>,
+        values: Vec<i64>,
+    },
     Identity,
 }
 
@@ -565,11 +568,13 @@ impl ValueCodec {
                     .find(|(item, _)| *item == raw)
                     .map(|(_, value)| PropertyValue::VacuumOperationalState(*value))
             }),
-            Self::Fault => Some(PropertyValue::VacuumFault(match value {
-                WireValue::String(value) => value.clone(),
-                WireValue::Integer(value) => value.to_string(),
-                _ => return None,
-            })),
+            Self::Fault { range, values } => integer_value(value)
+                .filter(|value| {
+                    range.is_some_and(|(minimum, maximum, step)| {
+                        valid_number(*value as f64, minimum, maximum, step)
+                    }) || values.contains(value)
+                })
+                .map(|value| PropertyValue::VacuumFault(value.to_string())),
             Self::Identity => None,
         }
     }

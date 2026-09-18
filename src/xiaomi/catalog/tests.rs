@@ -997,6 +997,93 @@ fn decoders_reject_invalid_wire_values_and_do_not_confirm_targets() {
 }
 
 #[test]
+fn vacuum_fault_decoder_honors_integer_format_and_declared_range() {
+    let vacuum = compile_spec("xiaomi.vacuum.c104", &public_spec("xiaomi.vacuum.c104")).unwrap();
+    let feature = &vacuum.features[0];
+
+    for value in [
+        WireValue::String("0".into()),
+        WireValue::Number(1.0),
+        WireValue::Integer(-1),
+        WireValue::Integer(3001),
+    ] {
+        assert_eq!(
+            feature.decode(2, 2, &value),
+            Some((Property::VacuumFault, None))
+        );
+    }
+    assert_eq!(
+        feature.decode(2, 2, &WireValue::Integer(0)),
+        Some((
+            Property::VacuumFault,
+            Some(PropertyValue::VacuumFault("0".into()))
+        ))
+    );
+    assert_eq!(
+        feature.decode(2, 2, &WireValue::Integer(3000)),
+        Some((
+            Property::VacuumFault,
+            Some(PropertyValue::VacuumFault("3000".into()))
+        ))
+    );
+
+    let mut document: Value = serde_json::from_str(&public_spec("xiaomi.vacuum.c104")).unwrap();
+    let fault = document["services"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|service| service["iid"] == 2)
+        .unwrap()["properties"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|property| property["iid"] == 2)
+        .unwrap();
+    fault.as_object_mut().unwrap().remove("value-range");
+    fault["value-list"] = json!([
+        {"value": 0, "description": "No Fault"},
+        {"value": 17, "description": "Vendor Fault"}
+    ]);
+    let enum_vacuum = compile_spec("xiaomi.vacuum.c104", &document.to_string()).unwrap();
+    assert_eq!(
+        enum_vacuum.features[0].decode(2, 2, &WireValue::Integer(17)),
+        Some((
+            Property::VacuumFault,
+            Some(PropertyValue::VacuumFault("17".into()))
+        ))
+    );
+    assert_eq!(
+        enum_vacuum.features[0].decode(2, 2, &WireValue::Integer(18)),
+        Some((Property::VacuumFault, None))
+    );
+    let mut ranged: Value = serde_json::from_str(&public_spec("xiaomi.vacuum.c104")).unwrap();
+    let fault = ranged["services"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|service| service["iid"] == 2)
+        .unwrap()["properties"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|property| property["iid"] == 2)
+        .unwrap();
+    fault["value-range"] = json!([0, 3000, 2]);
+    let ranged = compile_spec("xiaomi.vacuum.c104", &ranged.to_string()).unwrap();
+    assert_eq!(
+        ranged.features[0].decode(2, 2, &WireValue::Integer(17)),
+        Some((Property::VacuumFault, None))
+    );
+    assert_eq!(
+        ranged.features[0].decode(2, 2, &WireValue::Integer(18)),
+        Some((
+            Property::VacuumFault,
+            Some(PropertyValue::VacuumFault("18".into()))
+        ))
+    );
+}
+
+#[test]
 fn generic_vertical_fan_reports_vertical_swing() {
     let mut invalid_horizontal = property(
         2,

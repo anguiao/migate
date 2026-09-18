@@ -1,5 +1,5 @@
 use super::{
-    common, curtain, fan, lighting, model, sensors,
+    common, curtain, fan, lighting, model, rvc, sensors,
     storage::{EndpointSceneStore, StoreAdapter, TopologyStore},
     thermostat as thermostat_handler,
 };
@@ -26,7 +26,8 @@ use rs_matter::{
         clusters::decl::{
             boolean_state, bridged_device_basic_information as bridged, fan_control,
             illuminance_measurement, occupancy_sensing, power_source,
-            relative_humidity_measurement, temperature_measurement, thermostat, window_covering,
+            relative_humidity_measurement, rvc_clean_mode, rvc_operational_state, rvc_run_mode,
+            temperature_measurement, thermostat, window_covering,
         },
         clusters::{desc, groups, identify, scenes},
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
@@ -112,6 +113,10 @@ const DEV_TYPE_THERMOSTAT: DeviceType = DeviceType {
 };
 const DEV_TYPE_WINDOW_COVERING: DeviceType = DeviceType {
     dtype: 0x0202,
+    drev: 3,
+};
+const DEV_TYPE_ROBOTIC_VACUUM_CLEANER: DeviceType = DeviceType {
+    dtype: 0x0074,
     drev: 3,
 };
 
@@ -351,6 +356,7 @@ struct FeatureRuntime {
     fan: Option<fan::FanHandler>,
     thermostat: Option<thermostat_handler::ThermostatHandler>,
     curtain: Option<curtain::CurtainHandler>,
+    rvc: Option<rvc::RvcHandler>,
     groups: groups::GroupsHandler<'static>,
     scenes: scenes::ScenesState<33, 96>,
     scenes_dataver: Dataver,
@@ -379,6 +385,12 @@ impl FeatureRuntime {
         self.curtain
             .as_ref()
             .expect("window covering cluster requires a curtain handler")
+    }
+
+    fn rvc(&self) -> &rvc::RvcHandler {
+        self.rvc
+            .as_ref()
+            .expect("RVC clusters require an RVC handler")
     }
 }
 
@@ -485,26 +497,6 @@ impl DeviceBridgeModel {
         name: String,
         capabilities: Vec<Capability>,
     ) -> Result<Option<FeatureRuntime>, StorageError> {
-        if !matches!(
-            allocation.feature.role,
-            FeatureRole::Light
-                | FeatureRole::BathHeaterLight
-                | FeatureRole::Load
-                | FeatureRole::TemperatureSensor
-                | FeatureRole::HumiditySensor
-                | FeatureRole::IlluminanceSensor
-                | FeatureRole::MotionSensor
-                | FeatureRole::OccupancySensor
-                | FeatureRole::ContactSensor
-                | FeatureRole::Fan
-                | FeatureRole::BathHeaterSupplyFan
-                | FeatureRole::BathHeaterExhaustFan
-                | FeatureRole::Climate
-                | FeatureRole::BathHeaterClimate
-                | FeatureRole::Curtain
-        ) {
-            return Ok(None);
-        }
         let mut device_types = Vec::new();
         let mut clusters = vec![desc::CLUSTER_ENDPOINT_UNIQUE_ID, common::BRIDGED_CLUSTER];
         let has_temperature = allocation.feature.role == FeatureRole::TemperatureSensor
@@ -575,6 +567,13 @@ impl DeviceBridgeModel {
                     matches!(capability, Capability::CurtainPosition(range) if range.accepts(0.0) && range.accepts(100.0))
                 })
             && capabilities.contains(&Capability::CurtainStop);
+        let has_rvc = allocation.feature.role == FeatureRole::Vacuum
+            && capabilities.contains(&Capability::VacuumControl);
+        let has_rvc_clean = has_rvc
+            && capabilities.iter().any(|capability| {
+                matches!(capability, Capability::VacuumCleanModes(values) if !values.is_empty())
+            });
+        let has_rvc_dock = has_rvc && capabilities.contains(&Capability::VacuumDock);
         if !(has_temperature
             || has_humidity
             || has_lux
@@ -583,7 +582,8 @@ impl DeviceBridgeModel {
             || has_power
             || has_fan
             || has_thermostat
-            || has_curtain)
+            || has_curtain
+            || has_rvc)
         {
             return Ok(None);
         }
@@ -636,6 +636,14 @@ impl DeviceBridgeModel {
         if has_curtain {
             device_types.push(DEV_TYPE_WINDOW_COVERING);
             clusters.extend([lighting::GROUPS_CLUSTER, curtain::CLUSTER]);
+        }
+        if has_rvc {
+            device_types.push(DEV_TYPE_ROBOTIC_VACUUM_CLEANER);
+            clusters.push(rvc::RUN_CLUSTER);
+            if has_rvc_clean {
+                clusters.push(rvc::CLEAN_CLUSTER);
+            }
+            clusters.push(rvc::operational_cluster(has_rvc_dock));
         }
         if has_temperature {
             device_types.push(DEV_TYPE_TEMPERATURE_SENSOR);
@@ -741,6 +749,15 @@ impl DeviceBridgeModel {
                     allocation.feature.clone(),
                     capabilities.clone(),
                     seed.wrapping_add(14),
+                )
+            }),
+            rvc: has_rvc.then(|| {
+                rvc::RvcHandler::new(
+                    self.service.clone(),
+                    allocation.feature.clone(),
+                    capabilities.clone(),
+                    allocation.endpoint,
+                    seed.wrapping_add(15),
                 )
             }),
             groups: groups::GroupsHandler::new(Dataver::new(seed.wrapping_add(12))),
@@ -865,6 +882,30 @@ impl DeviceBridgeModel {
             id if id == window_covering::FULL_CLUSTER.id => {
                 AsyncHandler::read(
                     &window_covering::HandlerAsyncAdaptor(runtime.curtain()),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
+            id if id == rvc::RUN_CLUSTER.id => {
+                AsyncHandler::read(
+                    &rvc_run_mode::HandlerAsyncAdaptor(runtime.rvc()),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
+            id if id == rvc::CLEAN_CLUSTER.id => {
+                AsyncHandler::read(
+                    &rvc_clean_mode::HandlerAsyncAdaptor(runtime.rvc()),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
+            id if id == rvc::OPERATIONAL_CLUSTER.id => {
+                AsyncHandler::read(
+                    &rvc_operational_state::HandlerAsyncAdaptor(runtime.rvc()),
                     ctx,
                     reply,
                 )
@@ -1084,6 +1125,30 @@ impl DeviceBridgeModel {
                 )
                 .await
             }
+            id if id == rvc::RUN_CLUSTER.id => {
+                AsyncHandler::invoke(
+                    &rvc_run_mode::HandlerAsyncAdaptor(runtime.rvc()),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
+            id if id == rvc::CLEAN_CLUSTER.id => {
+                AsyncHandler::invoke(
+                    &rvc_clean_mode::HandlerAsyncAdaptor(runtime.rvc()),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
+            id if id == rvc::OPERATIONAL_CLUSTER.id => {
+                AsyncHandler::invoke(
+                    &rvc_operational_state::HandlerAsyncAdaptor(runtime.rvc()),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
             id if id == lighting::SCENES_CLUSTER.id => {
                 self.invoke_scenes(runtime, ctx, reply).await
             }
@@ -1222,6 +1287,11 @@ impl DeviceBridgeModel {
                     .find(|runtime| runtime.allocation.feature == feature)
                     .unwrap();
                 for property in properties {
+                    if property == Property::VacuumFault
+                        && let Some(rvc) = &runtime.rvc
+                    {
+                        rvc.observe_fault(ctx)?;
+                    }
                     if !runtime.exposed_values.borrow().contains_key(&property) {
                         continue;
                     }
@@ -1360,6 +1430,9 @@ impl DeviceBridgeModel {
             if let Some(curtain) = &runtime.curtain {
                 curtain.set_capabilities(capabilities.clone());
             }
+            if let Some(rvc) = &runtime.rvc {
+                rvc.set_capabilities(capabilities.clone());
+            }
             for property in exposed_properties(&capabilities, &runtime.clusters) {
                 let current = self
                     .service
@@ -1369,6 +1442,11 @@ impl DeviceBridgeModel {
                         crate::device::PropertyState::Current { value, .. } => Some(value),
                         _ => None,
                     });
+                if property == Property::VacuumFault
+                    && let Some(rvc) = &runtime.rvc
+                {
+                    rvc.observe_fault(ctx)?;
+                }
                 let mut exposed = runtime.exposed_values.borrow_mut();
                 if exposed.get(&property) != Some(&current) {
                     exposed.insert(property, current);
@@ -1381,6 +1459,7 @@ impl DeviceBridgeModel {
                 self.notify_sensor_configuration(ctx, runtime);
                 self.notify_fan_configuration(ctx, runtime);
                 self.notify_thermostat_configuration(ctx, runtime);
+                self.notify_rvc_configuration(ctx, runtime);
             }
             if config_changed {
                 *runtime.config_signature.borrow_mut() =
@@ -1489,6 +1568,32 @@ impl DeviceBridgeModel {
                     thermostat::FULL_CLUSTER.id,
                     attribute as _,
                 );
+            }
+        }
+    }
+
+    fn notify_rvc_configuration(&self, ctx: &impl HandlerContext, runtime: &FeatureRuntime) {
+        if runtime.rvc.is_none() {
+            return;
+        }
+        for (cluster, attribute) in [
+            (
+                rvc::CLEAN_CLUSTER.id,
+                rvc_clean_mode::AttributeId::SupportedModes as u32,
+            ),
+            (
+                rvc::CLEAN_CLUSTER.id,
+                rvc_clean_mode::AttributeId::CurrentMode as u32,
+            ),
+        ] {
+            if runtime
+                .clusters
+                .iter()
+                .find(|candidate| candidate.id == cluster)
+                .and_then(|candidate| candidate.attribute(attribute))
+                .is_some()
+            {
+                ctx.notify_attr_changed(runtime.allocation.endpoint, cluster, attribute);
             }
         }
     }
@@ -1812,6 +1917,23 @@ impl AsyncHandler for DeviceBridgeModel {
             {
                 curtain.dataver().changed();
             }
+            if let Some(handler) = &runtime.rvc {
+                if let Some(cluster) = ctx.cluster() {
+                    if let Some(dataver) = handler.dataver(cluster) {
+                        dataver.changed();
+                    }
+                } else {
+                    for cluster in [
+                        rvc::RUN_CLUSTER.id,
+                        rvc::CLEAN_CLUSTER.id,
+                        rvc::OPERATIONAL_CLUSTER.id,
+                    ] {
+                        if let Some(dataver) = handler.dataver(cluster) {
+                            dataver.changed();
+                        }
+                    }
+                }
+            }
             if let Some(cluster) = ctx.cluster() {
                 if let Some(dataver) = runtime
                     .lighting
@@ -1982,6 +2104,30 @@ fn property_paths(runtime: &FeatureRuntime, property: Property) -> Vec<(u32, u32
             window_covering::FULL_CLUSTER.id,
             window_covering::AttributeId::OperationalStatus as _,
         )),
+        Property::VacuumOperationalState => vec![
+            (
+                rvc::RUN_CLUSTER.id,
+                rvc_run_mode::AttributeId::CurrentMode as _,
+            ),
+            (
+                rvc::OPERATIONAL_CLUSTER.id,
+                rvc_operational_state::AttributeId::OperationalState as _,
+            ),
+        ],
+        Property::VacuumCleanMode => single((
+            rvc::CLEAN_CLUSTER.id,
+            rvc_clean_mode::AttributeId::CurrentMode as _,
+        )),
+        Property::VacuumFault => vec![
+            (
+                rvc::OPERATIONAL_CLUSTER.id,
+                rvc_operational_state::AttributeId::OperationalState as _,
+            ),
+            (
+                rvc::OPERATIONAL_CLUSTER.id,
+                rvc_operational_state::AttributeId::OperationalError as _,
+            ),
+        ],
         Property::Brightness => single((
             lighting::LEVEL_CLUSTER.id,
             rs_matter::dm::clusters::decl::level_control::AttributeId::CurrentLevel as _,
@@ -2170,6 +2316,13 @@ pub(super) fn config_signature(shape: &str, capabilities: &[Capability]) -> Stri
                     digest.update([*value as u8]);
                 }
             }
+            Capability::VacuumCleanModes(values) => {
+                digest.update(b"vacuum-clean-modes");
+                digest.update((values.len() as u32).to_be_bytes());
+                for value in values {
+                    digest.update([*value as u8]);
+                }
+            }
             _ => {}
         }
     }
@@ -2258,6 +2411,13 @@ fn exposed_properties(capabilities: &[Capability], clusters: &[Cluster<'_>]) -> 
                 push(Property::CurtainPosition);
                 push(Property::CurtainTargetPosition);
                 push(Property::CurtainMovement);
+            }
+            Capability::VacuumControl if has(rvc::RUN_CLUSTER.id) => {
+                push(Property::VacuumOperationalState);
+                push(Property::VacuumFault);
+            }
+            Capability::VacuumCleanModes(_) if has(rvc::CLEAN_CLUSTER.id) => {
+                push(Property::VacuumCleanMode);
             }
             _ => {}
         }
