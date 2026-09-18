@@ -214,6 +214,9 @@ pub(super) fn compile_curtain(services: &[Service<'_>], output: &mut Vec<Feature
     let Some(range) = numeric_range(target, NumericUnit::Percent) else {
         return;
     };
+    if range.minimum < 0.0 || range.maximum <= 0.0 {
+        return;
+    }
     let codec = ValueCodec::Percent {
         minimum: range.minimum,
         maximum: range.maximum,
@@ -224,9 +227,9 @@ pub(super) fn compile_curtain(services: &[Service<'_>], output: &mut Vec<Feature
         .capabilities
         .0
         .push(Capability::CurtainPosition(NumericRange {
-            minimum: 0.,
+            minimum: range.minimum * 100. / range.maximum,
             maximum: 100.,
-            step: 1.,
+            step: range.step * 100. / range.maximum,
             unit: NumericUnit::Percent,
         }));
     feature.commands.push(command(

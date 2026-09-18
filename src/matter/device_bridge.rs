@@ -1,5 +1,5 @@
 use super::{
-    common, fan, lighting, model, sensors,
+    common, curtain, fan, lighting, model, sensors,
     storage::{EndpointSceneStore, StoreAdapter, TopologyStore},
     thermostat as thermostat_handler,
 };
@@ -26,7 +26,7 @@ use rs_matter::{
         clusters::decl::{
             boolean_state, bridged_device_basic_information as bridged, fan_control,
             illuminance_measurement, occupancy_sensing, power_source,
-            relative_humidity_measurement, temperature_measurement, thermostat,
+            relative_humidity_measurement, temperature_measurement, thermostat, window_covering,
         },
         clusters::{desc, groups, identify, scenes},
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
@@ -109,6 +109,10 @@ const DEV_TYPE_FAN: DeviceType = DeviceType {
 const DEV_TYPE_THERMOSTAT: DeviceType = DeviceType {
     dtype: 0x0301,
     drev: 4,
+};
+const DEV_TYPE_WINDOW_COVERING: DeviceType = DeviceType {
+    dtype: 0x0202,
+    drev: 3,
 };
 
 struct SceneContext<'a, C> {
@@ -346,6 +350,7 @@ struct FeatureRuntime {
     lighting: Option<lighting::LightingHandler>,
     fan: Option<fan::FanHandler>,
     thermostat: Option<thermostat_handler::ThermostatHandler>,
+    curtain: Option<curtain::CurtainHandler>,
     groups: groups::GroupsHandler<'static>,
     scenes: scenes::ScenesState<33, 96>,
     scenes_dataver: Dataver,
@@ -368,6 +373,12 @@ impl FeatureRuntime {
         self.thermostat
             .as_ref()
             .expect("thermostat clusters require a thermostat handler")
+    }
+
+    fn curtain(&self) -> &curtain::CurtainHandler {
+        self.curtain
+            .as_ref()
+            .expect("window covering cluster requires a curtain handler")
     }
 }
 
@@ -490,6 +501,7 @@ impl DeviceBridgeModel {
                 | FeatureRole::BathHeaterExhaustFan
                 | FeatureRole::Climate
                 | FeatureRole::BathHeaterClimate
+                | FeatureRole::Curtain
         ) {
             return Ok(None);
         }
@@ -556,6 +568,13 @@ impl DeviceBridgeModel {
                 .any(|capability| matches!(capability, Capability::TargetTemperature(_)));
         let has_climate_fan =
             allocation.feature.role == FeatureRole::Climate && (fan_multi_speed || fan_rocking);
+        let has_curtain = allocation.feature.role == FeatureRole::Curtain
+            && capabilities
+                .iter()
+                .any(|capability| {
+                    matches!(capability, Capability::CurtainPosition(range) if range.accepts(0.0) && range.accepts(100.0))
+                })
+            && capabilities.contains(&Capability::CurtainStop);
         if !(has_temperature
             || has_humidity
             || has_lux
@@ -563,7 +582,8 @@ impl DeviceBridgeModel {
             || has_contact
             || has_power
             || has_fan
-            || has_thermostat)
+            || has_thermostat
+            || has_curtain)
         {
             return Ok(None);
         }
@@ -612,6 +632,10 @@ impl DeviceBridgeModel {
             if has_climate_fan {
                 clusters.push(fan::cluster(fan_multi_speed, fan_auto, fan_rocking));
             }
+        }
+        if has_curtain {
+            device_types.push(DEV_TYPE_WINDOW_COVERING);
+            clusters.extend([lighting::GROUPS_CLUSTER, curtain::CLUSTER]);
         }
         if has_temperature {
             device_types.push(DEV_TYPE_TEMPERATURE_SENSOR);
@@ -709,6 +733,14 @@ impl DeviceBridgeModel {
                     allocation.feature.clone(),
                     capabilities.clone(),
                     seed.wrapping_add(11),
+                )
+            }),
+            curtain: has_curtain.then(|| {
+                curtain::CurtainHandler::new(
+                    self.service.clone(),
+                    allocation.feature.clone(),
+                    capabilities.clone(),
+                    seed.wrapping_add(14),
                 )
             }),
             groups: groups::GroupsHandler::new(Dataver::new(seed.wrapping_add(12))),
@@ -825,6 +857,14 @@ impl DeviceBridgeModel {
             id if id == thermostat::FULL_CLUSTER.id => {
                 AsyncHandler::read(
                     &thermostat::HandlerAsyncAdaptor(runtime.thermostat()),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
+            id if id == window_covering::FULL_CLUSTER.id => {
+                AsyncHandler::read(
+                    &window_covering::HandlerAsyncAdaptor(runtime.curtain()),
                     ctx,
                     reply,
                 )
@@ -965,6 +1005,13 @@ impl DeviceBridgeModel {
                 AsyncHandler::write(&thermostat::HandlerAsyncAdaptor(runtime.thermostat()), ctx)
                     .await
             }
+            id if id == window_covering::FULL_CLUSTER.id => {
+                AsyncHandler::write(
+                    &window_covering::HandlerAsyncAdaptor(runtime.curtain()),
+                    ctx,
+                )
+                .await
+            }
             id if id == lighting::ON_OFF_CLUSTER.id => Handler::write(
                 &rs_matter::dm::clusters::decl::on_off::HandlerAdaptor(runtime.lighting()),
                 ctx,
@@ -1024,6 +1071,14 @@ impl DeviceBridgeModel {
             id if id == thermostat::FULL_CLUSTER.id => {
                 AsyncHandler::invoke(
                     &thermostat::HandlerAsyncAdaptor(runtime.thermostat()),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
+            id if id == window_covering::FULL_CLUSTER.id => {
+                AsyncHandler::invoke(
+                    &window_covering::HandlerAsyncAdaptor(runtime.curtain()),
                     ctx,
                     reply,
                 )
@@ -1301,6 +1356,9 @@ impl DeviceBridgeModel {
             }
             if let Some(thermostat) = &runtime.thermostat {
                 thermostat.set_capabilities(capabilities.clone());
+            }
+            if let Some(curtain) = &runtime.curtain {
+                curtain.set_capabilities(capabilities.clone());
             }
             for property in exposed_properties(&capabilities, &runtime.clusters) {
                 let current = self
@@ -1747,6 +1805,13 @@ impl AsyncHandler for DeviceBridgeModel {
             {
                 thermostat.dataver().changed();
             }
+            if ctx
+                .cluster()
+                .is_none_or(|cluster| cluster == window_covering::FULL_CLUSTER.id)
+                && let Some(curtain) = &runtime.curtain
+            {
+                curtain.dataver().changed();
+            }
             if let Some(cluster) = ctx.cluster() {
                 if let Some(dataver) = runtime
                     .lighting
@@ -1905,6 +1970,18 @@ fn property_paths(runtime: &FeatureRuntime, property: Property) -> Vec<(u32, u32
             ),
         ],
         Property::HvacMode => thermostat_state_paths(),
+        Property::CurtainPosition => single((
+            window_covering::FULL_CLUSTER.id,
+            window_covering::AttributeId::CurrentPositionLiftPercent100ths as _,
+        )),
+        Property::CurtainTargetPosition => single((
+            window_covering::FULL_CLUSTER.id,
+            window_covering::AttributeId::TargetPositionLiftPercent100ths as _,
+        )),
+        Property::CurtainMovement => single((
+            window_covering::FULL_CLUSTER.id,
+            window_covering::AttributeId::OperationalStatus as _,
+        )),
         Property::Brightness => single((
             lighting::LEVEL_CLUSTER.id,
             rs_matter::dm::clusters::decl::level_control::AttributeId::CurrentLevel as _,
@@ -2081,6 +2158,12 @@ pub(super) fn config_signature(shape: &str, capabilities: &[Capability]) -> Stri
                 digest.update(range.maximum.to_bits().to_be_bytes());
                 digest.update(range.step.to_bits().to_be_bytes());
             }
+            Capability::CurtainPosition(range) => {
+                digest.update(b"curtain-position");
+                digest.update(range.minimum.to_bits().to_be_bytes());
+                digest.update(range.maximum.to_bits().to_be_bytes());
+                digest.update(range.step.to_bits().to_be_bytes());
+            }
             Capability::HvacModes(values) => {
                 digest.update(b"hvac-modes");
                 for value in values {
@@ -2170,6 +2253,11 @@ fn exposed_properties(capabilities: &[Capability], clusters: &[Cluster<'_>]) -> 
                 if has(rs_matter::dm::clusters::decl::color_control::FULL_CLUSTER.id) =>
             {
                 push(Property::Color)
+            }
+            Capability::CurtainPosition(_) if has(window_covering::FULL_CLUSTER.id) => {
+                push(Property::CurtainPosition);
+                push(Property::CurtainTargetPosition);
+                push(Property::CurtainMovement);
             }
             _ => {}
         }

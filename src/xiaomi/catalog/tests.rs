@@ -1250,7 +1250,7 @@ fn supplied_property_metadata_has_valid_shapes_formats_and_ranges() {
 fn curtain_current_and_target_positions_use_their_own_ranges() {
     let mut target = property(2, "target-position", "uint8", &["read", "write", "notify"]);
     target["unit"] = json!("percentage");
-    target["value-range"] = json!([0, 100, 1]);
+    target["value-range"] = json!([0, 100, 5]);
     let mut current = property(3, "current-position", "uint16", &["read", "notify"]);
     current["unit"] = json!("percentage");
     current["value-range"] = json!([0, 10000, 100]);
@@ -1260,6 +1260,14 @@ fn curtain_current_and_target_positions_use_their_own_ranges() {
     );
     let compiled = compile_spec("vendor.curtain.ranges", &document).unwrap();
     let feature = &compiled.features[0];
+    assert!(feature.capabilities.0.iter().any(|capability| {
+        matches!(capability, Capability::CurtainPosition(range) if *range == crate::device::NumericRange {
+            minimum: 0.0,
+            maximum: 100.0,
+            step: 5.0,
+            unit: crate::device::NumericUnit::Percent,
+        })
+    }));
     assert_eq!(
         feature.decode(2, 3, &WireValue::Integer(5000)),
         Some((
@@ -1287,6 +1295,22 @@ fn curtain_current_and_target_positions_use_their_own_ranges() {
             .iter()
             .any(|mapping| mapping.property == Property::CurtainPosition)
     );
+}
+
+#[test]
+fn curtain_rejects_target_ranges_that_cannot_normalize_to_percent() {
+    for range in [json!([0, 0, 1]), json!([-100, -1, 1])] {
+        let mut target = property(2, "target-position", "int16", &["read", "write", "notify"]);
+        target["unit"] = json!("percentage");
+        target["value-range"] = range;
+        let document = spec("curtain", json!([service(2, "curtain", json!([target]))]));
+        assert!(
+            compile_spec("vendor.curtain.invalid-range", &document)
+                .unwrap()
+                .features
+                .is_empty()
+        );
+    }
 }
 
 #[test]
