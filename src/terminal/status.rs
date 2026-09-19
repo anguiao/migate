@@ -2,72 +2,39 @@ use crate::xiaomi::{
     auth::{AuthReport, AuthenticationState, CertificateUpdate},
     certificate::{CertificateStatus, CertificateValidity},
 };
-use std::{
-    cell::RefCell,
-    fmt::Write as _,
-    path::{Path, PathBuf},
-};
+use std::{fmt::Write as _, path::Path};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub struct AuthStatus {
-    report: RefCell<AuthReport>,
-    executable: PathBuf,
-    data_dir: PathBuf,
+pub fn log_report(report: &AuthReport, now: i64, executable: &Path, data_dir: &Path) {
+    log_status(report, now);
+    if matches!(report.authentication, AuthenticationState::NotSignedIn) {
+        log::info!("Sign in with: {}", login_command(executable, data_dir));
+    }
 }
 
-impl AuthStatus {
-    pub fn new(report: AuthReport, executable: PathBuf, data_dir: PathBuf) -> Self {
-        Self {
-            report: RefCell::new(report),
-            executable,
-            data_dir,
+pub(crate) fn log_status(report: &AuthReport, now: i64) {
+    let authentication_level = match &report.authentication {
+        AuthenticationState::SignInRequired(_) | AuthenticationState::Unavailable(_) => {
+            log::Level::Warn
         }
-    }
-
-    pub fn replace(&self, report: AuthReport) -> bool {
-        let mut current = self.report.borrow_mut();
-        let changed = current.authentication != report.authentication
-            || current.certificate != report.certificate
-            || current.certificate_update != report.certificate_update;
-        *current = report;
-        changed
-    }
-
-    pub fn render(&self, now: i64) -> String {
-        format_report(&self.report.borrow(), now, &self.executable, &self.data_dir)
-    }
-
-    pub fn log(&self, now: i64) {
-        let report = self.report.borrow();
-        let authentication_level = match &report.authentication {
-            AuthenticationState::SignInRequired(_) | AuthenticationState::Unavailable(_) => {
-                log::Level::Warn
-            }
-            _ => log::Level::Info,
-        };
-        log::log!(
-            authentication_level,
-            "{}",
-            format_authentication(&report.authentication)
-        );
-        let certificate_level = match report.certificate.map(|validity| validity.status(now)) {
-            Some(CertificateStatus::NotYetValid | CertificateStatus::Expired) => log::Level::Warn,
-            _ => log::Level::Info,
-        };
-        log::log!(
-            certificate_level,
-            "{}",
-            format_certificate(report.certificate, now)
-        );
-        if let CertificateUpdate::Failed(reason) = &report.certificate_update {
-            log::warn!("Gateway certificate update failed: {reason}.");
-        }
-        if matches!(report.authentication, AuthenticationState::NotSignedIn) {
-            log::info!(
-                "Sign in with: {}",
-                login_command(&self.executable, &self.data_dir)
-            );
-        }
+        _ => log::Level::Info,
+    };
+    log::log!(
+        authentication_level,
+        "{}",
+        format_authentication(&report.authentication)
+    );
+    let certificate_level = match report.certificate.map(|validity| validity.status(now)) {
+        Some(CertificateStatus::NotYetValid | CertificateStatus::Expired) => log::Level::Warn,
+        _ => log::Level::Info,
+    };
+    log::log!(
+        certificate_level,
+        "{}",
+        format_certificate(report.certificate, now)
+    );
+    if let CertificateUpdate::Failed(reason) = &report.certificate_update {
+        log::warn!("Gateway certificate update failed: {reason}.");
     }
 }
 
@@ -154,8 +121,6 @@ pub fn current_time() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::bridge;
-    use crate::virtual_device::VirtualLight;
     use crate::xiaomi::auth::AuthReport;
 
     #[test]
@@ -187,47 +152,5 @@ mod tests {
             ),
             "Xiaomi: authenticated (cn).\nGateway certificate: valid until 2023-11-17T22:13:21Z; renewal due."
         );
-    }
-
-    #[test]
-    fn bridge_help_reads_the_latest_report() {
-        let checking = AuthReport::for_test(
-            AuthenticationState::Checking,
-            None,
-            CertificateUpdate::NotNeeded,
-            1_700_000_000,
-        );
-        let status = AuthStatus::new(checking, "/bin/migate".into(), "/data".into());
-        assert!(
-            bridge::handle_line(&VirtualLight::new(), &status, "help", 1_700_000_000)
-                .unwrap()
-                .contains("Xiaomi: checking authentication (cn)...")
-        );
-
-        let authenticated = AuthReport::for_test(
-            AuthenticationState::Authenticated,
-            Some(CertificateValidity {
-                not_before: 1_699_000_000,
-                not_after: 1_800_000_000,
-            }),
-            CertificateUpdate::NotNeeded,
-            1_700_000_000,
-        );
-        assert!(status.replace(authenticated));
-        let help =
-            bridge::handle_line(&VirtualLight::new(), &status, "help", 1_700_000_000).unwrap();
-        assert!(help.contains("Xiaomi: authenticated (cn)."), "{help}");
-        assert!(!help.contains("checking authentication"), "{help}");
-
-        let same_visible_status = AuthReport::for_test(
-            AuthenticationState::Authenticated,
-            Some(CertificateValidity {
-                not_before: 1_699_000_000,
-                not_after: 1_800_000_000,
-            }),
-            CertificateUpdate::NotNeeded,
-            1_700_000_001,
-        );
-        assert!(!status.replace(same_visible_status));
     }
 }

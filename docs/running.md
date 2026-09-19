@@ -1,109 +1,121 @@
 # 运行 MiGate
 
-当前支持 macOS / Apple Silicon，使用 Rust 1.96 和 Cargo 构建。MiGate 目前提供虚拟灯桥接和米家账号认证，尚未提供设备列表与真实米家设备桥接。
+MiGate 在本机前台运行，将当前局域网中经过归属确认的米家设备桥接到 Matter。当前开发和验证环境是 macOS / Apple Silicon，使用 Rust 1.96 和 Cargo 构建。
 
-以下命令均在仓库根目录执行，并使用 `.migate/` 保存数据。继续使用已有实例时，请将命令中的 `.migate` 替换为原数据目录。
+从旧虚拟灯版本切换时，请选择新的并列数据目录，重新登录米家并在 Apple Home 中配对。旧目录不会迁移到真实设备结构，也不要删除旧目录来创建新实例。
 
-## 启动
+数据目录保存网桥身份、Apple Home 配对、米家凭据、家庭绑定、设备身份和最后确认状态。首次使用的目录必须不存在或为空，同一目录一次只运行一个网桥进程；`auth` 子命令是独立进程，应按下文先完成登录，再以前台网桥命令启动运行。
+
+## 登录米家
+
+目前只支持中国大陆服务区，每个数据目录保存一个账号。全局参数必须放在 `auth` 前面。
 
 ```sh
-cargo run --locked -- --data-dir .migate
+cargo run --locked -- --data-dir .migate-real auth login
 ```
 
-程序在前台运行，使用 Ctrl-C 停止，同一数据目录一次只运行一个网桥进程。
+1. 打开终端给出的授权链接并登录米家账号。
+2. 浏览器跳转到 `http://homeassistant.local:8123/api/webhook/…` 后，复制地址栏中的完整网址；页面无法打开不影响复制。
+3. 将包含本次 `code` 和 `state` 的网址粘贴回终端。
+4. 等待认证和中枢证书状态完成。
 
-Matter 默认使用 UDP 5540。可通过 `MIGATE_MATTER_PORT` 设置端口（`0`–`65535`），设为 `0` 时由系统分配空闲端口；启动日志显示实际端口。运行多个网桥时，分别使用独立数据目录和不同端口。
+```sh
+cargo run --locked -- --data-dir .migate-real auth check
+cargo run --locked -- --data-dir .migate-real auth logout
+```
+
+认证子命令不会启动 Matter、设备发现或真实设备运行时。`logout` 删除本地米家凭据，但保留家庭绑定、已发布 endpoint、Matter 身份和 Apple Home 配对；设备会显示不可用。重新登录同一账号并完成目录核对后，仍属于绑定家庭的设备会恢复原身份。登录另一账号后，不符合新账号和家庭范围的旧 endpoint 不再执行命令，并从有效拓扑移除；分配记录保留。
+
+## 启动与配对
+
+```sh
+cargo run --locked -- --data-dir .migate-real
+```
+
+进程同时运行米家运行时、Matter 和终端。未登录、尚未发现中枢或暂时没有已发布设备时，Matter 仍提供根节点和 Aggregator。终端 EOF 只停止命令输入；Ctrl-C 会停止 Matter、发现、连接、命令、状态刷新和认证维护后退出。
+
+Matter 默认绑定 UDP 5540。端口优先读取 `MIGATE_MATTER_PORT`；设为 `0` 时由系统分配，日志中的实际端口也是 mDNS 公告端口。数据目录优先使用命令行 `--data-dir`，其次为 `MIGATE_DATA_DIR`，最后为 `~/.migate/`。本仓库的 Cargo 配置在未显式指定目录时会覆盖为项目根目录的 `.migate/`。
+
+尚未配对时，终端显示二维码和手动配对码，commissioning 窗口开放 900 秒。在「家庭」App 中添加配件并扫描二维码或输入配对码。当前仍使用开发测试认证材料；Apple Home 可能显示未认证配件提示。窗口过期后，以同一数据目录重启即可再次开窗，同时保留网桥身份和真实设备 endpoint；已经完成的 Apple Home 配对也会保留。
 
 也可以构建后直接运行：
 
 ```sh
 cargo build --locked --release
-./target/release/migate --data-dir .migate
+./target/release/migate --data-dir .migate-real
 ```
 
-### 调试构建
+## 家庭绑定与通信路径
 
-默认开发构建仅为项目代码保留回溯所需的行号信息，第三方依赖不生成调试信息。需要使用 LLDB/GDB 检查变量或进入依赖源码时，使用 `debugging` profile：
+MiGate 读取账号自有家庭的完整目录，并用当前局域网中经过认证的米家中枢自动匹配和持久化目标家庭；没有家庭选择参数。首次接入的新设备必须取得本地证明：中枢子设备和灯组由认证中枢确认，IP 设备需要在本地接口发现并以 token 核对 DID。仅在云端目录出现的设备不会因此获得控制资格。
+
+设备首次准入后，普通断网、休眠或连接重建不会撤销成员资格。控制路径按健康的中枢、设备局域网直连、小米云顺序选择。启动和重新登录后会完成目录校对；目录明确显示设备移出绑定家庭时停止新命令并移出有效拓扑。多台认证中枢报告冲突家庭时会暂停真实设备控制，`devices` 会明确显示冲突。
+
+灯组和单灯拥有各自稳定 ID 和 endpoint；满足准入条件时会同时显示，不推断或隐藏灯组成员。
+
+## 终端命令
+
+先用 `devices` 查看稳定的公开功能 ID。命令不会隐式选择第一台设备。
+
+```text
+devices
+status <id>
+on <id>
+off <id>
+set <id> <property> <value>
+action <id> <action>
+refresh
+help
+```
+
+`status <id>` 会列出该功能实际支持的命令、合法范围、步长和枚举：
+
+- `brightness-percent`：百分比。
+- `color-temperature-kelvin`：Kelvin。
+- `color-rgb`：`R,G,B`，每个分量为 0–255。
+- `target-temperature-celsius`：摄氏度。
+- `position-percent`：0 表示全关，100 表示全开。
+- `hvac-mode`、`fan-speed`、`swing-mode`、`oscillation`、`clean-mode`：只接受 `status` 列出的值。
+
+动作包括设备确实支持时的 `curtain-stop`、`vacuum-start`、`vacuum-stop` 和 `vacuum-dock`。参数类型、范围、步长和枚举会在进入网络队列前验证；未知 ID、缺少参数或多余参数不会派发请求。`refresh` 进入与后台相同的合并发现、目录和状态刷新流程。
+
+命令返回 `Accepted` 表示控制接口已经接受请求，仍需等待设备报告确认状态；`Ambiguous` 表示请求可能因超时或断线而没有明确结果，控制运行时不会自动补发。先查看 `status` 再决定是否重试。状态值标为 `Current` 时来自当前确认报告；`LastKnown` 是重启或断连前的缓存值，不代表当前值；`Unknown` 表示没有可确认的当前值。来源和更新时间随状态显示。具体路径、失败阶段和安全错误码写入 stderr 日志。
+
+## 实现范围与验证边界
+
+下表是当前实现目标，不是逐型号实机通过声明。
+
+| 类型 | 目标型号 | 核心能力 |
+| --- | --- | --- |
+| 灯与灯组 | `yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`devcea.light.ls2307`、`lemesh.light.wy0c15`、`mijia.light.group3` | 开关、亮度、实际支持的色温／颜色 |
+| 开关、插座、面板负载 | `xiaomi.switch.w3`、`zimi.switch.dhkg01`、`zimi.switch.dhkg02`、`zimi.switch.dhkg05`、`xiaomi.controller.86v1`、`cuco.plug.cp7pd`、`cuco.plug.v3`、`qmi.plug.psv3`、`zimi.plug.zncz01` | 各实际负载通道开关与状态 |
+| 空调伴侣 | `lumi.acpartner.mcn02`、`lumi.acpartner.mcn04` | 开关、模式、目标温度、风速和实际支持的摆风 |
+| 窗帘 | `xiaomi.curtain.acn010` | 开、关、停止、目标和当前位置 |
+| 风扇 | `dmaker.fan.p5c` | 开关、离散风速、摇头 |
+| 温湿度 | `miaomiaoce.sensor_ht.t2/t6/t8/t9`、`xiaomi.sensor_ht.mini` | 温度、湿度、电量 |
+| 运动／存在／照度 | `xiaomi.motion.pir1`、`izq.sensor_occupy.trio`、`linp.sensor_occupy.hb01`、`xiaomi.sensor_occupy.03/p1` | 运动或整体存在、真实数值照度、电量 |
+| 门窗 | `isa.magnet.dw2hl`、`linp.magnet.m1` | 开合状态、电量 |
+| 扫地机器人 | `xiaomi.vacuum.c104` | 启停、回充、清扫类型、状态、故障、电量 |
+| 浴霸 | `yeelink.bhf_light.v13` | 照明、送风、换气、取暖及目标温度，按功能拆分 |
+
+不接入推窗器、无线按钮、旋钮、`yeelink.light.nl1` 夜灯，以及设计文档中列出的后续设备类别。配置项、能耗历史、地图、规则引擎和管理网页也不在本轮范围。
+
+Matter 照明的启动配置属性没有可信的米家断电记忆映射，因此读取返回 unavailable、写入返回 unsupported；不会伪造设置或在重启时回放控制。自动化测试覆盖协议、存储和模拟边界；真实硬件响应、Apple Home 展示和订阅行为仍需在代表设备上验证。
+
+## 排障
+
+- `devices` 没有设备：确认已登录中国区账号，并让本机与自有中枢处于同一局域网。候选项会区分未发现、等待本地验证、不支持、无法识别和绑定家庭之外。
+- 功能显示 unavailable：查看 `status <id>` 的关键状态是否仍为 `Unknown`，并查看 stderr 中的实际路径和失败阶段。暂时断网不会撤销已准入身份。
+- 家庭冲突：停止真实控制，确认当前网络中认证中枢属于同一个账号自有家庭；本轮不提供手工选择家庭。
+- 需要独立实例：使用新的并列目录和不同端口，例如 `.migate-real-2`；该实例需要重新登录和配对。
+
+## 构建 profile
+
+默认 `dev` profile 为项目代码保留行号信息。需要使用 LLDB/GDB 检查依赖变量时使用 `debugging`：
 
 ```sh
 cargo build --locked --profile debugging
+cargo run --locked --profile debugging -- --data-dir .migate-real
 ```
 
-产物位于 `target/debugging/migate`，项目和第三方依赖均启用完整调试信息。首次使用该 profile 会重新构建并额外占用磁盘空间。也可通过以下命令构建并启动：
-
-```sh
-cargo run --locked --profile debugging -- --data-dir .migate
-```
-
-## 米家账号认证
-
-认证需要联网，目前仅支持中国大陆服务区（`cn`），每个数据目录保存一个账号。以下认证命令在 shell 中执行。
-
-### 登录
-
-```sh
-cargo run --locked -- --data-dir .migate auth login
-```
-
-1. 打开终端显示的授权链接，在浏览器中登录米家账号并授权 HA 应用，无须安装或运行 Home Assistant。
-2. 浏览器跳转到 `http://homeassistant.local:8123/api/webhook/…` 后，即使页面显示无法访问，也直接复制地址栏中的完整网址。
-3. 将包含 `code` 和 `state` 的完整网址粘贴回等待中的终端并回车。使用本次授权得到的网址；若回调已失效，重新执行登录命令，从新的授权链接开始。
-4. 等待终端显示 `Xiaomi: authenticated (cn).` 和 `Gateway certificate: valid until …`，即完成登录。
-
-### 检查与退出登录
-
-```sh
-cargo run --locked -- --data-dir .migate auth check
-```
-
-检查会显示账号认证与证书状态，并在需要时刷新令牌和续期证书。两项均正常才表示检查成功；提示 `sign-in required` 时重新登录，网络故障时待网络恢复后重试。
-
-网桥每次启动时也会检查一次，运行期间没有定时检查。同一数据目录的认证操作应依次执行，避免与网桥启动检查重叠；通过独立命令更新凭据后，重启网桥以更新其显示的认证状态。
-
-退出登录：
-
-```sh
-cargo run --locked -- --data-dir .migate auth logout
-```
-
-该命令删除本地米家账号凭据，保留网桥身份与 Apple Home 配对，也不会撤销远端 HA 应用授权。
-
-## 添加到 Apple Home
-
-Mac 与 iPhone / iPad 需处于同一局域网，网络允许 Matter 使用的 UDP 端口（默认 5540）与 mDNS 发现，并保持 Mac 唤醒。虚拟灯配对与控制可以在未登录米家账号时使用。
-
-1. 启动网桥；尚未配对时，终端会显示二维码和手动配对码。
-2. 在「家庭」App 中添加配件，扫描二维码或输入终端显示的手动配对码。
-3. 当前使用测试认证材料。如提示配件未认证且提供继续入口，可选择继续添加。
-4. 添加完成后，会出现一盏名为 `MiGate Virtual Light` 的虚拟灯，可以在「家庭」App 中开关。
-
-配对窗口为 15 分钟，超时后用 Ctrl-C 停止，再以同一数据目录启动即可重新打开。
-
-## 日常操作与退出
-
-在运行网桥的终端中，每行输入一个命令：
-
-| 命令 | 操作 |
-| --- | --- |
-| `on` | 打开虚拟灯 |
-| `off` | 关闭虚拟灯 |
-| `status` | 查看虚拟灯状态 |
-| `help` | 查看命令帮助与认证状态 |
-
-终端与「家庭」App 控制同一盏灯，状态会相互同步。每次启动时灯都为关闭状态。
-
-Ctrl-C 停止网桥。输入 EOF 只停止终端读取，网桥仍会继续运行。重启时使用同一数据目录，即可保留原配对关系。
-
-## 数据目录与重新配对
-
-数据目录保存网桥身份、Apple Home 配对和米家账号凭据，请妥善保留，避免提交或共享。首次使用的目录必须为空或尚不存在。
-
-通过 `--data-dir <PATH>` 选择目录时，该参数须放在 `auth` 之前。未指定时依次使用 `MIGATE_DATA_DIR` 环境变量和 `~/.migate/`；仓库的 Cargo 配置会在未设置该环境变量时使用项目根目录的 `.migate/`。相对路径按命令执行目录解析，启动日志会显示实际使用的路径。
-
-在线从「家庭」App 移除配件后，使用原数据目录重启，可重新配对。如果在网桥离线时移除，网桥可能仍保留配对关系，此时可用新目录重新开始：
-
-```sh
-cargo run --locked -- --data-dir .migate-trial-1
-```
-
-新目录代表独立实例，需要重新登录米家账号和添加到「家庭」App。请选择与原目录并列的新目录，原目录的数据会保留。
+产物位于 `target/debugging/migate`，项目和依赖均启用完整调试信息。

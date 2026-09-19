@@ -1,30 +1,12 @@
-use super::super::{NODE, basic_info, bridged_info, model, storage::StoreAdapter};
-use crate::{storage::Store, virtual_device::VirtualLight};
 use event_listener::Event;
-use futures_lite::future::{block_on, or};
 use rs_matter::{
-    MATTER_PORT, Matter,
+    Matter,
     acl::{AclEntry, AuthMode},
     crypto::test_only_crypto,
-    dm::{
-        Dataver, Privilege,
-        clusters::{identify, scenes},
-        devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET},
-        networks::eth::EthNetwork,
-    },
+    dm::Privilege,
     error::Error,
-    im::{
-        AttrPath, EthInteractionModelState, GenericPath, IMStatusCode, InteractionModel, OpCode,
-        StatusResp,
-        client::{ImClient, SubscribeOutcome, TxOutcome},
-        encoding::ReportDataResp,
-    },
-    persist::PERSISTENT_SUBSCRIPTIONS_START,
-    respond::DefaultResponder,
-    tlv::{FromTLV, TLVElement},
     transport::{
-        exchange::{Exchange, MatterBuffers},
-        network::{Address, NetworkReceive, NetworkSend, NoNetwork},
+        network::{Address, NetworkReceive, NetworkSend},
         session::{NocCatIds, ReservedSession, SessionMode},
     },
 };
@@ -33,12 +15,8 @@ use std::{
     collections::VecDeque,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     num::NonZeroU8,
-    path::Path,
-    time::Duration,
 };
 
-const SERVER_ID: u64 = 123456;
-const CLIENT_ID: u64 = 445566;
 const ADDRESS: Address = Address::Udp(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)));
 
 // Exercise real Matter exchanges without binding the live bridge's UDP port.
@@ -123,217 +101,4 @@ pub(super) fn connect_at(
         )
         .unwrap();
     session.complete();
-}
-
-async fn subscribe(client: &Matter<'_>) -> Result<u32, Error> {
-    let paths = [AttrPath::from_gp(&GenericPath::new(
-        Some(2),
-        Some(6),
-        Some(0),
-    ))];
-    let exchange = Exchange::initiate(
-        client,
-        test_only_crypto(),
-        NonZeroU8::new(1).unwrap(),
-        SERVER_ID,
-    )
-    .await?;
-    let mut sender = exchange.subscribe_sender().await?;
-    let mut chunk = loop {
-        match sender.tx().await? {
-            TxOutcome::BuildRequest(builder) => {
-                sender = builder
-                    .keep_subs(false)?
-                    .min_int_floor(0)?
-                    .max_int_ceil(60)?
-                    .attr_requests_from(&paths)?
-                    .fabric_filtered(false)?
-                    .end()?;
-            }
-            TxOutcome::GotResponse(chunk) => break chunk,
-        }
-    };
-    loop {
-        assert_power(&chunk.response()?, false);
-        match chunk.complete().await? {
-            SubscribeOutcome::NextChunk(next) => chunk = next,
-            SubscribeOutcome::Established(subscription) => return Ok(subscription.subscription_id),
-        }
-    }
-}
-
-fn assert_power(report: &ReportDataResp<'_>, power: bool) {
-    let values = report
-        .attrs::<bool>(6, 0)
-        .map(|(endpoint, value)| (endpoint, value.unwrap()))
-        .collect::<Vec<_>>();
-    assert_eq!(values, [(2, power)]);
-}
-
-async fn expect_report(
-    client: &Matter<'_>,
-    subscription_id: u32,
-    power: bool,
-) -> Result<(), Error> {
-    let mut exchange = Exchange::accept(client).await?;
-    exchange.recv_fetch().await?;
-    {
-        let rx = exchange.rx()?;
-        assert_eq!(rx.meta().proto_opcode, OpCode::ReportData as u8);
-        let report = ReportDataResp::from_tlv(&TLVElement::new(rx.payload()))?;
-        assert_eq!(report.subscription_id, Some(subscription_id));
-        assert_power(&report, power);
-    }
-    exchange
-        .send_with(|_, buffer| {
-            StatusResp::write(buffer, IMStatusCode::Success)?;
-            Ok(Some(OpCode::StatusResponse.into()))
-        })
-        .await?;
-    exchange.acknowledge().await
-}
-
-async fn wait_committed(state: &EthInteractionModelState) {
-    // SubscribeResponse can reach the client before the server commits its
-    // priming report. Start device operations after that transaction completes.
-    while !state
-        .subscriptions()
-        .has_subscription_for(NonZeroU8::new(1).unwrap(), CLIENT_ID)
-    {
-        futures_lite::future::yield_now().await;
-    }
-}
-
-fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> u32 {
-    let store = Store::open(directory).unwrap();
-    let identity = store.load_identity().unwrap();
-    let info = basic_info(&identity);
-    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    let protocol = StoreAdapter::new(store.matter());
-    let kv = matter.kv(protocol.clone());
-    matter.startup(&kv).unwrap();
-    let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    connect(&matter, SERVER_ID, CLIENT_ID, boot);
-    connect(&client, CLIENT_ID, SERVER_ID, boot);
-    let crypto = test_only_crypto();
-    let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
-    let light = VirtualLight::new();
-    let scenes = scenes::ScenesState::<16>::new();
-    let identify = identify::IdentifyHandler::new(Dataver::new(boot.into()));
-    let inner = model::on_off(&light, &scenes, Dataver::new(boot.into()));
-    let handler = model::handler(
-        &light,
-        &identity.light_id,
-        bridged_info::load_label(&store.matter()).unwrap(),
-        &identify,
-        &scenes,
-        &inner,
-        rand::rng(),
-    );
-    let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
-    let incoming = Pipe::default();
-    let outgoing = Pipe::default();
-    let responder = DefaultResponder::new(&im);
-
-    let id = block_on(async {
-        im.startup().await.unwrap();
-        let services = async {
-            or(
-                matter.run(
-                    &crypto,
-                    SendPipe(&outgoing),
-                    ReceivePipe(&incoming),
-                    NoNetwork,
-                ),
-                or(
-                    client.run(
-                        &crypto,
-                        SendPipe(&incoming),
-                        ReceivePipe(&outgoing),
-                        NoNetwork,
-                    ),
-                    or(responder.run::<4, 4>(), im.run()),
-                ),
-            )
-            .await
-            .unwrap();
-            panic!("Matter services exited during subscription test");
-        };
-        let controller = async {
-            let mut id = if let Some(id) = previous_subscription {
-                // No new SubscribeRequest: resume under the original ID and
-                // report the reset power value. Real CASE is validated manually.
-                expect_report(&client, id, false).await.unwrap();
-                id
-            } else {
-                let first = subscribe(&client).await.unwrap();
-                wait_committed(&state).await;
-                let replacement = subscribe(&client).await.unwrap();
-                assert_ne!(first, replacement);
-                replacement
-            };
-            for (command, power) in [("on", true), ("off", false)] {
-                wait_committed(&state).await;
-                super::terminal_command(&light, command);
-                expect_report(&client, id, power).await.unwrap();
-            }
-            wait_committed(&state).await;
-            if boot == 2 {
-                // A new subscription must not reuse the restored ID.
-                let replacement = subscribe(&client).await.unwrap();
-                assert!(replacement > id);
-                id = replacement;
-            }
-            wait_committed(&state).await;
-            super::terminal_command(&light, "on");
-            expect_report(&client, id, true).await.unwrap();
-            id
-        };
-        or(
-            services,
-            or(controller, async {
-                async_io::Timer::after(Duration::from_secs(5)).await;
-                panic!("timed out waiting for a subscription report on boot {boot}");
-            }),
-        )
-        .await
-    });
-    protocol.check_failure().unwrap();
-    assert!(
-        Store::open(directory)
-            .unwrap()
-            .matter()
-            .contains(PERSISTENT_SUBSCRIPTIONS_START)
-            .unwrap()
-    );
-    id
-}
-
-#[test]
-fn replaced_subscription_survives_restarts_and_reports_terminal_changes() {
-    env_logger::Builder::from_default_env().is_test(true).init();
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            let directory = tempfile::tempdir().unwrap();
-            let identity = Store::open(directory.path())
-                .unwrap()
-                .load_identity()
-                .unwrap();
-            let mut subscription = None;
-            for boot in 1..=3 {
-                subscription = Some(run_boot(directory.path(), boot, subscription));
-                assert_eq!(
-                    Store::open(directory.path())
-                        .unwrap()
-                        .load_identity()
-                        .unwrap(),
-                    identity
-                );
-            }
-        })
-        .unwrap()
-        .join()
-        .unwrap();
 }

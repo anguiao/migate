@@ -437,7 +437,7 @@ fn ctrl_c_cancels_unfinished_login_with_failure() {
 }
 
 #[test]
-fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
+fn explicit_directory_eof_and_interrupt_keep_identity_and_protocol_state() {
     let peer_directory = tempfile::tempdir().unwrap();
     let (mut peer, peer_port) = TestProcess::bridge(peer_directory.path());
     let directory = tempfile::tempdir().unwrap();
@@ -445,11 +445,11 @@ fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
     for close_input in [false, true] {
         let (mut process, port) = TestProcess::bridge(directory.path());
         assert_ne!(port, peer_port);
-        process.send("status\non\n");
+        process.send("devices\n");
         if close_input {
             process.close_input();
         }
-        process.wait_for_output(Stream::Stdout, "virtual-light-1: on\n");
+        process.wait_for_output(Stream::Stdout, "No published features.");
         if close_input {
             process.wait_for_output(
                 Stream::Stderr,
@@ -463,21 +463,23 @@ fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
             "{output}"
         );
         assert!(output.contains("Manual pairing code: "), "{output}");
-        assert!(output.contains("virtual-light-1: off"), "{output}");
-        assert!(output.contains("virtual-light-1: on"), "{output}");
         assert!(errors.contains(directory.path().to_str().unwrap()));
-        let restored = migate::storage::Store::open(directory.path())
-            .unwrap()
-            .load_identity()
-            .unwrap();
+        let store = migate::storage::Store::open(directory.path()).unwrap();
+        let restored = store.load_identity().unwrap();
+        assert!(
+            store
+                .matter()
+                .contains(rs_matter::persist::BASIC_INFO_KEY)
+                .unwrap()
+        );
         if let Some(identity) = &identity {
             assert_eq!(identity, &restored);
         } else {
             identity = Some(restored);
         }
     }
-    peer.send("status\n");
-    peer.wait_for_output(Stream::Stdout, "virtual-light-1: off\n");
+    peer.send("devices\n");
+    peer.wait_for_output(Stream::Stdout, "No published features.");
     peer.interrupt();
 }
 

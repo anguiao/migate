@@ -1,44 +1,26 @@
-use super::super::{
-    NODE, basic_info,
-    bridged_info::{self, BridgedHandler},
-    model::{self, LIGHT_ENDPOINT},
-    storage::StoreAdapter,
-};
-use crate::{storage::Store, virtual_device::VirtualLight};
-use futures_lite::future::{block_on, poll_once};
 use rs_matter::{
-    MATTER_PORT, Matter,
-    crypto::{Crypto, default_crypto},
+    Matter,
+    crypto::Crypto,
     dm::{
-        Async, AsyncHandler, AttrChangeNotifier, AttrDetails, CmdDetails, Dataver, EventEmitter,
-        EventNumber, HandlerContext, InvokeContext, InvokeReplyInstance, MatchContext, Metadata,
-        OperationContext, OwnAttrChangeNotifier, OwnEventEmitter, ReadContext, ReadReplyInstance,
-        WriteContext,
-        clusters::{
-            app::on_off,
-            decl::bridged_device_basic_information::{self as bridged, ClusterHandler as _},
-            identify,
-            net_comm::NetworksAccess,
-            scenes,
-        },
-        devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
-        networks::eth::EthNetwork,
+        AsyncHandler, AttrChangeNotifier, AttrDetails, CmdDetails, EventEmitter, EventNumber,
+        HandlerContext, InvokeContext, MatchContext, Metadata, OperationContext,
+        OwnAttrChangeNotifier, OwnEventEmitter, ReadContext, ReadReplyInstance, WriteContext,
+        clusters::net_comm::NetworksAccess,
     },
     error::Error,
     im::{
-        EthInteractionModelState, ImStats, InteractionModel,
+        ImStats,
         encoding::{EventPriority, IMBuffer},
         events::EventTLVWrite,
     },
     persist::KvBlobStoreAccess,
-    tlv::{TLVElement, TLVTag, TLVWriteParent, Utf8StrBuilder},
-    transport::exchange::{Exchange, MatterBuffers},
+    tlv::TLVElement,
+    transport::exchange::Exchange,
     utils::storage::{WriteBuf, pooled::Buffers},
 };
 use std::{
     cell::{Cell, RefCell},
     num::NonZeroU8,
-    pin::pin,
 };
 
 pub(super) struct Context<'a, H> {
@@ -54,10 +36,6 @@ impl<'a, H> Context<'a, H> {
         self.changes
             .borrow()
             .contains(&(endpoint, cluster, attribute))
-    }
-
-    fn new(base: &'a H, cluster_id: u32, attr_id: u32) -> Self {
-        Self::new_at(base, LIGHT_ENDPOINT, cluster_id, attr_id)
     }
 
     pub(super) fn new_at(base: &'a H, endpoint: u16, cluster_id: u32, attr_id: u32) -> Self {
@@ -259,130 +237,4 @@ fn attr(endpoint_id: u16, cluster_id: u32, attr_id: u32) -> AttrDetails {
         array: false,
         cluster_status: Cell::new(0),
     }
-}
-#[test]
-fn actual_handler_invoke_read_and_report_share_the_device() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let identity = store.load_identity().unwrap();
-    let info = basic_info(&identity);
-    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
-    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-    let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let light = VirtualLight::new();
-    let scenes = scenes::ScenesState::<16>::new();
-    let identify = identify::IdentifyHandler::new(Dataver::new(1));
-    let inner = model::on_off(&light, &scenes, Dataver::new(1));
-    let handler = model::handler(
-        &light,
-        &identity.light_id,
-        bridged_info::load_label(&store.matter()).unwrap(),
-        &identify,
-        &scenes,
-        &inner,
-        rand::rng(),
-    );
-    let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
-    let mut ctx = Context::new(&im, 6, 0);
-    block_on(async {
-        for (command, power) in [(1, true), (0, false), (2, true), (2, false)] {
-            ctx.command.cmd_id = command;
-            let mut out = [0; 128];
-            handler
-                .invoke(
-                    &ctx,
-                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out)),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                super::terminal_command(&light, "status").unwrap(),
-                format!("virtual-light-1: {}", if power { "on" } else { "off" })
-            );
-        }
-        ctx.data = TLVElement::new(&[0x15]);
-        assert!(
-            handler
-                .invoke(
-                    &ctx,
-                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128]))
-                )
-                .await
-                .is_err()
-        );
-        assert!(!light.snapshot().power);
-        super::terminal_command(&light, "on");
-        let mut out = [0; 128];
-        let mut write = WriteBuf::new(&mut out);
-        handler
-            .read(&ctx, ReadReplyInstance::new(&ctx.attribute, &mut write))
-            .await
-            .unwrap();
-        let root = TLVElement::new(write.as_slice());
-        assert!(
-            root.structure()
-                .unwrap()
-                .find_ctx(1)
-                .unwrap()
-                .structure()
-                .unwrap()
-                .find_ctx(2)
-                .unwrap()
-                .bool()
-                .unwrap()
-        );
-        let mut run = pin!(handler.run(&ctx));
-        assert!(poll_once(&mut run).await.is_none());
-        assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
-        assert!(on_off::ClusterAsyncHandler::dataver(&inner) > 1);
-        let count = ctx.changes.borrow().len();
-        super::terminal_command(&light, "on");
-        assert!(poll_once(&mut run).await.is_none());
-        assert_eq!(ctx.changes.borrow().len(), count);
-    });
-}
-
-#[test]
-fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let identity = store.load_identity().unwrap();
-    let info = basic_info(&identity);
-    let label = bridged_info::load_label(&store.matter()).unwrap();
-    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
-    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-    let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let bridged = BridgedHandler::new(Dataver::new(1), &identity.light_id, label);
-    let handler = Async(bridged::HandlerAdaptor(&bridged));
-    let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
-    let ctx = Context::new(
-        &im,
-        BridgedHandler::CLUSTER.id,
-        bridged::AttributeId::NodeLabel as _,
-    );
-    bridged.set_node_label(&ctx, "Study Light").unwrap();
-    assert_eq!(
-        bridged_info::load_label(&Store::open(dir.path()).unwrap().matter()).unwrap(),
-        "Study Light"
-    );
-    let count = ctx.changes.borrow().len();
-    bridged.set_node_label(&ctx, "Study Light").unwrap();
-    assert_eq!(ctx.changes.borrow().len(), count);
-    assert!(bridged.set_node_label(&ctx, &"x".repeat(33)).is_err());
-    let mut bytes = [0; 64];
-    let mut writer = WriteBuf::new(&mut bytes);
-    bridged
-        .node_label(
-            &ctx,
-            Utf8StrBuilder::new(TLVWriteParent::new((), &mut writer), &TLVTag::Anonymous),
-        )
-        .unwrap();
-    assert_eq!(
-        TLVElement::new(writer.as_slice()).utf8().unwrap(),
-        "Study Light"
-    );
 }

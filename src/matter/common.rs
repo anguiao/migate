@@ -1,16 +1,61 @@
 use super::storage::StoreAdapter;
 use crate::{
     device::{DeviceService, FeatureIdentity},
-    storage::StorageError,
+    storage::{Identity, StorageError},
 };
+use rs_matter::dm::clusters::desc::ClusterHandler as _;
 use rs_matter::{
+    Matter, clusters, devices,
     dm::clusters::decl::bridged_device_basic_information as bridged,
     dm::{Cluster, Dataver, InvokeContext, ReadContext, WriteContext},
+    dm::{
+        Endpoint, Node,
+        clusters::basic_info::BasicInfoConfig,
+        devices::{DEV_TYPE_AGGREGATOR, test::TEST_DEV_DET},
+    },
     error::{Error, ErrorCode},
+    root_endpoint,
     tlv::{TLVBuilderParent, Utf8Str, Utf8StrBuilder},
     with,
 };
 use std::cell::RefCell;
+
+pub(crate) fn basic_info(identity: &Identity) -> BasicInfoConfig<'_> {
+    BasicInfoConfig {
+        product_name: "MiGate",
+        device_name: "MiGate",
+        product_label: "MiGate",
+        serial_no: &identity.bridge_id,
+        unique_id: &identity.bridge_id,
+        ..TEST_DEV_DET
+    }
+}
+
+pub(crate) fn initialize_basic_info(
+    matter: &Matter<'_>,
+    kv: impl rs_matter::persist::KvBlobStoreAccess,
+    missing: bool,
+) -> Result<(), Error> {
+    if missing {
+        let mut settings = rs_matter::dm::clusters::basic_info::BasicInfoSettings::new();
+        settings.node_label.push_str("MiGate").unwrap();
+        rs_matter::persist::Persist::new(&kv)
+            .store_tlv(rs_matter::persist::BASIC_INFO_KEY, &settings)?;
+        matter.startup(&kv)?;
+    }
+    Ok(())
+}
+
+pub(super) const BASE_NODE: Node<'static> = Node {
+    endpoints: &[
+        root_endpoint!(eth),
+        Endpoint::new(
+            1,
+            devices!(DEV_TYPE_AGGREGATOR),
+            clusters!(rs_matter::dm::clusters::desc::DescHandler::CLUSTER),
+        ),
+    ],
+};
 
 pub(super) const BRIDGED_CLUSTER: Cluster<'static> = bridged::FULL_CLUSTER
     .with_features(0)

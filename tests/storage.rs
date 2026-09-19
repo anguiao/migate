@@ -1,4 +1,4 @@
-use migate::{config::Config, device::Command, storage::Store, virtual_device::VirtualLight};
+use migate::{config::Config, storage::Store};
 use rusqlite::Connection;
 use std::{error::Error as _, fs};
 
@@ -15,7 +15,7 @@ CREATE TABLE blobs (
 "#;
 
 #[test]
-fn initializes_and_restores_identity_without_power() {
+fn initializes_and_restores_bridge_identity() {
     let root = tempfile::tempdir().unwrap();
     for dir in [root.path().join("new"), root.path().join("empty")] {
         if dir.ends_with("empty") {
@@ -27,19 +27,15 @@ fn initializes_and_restores_identity_without_power() {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            8
+            9
         );
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
-        assert_ne!(identity.bridge_id, identity.light_id);
-        let light = VirtualLight::new();
-        light.execute(Command::On);
         drop(store);
         assert_eq!(
             Store::open(&dir).unwrap().load_identity().unwrap(),
             identity
         );
-        assert!(!VirtualLight::new().snapshot().power);
     }
     assert_ne!(
         Store::open(root.path().join("new"))

@@ -866,6 +866,19 @@ impl XiaomiRuntime {
         self.inner.auth_report.borrow().clone()
     }
 
+    fn replace_auth_report(&self, report: AuthReport) {
+        let changed = {
+            let previous = self.inner.auth_report.borrow();
+            previous.authentication != report.authentication
+                || previous.certificate != report.certificate
+                || previous.certificate_update != report.certificate_update
+        };
+        if changed {
+            crate::terminal::log_status(&report, unix_time());
+        }
+        *self.inner.auth_report.borrow_mut() = report;
+    }
+
     pub fn status(&self) -> XiaomiRuntimeStatus {
         let mut status = self.inner.status.borrow().clone();
         status.diagnostics = self.inner.diagnostics.borrow().iter().cloned().collect();
@@ -873,6 +886,18 @@ impl XiaomiRuntime {
     }
 
     pub fn refresh(&self) {
+        let devices = self
+            .inner
+            .status
+            .borrow()
+            .admission
+            .features
+            .iter()
+            .map(|feature| feature.identity.physical.clone())
+            .collect::<BTreeSet<_>>();
+        for device in devices {
+            self.inner.state.request_refresh(&device);
+        }
         self.inner.refresh_requested.set(true);
         self.inner.wake.notify(usize::MAX);
     }
@@ -1364,7 +1389,7 @@ impl XiaomiRuntime {
                                 if !certificate_current {
                                     self.drop_all_gateways(runner)?;
                                 }
-                                *self.inner.auth_report.borrow_mut() = report;
+                                self.replace_auth_report(report);
                                 if successful && let Ok(snapshot) = runner.observer.snapshot() {
                                     runner.next_auth = auth_maintenance_deadline(&snapshot);
                                     runner.auth_backoff = AUTH_MAINTENANCE_INTERVAL;
@@ -3091,6 +3116,7 @@ impl XiaomiRuntime {
         if diagnostics.len() == 32 {
             diagnostics.pop_front();
         }
+        log::warn!("{}", format_diagnostic(&diagnostic));
         diagnostics.push_back(diagnostic);
     }
 
@@ -3142,6 +3168,47 @@ fn same_diagnostic(left: &XiaomiRuntimeDiagnostic, right: &XiaomiRuntimeDiagnost
             left == right
         }
         _ => false,
+    }
+}
+
+fn format_diagnostic(diagnostic: &XiaomiRuntimeDiagnostic) -> String {
+    match diagnostic {
+        XiaomiRuntimeDiagnostic::Command(super::RuntimeDiagnostic::CommandFailure {
+            feature,
+            command,
+            path,
+            stage,
+            outcome,
+            sent,
+        }) => format!(
+            "Xiaomi command failed: device={} service={} role={} command={command:?} path={path:?} stage={stage:?} outcome={outcome:?} sent={sent}",
+            feature.physical.parent_did,
+            feature.service_instance,
+            feature.role.as_str(),
+        ),
+        XiaomiRuntimeDiagnostic::State(super::StateDiagnostic::ReadFailure {
+            feature,
+            path,
+            failure,
+        }) => format!(
+            "Xiaomi state read failed: device={} service={} role={} path={path:?} outcome={failure:?}",
+            feature.physical.parent_did,
+            feature.service_instance,
+            feature.role.as_str(),
+        ),
+        XiaomiRuntimeDiagnostic::State(super::StateDiagnostic::QueueFull) => {
+            "Xiaomi state refresh queue is full".to_owned()
+        }
+        XiaomiRuntimeDiagnostic::State(super::StateDiagnostic::StorageFailure(error)) => {
+            format!("Xiaomi state persistence failed: {error}")
+        }
+        XiaomiRuntimeDiagnostic::Boundary(diagnostic) => format!(
+            "Xiaomi boundary failure: component={:?} stage={:?} code={:?} subject={}",
+            diagnostic.component,
+            diagnostic.stage,
+            diagnostic.code,
+            diagnostic.subject.as_deref().unwrap_or("none"),
+        ),
     }
 }
 
@@ -4413,6 +4480,9 @@ fn auth_maintenance_deadline(snapshot: &AuthSnapshot) -> Instant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xiaomi::runtime::{
+        AdmissionFeature, AdmissionSnapshot, AdmissionStatus, OperationPaths, RuntimeFeature,
+    };
     use bytes::BytesMut;
     use futures_lite::future::{block_on, poll_once};
     use mqttbytes::{QoS, v5};
@@ -4421,6 +4491,175 @@ mod tests {
         net::{TcpListener, TcpStream},
         thread,
     };
+
+    #[test]
+    fn terminal_help_reads_the_current_runtime_auth_report_each_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let runtime = XiaomiRuntime::new(store.clone()).unwrap();
+        let service = runtime.service();
+        let render = || {
+            block_on(crate::terminal::bridge::handle_line(
+                &service,
+                &store.devices(),
+                &runtime,
+                "/bin/migate".as_ref(),
+                directory.path(),
+                "help",
+                0,
+            ))
+            .unwrap()
+            .unwrap()
+        };
+
+        assert!(render().contains("Xiaomi: not signed in (cn)."));
+        runtime.replace_auth_report(crate::xiaomi::auth::AuthReport::for_test(
+            crate::xiaomi::auth::AuthenticationState::Checking,
+            None,
+            crate::xiaomi::auth::CertificateUpdate::NotNeeded,
+            0,
+        ));
+        assert!(render().contains("Xiaomi: checking authentication (cn)..."));
+    }
+
+    #[test]
+    fn manual_refresh_schedules_one_forced_state_read_per_admitted_device() {
+        let mut response_index = 0;
+        let (cloud_base, requests) =
+            crate::xiaomi::test_support::dynamic_mock_server(2, move |request| {
+                assert!(request.target.ends_with("/get"));
+                let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+                let value = response_index != 0;
+                response_index += 1;
+                let result = body["params"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| {
+                        serde_json::json!({
+                            "did": item["did"],
+                            "siid": item["siid"],
+                            "piid": item["piid"],
+                            "code": 0,
+                            "value": value,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                crate::xiaomi::test_support::MockResponse::json(
+                    200,
+                    &serde_json::json!({"code": 0, "result": result}).to_string(),
+                )
+            });
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let runtime = XiaomiRuntime::new(store.clone()).unwrap();
+        let service = runtime.service();
+        let physical = crate::device::PhysicalDeviceId {
+            account: crate::device::AccountId::new("account").unwrap(),
+            home: crate::device::HomeId::new("home").unwrap(),
+            parent_did: crate::device::DeviceDid::new("device").unwrap(),
+        };
+        let descriptors = crate::xiaomi::catalog::compile_spec(
+            "xiaomi.switch.w3",
+            include_str!("../../../tests/fixtures/miot_specs/xiaomi.switch.w3.json"),
+        )
+        .unwrap()
+        .features;
+        assert!(descriptors.len() > 1);
+        let auth_generation = store.xiaomi().snapshot().unwrap().session_generation;
+        let features = descriptors
+            .into_iter()
+            .take(2)
+            .map(|descriptor| {
+                let identity = crate::device::FeatureIdentity {
+                    physical: physical.clone(),
+                    service_instance: descriptor.service_instance,
+                    role: descriptor.role,
+                };
+                service.publish(
+                    identity.clone(),
+                    descriptor.name.clone(),
+                    descriptor.capabilities.clone(),
+                );
+                let registered = RuntimeFeature {
+                    identity: identity.clone(),
+                    descriptor,
+                    authority_generation: 1,
+                    auth_session_generation: auth_generation,
+                };
+                AdmissionFeature {
+                    identity,
+                    runtime: registered,
+                    paths: OperationPaths {
+                        cloud: true,
+                        ..OperationPaths::default()
+                    },
+                    gateways: Vec::new(),
+                    lan_evidence: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let snapshot = AdmissionSnapshot {
+            binding: None,
+            status: AdmissionStatus::Active,
+            epoch: NetworkEpoch::new(1),
+            features,
+        };
+        runtime.inner.registry.install_cloud(
+            physical.clone(),
+            Rc::new(CloudClient::for_test(&cloud_base, Duration::from_millis(300)).unwrap()),
+            "access",
+            unix_time() + 60,
+            runtime.session_authority(),
+        );
+        runtime.inner.state.reconcile(&snapshot);
+        block_on(runtime.inner.state.run_until_idle());
+        let initial_requests = requests.try_iter().collect::<Vec<_>>();
+        assert_eq!(initial_requests.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&initial_requests[0].body).unwrap()["params"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let token = runtime
+            .inner
+            .state
+            .select_push_source(&physical, PushSource::Cloud, 1, 1)
+            .unwrap();
+        assert!(runtime.inner.state.acknowledge(&token, 1, 1));
+        block_on(runtime.inner.state.run_until_idle());
+        assert!(requests.try_recv().is_err());
+        runtime.inner.status.borrow_mut().admission = snapshot.clone();
+
+        runtime.refresh();
+        runtime.refresh();
+        block_on(runtime.inner.state.run_until_idle());
+
+        let refresh_requests = requests.try_iter().collect::<Vec<_>>();
+        assert_eq!(refresh_requests.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&refresh_requests[0].body).unwrap()["params"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(runtime.inner.refresh_requested.get());
+        for feature in &snapshot.features {
+            assert!(matches!(
+                service
+                    .snapshot(&feature.identity)
+                    .unwrap()
+                    .property(crate::device::Property::Power),
+                Some(crate::device::PropertyState::Current {
+                    value: crate::device::PropertyValue::Power(true),
+                    ..
+                })
+            ));
+        }
+    }
 
     fn mqtt_packet(stream: &mut TcpStream, buffer: &mut BytesMut) -> v5::Packet {
         loop {

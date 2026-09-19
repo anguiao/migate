@@ -65,6 +65,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, VecDeque},
     num::NonZeroU8,
+    path::Path,
     rc::Rc,
     time::Duration,
 };
@@ -338,14 +339,14 @@ fn fan_tlv_reads_and_writes_use_confirmed_discrete_state_without_optimism() {
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let read =
             |attribute| Context::new_at(&im, endpoint, fan_control::FULL_CLUSTER.id, attribute);
@@ -628,14 +629,14 @@ fn bath_heater_supply_and_exhaust_are_independent_power_only_fans() {
         let commands = Rc::new(RecordingCommands::default());
         service.set_command_sink(commands.clone());
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
         for (index, expected_mode, expected_percent) in [
@@ -735,14 +736,14 @@ fn matter_fan_commands_reach_real_runtime_with_p5c_wire_values() {
         });
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
         let percent = scalar_data(|writer| writer.u8(&TLVTag::Anonymous, 35).unwrap());
@@ -833,14 +834,14 @@ fn auto_fan_keeps_auto_distinct_from_off_and_unknown_percent() {
         service.set_command_sink(commands.clone());
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
         let mode = Context::new_at(
@@ -980,14 +981,14 @@ fn on_off_commands_use_the_queue_without_optimistic_state() {
         service.set_command_sink(commands.clone());
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let mut ctx = Context::new_at(&im, endpoint, 6, 0);
         ctx.set_command(1, TLVElement::new(&[0x15, 0x18]));
@@ -1075,14 +1076,14 @@ fn level_and_color_temperature_use_confirmed_values_and_typed_commands() {
         service.set_command_sink(commands.clone());
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
         let level = Context::new_at(
@@ -1388,14 +1389,14 @@ fn move_color_preserves_each_axis_rate_until_its_own_boundary() {
         service.set_command_sink(commands.clone());
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let move_color = command_data(|writer| {
             writer.i16(&TLVTag::Context(0), 30_000).unwrap();
@@ -1494,14 +1495,14 @@ fn level_options_couple_temperature_and_global_scene_recalls_confirmed_values() 
         let commands = Rc::new(RecordingCommands::default());
         service.set_command_sink(commands.clone());
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let options = scalar_data(|writer| {
             writer
@@ -1660,14 +1661,14 @@ fn matter_light_commands_reach_real_runtime_with_light3_wire_values() {
         });
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
         let level = command_data(|writer| {
@@ -1778,14 +1779,14 @@ fn reconcile_refreshes_lighting_ranges_without_rebuilding_the_endpoint() {
         service.set_command_sink(commands.clone());
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let data = command_data(|writer| {
             writer.u8(&TLVTag::Context(0), 127).unwrap();
@@ -1846,14 +1847,14 @@ fn reconcile_refreshes_fan_levels_without_rebuilding_the_endpoint() {
         );
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let ctx = Context::new_at(
             &im,
@@ -1929,14 +1930,14 @@ fn reconcile_refreshes_thermostat_range_without_rebuilding_the_endpoint() {
         );
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let ctx = Context::new_at(
             &im,
@@ -2004,14 +2005,14 @@ fn lighting_adjustment_survives_state_reports_without_duplicate_dispatch() {
         service.set_command_sink(commands.clone());
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let move_to = command_data(|writer| {
             writer.u8(&TLVTag::Context(0), 200).unwrap();
@@ -2127,14 +2128,14 @@ fn rejected_adjustment_step_does_not_stop_lighting_background() {
         ]));
         service.set_command_sink(commands.clone());
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let first = command_data(|writer| {
             writer.u8(&TLVTag::Context(0), 200).unwrap();
@@ -2225,14 +2226,14 @@ fn timed_off_extends_on_time_tracks_off_wait_and_honors_accept_only_when_on() {
         service.set_command_sink(commands.clone());
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let timed = |control, on_time, off_wait| {
             command_data(|writer| {
@@ -2366,7 +2367,7 @@ fn real_im_scenes_are_endpoint_and_fabric_scoped_and_require_confirmed_state() {
                 let model =
                     DeviceBridgeModel::new(service.clone(), store.devices(), store.matter())
                         .unwrap();
-                let basic_info = super::super::basic_info(&identity);
+                let basic_info = super::super::common::basic_info(&identity);
                 let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let crypto = test_only_crypto();
@@ -2374,7 +2375,7 @@ fn real_im_scenes_are_endpoint_and_fabric_scoped_and_require_confirmed_state() {
                 let state: EthInteractionModelState =
                     EthInteractionModelState::new(EthNetwork::new_default());
                 let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
-                super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+                super::super::common::initialize_basic_info(&server, &kv, true).unwrap();
                 connect(&server, 123456, 445566, 71);
                 connect(&client, 445566, 123456, 71);
                 let fabric_two = NonZeroU8::new(2).unwrap();
@@ -2649,7 +2650,7 @@ fn real_im_scenes_are_endpoint_and_fabric_scoped_and_require_confirmed_state() {
                     EthInteractionModelState::new(EthNetwork::new_default());
                 let restored_kv = restored_server
                     .kv(super::super::storage::StoreAdapter::new(store.matter()));
-                super::super::model::initialize_basic_info(&restored_server, &restored_kv, true)
+                super::super::common::initialize_basic_info(&restored_server, &restored_kv, true)
                     .unwrap();
                 connect(&restored_server, 123456, 445566, 73);
                 connect(&restored_client, 445566, 123456, 73);
@@ -3003,7 +3004,7 @@ fn sensor_tlv_reads_preserve_fractional_values_unknowns_and_contact_polarity() {
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
         let identity = store.load_identity().unwrap();
-        let info = super::super::basic_info(&identity);
+        let info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let crypto = test_only_crypto();
         let buffers: MatterBuffers = MatterBuffers::new();
@@ -3514,14 +3515,14 @@ fn all_approved_fixtures_publish_each_compiled_functional_endpoint() {
         assert_eq!(features.len(), 58);
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
         let identity = store.load_identity().unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         for feature in features {
             let endpoint = model
@@ -3679,14 +3680,14 @@ fn rvc_tlv_uses_real_modes_and_keeps_accepted_commands_unconfirmed() {
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
         let supported = Context::new_at(
@@ -4078,14 +4079,14 @@ fn rvc_commands_reach_runtime_with_c104_wire_operations() {
         });
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
         for mode in [1, 0] {
@@ -4217,14 +4218,14 @@ fn reconcile_refreshes_rvc_modes_without_rebuilding_the_endpoint() {
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let ctx = Context::new_at(
             &im,
@@ -4340,14 +4341,14 @@ fn curtain_tlv_inverts_confirmed_positions_and_dispatches_only_valid_commands() 
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let read =
             |attribute| Context::new_at(&im, endpoint, window_covering::FULL_CLUSTER.id, attribute);
@@ -4649,14 +4650,14 @@ fn curtain_commands_reach_runtime_and_stop_retracts_an_unsent_target() {
         });
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
         let position = command_data(|writer| {
@@ -4771,14 +4772,14 @@ fn reconcile_refreshes_curtain_grid_and_reports_each_confirmed_state() {
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let ctx = Context::new_at(
             &im,
@@ -4946,14 +4947,14 @@ fn thermostat_tlv_uses_confirmed_mode_single_target_and_climate_fan_controls() {
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model =
             DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
         let read =
             |attribute| Context::new_at(&im, endpoint, thermostat::FULL_CLUSTER.id, attribute);
@@ -5270,14 +5271,14 @@ fn bath_heater_thermostat_controls_only_heating_and_its_target() {
         service.set_command_sink(commands.clone());
         let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
         let model = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = test_only_crypto();
         let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
         model.access(|node| {
@@ -5493,14 +5494,14 @@ fn thermostat_commands_reach_runtime_with_each_companions_real_wire_mapping() {
             let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
             let model =
                 DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
-            let basic_info = super::super::basic_info(&identity);
+            let basic_info = super::super::common::basic_info(&identity);
             let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
             let buffers: MatterBuffers = MatterBuffers::new();
             let state: EthInteractionModelState =
                 EthInteractionModelState::new(EthNetwork::new_default());
             let crypto = test_only_crypto();
             let kv = matter.kv(super::super::storage::StoreAdapter::new(store.matter()));
-            super::super::model::initialize_basic_info(&matter, &kv, true).unwrap();
+            super::super::common::initialize_basic_info(&matter, &kv, true).unwrap();
             let im =
                 InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
 
@@ -5961,7 +5962,7 @@ fn real_im_fan_subscription_reports_confirmed_changes_once() {
                 let model =
                     DeviceBridgeModel::new(service.clone(), store.devices(), store.matter())
                         .unwrap();
-                let basic_info = super::super::basic_info(&identity);
+                let basic_info = super::super::common::basic_info(&identity);
                 let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let crypto = test_only_crypto();
@@ -5969,7 +5970,7 @@ fn real_im_fan_subscription_reports_confirmed_changes_once() {
                 let state: EthInteractionModelState =
                     EthInteractionModelState::new(EthNetwork::new_default());
                 let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
-                super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+                super::super::common::initialize_basic_info(&server, &kv, true).unwrap();
                 connect(&server, 123456, 445566, 72);
                 connect(&client, 445566, 123456, 72);
                 let mut random = rand::rng();
@@ -6124,7 +6125,7 @@ fn real_im_thermostat_subscription_reports_confirmed_changes_once() {
                 let model =
                     DeviceBridgeModel::new(service.clone(), store.devices(), store.matter())
                         .unwrap();
-                let basic_info = super::super::basic_info(&identity);
+                let basic_info = super::super::common::basic_info(&identity);
                 let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let crypto = test_only_crypto();
@@ -6132,7 +6133,7 @@ fn real_im_thermostat_subscription_reports_confirmed_changes_once() {
                 let state: EthInteractionModelState =
                     EthInteractionModelState::new(EthNetwork::new_default());
                 let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
-                super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+                super::super::common::initialize_basic_info(&server, &kv, true).unwrap();
                 connect(&server, 123456, 445566, 73);
                 connect(&client, 445566, 123456, 73);
                 let mut random = rand::rng();
@@ -6303,7 +6304,7 @@ fn real_im_curtain_groups_and_position_subscription_use_the_dynamic_endpoint() {
                 let model =
                     DeviceBridgeModel::new(service.clone(), store.devices(), store.matter())
                         .unwrap();
-                let basic_info = super::super::basic_info(&identity);
+                let basic_info = super::super::common::basic_info(&identity);
                 let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let crypto = test_only_crypto();
@@ -6311,7 +6312,7 @@ fn real_im_curtain_groups_and_position_subscription_use_the_dynamic_endpoint() {
                 let state: EthInteractionModelState =
                     EthInteractionModelState::new(EthNetwork::new_default());
                 let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
-                super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+                super::super::common::initialize_basic_info(&server, &kv, true).unwrap();
                 connect(&server, 123456, 445566, 82);
                 connect(&client, 445566, 123456, 82);
                 server.with_state(|state| {
@@ -6943,7 +6944,7 @@ fn real_im_rvc_fault_subscription_emits_each_new_confirmed_fault_once() {
                 let model =
                     DeviceBridgeModel::new(service.clone(), store.devices(), store.matter())
                         .unwrap();
-                let basic_info = super::super::basic_info(&identity);
+                let basic_info = super::super::common::basic_info(&identity);
                 let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let crypto = test_only_crypto();
@@ -6951,7 +6952,7 @@ fn real_im_rvc_fault_subscription_emits_each_new_confirmed_fault_once() {
                 let state: EthInteractionModelState =
                     EthInteractionModelState::new(EthNetwork::new_default());
                 let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
-                super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+                super::super::common::initialize_basic_info(&server, &kv, true).unwrap();
                 connect(&server, 123456, 445566, 72);
                 connect(&client, 445566, 123456, 72);
                 let mut random = rand::rng();
@@ -7230,14 +7231,14 @@ fn real_im_temperature_subscription_reports_changes_once_and_ignores_same_value(
                 }),
             ]));
         }
-        let basic_info = super::super::basic_info(&identity);
+        let basic_info = super::super::common::basic_info(&identity);
         let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let crypto = test_only_crypto();
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
         let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
-        super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+        super::super::common::initialize_basic_info(&server, &kv, true).unwrap();
         connect(&server, 123456, 445566, 71);
         connect(&client, 445566, 123456, 71);
         let mut random = rand::rng();
@@ -7488,7 +7489,7 @@ fn real_im_level_subscription_throttles_rapid_reports_and_flushes_latest_value()
                 let model =
                     DeviceBridgeModel::new(service.clone(), store.devices(), store.matter())
                         .unwrap();
-                let basic_info = super::super::basic_info(&identity);
+                let basic_info = super::super::common::basic_info(&identity);
                 let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let crypto = test_only_crypto();
@@ -7496,7 +7497,7 @@ fn real_im_level_subscription_throttles_rapid_reports_and_flushes_latest_value()
                 let state: EthInteractionModelState =
                     EthInteractionModelState::new(EthNetwork::new_default());
                 let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
-                super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+                super::super::common::initialize_basic_info(&server, &kv, true).unwrap();
                 connect(&server, 123456, 445566, 81);
                 connect(&client, 445566, 123456, 81);
                 let mut random = rand::rng();
@@ -7626,6 +7627,215 @@ fn real_im_level_subscription_throttles_rapid_reports_and_flushes_latest_value()
         .unwrap();
 }
 
+async fn expect_temperature_report(
+    client: &Matter<'_>,
+    subscription_id: u32,
+    expected: Option<i16>,
+) -> Result<(), Error> {
+    let mut exchange = Exchange::accept(client).await?;
+    exchange.recv_fetch().await?;
+    {
+        let rx = exchange.rx()?;
+        assert_eq!(rx.meta().proto_opcode, OpCode::ReportData as u8);
+        let report = ReportDataResp::from_tlv(&TLVElement::new(rx.payload()))?;
+        assert_eq!(report.subscription_id, Some(subscription_id));
+        assert_eq!(
+            report
+                .attrs::<Nullable<i16>>(
+                    temperature_measurement::FULL_CLUSTER.id,
+                    temperature_measurement::AttributeId::MeasuredValue as _,
+                )
+                .map(|(_, value)| value.unwrap().into_option())
+                .collect::<Vec<_>>(),
+            [expected]
+        );
+    }
+    exchange
+        .send_with(|_, buffer| {
+            StatusResp::write(buffer, IMStatusCode::Success)?;
+            Ok(Some(OpCode::StatusResponse.into()))
+        })
+        .await?;
+    exchange.acknowledge().await
+}
+
+fn run_temperature_subscription_boot(
+    directory: &Path,
+    boot: u16,
+    previous_subscription: Option<u32>,
+) -> u32 {
+    let store = Store::open(directory).unwrap();
+    let identity = store.load_identity().unwrap();
+    let service = DeviceService::new();
+    let id = feature(FeatureRole::TemperatureSensor);
+    let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+    service.publish(
+        id.clone(),
+        "Temperature",
+        FeatureCapabilities(vec![Capability::Temperature(NumericRange {
+            minimum: -20.0,
+            maximum: 60.0,
+            step: 0.1,
+            unit: NumericUnit::Celsius,
+        })]),
+    );
+    let model = DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
+    let basic_info = super::super::common::basic_info(&identity);
+    let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    let protocol = super::super::storage::StoreAdapter::new(store.matter());
+    let kv = server.kv(protocol.clone());
+    server.startup(&kv).unwrap();
+    if !store
+        .matter()
+        .contains(rs_matter::persist::BASIC_INFO_KEY)
+        .unwrap()
+    {
+        super::super::common::initialize_basic_info(&server, &kv, true).unwrap();
+    }
+    let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    connect(&server, 123456, 445566, boot);
+    connect(&client, 445566, 123456, boot);
+    let crypto = test_only_crypto();
+    let buffers: MatterBuffers = MatterBuffers::new();
+    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let mut random = rand::rng();
+    let handler = endpoints::EthSysHandlerBuilder::new()
+        .netif_diag(&SysNetifs)
+        .build(&mut random)
+        .chain(|endpoint, _| endpoint != 0, &model);
+    let im = InteractionModel::new(&server, &crypto, &buffers, (&model, &handler), &kv, &state);
+    let incoming = Pipe::default();
+    let outgoing = Pipe::default();
+    let responder = DefaultResponder::new(&im);
+
+    let subscription = block_on(async {
+        im.startup().await.unwrap();
+        let services = async {
+            or(
+                server.run(
+                    &crypto,
+                    SendPipe(&outgoing),
+                    ReceivePipe(&incoming),
+                    NoNetwork,
+                ),
+                or(
+                    client.run(
+                        &crypto,
+                        SendPipe(&incoming),
+                        ReceivePipe(&outgoing),
+                        NoNetwork,
+                    ),
+                    or(responder.run::<4, 4>(), im.run()),
+                ),
+            )
+            .await
+            .unwrap();
+            panic!("Matter services exited during cold-start subscription test");
+        };
+        let controller = async {
+            let mut current = if let Some(previous) = previous_subscription {
+                expect_temperature_report(&client, previous, None)
+                    .await
+                    .unwrap();
+                previous
+            } else {
+                let first = subscribe_temperature(&client, endpoint).await.unwrap();
+                while !state
+                    .subscriptions()
+                    .has_subscription_for(NonZeroU8::new(1).unwrap(), 445566)
+                {
+                    futures_lite::future::yield_now().await;
+                }
+                let replacement = subscribe_temperature(&client, endpoint).await.unwrap();
+                assert_ne!(first, replacement);
+                replacement
+            };
+            while !state
+                .subscriptions()
+                .has_subscription_for(NonZeroU8::new(1).unwrap(), 445566)
+            {
+                futures_lite::future::yield_now().await;
+            }
+            if boot == 2 {
+                let replacement = subscribe_temperature(&client, endpoint).await.unwrap();
+                assert!(replacement > current);
+                current = replacement;
+            }
+            while !state
+                .subscriptions()
+                .has_subscription_for(NonZeroU8::new(1).unwrap(), 445566)
+            {
+                futures_lite::future::yield_now().await;
+            }
+            service.apply_report(StateReport::new(
+                id,
+                service.next_report_version(),
+                StateSource::Lan,
+                boot.into(),
+                [(
+                    Property::Temperature,
+                    PropertyValue::Temperature(20.0 + f64::from(boot)),
+                )],
+            ));
+            expect_temperature_report(
+                &client,
+                current,
+                Some(((20.0 + f64::from(boot)) * 100.0) as i16),
+            )
+            .await
+            .unwrap();
+            current
+        };
+        or(
+            services,
+            or(controller, async {
+                async_io::Timer::after(Duration::from_secs(5)).await;
+                panic!("timed out on cold-start subscription boot {boot}");
+            }),
+        )
+        .await
+    });
+    protocol.check_failure().unwrap();
+    assert!(
+        store
+            .matter()
+            .contains(rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START)
+            .unwrap()
+    );
+    subscription
+}
+
+#[test]
+fn replaced_subscription_survives_three_cold_starts_on_real_device_model() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let identity = Store::open(directory.path())
+                .unwrap()
+                .load_identity()
+                .unwrap();
+            let mut subscription = None;
+            for boot in 1..=3 {
+                subscription = Some(run_temperature_subscription_boot(
+                    directory.path(),
+                    boot,
+                    subscription,
+                ));
+                assert_eq!(
+                    Store::open(directory.path())
+                        .unwrap()
+                        .load_identity()
+                        .unwrap(),
+                    identity
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn shape_rebuild_restores_existing_subscription_on_the_new_model() {
     std::thread::Builder::new()
@@ -7656,11 +7866,11 @@ fn shape_rebuild_restores_existing_subscription_on_the_new_model() {
                         }),
                     ]),
                 );
-                let basic_info = super::super::basic_info(&identity);
+                let basic_info = super::super::common::basic_info(&identity);
                 let server = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
                 let kv = server.kv(super::super::storage::StoreAdapter::new(store.matter()));
-                super::super::model::initialize_basic_info(&server, &kv, true).unwrap();
+                super::super::common::initialize_basic_info(&server, &kv, true).unwrap();
                 connect(&server, 123456, 445566, 72);
                 connect(&client, 445566, 123456, 72);
                 let crypto = test_only_crypto();

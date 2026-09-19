@@ -1,7 +1,6 @@
 CREATE TABLE identity (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    bridge_id TEXT NOT NULL CHECK (length(bridge_id) = 32),
-    light_id TEXT NOT NULL CHECK (length(light_id) = 32 AND light_id <> bridge_id)
+    bridge_id TEXT NOT NULL CHECK (length(bridge_id) = 32)
 ) STRICT;
 
 CREATE TABLE blobs (
@@ -158,4 +157,4 @@ CREATE TABLE feature_states (
             account_uid, home_id, parent_did, service_instance, role
         )
 ) STRICT;
-PRAGMA user_version = 8;
+PRAGMA user_version = 9;
