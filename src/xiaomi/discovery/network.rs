@@ -1,21 +1,15 @@
 use std::{
-    collections::BTreeMap,
     net::Ipv4Addr,
-    process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use async_io::Timer;
-use async_process::Command;
-use futures_lite::future;
-use if_addrs::{IfAddr, get_if_addrs};
-
-use super::DiscoveryError;
+use super::{DiscoveryError, platform};
+pub use platform::capture_wake_sample;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinkType {
     Ethernet,
-    Other(u8),
+    Other(u16),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +22,7 @@ pub struct InterfaceRecord {
     pub point_to_point: bool,
     pub loopback: bool,
     pub link_type: LinkType,
+    pub physical: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -141,18 +136,12 @@ impl NetworkSnapshot {
 }
 
 fn is_physical_ipv4(record: &InterfaceRecord) -> bool {
-    const EXCLUDED_PREFIXES: &[&str] = &[
-        "lo", "utun", "tun", "tap", "p2p", "bridge", "awdl", "llw", "gif", "stf",
-    ];
     record.up
         && !record.point_to_point
         && !record.loopback
         && record.link_type == LinkType::Ethernet
         && record.index != 0
-        && record.name.starts_with("en")
-        && !EXCLUDED_PREFIXES
-            .iter()
-            .any(|prefix| record.name.starts_with(prefix))
+        && record.physical
         && !record.address.is_unspecified()
         && !record.address.is_loopback()
         && !record.address.is_multicast()
@@ -288,42 +277,6 @@ impl NetworkTracker {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn capture_wake_sample() -> Result<WakeSample, DiscoveryError> {
-    #[repr(C)]
-    struct MachTimebaseInfo {
-        numer: u32,
-        denom: u32,
-    }
-    unsafe extern "C" {
-        fn mach_absolute_time() -> u64;
-        fn mach_continuous_time() -> u64;
-        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
-    }
-    let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
-    // SAFETY: timebase points to initialized writable storage.
-    if unsafe { mach_timebase_info(&mut timebase) } != 0 || timebase.denom == 0 {
-        return Err(DiscoveryError::new("cannot read macOS wake clock"));
-    }
-    let to_millis = |ticks: u64| {
-        (u128::from(ticks) * u128::from(timebase.numer) / u128::from(timebase.denom) / 1_000_000)
-            as u64
-    };
-    Ok(WakeSample {
-        // SAFETY: both functions are side-effect-free Darwin monotonic clock reads.
-        active_millis: to_millis(unsafe { mach_absolute_time() }),
-        // SAFETY: mach_continuous_time is available on supported macOS versions.
-        continuous_millis: to_millis(unsafe { mach_continuous_time() }),
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn capture_wake_sample() -> Result<WakeSample, DiscoveryError> {
-    Err(DiscoveryError::new(
-        "wake clock collection is supported only on macOS",
-    ))
-}
-
 impl Default for NetworkTracker {
     fn default() -> Self {
         Self::new()
@@ -379,173 +332,7 @@ impl Default for NetworkMonitor {
 pub async fn collect_network_snapshot(
     timeout: Duration,
 ) -> Result<NetworkSnapshot, DiscoveryError> {
-    let records = collect_interface_records()?;
-    let default_route = collect_default_route(&records, timeout).await?;
+    let records = platform::collect_interface_records()?;
+    let default_route = platform::collect_default_route(&records, timeout).await?;
     NetworkSnapshot::select(records, default_route)
-}
-
-fn collect_interface_records() -> Result<Vec<InterfaceRecord>, DiscoveryError> {
-    let link_types = link_types_by_index()?;
-    let records = get_if_addrs()
-        .map_err(DiscoveryError::from)?
-        .into_iter()
-        .filter_map(|interface| {
-            let IfAddr::V4(ref ipv4) = interface.addr else {
-                return None;
-            };
-            let index = interface.index?;
-            let link_type = link_types
-                .get(&index)
-                .copied()
-                .unwrap_or(LinkType::Other(0));
-            let up = interface.is_oper_up();
-            let point_to_point = interface.is_p2p();
-            Some(InterfaceRecord {
-                index,
-                name: interface.name,
-                address: ipv4.ip,
-                netmask: ipv4.netmask,
-                up,
-                point_to_point,
-                loopback: ipv4.ip.is_loopback(),
-                link_type,
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(records)
-}
-
-#[cfg(target_os = "macos")]
-fn link_types_by_index() -> Result<BTreeMap<u32, LinkType>, DiscoveryError> {
-    let mut head = std::ptr::null_mut();
-    // SAFETY: getifaddrs initializes `head` on success and freeifaddrs accepts that list.
-    if unsafe { libc::getifaddrs(&mut head) } != 0 {
-        return Err(DiscoveryError::from(std::io::Error::last_os_error()));
-    }
-    let mut types = BTreeMap::new();
-    let mut cursor = head;
-    while !cursor.is_null() {
-        // SAFETY: cursor belongs to the live getifaddrs list.
-        let entry = unsafe { &*cursor };
-        if !entry.ifa_addr.is_null()
-            // SAFETY: the address points to a sockaddr whose family can be read.
-            && unsafe { (*entry.ifa_addr).sa_family as i32 } == libc::AF_LINK
-        {
-            // SAFETY: AF_LINK addresses use sockaddr_dl on Darwin.
-            let link = unsafe { &*(entry.ifa_addr.cast::<libc::sockaddr_dl>()) };
-            const IFT_ETHER: u8 = 6;
-            let link_type = if link.sdl_type == IFT_ETHER {
-                LinkType::Ethernet
-            } else {
-                LinkType::Other(link.sdl_type)
-            };
-            types.insert(u32::from(link.sdl_index), link_type);
-        }
-        cursor = entry.ifa_next;
-    }
-    // SAFETY: head is the list returned by getifaddrs above.
-    unsafe { libc::freeifaddrs(head) };
-    Ok(types)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn link_types_by_index() -> Result<BTreeMap<u32, LinkType>, DiscoveryError> {
-    Ok(BTreeMap::new())
-}
-
-async fn collect_default_route(
-    records: &[InterfaceRecord],
-    timeout: Duration,
-) -> Result<Option<DefaultRoute>, DiscoveryError> {
-    let output = future::race(
-        async {
-            let mut command = Command::new("/sbin/route");
-            command
-                .args(["-n", "get", "-inet", "default"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            command.output().await.map_err(|error| {
-                DiscoveryError::new(format!("cannot inspect default route: {error}"))
-            })
-        },
-        async {
-            Timer::after(timeout).await;
-            Err(DiscoveryError::new("default route lookup timed out"))
-        },
-    )
-    .await?;
-    let error_output = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        if error_output.contains("not in table") || error_output.contains("not found") {
-            return Ok(None);
-        }
-        return Err(DiscoveryError::new("default route lookup failed"));
-    }
-    let route_output = std::str::from_utf8(&output.stdout)
-        .map_err(|_| DiscoveryError::new("default route output is not UTF-8"))?;
-    parse_default_route(records, route_output).map(Some)
-}
-
-fn parse_default_route(
-    records: &[InterfaceRecord],
-    output: &str,
-) -> Result<DefaultRoute, DiscoveryError> {
-    let field = |name: &str| {
-        output.lines().find_map(|line| {
-            let (key, value) = line.trim().split_once(':')?;
-            (key == name).then(|| value.trim())
-        })
-    };
-    let interface_name =
-        field("interface").ok_or_else(|| DiscoveryError::new("default route has no interface"))?;
-    let interface_index = records
-        .iter()
-        .find(|record| record.name == interface_name)
-        .map(|record| record.index)
-        .ok_or_else(|| DiscoveryError::new("default route interface was not found"))?;
-    let gateway = match field("gateway") {
-        Some(gateway_text) if gateway_text.starts_with("link#") => RouteGateway::Link(
-            gateway_text[5..]
-                .parse()
-                .map_err(|_| DiscoveryError::new("default route link is invalid"))?,
-        ),
-        Some(gateway_text) => RouteGateway::Ipv4(
-            gateway_text
-                .parse()
-                .map_err(|_| DiscoveryError::new("default route gateway is invalid"))?,
-        ),
-        None => RouteGateway::Interface,
-    };
-    Ok(DefaultRoute {
-        interface_index,
-        gateway,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn direct_interface_default_route_does_not_require_a_gateway_field() {
-        let records = vec![InterfaceRecord {
-            index: 7,
-            name: "utun4".into(),
-            address: Ipv4Addr::new(10, 0, 0, 2),
-            netmask: Ipv4Addr::new(255, 0, 0, 0),
-            up: true,
-            point_to_point: true,
-            loopback: false,
-            link_type: LinkType::Other(0),
-        }];
-        let route = parse_default_route(
-            &records,
-            "destination: default\nmask: default\ninterface: utun4\nflags: <UP,DONE>\n",
-        )
-        .unwrap();
-        assert_eq!(route.interface_index, 7);
-        assert_eq!(route.gateway, RouteGateway::Interface);
-    }
 }

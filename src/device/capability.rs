@@ -1,4 +1,4 @@
-use super::InvalidValue;
+use super::{FeatureRole, InvalidValue};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -260,4 +260,13 @@ pub enum DeviceCommand {
     StopVacuum,
     ReturnVacuumToDock,
     SetVacuumCleanMode(VacuumCleanMode),
+}
+
+/// A protocol-independent functional definition before account and device binding.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeatureDefinition {
+    pub service_instance: u32,
+    pub role: FeatureRole,
+    pub name: String,
+    pub capabilities: FeatureCapabilities,
 }

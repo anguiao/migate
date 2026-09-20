@@ -1,3 +1,4 @@
+use mdns_sd::{ServiceDaemon, ServiceEvent};
 use migate::storage::{TokenSet, XiaomiRecord};
 use rusqlite::Connection;
 use std::{
@@ -61,13 +62,23 @@ impl TestProcess {
             .unwrap()
             .parse()
             .unwrap();
-        let mut lookup = Self::spawn(Command::new("/usr/bin/dns-sd").args([
-            "-L",
-            &format!("{service_id:016X}"),
-            "_matterc._udp",
-            "local.",
-        ]));
-        lookup.wait_for_output(Stream::Stdout, &format!(":{port} (interface"));
+        let lookup = MdnsLookup(ServiceDaemon::new().unwrap());
+        let services = lookup.0.browse("_matterc._udp.local.").unwrap();
+        let fullname = format!("{service_id:016X}._matterc._udp.local.");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let event = services
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!("cannot resolve {fullname}: {error}\n{}", process.output().1)
+                });
+            if let ServiceEvent::ServiceResolved(service) = event
+                && service.get_fullname().eq_ignore_ascii_case(&fullname)
+            {
+                assert_eq!(service.get_port(), port);
+                break;
+            }
+        }
         (process, port)
     }
 
@@ -134,13 +145,9 @@ impl TestProcess {
             "process exited before Ctrl-C: {}",
             self.output().1
         );
-        assert!(
-            Command::new("kill")
-                .args(["-INT", &self.child.id().to_string()])
-                .status()
-                .unwrap()
-                .success()
-        );
+        let pid = libc::pid_t::try_from(self.child.id()).unwrap();
+        // SAFETY: pid identifies the live child owned by this test.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
         let deadline = Instant::now() + TIMEOUT;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -159,13 +166,9 @@ impl TestProcess {
     }
 
     fn interrupt_failure(mut self) -> (String, String) {
-        assert!(
-            Command::new("kill")
-                .args(["-INT", &self.child.id().to_string()])
-                .status()
-                .unwrap()
-                .success()
-        );
+        let pid = libc::pid_t::try_from(self.child.id()).unwrap();
+        // SAFETY: pid identifies the live child owned by this test.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
         let deadline = Instant::now() + TIMEOUT;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -180,6 +183,16 @@ impl TestProcess {
         let output = self.output();
         assert!(!status.success(), "auth command unexpectedly succeeded");
         output
+    }
+}
+
+struct MdnsLookup(ServiceDaemon);
+
+impl Drop for MdnsLookup {
+    fn drop(&mut self) {
+        if let Ok(stopped) = self.0.shutdown() {
+            let _ = stopped.recv_timeout(TIMEOUT);
+        }
     }
 }
 
@@ -485,16 +498,28 @@ fn explicit_directory_eof_and_interrupt_keep_identity_and_protocol_state() {
 
 #[test]
 fn test_process_is_reaped_when_an_assertion_panics() {
-    let process = TestProcess::spawn(Command::new("sleep").arg("30"));
-    let pid = process.child.id();
+    let directory = tempfile::tempdir().unwrap();
+    let mut process = TestProcess::spawn(
+        Command::new(env!("CARGO_BIN_EXE_migate"))
+            .arg("--data-dir")
+            .arg(directory.path())
+            .args(["auth", "login"]),
+    );
+    process.wait_for_output(Stream::Stdout, "Paste the complete address-bar URL");
+    let pid = libc::pid_t::try_from(process.child.id()).unwrap();
     let result = std::panic::catch_unwind(move || {
         let _process = process;
         panic!("simulated test failure");
     });
     assert!(result.is_err());
-    let probe = Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .output()
-        .unwrap();
-    assert!(!probe.status.success(), "child survived test failure");
+    let mut status = 0;
+    // SAFETY: status is writable storage; WNOHANG cannot block if cleanup regresses.
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
 }

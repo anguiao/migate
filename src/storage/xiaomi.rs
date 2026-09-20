@@ -45,7 +45,7 @@ pub struct XiaomiAuthObservation {
     pub session_generation: AuthSessionGeneration,
 }
 
-/// A thread-safe observer for long-running Xiaomi coordinators.
+/// A thread-safe observer for long-running Xiaomi runtimes.
 #[derive(Clone, Debug)]
 pub struct XiaomiAuthObserver {
     path: PathBuf,

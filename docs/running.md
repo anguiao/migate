@@ -1,10 +1,30 @@
 # 运行 MiGate
 
-MiGate 在本机前台运行，将当前局域网中经过归属确认的米家设备桥接到 Matter。当前开发和验证环境是 macOS / Apple Silicon，使用 Rust 1.96 和 Cargo 构建。
+MiGate 在本机前台运行，将当前局域网中经过归属确认的米家设备桥接到 Matter。当前平台范围为 macOS 和 Linux，使用 Rust 1.96 和 Cargo 构建。
 
 从旧虚拟灯版本切换时，请选择新的并列数据目录，重新登录米家并在 Apple Home 中配对。旧目录不会迁移到真实设备结构，也不要删除旧目录来创建新实例。
 
+本次模块结构调整继续复用已有真实设备数据目录中的设备 endpoint、米家凭据和 Apple Home 配对，无需重新登录或配对。源码职责见[项目结构](architecture.md)。
+
 数据目录保存网桥身份、Apple Home 配对、米家凭据、家庭绑定、设备身份和最后确认状态。首次使用的目录必须不存在或为空，同一目录一次只运行一个网桥进程；`auth` 子命令是独立进程，应按下文先完成登录，再以前台网桥命令启动运行。
+
+## 运行环境
+
+macOS 使用系统 Bonjour 和网络接口，需要安装 Xcode Command Line Tools。
+
+Linux 需要 C 编译工具链、可读取的 `/sys` 和 `/proc`，以及运行中的 Avahi 和 DNS-SD 兼容库。当前固定的 `rs-matter` mDNS 后端使用这一兼容接口，仅运行 `systemd-resolved` 不够。Debian / Ubuntu 可以这样安装：
+
+```sh
+sudo apt-get update
+sudo apt-get install build-essential pkg-config libavahi-compat-libdnssd-dev avahi-daemon
+sudo systemctl enable --now avahi-daemon
+```
+
+Linux 内核需为 5.7 或更新版本，以便普通用户为新建的 UDP socket 绑定网络接口，无需以 root 运行 MiGate。两边都需要允许局域网 mDNS（UDP 5353）、Matter（默认 UDP 5540）和米家设备通信。
+
+本地发现只使用正在工作的物理以太网或 Wi-Fi IPv4 接口，并按接口及来源地址绑定 UDP。Linux 通过 sysfs 判断硬件接口，支持 `eth*`、`en*`、`wlan*`、`wlp*` 和自定义名称；桥接、隧道及容器虚拟接口不作为首次准入的本地证明。Linux 读取主路由表的默认 IPv4 路由用于网络变化检测；复杂策略路由和容器桥接部署不在当前平台范围内。
+
+两边均可执行 README 中的开发检查；进程测试需要系统 mDNS 服务正常运行，不依赖 `dns-sd`、`kill` 或 `sleep` 命令。
 
 ## 登录米家
 

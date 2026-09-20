@@ -98,7 +98,7 @@ impl Harness {
             .features
             .remove(0);
         if notify_only {
-            for mapping in &mut descriptor.properties {
+            for mapping in &mut descriptor.binding.properties {
                 mapping.readable = false;
             }
         }
@@ -108,15 +108,15 @@ impl Harness {
                 home: HomeId::new("home-a").unwrap(),
                 parent_did: DeviceDid::new("1234").unwrap(),
             },
-            service_instance: descriptor.service_instance,
-            role: descriptor.role,
+            service_instance: descriptor.definition.service_instance,
+            role: descriptor.definition.role,
         };
         let service = DeviceService::new();
         store.devices().allocate_feature(&feature).unwrap();
         service.publish(
             feature.clone(),
             "Review light",
-            descriptor.capabilities.clone(),
+            descriptor.definition.capabilities.clone(),
         );
         let commands = CommandRuntime::new(service.clone(), Rc::new(UnusedTransport));
         let state = StateRuntime::with_limits(
@@ -194,6 +194,7 @@ fn same_epoch_cloud_fallback_keeps_confirmed_state_available() {
     assert!(harness.state.acknowledge(&token, 41, 1));
     let power = harness
         .descriptor
+        .binding
         .properties
         .iter()
         .find(|mapping| mapping.property == Property::Power)
@@ -237,6 +238,7 @@ fn stopped_state_runtime_rejects_previously_valid_pushes() {
     assert!(harness.state.acknowledge(&token, 41, 1));
     let power = harness
         .descriptor
+        .binding
         .properties
         .iter()
         .find(|mapping| mapping.property == Property::Power)
@@ -294,6 +296,7 @@ fn idle_actor_flushes_a_pure_push_without_explicit_flush() {
     assert!(harness.state.acknowledge(&token, 41, 1));
     let power = harness
         .descriptor
+        .binding
         .properties
         .iter()
         .find(|mapping| mapping.property == Property::Power)
@@ -341,6 +344,7 @@ fn failed_full_cache_eventually_saves_all_latest_confirmed_values() {
             ] {
                 let mapping = harness
                     .descriptor
+                    .binding
                     .properties
                     .iter()
                     .find(|mapping| mapping.property == property)
@@ -358,6 +362,7 @@ fn failed_full_cache_eventually_saves_all_latest_confirmed_values() {
             }
             let power = harness
                 .descriptor
+                .binding
                 .properties
                 .iter()
                 .find(|mapping| mapping.property == Property::Power)
@@ -446,7 +451,7 @@ fn retrying_early_devices_cannot_starve_later_initial_reads() {
         harness.service.publish(
             added.identity.clone(),
             format!("Light {index}"),
-            harness.descriptor.capabilities.clone(),
+            harness.descriptor.definition.capabilities.clone(),
         );
         harness.snapshot.features.push(added);
     }
@@ -529,6 +534,7 @@ fn review_wire_values() -> Vec<(Property, u32, u32, WireValue)> {
     .into_iter()
     .map(|(property, value)| {
         let mapping = descriptor
+            .binding
             .properties
             .iter()
             .find(|mapping| mapping.property == property)
@@ -557,6 +563,7 @@ fn frequent_covered_pushes_do_not_postpone_uncovered_property_polls() {
     let feature = &mut harness.snapshot.features[0].runtime;
     let brightness = feature
         .descriptor
+        .binding
         .properties
         .iter_mut()
         .find(|mapping| mapping.property == Property::Brightness)
@@ -572,6 +579,7 @@ fn frequent_covered_pushes_do_not_postpone_uncovered_property_polls() {
     assert!(harness.state.acknowledge(&token, 41, 1));
     let power = harness
         .descriptor
+        .binding
         .properties
         .iter()
         .find(|mapping| mapping.property == Property::Power)
@@ -708,6 +716,7 @@ fn gate_queue_time_uses_total_budget_before_local_attempt() {
     assert!(harness.state.acknowledge(&token, 41, 1));
     let power = harness
         .descriptor
+        .binding
         .properties
         .iter()
         .find(|mapping| mapping.property == Property::Power)
@@ -840,6 +849,7 @@ fn deferred_new_query_blocks_an_old_reply_while_capacity_is_full() {
     );
     let power = harness
         .descriptor
+        .binding
         .properties
         .iter()
         .find(|mapping| mapping.property == Property::Power)
@@ -911,6 +921,7 @@ fn unrelated_control_route_change_keeps_healthy_gateway_notifications() {
     assert!(harness.state.acknowledge(&token, 41, 1));
     let power = harness
         .descriptor
+        .binding
         .properties
         .iter()
         .find(|mapping| mapping.property == Property::Power)
@@ -955,10 +966,10 @@ fn cloud_offline_does_not_discard_authority_for_later_online_on_the_same_session
         .unwrap()
         .features
         .into_iter()
-        .find(|feature| feature.role == migate::device::FeatureRole::TemperatureSensor)
+        .find(|feature| feature.definition.role == migate::device::FeatureRole::TemperatureSensor)
         .unwrap();
-    harness.feature.service_instance = descriptor.service_instance;
-    harness.feature.role = descriptor.role;
+    harness.feature.service_instance = descriptor.definition.service_instance;
+    harness.feature.role = descriptor.definition.role;
     harness.descriptor = descriptor.clone();
     Store::open(harness.directory.path())
         .unwrap()
@@ -968,7 +979,7 @@ fn cloud_offline_does_not_discard_authority_for_later_online_on_the_same_session
     harness.service.publish(
         harness.feature.clone(),
         "Temperature",
-        descriptor.capabilities.clone(),
+        descriptor.definition.capabilities.clone(),
     );
     let feature = &mut harness.snapshot.features[0];
     feature.identity = harness.feature.clone();
@@ -987,6 +998,7 @@ fn cloud_offline_does_not_discard_authority_for_later_online_on_the_same_session
     assert!(harness.state.acknowledge(&token, 71, 1));
     let temperature = harness
         .descriptor
+        .binding
         .properties
         .iter()
         .find(|mapping| mapping.property == Property::Temperature)
@@ -1049,10 +1061,10 @@ fn cloud_push_can_confirm_sensor_without_a_control_route() {
         .unwrap()
         .features
         .into_iter()
-        .find(|feature| feature.role == migate::device::FeatureRole::TemperatureSensor)
+        .find(|feature| feature.definition.role == migate::device::FeatureRole::TemperatureSensor)
         .unwrap();
-    harness.feature.service_instance = descriptor.service_instance;
-    harness.feature.role = descriptor.role;
+    harness.feature.service_instance = descriptor.definition.service_instance;
+    harness.feature.role = descriptor.definition.role;
     harness.descriptor = descriptor.clone();
     Store::open(harness.directory.path())
         .unwrap()
@@ -1062,7 +1074,7 @@ fn cloud_push_can_confirm_sensor_without_a_control_route() {
     harness.service.publish(
         harness.feature.clone(),
         "Temperature",
-        descriptor.capabilities.clone(),
+        descriptor.definition.capabilities.clone(),
     );
     let feature = &mut harness.snapshot.features[0];
     feature.identity = harness.feature.clone();
@@ -1078,6 +1090,7 @@ fn cloud_push_can_confirm_sensor_without_a_control_route() {
     assert!(harness.state.acknowledge(&token, 71, 1));
     let temperature = harness
         .descriptor
+        .binding
         .properties
         .iter()
         .find(|mapping| mapping.property == Property::Temperature)
@@ -1108,8 +1121,8 @@ fn cloud_motion_events_confirm_reachability_without_a_control_route() {
             .unwrap()
             .features
             .remove(0);
-        harness.feature.service_instance = descriptor.service_instance;
-        harness.feature.role = descriptor.role;
+        harness.feature.service_instance = descriptor.definition.service_instance;
+        harness.feature.role = descriptor.definition.role;
         Store::open(harness.directory.path())
             .unwrap()
             .devices()
@@ -1118,7 +1131,7 @@ fn cloud_motion_events_confirm_reachability_without_a_control_route() {
         harness.service.publish(
             harness.feature.clone(),
             "Motion",
-            descriptor.capabilities.clone(),
+            descriptor.definition.capabilities.clone(),
         );
         let feature = &mut harness.snapshot.features[0];
         feature.identity = harness.feature.clone();

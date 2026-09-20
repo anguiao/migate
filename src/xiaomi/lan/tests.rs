@@ -945,7 +945,7 @@ fn mcn02_udp_runtime_transport_updates_state_and_sends_one_typed_command() {
     .unwrap()
     .features
     .into_iter()
-    .find(|feature| feature.role == FeatureRole::Climate)
+    .find(|feature| feature.definition.role == FeatureRole::Climate)
     .unwrap();
     let identity = FeatureIdentity {
         physical: PhysicalDeviceId {
@@ -953,15 +953,15 @@ fn mcn02_udp_runtime_transport_updates_state_and_sends_one_typed_command() {
             home: HomeId::new("home-a").unwrap(),
             parent_did: DeviceDid::new("42").unwrap(),
         },
-        service_instance: descriptor.service_instance,
-        role: descriptor.role,
+        service_instance: descriptor.definition.service_instance,
+        role: descriptor.definition.role,
     };
     store.devices().allocate_feature(&identity).unwrap();
     let service = DeviceService::new();
     service.publish(
         identity.clone(),
         "Loopback air conditioner",
-        descriptor.capabilities.clone(),
+        descriptor.definition.capabilities.clone(),
     );
     let registry = CurrentSessionRegistry::default();
     let transports = Rc::new(RuntimeTransports::new(registry.clone()));

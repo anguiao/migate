@@ -726,18 +726,26 @@ fn runtime_transport_uses_the_real_gateway_once_and_preserves_sent_results() {
         .unwrap()
         .features
         .into_iter()
-        .find(|f| f.role == crate::device::FeatureRole::Vacuum)
+        .find(|f| f.definition.role == crate::device::FeatureRole::Vacuum)
         .unwrap();
         let make = |descriptor: &crate::xiaomi::catalog::FeatureDescriptor| FeatureIdentity {
             physical: b.clone(),
-            service_instance: descriptor.service_instance,
-            role: descriptor.role,
+            service_instance: descriptor.definition.service_instance,
+            role: descriptor.definition.role,
         };
         let light_id = make(&light);
         let vacuum_id = make(&vacuum);
-        service.publish(light_id.clone(), "Light", light.capabilities.clone());
+        service.publish(
+            light_id.clone(),
+            "Light",
+            light.definition.capabilities.clone(),
+        );
         service.set_state_availability(&light_id, true);
-        service.publish(vacuum_id.clone(), "Vacuum", vacuum.capabilities.clone());
+        service.publish(
+            vacuum_id.clone(),
+            "Vacuum",
+            vacuum.definition.capabilities.clone(),
+        );
         service.set_state_availability(&vacuum_id, true);
         let runtime =
             CommandRuntime::new(service.clone(), Rc::new(RuntimeTransports::new(registry)));
@@ -812,6 +820,7 @@ fn runtime_state_gateway_keeps_core_success_when_optional_read_is_rejected() {
     .features
     .remove(0);
     let mut readable = descriptor
+        .binding
         .properties
         .iter()
         .filter(|p| p.readable)
@@ -883,12 +892,16 @@ fn runtime_state_gateway_keeps_core_success_when_optional_read_is_rejected() {
         };
         let identity = FeatureIdentity {
             physical: physical.clone(),
-            service_instance: descriptor.service_instance,
-            role: descriptor.role,
+            service_instance: descriptor.definition.service_instance,
+            role: descriptor.definition.role,
         };
         store.devices().allocate_feature(&identity).unwrap();
         let service = DeviceService::new();
-        service.publish(identity.clone(), "Vacuum", descriptor.capabilities.clone());
+        service.publish(
+            identity.clone(),
+            "Vacuum",
+            descriptor.definition.capabilities.clone(),
+        );
         let (mqtt, mqtt_handle, messages) = MqttConnection::new(
             MqttConfig::new("state-gateway", None, Duration::from_secs(5))
                 .with_endpoint(address.ip().to_string(), address.port()),

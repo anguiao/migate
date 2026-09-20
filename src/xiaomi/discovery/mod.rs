@@ -1,5 +1,6 @@
 mod browser;
 mod network;
+mod platform;
 mod profile;
 mod registry;
 mod socket;

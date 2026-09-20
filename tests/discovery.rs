@@ -26,6 +26,7 @@ fn interface(index: u32, name: &str, address: [u8; 4], prefix: u8) -> InterfaceR
         point_to_point: false,
         loopback: false,
         link_type: LinkType::Ethernet,
+        physical: true,
     }
 }
 
@@ -85,13 +86,18 @@ fn profile_parses_wire_fields_and_rejects_invalid_inputs() {
 
 #[test]
 fn physical_interface_selection_and_on_link_checks_do_not_trust_private_addresses() {
+    let virtual_interface = |index, name, address, prefix| InterfaceRecord {
+        physical: false,
+        ..interface(index, name, address, prefix)
+    };
     let records = vec![
         interface(4, "en0", [192, 168, 8, 10], 24),
-        interface(5, "utun3", [10, 0, 0, 2], 8),
-        interface(6, "bridge0", [172, 16, 0, 2], 16),
-        interface(9, "vmnet8", [192, 168, 64, 1], 24),
-        interface(10, "vmenet0", [192, 168, 65, 1], 24),
-        interface(11, "feth0", [192, 168, 66, 1], 24),
+        virtual_interface(5, "utun3", [10, 0, 0, 2], 8),
+        virtual_interface(6, "bridge0", [172, 16, 0, 2], 16),
+        virtual_interface(9, "vmnet8", [192, 168, 64, 1], 24),
+        virtual_interface(10, "vmenet0", [192, 168, 65, 1], 24),
+        virtual_interface(11, "feth0", [192, 168, 66, 1], 24),
+        virtual_interface(12, "eth0", [172, 17, 0, 2], 16),
         InterfaceRecord {
             point_to_point: true,
             ..interface(7, "en7", [192, 168, 9, 2], 24)
@@ -124,7 +130,7 @@ fn physical_interface_selection_and_on_link_checks_do_not_trust_private_addresse
     );
     assert!(
         NetworkSnapshot::select(
-            vec![interface(5, "utun3", [10, 0, 0, 2], 8)],
+            vec![virtual_interface(5, "utun3", [10, 0, 0, 2], 8)],
             Some(DefaultRoute {
                 interface_index: 5,
                 gateway: RouteGateway::Ipv4(Ipv4Addr::new(10, 0, 0, 1))
@@ -135,7 +141,7 @@ fn physical_interface_selection_and_on_link_checks_do_not_trust_private_addresse
     let vpn_route = NetworkSnapshot::select(
         vec![
             interface(4, "en0", [192, 168, 8, 10], 24),
-            interface(5, "utun3", [10, 0, 0, 2], 8),
+            virtual_interface(5, "utun3", [10, 0, 0, 2], 8),
         ],
         Some(DefaultRoute {
             interface_index: 5,
@@ -147,6 +153,15 @@ fn physical_interface_selection_and_on_link_checks_do_not_trust_private_addresse
     assert!(
         NetworkSnapshot::select(vec![interface(4, "en0", [192, 168, 8, 10], 24)], None,).is_ok()
     );
+}
+
+#[test]
+fn physical_interface_selection_accepts_system_names_without_a_prefix_allowlist() {
+    for name in ["en0", "eth0", "enp3s0", "wlan0", "wlp2s0", "lan-custom"] {
+        let snapshot =
+            NetworkSnapshot::select(vec![interface(2, name, [192, 168, 1, 10], 24)], None).unwrap();
+        assert_eq!(snapshot.interfaces()[0].name(), name);
+    }
 }
 
 #[test]
@@ -480,7 +495,6 @@ fn scoped_endpoint_selects_the_matching_address_on_a_multi_address_interface() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn native_network_collection_runs_and_reports_a_safe_result() {
     let wake = migate::xiaomi::discovery::capture_wake_sample().unwrap();

@@ -97,9 +97,9 @@ pub fn assemble_catalog(
                     if let Some(feature) = compiled
                         .features
                         .iter_mut()
-                        .find(|feature| feature.service_instance == split.1)
+                        .find(|feature| feature.definition.service_instance == split.1)
                     {
-                        feature.name = split.0.name.clone();
+                        feature.definition.name = split.0.name.clone();
                     }
                 }
             }
@@ -196,7 +196,7 @@ pub fn persist_catalog(
                 )
             })?,
         };
-        let feature_document = serde_json::to_string(&device.features.iter().map(|feature| serde_json::json!({"siid":feature.service_instance,"role":feature.role.as_str(),"name":feature.name})).collect::<Vec<_>>()).map_err(|error| crate::storage::StorageError::new(store.path(), "encode Xiaomi feature metadata", error))?;
+        let feature_document = serde_json::to_string(&device.features.iter().map(|feature| serde_json::json!({"siid":feature.definition.service_instance,"role":feature.definition.role.as_str(),"name":feature.definition.name})).collect::<Vec<_>>()).map_err(|error| crate::storage::StorageError::new(store.path(), "encode Xiaomi feature metadata", error))?;
         let record = DeviceRecord {
             identity,
             model: device.model.clone(),
@@ -366,14 +366,16 @@ fn restore_features(
         metadata.push((siid, role, name.to_owned()));
     }
     features.retain(|feature| {
-        metadata
-            .iter()
-            .any(|(siid, role, _)| feature.service_instance == *siid && feature.role == *role)
+        metadata.iter().any(|(siid, role, _)| {
+            feature.definition.service_instance == *siid && feature.definition.role == *role
+        })
     });
     for (siid, role, name) in metadata {
         let feature = features
             .iter_mut()
-            .find(|feature| feature.service_instance == siid && feature.role == role)
+            .find(|feature| {
+                feature.definition.service_instance == siid && feature.definition.role == role
+            })
             .ok_or_else(|| {
                 crate::storage::StorageError::new(
                     store.path(),
@@ -381,7 +383,7 @@ fn restore_features(
                     "Cached spec no longer provides a persisted feature",
                 )
             })?;
-        feature.name = name;
+        feature.definition.name = name;
     }
     Ok(())
 }
