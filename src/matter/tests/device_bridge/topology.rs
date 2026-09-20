@@ -369,3 +369,183 @@ fn restart_restores_sensor_shapes_and_split_role_endpoints() {
         assert!(lux.cluster(occupancy_sensing::FULL_CLUSTER.id).is_none());
     });
 }
+
+#[test]
+fn reconciliation_reuses_handlers_and_only_loads_labels_for_new_endpoints() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::TemperatureSensor);
+        let capabilities = |maximum| {
+            FeatureCapabilities(vec![Capability::Temperature(NumericRange {
+                minimum: -20.0,
+                maximum,
+                step: 0.1,
+                unit: NumericUnit::Celsius,
+            })])
+        };
+        service.publish(id.clone(), "Temperature", capabilities(60.0));
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        store
+            .matter()
+            .save_feature_label(endpoint, "Controller label")
+            .unwrap();
+        let model =
+            DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
+        let basic_info = crate::matter::common::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(crate::matter::storage::StoreAdapter::new(store.matter()));
+        crate::matter::common::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+        let context = Context::new_at(&im, endpoint, 3, 0);
+        let mut run = std::pin::pin!(model.run(&context));
+        assert!(poll_once(&mut run).await.is_none());
+        let original_signature = model.topology_signature();
+        assert_eq!(configuration_version(&store.matter()), 1);
+
+        let identify_data = command_data(|writer| {
+            writer.u16(&TLVTag::Context(0), 600).unwrap();
+        });
+        let identify = Context::command_at(&im, endpoint, 3, 0, &identify_data);
+        model
+            .invoke(
+                &identify,
+                InvokeReplyInstance::new(identify.cmd(), WriteBuf::new(&mut [0; 128])),
+            )
+            .await
+            .unwrap();
+        let database = rusqlite::Connection::open(store.path()).unwrap();
+        database
+            .execute_batch("ALTER TABLE matter_feature_labels RENAME TO unavailable_feature_labels")
+            .unwrap();
+
+        // Existing handlers already own their labels and live Identify state.
+        service.publish(id.clone(), "Renamed temperature", capabilities(60.0));
+        assert!(poll_once(&mut run).await.is_none());
+        assert_eq!(model.topology_signature(), original_signature);
+        assert_eq!(configuration_version(&store.matter()), 1);
+        service.publish(id.clone(), "Renamed temperature", capabilities(100.0));
+        assert!(poll_once(&mut run).await.is_none());
+        let identify = context.read_tlv(&model).await;
+        assert!(u16::from_tlv(&value_element(&identify)).unwrap() > 0);
+        let label = Context::new_at(&im, endpoint, 57, 5).read_tlv(&model).await;
+        assert_eq!(
+            Utf8Str::from_tlv(&value_element(&label)).unwrap(),
+            "Controller label"
+        );
+        let maximum = Context::new_at(
+            &im,
+            endpoint,
+            temperature_measurement::FULL_CLUSTER.id,
+            temperature_measurement::AttributeId::MaxMeasuredValue as _,
+        )
+        .read_tlv(&model)
+        .await;
+        assert_eq!(
+            Nullable::<i16>::from_tlv(&value_element(&maximum))
+                .unwrap()
+                .into_option(),
+            Some(10_000)
+        );
+        assert_eq!(model.endpoint_for(&id), Some(endpoint));
+        assert!(!model.take_rebuild_request());
+        assert_ne!(model.topology_signature(), original_signature);
+        assert_eq!(configuration_version(&store.matter()), 2);
+        model.check_failure().unwrap();
+
+        // A new endpoint still loads persisted labels and retains storage failures.
+        let mut added = id.clone();
+        added.service_instance += 1;
+        store.devices().allocate_feature(&added).unwrap();
+        service.publish(added, "New temperature", capabilities(60.0));
+        assert!(poll_once(&mut run).await.unwrap().is_err());
+        assert!(model.check_failure().is_err());
+    });
+}
+
+#[test]
+fn shape_changes_request_rebuild_before_constructing_replacement_handlers() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let service = DeviceService::new();
+        let id = feature(FeatureRole::Light);
+        service.publish(
+            id.clone(),
+            "Light",
+            FeatureCapabilities(vec![Capability::Power { writable: true }]),
+        );
+        let endpoint = store.devices().allocate_feature(&id).unwrap().endpoint;
+        let model =
+            DeviceBridgeModel::new(service.clone(), store.devices(), store.matter()).unwrap();
+        let basic_info = crate::matter::common::basic_info(&identity);
+        let matter = Matter::new(&basic_info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = test_only_crypto();
+        let kv = matter.kv(crate::matter::storage::StoreAdapter::new(store.matter()));
+        crate::matter::common::initialize_basic_info(&matter, &kv, true).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, (&model, &model), &kv, &state);
+        let context = Context::new_at(&im, endpoint, 3, 0);
+        let mut run = std::pin::pin!(model.run(&context));
+        assert!(poll_once(&mut run).await.is_none());
+        let original_signature = model.topology_signature();
+        let database = rusqlite::Connection::open(store.path()).unwrap();
+        database
+            .execute_batch("ALTER TABLE matter_feature_labels RENAME TO unavailable_feature_labels")
+            .unwrap();
+
+        service.publish(
+            id.clone(),
+            "Dimmable light",
+            FeatureCapabilities(vec![
+                Capability::Power { writable: true },
+                Capability::Brightness(NumericRange {
+                    minimum: 0.0,
+                    maximum: 100.0,
+                    step: 1.0,
+                    unit: NumericUnit::Percent,
+                }),
+            ]),
+        );
+        assert!(poll_once(&mut run).await.is_none());
+        assert!(model.take_rebuild_request());
+        assert_eq!(model.topology_signature(), original_signature);
+        model.access(|node| {
+            assert!(
+                node.endpoint(endpoint)
+                    .unwrap()
+                    .cluster(level_control::FULL_CLUSTER.id)
+                    .is_none()
+            );
+        });
+        model.check_failure().unwrap();
+        let requested_signature = store.matter().topology_signature().unwrap();
+        assert_ne!(requested_signature, original_signature);
+        assert_eq!(configuration_version(&store.matter()), 2);
+
+        database
+            .execute_batch("ALTER TABLE unavailable_feature_labels RENAME TO matter_feature_labels")
+            .unwrap();
+        let rebuilt = DeviceBridgeModel::new(service, store.devices(), store.matter()).unwrap();
+        assert_eq!(rebuilt.endpoint_for(&id), Some(endpoint));
+        assert_eq!(rebuilt.topology_signature(), requested_signature);
+        rebuilt.access(|node| {
+            assert!(
+                node.endpoint(endpoint)
+                    .unwrap()
+                    .cluster(level_control::FULL_CLUSTER.id)
+                    .is_some()
+            );
+        });
+        assert_eq!(configuration_version(&store.matter()), 2);
+    });
+}

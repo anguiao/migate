@@ -28,7 +28,7 @@ use super::{
 use crate::xiaomi::catalog::WireOperation;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum PushSource {
+pub(crate) enum PushSource {
     Gateway(u64),
     Lan,
     Cloud,
@@ -45,7 +45,7 @@ impl PushSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SubscriptionToken {
+pub(crate) struct SubscriptionToken {
     device: PhysicalDeviceId,
     source: PushSource,
     generation: u64,
@@ -56,7 +56,7 @@ pub struct SubscriptionToken {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ReadTarget {
+pub(crate) struct ReadTarget {
     pub siid: u32,
     pub piid: u32,
 }
@@ -71,20 +71,20 @@ pub enum StateReadFailure {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct StateReadResult {
+pub(crate) struct StateReadResult {
     pub siid: u32,
     pub piid: u32,
     pub value: Option<WireValue>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct StateReadRequest {
+pub(crate) struct StateReadRequest {
     pub device: PhysicalDeviceId,
     pub path: ControlPath,
     pub targets: Vec<ReadTarget>,
 }
 
-pub trait StateReadTransport {
+pub(crate) trait StateReadTransport {
     fn available_paths(&self, _device: &PhysicalDeviceId) -> OperationPaths {
         OperationPaths {
             gateway: true,
@@ -102,7 +102,7 @@ pub trait StateReadTransport {
 }
 
 #[derive(Clone)]
-pub struct StateReadGuard {
+pub(crate) struct StateReadGuard {
     cancelled: Arc<AtomicBool>,
     deadline: Instant,
     check: Rc<dyn Fn() -> bool>,
@@ -146,7 +146,7 @@ impl StateReadGuard {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct StateLimits {
+pub(crate) struct StateLimits {
     pub queue_capacity: usize,
     pub global_concurrency: usize,
     pub batch_size: usize,
@@ -205,12 +205,12 @@ impl PartialEq for StateDiagnostic {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CloudReachabilityUpdate {
+pub(crate) struct CloudReachabilityUpdate {
     pub online: bool,
 }
 
 #[derive(Clone)]
-pub struct StateRuntime {
+pub(crate) struct StateRuntime {
     inner: Rc<RefCell<StateData>>,
     service: DeviceService,
     store: crate::storage::DeviceStore,
@@ -659,6 +659,7 @@ impl StateRuntime {
         self.schedule_selected(device, true, true, None, None);
     }
 
+    #[cfg(test)]
     pub async fn run_until_idle(&self) {
         self.drive(true).await;
     }

@@ -4,9 +4,9 @@ use super::super::{
     reporting,
     storage::{StoreAdapter, TopologyStore},
 };
-use super::plan::hex_digest;
+use super::plan::{EndpointPlan, hex_digest, plan_endpoint};
 use crate::{
-    device::{DeviceService, FeatureIdentity},
+    device::{Capability, DeviceService, FeatureIdentity},
     storage::{DeviceStore, FeatureIdentity as AllocatedFeature, StorageError},
 };
 use event_listener::Event;
@@ -35,6 +35,13 @@ pub(in crate::matter) struct TopologyRegistry {
     rebuild_event: Event,
     topology_dirty: Cell<bool>,
     requested_topology_signature: RefCell<Option<String>>,
+}
+
+struct DesiredEndpoint {
+    allocation: AllocatedFeature,
+    name: String,
+    capabilities: Vec<Capability>,
+    plan: EndpointPlan,
 }
 
 impl TopologyRegistry {
@@ -76,14 +83,16 @@ impl TopologyRegistry {
         let mut runtimes = Vec::new();
         for (feature, allocation) in allocations {
             if let Some(published) = self.service.feature(feature)
-                && let Some(runtime) = build_runtime(
+                && let Some(plan) = plan_endpoint(feature.role, &published.capabilities.0)
+            {
+                let runtime = build_runtime(
                     &self.service,
                     &self.store,
                     allocation.clone(),
                     published.name,
                     published.capabilities.0,
-                )?
-            {
+                    plan,
+                )?;
                 runtimes.push(Rc::new(runtime));
             }
         }
@@ -119,7 +128,13 @@ impl TopologyRegistry {
 
     pub(in crate::matter) fn topology_signature(&self) -> String {
         let runtimes = self.snapshot();
-        topology_signature_for(&runtimes)
+        topology_signature_for(runtimes.iter().map(|runtime| {
+            (
+                runtime.allocation.endpoint,
+                runtime.shape_signature.as_str(),
+                runtime.config_signature.borrow().clone(),
+            )
+        }))
     }
 
     pub(in crate::matter) fn reconcile(&self, ctx: &impl HandlerContext) -> Result<(), Error> {
@@ -134,16 +149,13 @@ impl TopologyRegistry {
             let Some(allocation) = allocations.get(&published.identity).cloned() else {
                 continue;
             };
-            if let Some(runtime) = build_runtime(
-                &self.service,
-                &self.store,
-                allocation,
-                published.name,
-                published.capabilities.0,
-            )
-            .map_err(|_| ErrorCode::Failure)?
-            {
-                desired.push(Rc::new(runtime));
+            if let Some(plan) = plan_endpoint(published.identity.role, &published.capabilities.0) {
+                desired.push(DesiredEndpoint {
+                    allocation,
+                    name: published.name,
+                    capabilities: published.capabilities.0,
+                    plan,
+                });
             }
         }
         desired.sort_by_key(|runtime| runtime.allocation.endpoint);
@@ -152,11 +164,17 @@ impl TopologyRegistry {
             current
                 .iter()
                 .find(|runtime| runtime.allocation.feature == candidate.allocation.feature)
-                .is_some_and(|runtime| runtime.shape_signature != candidate.shape_signature)
+                .is_some_and(|runtime| runtime.shape_signature != candidate.plan.shape_signature)
         });
         if shape_changed {
             *self.requested_topology_signature.borrow_mut() =
-                Some(topology_signature_for(&desired));
+                Some(topology_signature_for(desired.iter().map(|candidate| {
+                    (
+                        candidate.allocation.endpoint,
+                        candidate.plan.shape_signature.as_str(),
+                        candidate.plan.config_signature.as_str(),
+                    )
+                })));
             self.rebuild_requested.set(true);
             self.rebuild_event.notify(usize::MAX);
             self.topology_dirty.set(true);
@@ -170,7 +188,16 @@ impl TopologyRegistry {
                 .iter()
                 .find(|runtime| runtime.allocation.feature == candidate.allocation.feature)
             else {
-                updated.push(candidate);
+                let runtime = build_runtime(
+                    &self.service,
+                    &self.store,
+                    candidate.allocation,
+                    candidate.name,
+                    candidate.capabilities,
+                    candidate.plan,
+                )
+                .map_err(|_| ErrorCode::Failure)?;
+                updated.push(Rc::new(runtime));
                 self.topology_dirty.set(true);
                 continue;
             };
@@ -179,10 +206,7 @@ impl TopologyRegistry {
                 runtime,
                 self.service.is_available(&runtime.allocation.feature),
             )?;
-            if runtime
-                .common
-                .set_default_label(&candidate.common.default_label())
-            {
+            if runtime.common.set_default_label(&candidate.name) {
                 ctx.notify_attr_changed(
                     runtime.allocation.endpoint,
                     common::BRIDGED_CLUSTER.id,
@@ -190,8 +214,8 @@ impl TopologyRegistry {
                 );
             }
             let config_changed =
-                *candidate.config_signature.borrow() != *runtime.config_signature.borrow();
-            let capabilities = candidate.sensor.capabilities();
+                candidate.plan.config_signature != *runtime.config_signature.borrow();
+            let capabilities = candidate.capabilities;
             let capabilities_changed = capabilities != runtime.sensor.capabilities();
             runtime.sensor.set_capabilities(capabilities.clone());
             if let Some(lighting) = &runtime.lighting {
@@ -214,8 +238,7 @@ impl TopologyRegistry {
                 reporting::notify_configuration(ctx, runtime);
             }
             if config_changed {
-                *runtime.config_signature.borrow_mut() =
-                    candidate.config_signature.borrow().clone();
+                *runtime.config_signature.borrow_mut() = candidate.plan.config_signature;
                 self.topology_dirty.set(true);
             }
             updated.push(runtime.clone());
@@ -277,12 +300,14 @@ impl TopologyRegistry {
     }
 }
 
-fn topology_signature_for(runtimes: &[Rc<FeatureRuntime>]) -> String {
+fn topology_signature_for<'a, C: AsRef<str>>(
+    endpoints: impl IntoIterator<Item = (u16, &'a str, C)>,
+) -> String {
     let mut digest = Sha1::new();
-    for runtime in runtimes {
-        digest.update(runtime.allocation.endpoint.to_be_bytes());
-        digest.update(runtime.shape_signature.as_bytes());
-        digest.update(runtime.config_signature.borrow().as_bytes());
+    for (endpoint, shape, config) in endpoints {
+        digest.update(endpoint.to_be_bytes());
+        digest.update(shape.as_bytes());
+        digest.update(config.as_ref().as_bytes());
     }
     hex_digest(digest.finalize().as_slice())
 }

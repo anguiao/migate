@@ -292,7 +292,7 @@ impl DeviceSessions {
                     let snapshot = self.admission.snapshot()?;
                     self.sync_cloud_routes(ctx)?;
                     ctx.state.reconcile(&snapshot);
-                    ctx.status.borrow_mut().admission = snapshot;
+                    ctx.status.set_admission(snapshot);
                 }
             }
         }

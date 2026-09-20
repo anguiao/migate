@@ -4,7 +4,7 @@ use super::{
     rvc, sensors,
     storage::StoreAdapter,
     thermostat as thermostat_handler,
-    topology::{EndpointPlan, exposed_properties, plan_endpoint},
+    topology::{EndpointPlan, exposed_properties},
 };
 use crate::{
     device::{Capability, DeviceService},
@@ -76,8 +76,9 @@ pub(super) fn build_runtime(
     allocation: AllocatedFeature,
     name: String,
     capabilities: Vec<Capability>,
-) -> Result<Option<FeatureRuntime>, StorageError> {
-    let Some(EndpointPlan {
+    plan: EndpointPlan,
+) -> Result<FeatureRuntime, StorageError> {
+    let EndpointPlan {
         device_types,
         clusters,
         shape_signature,
@@ -87,10 +88,7 @@ pub(super) fn build_runtime(
         has_thermostat,
         has_curtain,
         has_rvc,
-    }) = plan_endpoint(allocation.feature.role, &capabilities)
-    else {
-        return Ok(None);
-    };
+    } = plan;
     let label_override = store.capture(store.storage().feature_label(allocation.endpoint))?;
     let seed = rand::rng().random::<u32>();
     let reachable = service.is_available(&allocation.feature);
@@ -107,7 +105,7 @@ pub(super) fn build_runtime(
             (property, value)
         })
         .collect();
-    Ok(Some(FeatureRuntime {
+    Ok(FeatureRuntime {
         desc: desc::DescHandler::new(Dataver::new(seed)),
         identify: identify::IdentifyHandler::new(Dataver::new(seed.wrapping_add(1))),
         common: common::CommonHandler::new(
@@ -178,5 +176,5 @@ pub(super) fn build_runtime(
         shape_signature,
         config_signature: RefCell::new(config_signature),
         reported: ReportedState::new(exposed_values, reachable),
-    }))
+    })
 }

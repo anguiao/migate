@@ -35,7 +35,7 @@ use super::{
 };
 
 #[derive(Clone)]
-pub struct SessionAuthority {
+pub(crate) struct SessionAuthority {
     active: Arc<AtomicBool>,
     expires_at: i64,
 }
@@ -203,7 +203,7 @@ type AuthRefresh = Rc<dyn Fn()>;
 type RouteWake = Rc<dyn Fn()>;
 
 #[derive(Clone, Default)]
-pub struct CurrentSessionRegistry {
+pub(crate) struct CurrentSessionRegistry {
     routes: Rc<RefCell<BTreeMap<PhysicalDeviceId, Routes>>>,
     cloud_credential: Rc<RefCell<Option<CloudCredential>>>,
     auth_refresh: Rc<RefCell<Option<AuthRefresh>>>,
@@ -399,6 +399,7 @@ impl CurrentSessionRegistry {
         lease
     }
 
+    #[cfg(test)]
     pub fn install_cloud(
         &self,
         device: PhysicalDeviceId,
@@ -472,6 +473,7 @@ impl CurrentSessionRegistry {
         true
     }
 
+    #[cfg(test)]
     pub fn revoke_device(&self, device: &PhysicalDeviceId) {
         if let Some(routes) = self.routes.borrow_mut().remove(device) {
             revoke_routes(routes);
@@ -484,17 +486,6 @@ impl CurrentSessionRegistry {
             .borrow_mut()
             .get_mut(device)
             .and_then(|routes| routes.gateway.take())
-        {
-            route.authority.revoke();
-        }
-    }
-
-    pub fn revoke_lan(&self, device: &PhysicalDeviceId) {
-        if let Some(route) = self
-            .routes
-            .borrow_mut()
-            .get_mut(device)
-            .and_then(|routes| routes.lan.take())
         {
             route.authority.revoke();
         }
@@ -544,17 +535,13 @@ fn unix_time() -> i64 {
 }
 
 #[derive(Clone, Default)]
-pub struct RuntimeTransports {
+pub(crate) struct RuntimeTransports {
     registry: CurrentSessionRegistry,
 }
 
 impl RuntimeTransports {
     pub fn new(registry: CurrentSessionRegistry) -> Self {
         Self { registry }
-    }
-
-    pub fn registry(&self) -> &CurrentSessionRegistry {
-        &self.registry
     }
 
     pub fn available_paths(&self, device: &PhysicalDeviceId) -> super::OperationPaths {

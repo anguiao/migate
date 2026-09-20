@@ -746,3 +746,6 @@ fn require_record(changed: usize) -> rusqlite::Result<()> {
         Err(rusqlite::Error::QueryReturnedNoRows)
     }
 }
+
+#[cfg(test)]
+mod tests;

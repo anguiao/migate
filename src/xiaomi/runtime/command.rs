@@ -39,7 +39,7 @@ pub struct OperationPaths {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeFeature {
+pub(crate) struct RuntimeFeature {
     pub identity: FeatureIdentity,
     pub descriptor: FeatureDescriptor,
     pub authority_generation: u64,
@@ -47,20 +47,20 @@ pub struct RuntimeFeature {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TransportCommand {
+pub(crate) struct TransportCommand {
     pub device: PhysicalDeviceId,
     pub typed: DeviceCommand,
     pub operation: WireOperation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TransportFailure {
+pub(crate) enum TransportFailure {
     Unavailable,
     Rejected(i64),
     Ambiguous,
 }
 
-pub trait CommandTransport {
+pub(crate) trait CommandTransport {
     fn available_paths(&self, _device: &PhysicalDeviceId) -> OperationPaths {
         OperationPaths {
             gateway: true,
@@ -79,7 +79,7 @@ pub trait CommandTransport {
 }
 
 #[derive(Clone)]
-pub struct SendGuard {
+pub(crate) struct SendGuard {
     shared: SharedSendState,
     check: Rc<dyn Fn() -> SendAuthorization>,
     cancelled: Rc<Event>,
@@ -126,7 +126,7 @@ impl SendGuard {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SendAuthorization {
+pub(crate) enum SendAuthorization {
     Allowed,
     Revoked,
 }
@@ -151,7 +151,7 @@ pub enum CommandFailureStage {
 }
 
 #[derive(Clone)]
-pub struct SharedSendState {
+pub(crate) struct SharedSendState {
     state: Arc<AtomicU8>,
     deadline: Instant,
 }
@@ -183,7 +183,7 @@ impl SharedSendState {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct CommandLimits {
+pub(crate) struct CommandLimits {
     pub queue_capacity: usize,
     pub total: Duration,
     pub local_attempt: Duration,
@@ -202,7 +202,7 @@ impl Default for CommandLimits {
 }
 
 #[derive(Clone)]
-pub struct CommandRuntime {
+pub(crate) struct CommandRuntime {
     inner: Rc<RefCell<RuntimeState>>,
     service: DeviceService,
     transport: Rc<dyn CommandTransport>,
@@ -215,7 +215,7 @@ pub struct CommandRuntime {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CommandCompletion {
+pub(crate) struct CommandCompletion {
     pub feature: FeatureIdentity,
     pub command: DeviceCommand,
     pub operation: WireOperation,
@@ -233,7 +233,7 @@ struct CommandCompletionLog {
 
 type CommandCompletionEntries = (u64, VecDeque<(u64, CommandCompletion)>);
 
-pub struct CommandCompletionSubscription {
+pub(crate) struct CommandCompletionSubscription {
     log: CommandCompletionLog,
     cursor: u64,
     lagged: bool,
@@ -268,26 +268,15 @@ impl CommandCompletionSubscription {
     pub(crate) fn notifier(&self) -> Rc<Event> {
         self.log.event.clone()
     }
-
-    pub async fn changed(&mut self) -> Vec<CommandCompletion> {
-        loop {
-            let listener = self.log.event.listen();
-            let completions = self.drain();
-            if !completions.is_empty() || self.lagged {
-                return completions;
-            }
-            listener.await;
-        }
-    }
 }
 
 #[derive(Clone, Default)]
-pub struct DeviceExecutionGate {
+pub(crate) struct DeviceExecutionGate {
     busy: Rc<RefCell<HashSet<PhysicalDeviceId>>>,
     event: Rc<Event>,
 }
 
-pub struct DeviceExecutionLease {
+pub(crate) struct DeviceExecutionLease {
     gate: DeviceExecutionGate,
     device: PhysicalDeviceId,
 }
@@ -480,6 +469,7 @@ impl CommandRuntime {
         self.wake.notify(usize::MAX);
     }
 
+    #[cfg(test)]
     pub async fn run_until_idle(&self) {
         self.drive(true).await;
     }

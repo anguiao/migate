@@ -1,3 +1,5 @@
+mod review_regressions;
+
 use super::*;
 use crate::{
     device::{AccountId, DeviceDid, FeatureRole, HomeId, PropertyState},

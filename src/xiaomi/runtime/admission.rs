@@ -17,7 +17,7 @@ use crate::{
 use super::{CommandRuntime, OperationPaths, RuntimeFeature};
 
 #[derive(Clone, Debug)]
-pub struct AdmissionCatalog {
+pub(crate) struct AdmissionCatalog {
     pub account: AccountId,
     pub session_generation: AuthSessionGeneration,
     pub catalog: DeviceCatalog,
@@ -25,7 +25,7 @@ pub struct AdmissionCatalog {
 }
 
 #[derive(Clone, Debug)]
-pub struct AuthenticatedGateway {
+pub(crate) struct AuthenticatedGateway {
     pub account: AccountId,
     pub session_generation: AuthSessionGeneration,
     pub candidate: GatewayCandidate,
@@ -35,7 +35,7 @@ pub struct AuthenticatedGateway {
 }
 
 #[derive(Clone, Debug)]
-pub struct AuthenticatedLan {
+pub(crate) struct AuthenticatedLan {
     pub account: AccountId,
     pub session_generation: AuthSessionGeneration,
     pub target: LanTarget,
@@ -45,22 +45,21 @@ pub struct AuthenticatedLan {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LegacyOperationEvidence {
+pub(crate) enum LegacyOperationEvidence {
     Unverified,
     SuccessfulRead,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CloudEvidence {
+pub(crate) struct CloudEvidence {
     pub account: AccountId,
     pub session_generation: AuthSessionGeneration,
     pub status: CloudStatus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CloudStatus {
+pub(crate) enum CloudStatus {
     Ready,
-    TransportUnavailable,
     InvalidToken,
 }
 
@@ -73,7 +72,7 @@ pub enum AdmissionStatus {
 #[derive(Clone, Debug)]
 pub struct AdmissionFeature {
     pub identity: FeatureIdentity,
-    pub runtime: RuntimeFeature,
+    pub(crate) runtime: RuntimeFeature,
     pub paths: OperationPaths,
     pub gateways: Vec<GatewayPathEvidence>,
     pub lan_evidence: Option<LanEvidence>,
@@ -95,7 +94,7 @@ pub struct AdmissionSnapshot {
     pub features: Vec<AdmissionFeature>,
 }
 
-pub struct AdmissionController {
+pub(crate) struct AdmissionController {
     store: DeviceStore,
     service: DeviceService,
     commands: CommandRuntime,
@@ -154,6 +153,7 @@ impl AdmissionController {
         }
     }
 
+    #[cfg(test)]
     pub fn status(&self) -> AdmissionStatus {
         self.status
     }

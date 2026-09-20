@@ -109,7 +109,7 @@ fn manual_refresh_schedules_one_forced_state_read_per_admitted_device() {
     assert!(runtime.inner.state.acknowledge(&token, 1, 1));
     block_on(runtime.inner.state.run_until_idle());
     assert!(requests.try_recv().is_err());
-    runtime.inner.status.borrow_mut().admission = snapshot.clone();
+    runtime.inner.status.set_admission(snapshot.clone());
 
     runtime.refresh();
     runtime.refresh();

@@ -23,13 +23,13 @@ use crate::xiaomi::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LanOperationEvidence {
+pub(crate) enum LanOperationEvidence {
     Native,
     Mcn02Legacy,
     ReadOnly,
 }
 
-pub struct RunningLan {
+pub(crate) struct RunningLan {
     pub handle: LanHandle,
     pub notifications: Receiver<LanNotification>,
     pub evidence: LanEvidence,
@@ -38,10 +38,6 @@ pub struct RunningLan {
 }
 
 impl RunningLan {
-    pub async fn run(self) -> Result<(), LanError> {
-        self.task.await
-    }
-
     pub fn into_parts(
         self,
     ) -> (
@@ -61,7 +57,7 @@ impl RunningLan {
     }
 }
 
-pub async fn start_lan(
+pub(crate) async fn start_lan(
     target: LanTarget,
     virtual_did: u64,
     authentication_property: LanProperty,
@@ -158,7 +154,7 @@ pub(crate) async fn start_lan_session_for_test(
 }
 
 #[derive(Debug)]
-pub enum TransportStartupError {
+pub(crate) enum TransportStartupError {
     Timeout,
     Mqtt(MqttError),
     Gateway(crate::xiaomi::gateway::GatewayError),
@@ -176,7 +172,7 @@ impl fmt::Display for TransportStartupError {
 
 impl std::error::Error for TransportStartupError {}
 
-pub struct GatewayStartup {
+pub(crate) struct GatewayStartup {
     pub endpoint: SocketAddrV4,
     pub tls: GatewayTlsConfig,
     pub mqtt: MqttConfig,
@@ -188,7 +184,7 @@ pub struct GatewayStartup {
     pub guard: MqttSendGuard,
 }
 
-pub struct RunningGateway {
+pub(crate) struct RunningGateway {
     pub handle: GatewayHandle,
     pub notifications: Receiver<GatewayNotification>,
     pub evidence: GatewayEvidence,
@@ -204,52 +200,6 @@ pub(crate) struct GatewayRuntimeParts {
 }
 
 impl RunningGateway {
-    pub async fn select_notifications(
-        &mut self,
-        dids: Vec<String>,
-        deadline: Instant,
-    ) -> Result<u64, TransportStartupError> {
-        enum Ready {
-            Selected(Result<u64, crate::xiaomi::gateway::GatewayError>),
-            Driver(Result<(), MqttError>),
-            Session(Result<(), crate::xiaomi::gateway::GatewayError>),
-            Timeout,
-        }
-        let handle = self.handle.clone();
-        let selected = async move { handle.select_notifications(dids, deadline).await };
-        futures_lite::pin!(selected);
-        match future::or(
-            selected.map(Ready::Selected),
-            future::or(
-                self.driver.as_mut().map(Ready::Driver),
-                future::or(self.session.as_mut().map(Ready::Session), async {
-                    Timer::at(deadline).await;
-                    Ready::Timeout
-                }),
-            ),
-        )
-        .await
-        {
-            Ready::Selected(result) => result.map_err(TransportStartupError::Gateway),
-            Ready::Driver(result) => Err(result.map_or_else(TransportStartupError::Mqtt, |_| {
-                TransportStartupError::Timeout
-            })),
-            Ready::Session(result) => Err(result
-                .map_or_else(TransportStartupError::Gateway, |_| {
-                    TransportStartupError::Timeout
-                })),
-            Ready::Timeout => Err(TransportStartupError::Timeout),
-        }
-    }
-
-    pub async fn run(self) -> Result<(), TransportStartupError> {
-        future::or(
-            self.driver.map_err(TransportStartupError::Mqtt),
-            self.session.map_err(TransportStartupError::Gateway),
-        )
-        .await
-    }
-
     pub(crate) fn into_parts(self) -> GatewayRuntimeParts {
         GatewayRuntimeParts {
             handle: self.handle,
@@ -264,7 +214,7 @@ impl RunningGateway {
     }
 }
 
-pub async fn start_gateway(
+pub(crate) async fn start_gateway(
     startup: GatewayStartup,
 ) -> Result<RunningGateway, TransportStartupError> {
     let remaining = startup.deadline.saturating_duration_since(Instant::now());
@@ -408,7 +358,7 @@ pub(crate) async fn start_gateway_plain_for_test(
     })
 }
 
-pub struct CloudNotificationStartup {
+pub(crate) struct CloudNotificationStartup {
     pub host: String,
     pub port: u16,
     pub tls: CloudTlsConfig,
@@ -419,7 +369,7 @@ pub struct CloudNotificationStartup {
     pub deadline: Instant,
 }
 
-pub struct RunningCloudNotifications {
+pub(crate) struct RunningCloudNotifications {
     pub handle: CloudNotificationHandle,
     pub notifications: Receiver<CloudNotification>,
     pub generation: u64,
@@ -428,14 +378,6 @@ pub struct RunningCloudNotifications {
 }
 
 impl RunningCloudNotifications {
-    pub async fn run(self) -> Result<(), TransportStartupError> {
-        future::or(
-            self.driver.map_err(TransportStartupError::Mqtt),
-            self.session.map_err(TransportStartupError::Mqtt),
-        )
-        .await
-    }
-
     pub fn into_parts(
         self,
     ) -> (
@@ -453,7 +395,7 @@ impl RunningCloudNotifications {
     }
 }
 
-pub async fn start_cloud_notifications(
+pub(crate) async fn start_cloud_notifications(
     startup: CloudNotificationStartup,
 ) -> Result<RunningCloudNotifications, TransportStartupError> {
     let (mqtt, cloud, handle, notifications) = CloudNotificationSession::new(

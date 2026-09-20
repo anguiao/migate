@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::{sync::mpsc, thread, time::Duration};
 
 use migate::storage::{SessionCheckErrorKind, SessionCheckFailure, Store, TokenSet, XiaomiRecord};
 use rusqlite::Connection;
@@ -55,7 +55,7 @@ fn observer_distinguishes_maintenance_from_a_new_login_session() {
 }
 
 #[test]
-fn both_fast_observation_and_full_snapshot_reject_a_busy_database_promptly() {
+fn both_fast_observation_and_full_snapshot_reject_a_held_database_lock() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     store.xiaomi().replace(&credentials()).unwrap();
@@ -64,21 +64,27 @@ fn both_fast_observation_and_full_snapshot_reject_a_busy_database_promptly() {
     let locker = Connection::open(store.path()).unwrap();
     locker.execute_batch("BEGIN EXCLUSIVE").unwrap();
 
-    let started = Instant::now();
-    let observed = observer.observe().unwrap_err();
-    let snapshot = observer.snapshot().unwrap_err();
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "credential observation must not wait on another process's transaction"
-    );
-    for failure in [observed, snapshot] {
+    let (completed, result) = mpsc::channel();
+    let reader = observer.clone();
+    let worker = thread::spawn(move || {
+        completed
+            .send((reader.observe(), reader.snapshot()))
+            .unwrap();
+    });
+    // Keep the lock held until both operations return. This timeout only detects a hang;
+    // the connection's retry budget is checked independently of thread scheduling.
+    let reads = result.recv_timeout(Duration::from_secs(10));
+    locker.execute_batch("ROLLBACK").unwrap();
+    worker.join().unwrap();
+    let (observed, snapshot) =
+        reads.expect("authentication reads waited for the lock to be released");
+    for failure in [observed.unwrap_err(), snapshot.unwrap_err()] {
         assert!(matches!(
             failure,
             SessionCheckFailure::Storage(ref error)
                 if matches!(error.kind(), SessionCheckErrorKind::Busy | SessionCheckErrorKind::Locked)
         ));
     }
-    locker.execute_batch("ROLLBACK").unwrap();
     assert_eq!(observer.observe().unwrap(), previous);
     assert_eq!(observer.snapshot().unwrap().record, Some(credentials()));
 }

@@ -6,7 +6,7 @@ MiGate 保持单个 Rust 包，由 `main.rs` 组装 SQLite 存储、Xiaomi 运�
 
 单元测试统一使用外部子模块，生产文件只声明 `#[cfg(test)] mod tests;`。例如 `xiaomi/runtime/state.rs` 对应 `xiaomi/runtime/state/tests.rs`，测试仍属于原模块的子模块，可访问其私有成员。平台条件保留在模块声明处；只供测试调用的构造或观察接口继续由 `#[cfg(test)]` 限定。
 
-已有独立职责的测试分组可以继续使用子文件，例如 `admission/tests/review_regressions.rs`。跨模块的集成测试放在仓库根目录的 `tests/`；按职责组织测试，不按固定行数拆分。
+已有独立职责的测试分组可以继续使用子文件，例如 `admission/tests/review_regressions.rs`。仓库根目录的 `tests/` 验证公开入口；依赖命令、状态或会话内部接口的回归测试放在所属模块下，不为测试扩大公开接口。按职责组织测试，不按固定行数拆分。
 
 较大的测试套件进一步按主题组织：`matter/tests/device_bridge/` 按设备类型分组，照明下再区分场景与连续调整，`interaction.rs` 保存共享的协议请求工具，`subscription_recovery.rs` 验证订阅恢复；`catalog/tests/` 区分范围、物模型校验、目录装配与各类映射；`runtime/sessions/tests/` 区分认证、生命周期、各通信路径和目录协调。各自的 `tests.rs` 或测试入口文件保留共享夹具，子文件保持原有私有成员访问。
 
@@ -74,6 +74,10 @@ xiaomi/runtime/
 
 `XiaomiRuntime` 直接组装并运行认证、目录、发现与会话组件，`lifecycle.rs` 是这一类型的生命周期方法实现。私有的 `Runner` 只持有 `AuthMaintenance`、`CatalogRefresh`、`NetworkDiscovery` 和 `DeviceSessions` 四个组件。每个组件私有持有自己的运行状态，运行时调用调度方法并等待事件；取消一次等待不会丢失组件中尚未完成的任务。会话策略通过 `SessionContext` 读取认证和网络结果，以及访问状态、路由、存储与诊断接口，不能修改其它组件的任务或计时器。
 
+运行时公开接口只保留 `XiaomiRuntime`、启动错误及状态快照所需的类型。命令与状态执行器、会话授权、传输和建连接口限制在包内；只供测试使用的辅助方法受 `#[cfg(test)]` 限定。认证报告的通用状态格式和日志由 `xiaomi/auth/report.rs` 提供，终端补充登录命令等交互提示，运行时不依赖终端模块。
+
+`status.rs` 中的私有 `RuntimeStatus` 封装状态快照与有界诊断记录，提供准入快照更新、候选状态更新和诊断记录方法。`SessionContext` 不暴露这些数据的 `RefCell` 或诊断队列；诊断去重和容量限制只在状态模块内维护。
+
 `DeviceSessions` 的状态仍集中在 `sessions.rs`；`sessions/` 子模块中的方法共用同一所有者，按中枢、LAN、云通知和目录应用组织策略。`gateway_connection.rs`、`lan_connection.rs`、`cloud_connection.rs` 负责连接任务的资源生命周期，`sessions/gateway.rs`、`lan.rs`、`cloud.rs` 处理连接事实的准入与发布，不建立第二套连接状态。`catalog_refresh.rs` 持有目录获取与物模型解析任务，`sessions/catalog.rs` 将完成结果应用到当前设备会话。
 
 | 所有者 | 维护的状态 | 向外提供的结果或操作 |
@@ -120,7 +124,9 @@ matter/
 └── 各设备处理器          灯、风扇、温控、窗帘、传感器和扫地机的标准语义
 ```
 
-`EndpointPlan` 只由核心功能角色和能力计算，不读取数据库、不创建协议处理器，也不分配 endpoint。`TopologyRegistry` 管理活跃处理器快照和重建请求；`endpoint.rs` 消费计划及持久化身份建立处理器。`ReportedState` 私有保存已报告的值和可达性，用于去重，不替代设备服务的确认状态。`DeviceBridgeModel` 负责分发和等待设备变化，`DeviceBridge` 在模型重建期间保留运行中的 Matter 传输。
+`EndpointPlan` 只由核心功能角色和能力计算，不读取数据库、不创建协议处理器，也不分配 endpoint。`TopologyRegistry` 先比较期望计划与当前端点：形状相同时复用处理器并更新名称、能力和配置签名；形状变化时记录目标签名并请求模型重建。只有初次建立模型或增加端点时，`endpoint.rs` 才消费计划及持久化身份建立处理器、读取标签设置。已有端点的 Identify、场景和连续调整状态随处理器保留。
+
+`ReportedState` 私有保存已报告的值和可达性，用于去重，不替代设备服务的确认状态。`DeviceBridgeModel` 负责分发和等待设备变化，`DeviceBridge` 在模型重建期间保留运行中的 Matter 传输。
 
 照明的所有簇、场景与连续调整仍共用一个 `LightingHandler`，子模块不复制状态或创建独立命令队列。共享命令意图、定时关闭、调整任务和确认状态仍由这一处理器持有；文件拆分保留原有串行控制、停止和报告顺序。
 

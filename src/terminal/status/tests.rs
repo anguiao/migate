@@ -1,5 +1,8 @@
 use super::*;
-use crate::xiaomi::auth::AuthReport;
+use crate::xiaomi::{
+    auth::{AuthReport, CertificateUpdate},
+    certificate::CertificateValidity,
+};
 
 #[test]
 fn certificate_dates_are_recomputed_for_each_render() {

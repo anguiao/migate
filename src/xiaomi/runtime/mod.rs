@@ -14,38 +14,42 @@ mod state;
 mod status;
 mod transports;
 
-pub use admission::{
-    AdmissionCatalog, AdmissionController, AdmissionFeature, AdmissionSnapshot, AdmissionStatus,
-    AuthenticatedGateway, AuthenticatedLan, CloudEvidence, CloudStatus, GatewayPathEvidence,
-    LegacyOperationEvidence,
+pub(crate) use admission::{
+    AdmissionCatalog, AdmissionController, AuthenticatedGateway, AuthenticatedLan, CloudEvidence,
+    CloudStatus, LegacyOperationEvidence,
 };
-pub use command::{
-    CommandCompletion, CommandCompletionSubscription, CommandFailureStage, CommandLimits,
-    CommandRuntime, CommandTransport, ControlPath, DeviceExecutionGate, DeviceExecutionLease,
-    OperationPaths, RuntimeDiagnostic, RuntimeFeature, SendAuthorization, SendGuard,
-    SharedSendState, TransportCommand, TransportFailure,
+pub use admission::{AdmissionFeature, AdmissionSnapshot, AdmissionStatus, GatewayPathEvidence};
+pub(crate) use command::{
+    CommandCompletion, CommandCompletionSubscription, CommandRuntime, CommandTransport,
+    DeviceExecutionGate, RuntimeFeature, SendAuthorization, SendGuard, TransportCommand,
+    TransportFailure,
 };
-pub use startup::{
+pub use command::{CommandFailureStage, ControlPath, OperationPaths, RuntimeDiagnostic};
+pub(crate) use startup::{
     CloudNotificationStartup, GatewayStartup, LanOperationEvidence, RunningCloudNotifications,
     RunningGateway, RunningLan, TransportStartupError, start_cloud_notifications, start_gateway,
     start_lan,
 };
-pub use state::{
-    CloudReachabilityUpdate, PushSource, ReadTarget, StateDiagnostic, StateLimits,
-    StateReadFailure, StateReadGuard, StateReadRequest, StateReadResult, StateReadTransport,
+pub(crate) use state::{
+    PushSource, ReadTarget, StateReadGuard, StateReadRequest, StateReadResult, StateReadTransport,
     StateRuntime, SubscriptionToken,
 };
+pub use state::{StateDiagnostic, StateReadFailure};
 pub use status::{
     XiaomiBoundaryDiagnostic, XiaomiCandidateState, XiaomiCandidateStatus, XiaomiFailureStage,
     XiaomiGatewayStatus, XiaomiRuntimeComponent, XiaomiRuntimeDiagnostic, XiaomiRuntimeStatus,
     XiaomiSafeFailureCode,
 };
-pub use transports::{CurrentSessionRegistry, RuntimeTransports, SessionAuthority};
+pub(crate) use transports::{CurrentSessionRegistry, RuntimeTransports, SessionAuthority};
 
+#[cfg(test)]
+pub(crate) use command::CommandLimits;
 #[cfg(test)]
 pub(crate) use startup::GatewayRuntimeParts;
 #[cfg(test)]
 pub(crate) use startup::{start_gateway_plain_for_test, start_lan_session_for_test};
+#[cfg(test)]
+pub(crate) use state::StateLimits;
 pub(crate) use transports::{RouteFailure, RouteLease};
 
 use crate::{
@@ -62,9 +66,9 @@ use catalog_refresh::CatalogRefresh;
 use discovery::NetworkDiscovery;
 use event_listener::Event;
 use sessions::DeviceSessions;
+use status::RuntimeStatus;
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, VecDeque},
     fmt,
     rc::Rc,
     time::Duration,
@@ -134,8 +138,7 @@ pub struct XiaomiRuntime {
 struct Inner {
     service: DeviceService,
     auth_report: RefCell<AuthReport>,
-    status: RefCell<XiaomiRuntimeStatus>,
-    diagnostics: RefCell<VecDeque<XiaomiRuntimeDiagnostic>>,
+    status: RuntimeStatus,
     failure: RefCell<Option<StorageError>>,
     failed: Event,
     refresh_requested: Rc<Cell<bool>>,
@@ -203,18 +206,12 @@ impl XiaomiRuntime {
             snapshot.session_generation,
         );
         admission.restore_archived()?;
-        let initial_status = XiaomiRuntimeStatus {
-            admission: admission.snapshot()?,
-            candidates: Vec::new(),
-            gateways: Vec::new(),
-            diagnostics: Vec::new(),
-        };
+        let status = RuntimeStatus::new(admission.snapshot()?);
         Ok(Self {
             inner: Rc::new(Inner {
                 service,
                 auth_report: RefCell::new(auth_report),
-                status: RefCell::new(initial_status),
-                diagnostics: RefCell::new(VecDeque::new()),
+                status,
                 failure: RefCell::new(None),
                 failed: Event::new(),
                 refresh_requested,
@@ -245,22 +242,11 @@ impl XiaomiRuntime {
     }
 
     pub fn status(&self) -> XiaomiRuntimeStatus {
-        let mut status = self.inner.status.borrow().clone();
-        status.diagnostics = self.inner.diagnostics.borrow().iter().cloned().collect();
-        status
+        self.inner.status.snapshot()
     }
 
     pub fn refresh(&self) {
-        let devices = self
-            .inner
-            .status
-            .borrow()
-            .admission
-            .features
-            .iter()
-            .map(|feature| feature.identity.physical.clone())
-            .collect::<BTreeSet<_>>();
-        for device in devices {
+        for device in self.inner.status.admitted_devices() {
             self.inner.state.request_refresh(&device);
         }
         self.inner.refresh_requested.set(true);

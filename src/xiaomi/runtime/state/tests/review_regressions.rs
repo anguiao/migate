@@ -1,7 +1,6 @@
 use std::{rc::Rc, time::Duration};
 
-use futures_util::{FutureExt, future::LocalBoxFuture};
-use migate::{
+use crate::{
     device::{
         AccountId, CommandOutcome, DeviceCommand, DeviceDid, DeviceService, FeatureIdentity,
         HomeId, PhysicalDeviceId, Property,
@@ -19,6 +18,7 @@ use migate::{
         },
     },
 };
+use futures_util::{FutureExt, future::LocalBoxFuture};
 
 struct UnusedTransport;
 
@@ -177,7 +177,7 @@ fn readmission_keeps_unknown_state_unavailable_in_events_and_send_checks() {
     assert!(!harness.service.is_available(&harness.feature));
     assert!(changes.drain().iter().all(|change| !matches!(
         change,
-        migate::device::DeviceChange::AvailabilityChanged {
+        crate::device::DeviceChange::AvailabilityChanged {
             available: true,
             ..
         }
@@ -223,7 +223,7 @@ fn same_epoch_cloud_fallback_keeps_confirmed_state_available() {
             .snapshot(&harness.feature)
             .unwrap()
             .property(Property::Power),
-        Some(migate::device::PropertyState::Current { .. })
+        Some(crate::device::PropertyState::Current { .. })
     ));
     assert!(harness.service.is_available(&harness.feature));
 }
@@ -396,7 +396,7 @@ fn failed_full_cache_eventually_saves_all_latest_confirmed_values() {
                 .iter()
                 .find(|state| state.property == Property::Power)
                 .unwrap();
-            assert_eq!(power.value, migate::device::PropertyValue::Power(false));
+            assert_eq!(power.value, crate::device::PropertyValue::Power(false));
             assert_eq!(power.observed_at, 11);
             harness.state.stop();
         },
@@ -655,7 +655,7 @@ fn healthy_subscription_retries_a_missing_initial_property() {
                         .snapshot(&harness.feature)
                         .unwrap()
                         .property(Property::Brightness),
-                    Some(migate::device::PropertyState::Current { .. })
+                    Some(crate::device::PropertyState::Current { .. })
                 ) {
                     break;
                 }
@@ -770,7 +770,7 @@ fn gate_queue_time_uses_total_budget_before_local_attempt() {
 
 #[test]
 fn removing_one_route_keeps_the_shared_session_authority_live() {
-    use migate::xiaomi::{
+    use crate::xiaomi::{
         cloud::CloudClient,
         runtime::{CurrentSessionRegistry, SessionAuthority},
     };
@@ -873,7 +873,7 @@ fn deferred_new_query_blocks_an_old_reply_while_capacity_is_full() {
                         .snapshot(&harness.feature)
                         .unwrap()
                         .property(Property::Power),
-                    Some(migate::device::PropertyState::Current { .. })
+                    Some(crate::device::PropertyState::Current { .. })
                 ),
                 "the older query was applied while its replacement was pending"
             );
@@ -892,8 +892,8 @@ fn deferred_new_query_blocks_an_old_reply_while_capacity_is_full() {
                         .snapshot(&harness.feature)
                         .unwrap()
                         .property(Property::Power),
-                    Some(migate::device::PropertyState::Current {
-                        value: migate::device::PropertyValue::Power(false),
+                    Some(crate::device::PropertyState::Current {
+                        value: crate::device::PropertyValue::Power(false),
                         ..
                     })
                 ) {
@@ -966,7 +966,7 @@ fn cloud_offline_does_not_discard_authority_for_later_online_on_the_same_session
         .unwrap()
         .features
         .into_iter()
-        .find(|feature| feature.definition.role == migate::device::FeatureRole::TemperatureSensor)
+        .find(|feature| feature.definition.role == crate::device::FeatureRole::TemperatureSensor)
         .unwrap();
     harness.feature.service_instance = descriptor.definition.service_instance;
     harness.feature.role = descriptor.definition.role;
@@ -1061,7 +1061,7 @@ fn cloud_push_can_confirm_sensor_without_a_control_route() {
         .unwrap()
         .features
         .into_iter()
-        .find(|feature| feature.definition.role == migate::device::FeatureRole::TemperatureSensor)
+        .find(|feature| feature.definition.role == crate::device::FeatureRole::TemperatureSensor)
         .unwrap();
     harness.feature.service_instance = descriptor.definition.service_instance;
     harness.feature.role = descriptor.definition.role;
@@ -1116,7 +1116,8 @@ fn cloud_motion_events_confirm_reachability_without_a_control_route() {
     for keyed in [false, true] {
         let mut harness = Harness::new();
         harness.service.remove(&harness.feature);
-        let document = include_str!("fixtures/miot_specs/xiaomi.motion.pir1.json");
+        let document =
+            include_str!("../../../../../tests/fixtures/miot_specs/xiaomi.motion.pir1.json");
         let descriptor = compile_spec("xiaomi.motion.pir1", document)
             .unwrap()
             .features
@@ -1176,8 +1177,8 @@ fn cloud_motion_events_confirm_reachability_without_a_control_route() {
                 .snapshot(&harness.feature)
                 .unwrap()
                 .property(Property::Motion),
-            Some(migate::device::PropertyState::Current {
-                value: migate::device::PropertyValue::Motion(true),
+            Some(crate::device::PropertyState::Current {
+                value: crate::device::PropertyValue::Motion(true),
                 ..
             })
         ));

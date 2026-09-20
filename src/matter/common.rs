@@ -118,10 +118,6 @@ impl CommonHandler {
         self.label_override.borrow().is_none()
     }
 
-    pub(super) fn default_label(&self) -> String {
-        self.default_label.borrow().clone()
-    }
-
     pub(super) fn save_override(&self, value: &str) -> Result<(), StorageError> {
         self.store.capture(
             self.store

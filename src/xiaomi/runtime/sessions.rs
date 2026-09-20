@@ -21,8 +21,8 @@ use super::lan_connection::{
 use super::{
     XiaomiBoundaryDiagnostic, XiaomiCandidateState, XiaomiCandidateStatus, XiaomiFailureStage,
     XiaomiGatewayStatus, XiaomiRuntimeComponent, XiaomiRuntimeDiagnostic, XiaomiRuntimeError,
-    XiaomiRuntimeStatus, XiaomiSafeFailureCode, auth::AuthMaintenance, discovery::NetworkDiscovery,
-    status::record_diagnostic,
+    XiaomiSafeFailureCode, auth::AuthMaintenance, discovery::NetworkDiscovery,
+    status::RuntimeStatus,
 };
 use crate::{
     device::PhysicalDeviceId,
@@ -44,8 +44,8 @@ use futures_util::{
     future::{LocalBoxFuture, select_all},
 };
 use std::{
-    cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
     rc::Rc,
 };
 
@@ -57,8 +57,7 @@ pub(super) struct SessionContext<'a> {
     pub(super) cloud: &'a Rc<CloudClient>,
     pub(super) state: &'a StateRuntime,
     pub(super) registry: &'a CurrentSessionRegistry,
-    pub(super) status: &'a RefCell<XiaomiRuntimeStatus>,
-    pub(super) diagnostics: &'a RefCell<VecDeque<XiaomiRuntimeDiagnostic>>,
+    pub(super) status: &'a RuntimeStatus,
     pub(super) wake: &'a Rc<Event>,
     pub(super) refresh_requested: &'a Cell<bool>,
     pub(super) devices: &'a crate::storage::DeviceStore,
@@ -82,26 +81,18 @@ impl SessionContext<'_> {
         code: XiaomiSafeFailureCode,
         subject: Option<String>,
     ) {
-        record_diagnostic(
-            self.diagnostics,
-            XiaomiRuntimeDiagnostic::Boundary(XiaomiBoundaryDiagnostic {
-                component,
-                stage,
-                code,
-                subject,
-            }),
-        );
+        self.status
+            .record_diagnostic(XiaomiRuntimeDiagnostic::Boundary(
+                XiaomiBoundaryDiagnostic {
+                    component,
+                    stage,
+                    code,
+                    subject,
+                },
+            ));
     }
     fn refresh(&self) {
-        let devices = self
-            .status
-            .borrow()
-            .admission
-            .features
-            .iter()
-            .map(|feature| feature.identity.physical.clone())
-            .collect::<BTreeSet<_>>();
-        for device in devices {
+        for device in self.status.admitted_devices() {
             self.state.request_refresh(&device);
         }
         self.refresh_requested.set(true);
@@ -486,7 +477,7 @@ impl DeviceSessions {
                     ctx.registry.revoke_cloud(&feature.identity.physical);
                 }
                 ctx.state.reconcile(&snapshot);
-                ctx.status.borrow_mut().admission = snapshot;
+                ctx.status.set_admission(snapshot);
             }
             self.cloud_routes.clear();
             if let Some(authority) = self.cloud_authority.take() {
@@ -548,12 +539,12 @@ impl DeviceSessions {
     ) -> Result<(), XiaomiRuntimeError> {
         let snapshot = admission.snapshot()?;
         ctx.state.reconcile(&snapshot);
-        ctx.status.borrow_mut().admission = snapshot;
+        ctx.status.set_admission(snapshot);
         Ok(())
     }
 
     pub(super) fn update_status(&mut self, ctx: &SessionContext<'_>) {
-        let admission = ctx.status.borrow().admission.clone();
+        let admission = ctx.status.admission();
         let candidates = self
             .catalog
             .as_ref()
@@ -614,9 +605,7 @@ impl DeviceSessions {
                 authenticated: self.gateways.contains_key(&candidate.gateway_did),
             })
             .collect();
-        let mut status = ctx.status.borrow_mut();
-        status.candidates = candidates;
-        status.gateways = gateways;
+        ctx.status.set_devices(candidates, gateways);
     }
 }
 

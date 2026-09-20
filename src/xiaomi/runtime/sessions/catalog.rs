@@ -138,7 +138,7 @@ impl DeviceSessions {
                 self.rebuild_gateway_routes(ctx, &admission_snapshot);
                 self.sync_cloud_routes(ctx)?;
                 ctx.state.reconcile(&admission_snapshot);
-                ctx.status.borrow_mut().admission = admission_snapshot;
+                ctx.status.set_admission(admission_snapshot);
                 self.schedule_gateway_operations();
                 let persisted = persist_catalog(
                     &ctx.devices(),

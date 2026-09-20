@@ -6,7 +6,6 @@ use super::{
     catalog_refresh::{CatalogRefresh, CatalogTaskResult},
     discovery::{DiscoveryEvent, NetworkDiscovery},
     sessions::{SessionContext, SessionEvent},
-    status::record_diagnostic,
     unix_time,
 };
 use crate::{
@@ -42,7 +41,7 @@ impl XiaomiRuntime {
                 || previous.certificate_update != report.certificate_update
         };
         if changed {
-            crate::terminal::log_status(&report, unix_time());
+            report.log_status(unix_time());
         }
         *self.inner.auth_report.borrow_mut() = report;
     }
@@ -92,7 +91,7 @@ impl XiaomiRuntime {
     }
 
     fn record_diagnostic(&self, diagnostic: XiaomiRuntimeDiagnostic) {
-        record_diagnostic(&self.inner.diagnostics, diagnostic);
+        self.inner.status.record_diagnostic(diagnostic);
     }
 
     fn record_boundary(
@@ -125,7 +124,6 @@ impl XiaomiRuntime {
             state: &self.inner.state,
             registry: &self.inner.registry,
             status: &self.inner.status,
-            diagnostics: &self.inner.diagnostics,
             wake: &self.inner.wake,
             refresh_requested: &self.inner.refresh_requested,
             devices: &self.inner.devices,

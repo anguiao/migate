@@ -216,7 +216,7 @@ impl DeviceSessions {
         );
         self.sync_cloud_routes(ctx)?;
         ctx.state.reconcile(&snapshot);
-        ctx.status.borrow_mut().admission = snapshot;
+        ctx.status.set_admission(snapshot);
         let active = self
             .lans
             .get_mut(device)
@@ -256,7 +256,7 @@ impl DeviceSessions {
         self.admission.remove_lan(device);
         let snapshot = self.admission.snapshot()?;
         ctx.state.reconcile(&snapshot);
-        ctx.status.borrow_mut().admission = snapshot;
+        ctx.status.set_admission(snapshot);
         self.select_fallback_push_sources(ctx)?;
         Ok(())
     }
@@ -286,7 +286,7 @@ impl DeviceSessions {
         self.admission.remove_lan(device);
         let snapshot = self.admission.snapshot()?;
         ctx.state.reconcile(&snapshot);
-        ctx.status.borrow_mut().admission = snapshot;
+        ctx.status.set_admission(snapshot);
         self.select_fallback_push_sources(ctx)?;
         Ok(())
     }
@@ -307,7 +307,7 @@ impl DeviceSessions {
         self.admission.remove_lan(device);
         let snapshot = self.admission.snapshot()?;
         ctx.state.reconcile(&snapshot);
-        ctx.status.borrow_mut().admission = snapshot;
+        ctx.status.set_admission(snapshot);
         self.select_fallback_push_sources(ctx)?;
         Ok(())
     }

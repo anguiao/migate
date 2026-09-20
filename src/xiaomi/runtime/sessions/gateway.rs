@@ -220,7 +220,7 @@ impl DeviceSessions {
             self.rebuild_gateway_routes(ctx, &snapshot);
         }
         ctx.state.reconcile(&snapshot);
-        ctx.status.borrow_mut().admission = snapshot.clone();
+        ctx.status.set_admission(snapshot.clone());
         self.schedule_gateway_operations();
         self.update_status(ctx);
         Ok(())
@@ -505,7 +505,7 @@ impl DeviceSessions {
                 self.rebuild_gateway_routes(ctx, &snapshot);
                 self.sync_cloud_routes(ctx)?;
                 ctx.state.reconcile(&snapshot);
-                ctx.status.borrow_mut().admission = snapshot.clone();
+                ctx.status.set_admission(snapshot.clone());
             }
         }
         self.schedule_gateway_operations();

@@ -1,4 +1,77 @@
-use std::{cell::RefCell, collections::VecDeque};
+use crate::device::PhysicalDeviceId;
+use std::{
+    cell::RefCell,
+    collections::{BTreeSet, VecDeque},
+};
+
+/// Publishes runtime observations without exposing their mutable containers.
+pub(super) struct RuntimeStatus {
+    current: RefCell<XiaomiRuntimeStatus>,
+    diagnostics: RefCell<VecDeque<XiaomiRuntimeDiagnostic>>,
+}
+
+impl RuntimeStatus {
+    pub(super) fn new(admission: super::AdmissionSnapshot) -> Self {
+        Self {
+            current: RefCell::new(XiaomiRuntimeStatus {
+                admission,
+                candidates: Vec::new(),
+                gateways: Vec::new(),
+                diagnostics: Vec::new(),
+            }),
+            diagnostics: RefCell::new(VecDeque::new()),
+        }
+    }
+
+    pub(super) fn snapshot(&self) -> XiaomiRuntimeStatus {
+        let mut status = self.current.borrow().clone();
+        status.diagnostics = self.diagnostics.borrow().iter().cloned().collect();
+        status
+    }
+
+    pub(super) fn admission(&self) -> super::AdmissionSnapshot {
+        self.current.borrow().admission.clone()
+    }
+
+    pub(super) fn admitted_devices(&self) -> BTreeSet<PhysicalDeviceId> {
+        self.current
+            .borrow()
+            .admission
+            .features
+            .iter()
+            .map(|feature| feature.identity.physical.clone())
+            .collect()
+    }
+
+    pub(super) fn set_admission(&self, admission: super::AdmissionSnapshot) {
+        self.current.borrow_mut().admission = admission;
+    }
+
+    pub(super) fn set_devices(
+        &self,
+        candidates: Vec<XiaomiCandidateStatus>,
+        gateways: Vec<XiaomiGatewayStatus>,
+    ) {
+        let mut status = self.current.borrow_mut();
+        status.candidates = candidates;
+        status.gateways = gateways;
+    }
+
+    pub(super) fn record_diagnostic(&self, diagnostic: XiaomiRuntimeDiagnostic) {
+        let mut diagnostics = self.diagnostics.borrow_mut();
+        if diagnostics
+            .back()
+            .is_some_and(|current| same_diagnostic(current, &diagnostic))
+        {
+            return;
+        }
+        if diagnostics.len() == 32 {
+            diagnostics.pop_front();
+        }
+        log::warn!("{}", format_diagnostic(&diagnostic));
+        diagnostics.push_back(diagnostic);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct XiaomiRuntimeStatus {
@@ -134,22 +207,4 @@ fn format_diagnostic(diagnostic: &XiaomiRuntimeDiagnostic) -> String {
             diagnostic.subject.as_deref().unwrap_or("none"),
         ),
     }
-}
-
-pub(super) fn record_diagnostic(
-    diagnostics: &RefCell<VecDeque<XiaomiRuntimeDiagnostic>>,
-    diagnostic: XiaomiRuntimeDiagnostic,
-) {
-    let mut diagnostics = diagnostics.borrow_mut();
-    if diagnostics
-        .back()
-        .is_some_and(|current| same_diagnostic(current, &diagnostic))
-    {
-        return;
-    }
-    if diagnostics.len() == 32 {
-        diagnostics.pop_front();
-    }
-    log::warn!("{}", format_diagnostic(&diagnostic));
-    diagnostics.push_back(diagnostic);
 }
