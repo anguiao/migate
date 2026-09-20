@@ -5,6 +5,9 @@ mod matter;
 mod migration;
 mod xiaomi;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::StorageError;
 pub use identity::Identity;
 pub use matter::MatterStore;

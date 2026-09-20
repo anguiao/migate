@@ -12,6 +12,7 @@ use migate::{
     },
 };
 use rusqlite::Connection;
+use std::error::Error as _;
 
 fn credentials(uid: &str) -> XiaomiRecord {
     XiaomiRecord {
@@ -365,48 +366,30 @@ fn feature_identity_allocation_is_stable_monotonic_and_never_reused() {
 }
 
 #[test]
-fn short_storage_lock_waits_but_timeout_does_not_publish_an_identity() {
-    let short_dir = tempfile::tempdir().unwrap();
-    let short_store = Store::open(short_dir.path()).unwrap();
-    let short_path = short_store.path().to_owned();
-    let (locked, ready) = std::sync::mpsc::sync_channel(1);
-    let lock = std::thread::spawn(move || {
-        let connection = Connection::open(short_path).unwrap();
-        connection.execute_batch("BEGIN EXCLUSIVE").unwrap();
-        locked.send(()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(25));
-        connection.execute_batch("ROLLBACK").unwrap();
-    });
-    ready.recv().unwrap();
-    assert!(short_store.devices().allocate_feature(&feature()).is_ok());
-    lock.join().unwrap();
+fn held_storage_lock_does_not_publish_or_consume_a_feature_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let locker = Connection::open(store.path()).unwrap();
+    locker.execute_batch("BEGIN EXCLUSIVE").unwrap();
 
-    let timeout_dir = tempfile::tempdir().unwrap();
-    let timeout_store = Store::open(timeout_dir.path()).unwrap();
-    let timeout_path = timeout_store.path().to_owned();
-    let (locked, ready) = std::sync::mpsc::sync_channel(1);
-    let lock = std::thread::spawn(move || {
-        let connection = Connection::open(&timeout_path).unwrap();
-        connection.execute_batch("BEGIN EXCLUSIVE").unwrap();
-        locked.send(()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(225));
-        connection.execute_batch("ROLLBACK").unwrap();
-    });
-    ready.recv().unwrap();
-    assert!(
-        timeout_store
-            .devices()
-            .allocate_feature(&feature())
-            .is_err()
+    // Keep the lock held until allocation returns, regardless of thread scheduling.
+    let result = store.devices().allocate_feature(&feature());
+    locker.execute_batch("ROLLBACK").unwrap();
+    let error = result.unwrap_err();
+    assert!(matches!(
+        error.source().unwrap().downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(error, _))
+            if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    ));
+    assert!(store.devices().load_features(false).unwrap().is_empty());
+
+    let identity = store.devices().allocate_feature(&feature()).unwrap();
+    assert_eq!(identity.endpoint, 2);
+    assert_eq!(
+        store.devices().allocate_feature(&feature()).unwrap(),
+        identity
     );
-    lock.join().unwrap();
-    assert!(
-        timeout_store
-            .devices()
-            .load_features(false)
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(store.devices().load_features(false).unwrap(), [identity]);
 }
 
 #[test]
