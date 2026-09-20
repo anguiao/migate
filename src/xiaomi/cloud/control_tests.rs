@@ -3,7 +3,7 @@ use crate::{
     xiaomi::catalog::WireValue,
     xiaomi::gateway::EventArguments,
     xiaomi::mqtt::MqttErrorKind,
-    xiaomi::test_support::{MockResponse, dynamic_mock_server, mock_server},
+    xiaomi::test_support::{MockResponse, controlled_mock_server, mock_server},
 };
 use bytes::BytesMut;
 use futures_lite::future::{self, block_on};
@@ -11,6 +11,7 @@ use futures_util::FutureExt;
 use mqttbytes::{QoS, v5};
 use serde_json::{Value, json};
 use std::{
+    cell::Cell,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     thread,
@@ -18,7 +19,15 @@ use std::{
 };
 
 fn deadline() -> Instant {
-    Instant::now() + Duration::from_secs(1)
+    Instant::now() + Duration::from_secs(10)
+}
+
+async fn within_timeout<T>(operation: impl Future<Output = T>) -> T {
+    future::or(operation, async {
+        async_io::Timer::after(Duration::from_secs(5)).await;
+        panic!("cloud timeout test did not complete after the short request budget");
+    })
+    .await
 }
 
 fn property(did: &str, siid: u32, piid: u32) -> CloudProperty {
@@ -72,12 +81,7 @@ fn reads_properties_with_exact_headers_body_and_partial_results() {
         {"did":"air","siid":2,"piid":6,"code":0,"value":{"unsupported":true}}
     ]});
     let (base, requests) = mock_server(vec![MockResponse::json(200, &body.to_string())]);
-    let client = CloudClient::for_test_with_control_timeout(
-        &base,
-        Duration::from_secs(1),
-        Duration::from_millis(200),
-    )
-    .unwrap();
+    let client = CloudClient::for_test(&base, Duration::from_secs(10)).unwrap();
     let properties = [
         property("air", 2, 3),
         property("air", 2, 4),
@@ -273,29 +277,30 @@ fn control_timeout_covers_headers_and_body_without_retrying() {
         MockResponse::json(
             200,
             r#"{"code":0,"result":{"did":"did","siid":2,"aiid":1,"code":0}}"#,
-        )
-        .delayed(Duration::from_millis(100)),
+        ),
         MockResponse::delayed_body(
             200,
             r#"{"code":0,"result":{"did":"did","siid":2,"aiid":1,"code":0}}"#,
             5,
-            Duration::from_millis(100),
+            Duration::ZERO,
         ),
     ] {
-        let (base, requests) = mock_server(vec![response]);
+        let (base, requests) = controlled_mock_server(vec![response]);
         let client = CloudClient::for_test_with_control_timeout(
             &base,
+            Duration::from_secs(10),
             Duration::from_secs(1),
-            Duration::from_millis(20),
         )
         .unwrap();
-        assert!(
-            block_on(client.invoke_action("access", &action, deadline()))
-                .unwrap_err()
-                .is_timeout()
-        );
-        requests.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(requests.recv_timeout(Duration::from_millis(120)).is_err());
+        let (result, response) = block_on(within_timeout(future::zip(
+            client.invoke_action("access", &action, deadline()),
+            requests.recv_async(),
+        )));
+        assert!(result.unwrap_err().is_timeout());
+        let response = response.unwrap();
+        assert_eq!(response.request.target, "/app/v2/miotspec/action");
+        response.release();
+        assert!(requests.recv_timeout(Duration::from_secs(5)).is_err());
     }
 }
 
@@ -304,43 +309,36 @@ fn remaining_deadline_shortens_the_control_timeout() {
     let response = MockResponse::json(
         200,
         r#"{"code":0,"result":{"did":"did","siid":2,"aiid":1,"code":0}}"#,
-    )
-    .delayed(Duration::from_millis(100));
-    let (base, requests) = mock_server(vec![response]);
+    );
+    let (base, requests) = controlled_mock_server(vec![response]);
     let client = CloudClient::for_test_with_control_timeout(
         &base,
-        Duration::from_secs(1),
-        Duration::from_millis(200),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
     )
     .unwrap();
     let action = CloudAction::new("did", 2, 1, vec![]);
-    assert!(
-        block_on(client.invoke_action(
-            "access",
-            &action,
-            Instant::now() + Duration::from_millis(20),
-        ))
-        .unwrap_err()
-        .is_timeout()
-    );
-    requests.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert!(requests.recv_timeout(Duration::from_millis(120)).is_err());
+    let (result, response) = block_on(within_timeout(future::zip(
+        client.invoke_action("access", &action, Instant::now() + Duration::from_secs(1)),
+        requests.recv_async(),
+    )));
+    assert!(result.unwrap_err().is_timeout());
+    response.unwrap().release();
+    assert!(requests.recv_timeout(Duration::from_secs(5)).is_err());
 }
 
 #[test]
 fn deadline_invalid_input_and_cancellation_never_add_control_posts() {
     let action = CloudAction::new("did", 2, 1, vec![]);
-    let (base, requests) = dynamic_mock_server(2, |_| {
-        MockResponse::json(
-            200,
-            r#"{"code":0,"result":{"did":"did","siid":2,"aiid":1,"code":0}}"#,
-        )
-        .delayed(Duration::from_millis(200))
-    });
+    let response = MockResponse::json(
+        200,
+        r#"{"code":0,"result":{"did":"did","siid":2,"aiid":1,"code":0}}"#,
+    );
+    let (base, requests) = controlled_mock_server(vec![response.clone(), response]);
     let client = CloudClient::for_test_with_control_timeout(
         &base,
-        Duration::from_secs(1),
-        Duration::from_secs(1),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
     )
     .unwrap();
     assert!(
@@ -385,19 +383,20 @@ fn deadline_invalid_input_and_cancellation_never_add_control_posts() {
             .kind(),
         &CloudErrorKind::InvalidInput
     );
-    assert!(requests.recv_timeout(Duration::from_millis(80)).is_err());
+    assert!(requests.try_recv().is_err());
 
-    block_on(async {
+    let response = block_on(within_timeout(async {
         let request = client.invoke_action("access", &action, deadline());
-        futures_lite::pin!(request);
-        let completed = future::or(async { Some(request.await) }, async {
-            async_io::Timer::after(Duration::from_millis(30)).await;
-            None
-        })
-        .await;
-        assert!(completed.is_none());
-    });
-    requests.recv_timeout(Duration::from_secs(1)).unwrap();
+        future::or(
+            async {
+                let result = request.await;
+                panic!("control request completed while its response was held: {result:?}");
+            },
+            async { requests.recv_async().await.unwrap() },
+        )
+        .await
+    }));
+    response.release();
     assert!(requests.recv_timeout(Duration::from_millis(250)).is_err());
 }
 
@@ -405,23 +404,42 @@ fn deadline_invalid_input_and_cancellation_never_add_control_posts() {
 fn control_timeout_does_not_replace_the_general_http_timeout() {
     let home = r#"{"code":0,"result":{"homelist":[]}}"#;
     let action_reply = r#"{"code":0,"result":{"did":"did","siid":2,"aiid":1,"code":0}}"#;
-    let (base, _) = mock_server(vec![
-        MockResponse::json(200, home).delayed(Duration::from_millis(60)),
-        MockResponse::json(200, action_reply).delayed(Duration::from_millis(60)),
+    let (base, requests) = controlled_mock_server(vec![
+        MockResponse::json(200, action_reply),
+        MockResponse::json(200, home),
     ]);
     let client = CloudClient::for_test_with_control_timeout(
         &base,
-        Duration::from_millis(20),
-        Duration::from_millis(300),
+        Duration::from_secs(1),
+        Duration::from_secs(10),
     )
     .unwrap();
-    assert!(
-        block_on(client.get_home("access"))
-            .unwrap_err()
-            .is_timeout()
-    );
-    block_on(client.invoke_action("access", &CloudAction::new("did", 2, 1, vec![]), deadline()))
-        .unwrap();
+    let released = Cell::new(false);
+    block_on(within_timeout(future::zip(
+        async {
+            let result = client
+                .invoke_action("access", &CloudAction::new("did", 2, 1, vec![]), deadline())
+                .await;
+            assert!(
+                released.get(),
+                "control request ended before the general request timed out"
+            );
+            result.unwrap();
+        },
+        async {
+            // Start the general request only after control is already waiting for its response.
+            let control = requests.recv_async().await.unwrap();
+            assert_eq!(control.request.target, "/app/v2/miotspec/action");
+            let (result, home) =
+                future::zip(client.get_home("access"), requests.recv_async()).await;
+            let home = home.unwrap();
+            assert_eq!(home.request.target, "/app/v2/homeroom/gethome");
+            assert!(result.unwrap_err().is_timeout());
+            released.set(true);
+            control.release();
+            home.release();
+        },
+    )));
 }
 
 #[test]

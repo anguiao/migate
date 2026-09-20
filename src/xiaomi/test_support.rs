@@ -19,6 +19,17 @@ pub(crate) struct ReceivedRequest {
     pub body: String,
 }
 
+pub(crate) struct HeldResponse {
+    pub request: ReceivedRequest,
+    release: flume::Sender<()>,
+}
+
+impl HeldResponse {
+    pub fn release(self) {
+        self.release.send(()).unwrap();
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct MockResponse {
     wire: String,
@@ -62,6 +73,51 @@ impl MockResponse {
 
 pub(crate) fn mock_server(responses: Vec<MockResponse>) -> (String, Receiver<ReceivedRequest>) {
     mock_server_with_accept_timeout(responses, Duration::from_secs(2))
+}
+
+/// Hold each response until the test releases it, allowing concurrent requests.
+/// A split response sends its headers and body prefix before reporting readiness.
+pub(crate) fn controlled_mock_server(
+    responses: Vec<MockResponse>,
+) -> (String, flume::Receiver<HeldResponse>) {
+    assert!(
+        responses.iter().all(|response| response.delay.is_zero()),
+        "controlled responses use release signals"
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = flume::unbounded();
+    thread::spawn(move || {
+        for response in responses {
+            let Some(mut stream) =
+                accept_until(&listener, Instant::now() + Duration::from_secs(15))
+            else {
+                return;
+            };
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let Some(request) = read_request(&mut stream) else {
+                    return;
+                };
+                let split_at = response.split_at.unwrap_or(0);
+                if stream
+                    .write_all(&response.wire.as_bytes()[..split_at])
+                    .is_err()
+                {
+                    return;
+                }
+                let (release, released) = flume::bounded(1);
+                if sender.send(HeldResponse { request, release }).is_err() {
+                    return;
+                }
+                if released.recv_timeout(Duration::from_secs(15)).is_ok() {
+                    let _ = stream.write_all(&response.wire.as_bytes()[split_at..]);
+                }
+            });
+        }
+    });
+    (format!("http://{address}"), receiver)
 }
 
 pub(crate) fn mock_server_with_accept_timeout(
