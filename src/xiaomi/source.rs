@@ -537,10 +537,17 @@ fn make_device(metadata: &CachedDevice, clock: Arc<dyn Clock>) -> (Device, Comma
     }
 }
 fn update_auth(context: &Context, preparation: &super::auth::BridgePreparation) {
-    context.live.borrow_mut().credentials = preparation.credentials.clone();
+    let credentials_changed = {
+        let mut live = context.live.borrow_mut();
+        let changed = live.credentials != preparation.credentials;
+        live.credentials = preparation.credentials.clone();
+        changed
+    };
     context.status.borrow_mut().authentication = preparation.report.clone();
     context.status_changed.notify(usize::MAX);
-    context.changed.notify(usize::MAX);
+    if credentials_changed {
+        context.changed.notify(usize::MAX);
+    }
 }
 fn authentication_error(report: &AuthReport) -> SourceError {
     match &report.authentication {
@@ -626,7 +633,6 @@ async fn cached_auth(
                     store.devices().save(&context.metadata())?;
                     context.live.borrow_mut().dirty = false;
                 }
-                context.changed.notify(usize::MAX);
                 break;
             }
             Err(CatalogError::NoLocalHome) => {
@@ -828,22 +834,40 @@ async fn local_run(
         {
             return Err(error);
         }
-        wait_retry(&context, &mut changes, backoff.failed(stable)).await?;
+        wait_retry(
+            &context,
+            &discovery,
+            &mut changes,
+            route.as_ref(),
+            backoff.failed(stable),
+        )
+        .await?;
     }
 }
 async fn wait_retry(
     context: &Context,
+    discovery: &Discovery,
     changes: &mut super::discovery::DiscoveryChanges,
+    previous_route: Option<&GatewayRoute>,
     delay: Duration,
 ) -> Result<(), SourceError> {
     let listener = context.changed.listen();
+    let group_id = context.metadata().group_id;
+    let route = discovery.snapshot().route(&group_id, previous_route);
     future::or(
         async {
             context.clock.wait_until(context.clock.now() + delay).await;
             Ok(())
         },
         future::or(
-            async { changes.changed().await.map(|_| ()).map_err(Into::into) },
+            async {
+                loop {
+                    changes.changed().await?;
+                    if discovery.snapshot().route(&group_id, route.as_ref()) != route {
+                        return Ok(());
+                    }
+                }
+            },
             async {
                 listener.await;
                 Ok(())

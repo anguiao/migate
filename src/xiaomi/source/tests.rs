@@ -111,6 +111,7 @@ fn home_announcement(
 struct TestClock {
     elapsed: std::sync::Mutex<Duration>,
     deadlines: std::sync::Mutex<Vec<Duration>>,
+    polls: std::sync::Mutex<Vec<Duration>>,
     changed: Event,
 }
 impl TestClock {
@@ -127,6 +128,7 @@ impl Clock for TestClock {
         self.deadlines.lock().unwrap().push(deadline);
         Box::pin(async move {
             loop {
+                self.polls.lock().unwrap().push(deadline);
                 let listener = self.changed.listen();
                 if self.now() >= deadline {
                     return;
@@ -1358,6 +1360,8 @@ fn thirty_seconds_available_resets_connection_backoff_before_later_offline() {
             for delay in [1, 2] {
                 let mut broker = c.accept().await;
                 assert!(matches!(broker.next().await, Packet::Connect(_)));
+                let before = clock.deadlines.lock().unwrap().len();
+                let deadline = clock.now() + Duration::from_secs(delay);
                 broker
                     .send(Packet::ConnAck(ConnAck::new(
                         ConnectReturnCode::NotAuthorized,
@@ -1365,6 +1369,7 @@ fn thirty_seconds_available_resets_connection_backoff_before_later_offline() {
                     )))
                     .await;
                 assert!(broker.next_optional().await.is_none());
+                wait_for(|| clock.deadlines.lock().unwrap()[before..].contains(&deadline)).await;
                 clock.advance(Duration::from_secs(delay));
             }
             let mut stable = c.accept().await;
@@ -1386,17 +1391,40 @@ fn thirty_seconds_available_resets_connection_backoff_before_later_offline() {
                 .send(stable.business(&refresh, info(&c.metadata, false)))
                 .await;
             wait_for(|| !c.context.live.borrow().stable).await;
+            let before = clock.deadlines.lock().unwrap().len();
+            let deadline = clock.now() + Duration::from_secs(1);
             drop(stable);
             wait_for(|| c.context.live.borrow().generation.is_none()).await;
+            wait_for(|| clock.deadlines.lock().unwrap()[before..].contains(&deadline)).await;
             clock.advance(Duration::from_secs(1));
             let mut recovered = c.accept().await;
             initialize(&mut recovered, &c.metadata, true).await;
             available(&prepared.device).await;
             assert_eq!(prepared.device.snapshot().power, Power::On);
+            let before = clock.deadlines.lock().unwrap().len();
+            let deadline = clock.now() + Duration::from_secs(2);
             drop(recovered);
             wait_for(|| c.context.live.borrow().generation.is_none()).await;
+            wait_for(|| clock.deadlines.lock().unwrap()[before..].contains(&deadline)).await;
+            let polls = clock
+                .polls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|value| **value == deadline)
+                .count();
             clock.advance(Duration::from_secs(1));
-            async_io::Timer::after(Duration::from_millis(10)).await;
+            wait_for(|| {
+                clock
+                    .polls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|value| **value == deadline)
+                    .count()
+                    > polls
+            })
+            .await;
             assert!(
                 poll_once(c.listener.accept()).await.is_none(),
                 "short recovery reused the previous stable reset"
@@ -1408,5 +1436,128 @@ fn thirty_seconds_available_resets_connection_backoff_before_later_offline() {
             assert_eq!(prepared.device.snapshot().power, Power::Off);
         })
         .await;
+    });
+}
+
+#[test]
+fn unchanged_credentials_auth_diagnostic_does_not_interrupt_an_armed_retry() {
+    block_on(async {
+        let clock = Arc::new(TestClock::default());
+        let rig = Rig::new(true, CloudCase::Failure, clock.clone());
+        let context = rig.source.context.clone();
+        let mut changes = rig.discovery.subscribe();
+        let retry = wait_retry(
+            &context,
+            &rig.discovery,
+            &mut changes,
+            None,
+            Duration::from_secs(2),
+        );
+        futures_lite::pin!(retry);
+        assert!(poll_once(retry.as_mut()).await.is_none());
+        assert_eq!(
+            clock.deadlines.lock().unwrap().as_slice(),
+            [Duration::from_secs(2)]
+        );
+        let mut report = context.status.borrow().authentication.clone();
+        report.authentication = AuthenticationState::Unavailable(FailureReason::Cloud(
+            CloudError::protocol("read owned homes"),
+        ));
+        let status_change = context.status_changed.listen();
+        let preparation = super::super::auth::BridgePreparation {
+            credentials: context.live.borrow().credentials.clone(),
+            report: report.clone(),
+            homes: Vec::new(),
+            cached_device: Some(rig.metadata.clone()),
+        };
+        update_auth(&context, &preparation);
+        assert_eq!(context.status.borrow().authentication, report);
+        assert!(poll_once(status_change).await.is_some());
+        assert!(
+            poll_once(retry.as_mut()).await.is_none(),
+            "a diagnostic-only auth completion bypassed retry backoff"
+        );
+        clock.advance(Duration::from_secs(2));
+        retry.await.unwrap();
+    });
+}
+
+#[test]
+fn stale_discovery_revision_does_not_bypass_retry_backoff() {
+    block_on(async {
+        let clock = Arc::new(TestClock::default());
+        let rig = Rig::new(true, CloudCase::Failure, clock.clone());
+        let context = rig.source.context.clone();
+        let mut changes = rig.discovery.subscribe();
+        rig.announce();
+        let driver = rig.discovery_driver.run();
+        futures_lite::pin!(driver);
+        assert!(poll_once(driver.as_mut()).await.is_none());
+        assert_eq!(rig.discovery.snapshot().gateways.len(), 1);
+        let retry = wait_retry(
+            &context,
+            &rig.discovery,
+            &mut changes,
+            None,
+            Duration::from_secs(2),
+        );
+        futures_lite::pin!(retry);
+        assert!(
+            poll_once(retry.as_mut()).await.is_none(),
+            "an already processed discovery revision bypassed retry backoff"
+        );
+        clock.advance(Duration::from_secs(2));
+        retry.await.unwrap();
+    });
+}
+
+#[test]
+fn changed_credentials_and_current_route_still_wake_retry_immediately() {
+    block_on(async {
+        for change_route in [false, true] {
+            let clock = Arc::new(TestClock::default());
+            let rig = Rig::new(true, CloudCase::Failure, clock);
+            let context = rig.source.context.clone();
+            rig.announce();
+            let driver = rig.discovery_driver.run();
+            futures_lite::pin!(driver);
+            assert!(poll_once(driver.as_mut()).await.is_none());
+            let mut changes = rig.discovery.subscribe();
+            let retry = wait_retry(
+                &context,
+                &rig.discovery,
+                &mut changes,
+                None,
+                Duration::from_secs(2),
+            );
+            futures_lite::pin!(retry);
+            assert!(poll_once(retry.as_mut()).await.is_none());
+            if change_route {
+                let replacement = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
+                rig.events
+                    .send(announcement(
+                        replacement.get_ref().local_addr().unwrap(),
+                        &rig.metadata.uid,
+                        "hub",
+                        123,
+                    ))
+                    .unwrap();
+                assert!(poll_once(driver.as_mut()).await.is_none());
+            } else {
+                let mut credentials = context.live.borrow().credentials.clone().unwrap();
+                credentials.tokens.access_token = "processed-token".into();
+                let report = context.status.borrow().authentication.clone();
+                update_auth(
+                    &context,
+                    &super::super::auth::BridgePreparation {
+                        credentials: Some(credentials),
+                        report,
+                        homes: Vec::new(),
+                        cached_device: Some(rig.metadata.clone()),
+                    },
+                );
+            }
+            assert!(matches!(poll_once(retry.as_mut()).await, Some(Ok(()))));
+        }
     });
 }
