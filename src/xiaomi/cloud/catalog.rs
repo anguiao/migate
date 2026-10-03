@@ -155,13 +155,13 @@ impl CloudClient {
             let mut progress = 0;
             for record in records {
                 let record = object(record, operation)?;
-                let returned_did = nonempty_string(record, "did", operation)?;
+                let returned_did = description_string(record, "did", operation)?;
                 progress += usize::from(seen_devices.insert(returned_did.clone()));
                 if returned_did == did {
                     found = Some(CloudDevice {
                         did: returned_did,
-                        model: nonempty_string(record, "model", operation)?,
-                        instance_type: nonempty_string(record, "spec_type", operation)?,
+                        model: description_string(record, "model", operation)?,
+                        instance_type: description_string(record, "spec_type", operation)?,
                     });
                 }
             }
@@ -191,6 +191,18 @@ impl CloudClient {
         }
         Ok(value)
     }
+}
+
+fn description_string(
+    value: &Map<String, Value>,
+    key: &str,
+    operation: &'static str,
+) -> Result<String, CloudError> {
+    let value = nonempty_string(value, key, operation)?;
+    if value.chars().any(char::is_control) {
+        return Err(CloudError::protocol(operation));
+    }
+    Ok(value)
 }
 
 fn list<'a>(value: Option<&'a Value>, operation: &'static str) -> Result<&'a [Value], CloudError> {
