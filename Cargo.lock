@@ -1035,6 +1035,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-rustls"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8f2f12607f92c69b12ed746fabf9ca4f5c482cba46679c1a75b874ed7c26adb"
+dependencies = [
+ "futures-io",
+ "rustls",
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "futures-sink"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1642,16 +1653,20 @@ dependencies = [
  "async-signal",
  "base64",
  "blocking",
+ "bytes",
  "embassy-time-queue-utils",
  "env_logger",
  "event-listener",
  "futures-lite",
+ "futures-rustls",
  "isahc",
  "log",
+ "mqttbytes",
  "rand",
  "rcgen",
  "rs-matter",
  "rusqlite",
+ "rustls",
  "serde_json",
  "sha1",
  "sha2",
@@ -1675,6 +1690,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+]
+
+[[package]]
+name = "mqttbytes"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7bd39d24e28e1544d74ff5746e322a477e52353c8ba7adcaa83d2e760752853"
+dependencies = [
+ "bytes",
 ]
 
 [[package]]
