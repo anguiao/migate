@@ -7,6 +7,200 @@ use std::time::Duration;
 use url::Url;
 
 #[test]
+fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
+    assert_eq!(group_id("account", "local"), "db84f388bb162bf2");
+    let responses = [
+        json!({"homelist":[
+            {"uid":"account","id":"local","dids":null,"roomlist":null},
+            {"uid":"account","id":"remote","dids":["remote-did"],"name":"private name"}
+        ],"has_more":true,"max_id":"cursor-1"}),
+        json!({"info":[{"id":"local","dids":["first"],"roomlist":[{"dids":["target"]}]},{"id":"remote","dids":["remote-extra"]}],"has_more":true,"max_id":"cursor-2"}),
+        json!({"info":[{"id":"local","dids":null,"roomlist":null}],"has_more":false}),
+        json!({"list":[{"did":"irrelevant","name":"private name"}],"has_more":true,"next_start_did":"device-cursor"}),
+        json!({"list":[{"did":"target","model":"vendor.plug","spec_type":"instance-type","name":"private name"}],"has_more":false}),
+    ];
+    let (base, requests) = mock_server(
+        responses
+            .into_iter()
+            .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
+            .collect(),
+    );
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let catalog = future::block_on(cloud.get_owned_homes("token")).unwrap();
+    assert_eq!(catalog.uid.as_deref(), Some("account"));
+    let local = catalog
+        .homes
+        .iter()
+        .find(|home| home.group_id == group_id("account", "local"))
+        .unwrap();
+    assert_eq!(local.dids, ["first", "target"]);
+    assert!(
+        future::block_on(cloud.get_device("token", local, "remote-did"))
+            .unwrap()
+            .is_none()
+    );
+    let device = future::block_on(cloud.get_device("token", local, "target"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(device.did, "target");
+    assert_eq!(device.model, "vendor.plug");
+    assert_eq!(device.instance_type, "instance-type");
+    assert!(!format!("{catalog:?} {device:?}").contains("private name"));
+    let captured = requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(captured.len(), 5);
+    let page: Value = serde_json::from_str(&captured[1].body).unwrap();
+    assert_eq!(page["start_id"], "cursor-1");
+    for request in &captured[3..] {
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["dids"], json!(["target"]));
+    }
+    let body: Value = serde_json::from_str(&captured[4].body).unwrap();
+    assert_eq!(body["start_did"], "device-cursor");
+}
+
+#[test]
+fn catalog_rejects_invalid_or_stalled_pagination_and_accepts_null_lists() {
+    for result in [json!({"homelist":null}), json!({"homelist":[]})] {
+        let (base, _) = mock_server(vec![MockResponse::json(
+            200,
+            &json!({"code":0,"result":result}).to_string(),
+        )]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert!(
+            future::block_on(cloud.get_owned_homes("token"))
+                .unwrap()
+                .homes
+                .is_empty()
+        );
+    }
+    for result in [
+        json!({}),
+        json!({"homelist":{}}),
+        json!({"homelist":[{"uid":"account","id":"home","dids":7}]}),
+        json!({"homelist":[{"uid":"account","id":"home"}],"has_more":true}),
+        json!({"homelist":[],"has_more":true,"max_id":"next"}),
+        json!({"homelist":[{"uid":"account","id":"home"}],"has_more":"yes"}),
+    ] {
+        let (base, _) = mock_server(vec![MockResponse::json(
+            200,
+            &json!({"code":0,"result":result}).to_string(),
+        )]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(cloud.get_owned_homes("token"))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+    }
+    let initial = json!({"code":0,"result":{"homelist":[{"uid":"account","id":"home"}],"has_more":true,"max_id":"same"}});
+    let repeated = json!({"code":0,"result":{"info":[{"id":"home","dids":["new"]}],"has_more":true,"max_id":"same"}});
+    let (base, requests) = mock_server(vec![
+        MockResponse::json(200, &initial.to_string()),
+        MockResponse::json(200, &repeated.to_string()),
+    ]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(cloud.get_owned_homes("token"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+    assert_eq!(requests.try_iter().count(), 2);
+
+    let repeated = json!({"code":0,"result":{"info":[{"id":"home","dids":null}],"has_more":true,"max_id":"different"}});
+    let (base, requests) = mock_server(vec![
+        MockResponse::json(200, &initial.to_string()),
+        MockResponse::json(200, &repeated.to_string()),
+    ]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(cloud.get_owned_homes("token"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+    assert_eq!(requests.try_iter().count(), 2);
+}
+
+#[test]
+fn device_pages_reject_missing_fields_and_stalled_progress() {
+    let home = OwnedHome {
+        uid: "account".into(),
+        home_id: "home".into(),
+        group_id: group_id("account", "home"),
+        dids: vec!["target".into()],
+    };
+    for result in [
+        json!({}),
+        json!({"list":{}}),
+        json!({"list":[],"has_more":true,"next_start_did":"next"}),
+        json!({"list":[{"did":"target","model":"model"}]}),
+        json!({"list":[{"did":"other"}],"has_more":true}),
+    ] {
+        let (base, _) = mock_server(vec![MockResponse::json(
+            200,
+            &json!({"code":0,"result":result}).to_string(),
+        )]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(cloud.get_device("token", &home, "target"))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+    }
+    let responses = [
+        json!({"list":[{"did":"other"}],"has_more":true,"next_start_did":"one"}),
+        json!({"list":[{"did":"other"}],"has_more":true,"next_start_did":"two"}),
+    ];
+    let (base, requests) = mock_server(
+        responses
+            .into_iter()
+            .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
+            .collect(),
+    );
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(cloud.get_device("token", &home, "target"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+    assert_eq!(requests.try_iter().count(), 2);
+    let (base, _) = mock_server(vec![MockResponse::json(
+        200,
+        r#"{"code":0,"result":{"list":null}}"#,
+    )]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert!(
+        future::block_on(cloud.get_device("token", &home, "target"))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn miot_instance_endpoint_is_injected_only_for_tests() {
+    let instance =
+        json!({"type":"urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1","services":[]});
+    let (base, requests) = mock_server(vec![MockResponse::json(200, &instance.to_string())]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(cloud.get_instance(instance["type"].as_str().unwrap())).unwrap(),
+        instance
+    );
+    let request = requests.recv().unwrap();
+    let url = Url::parse(&format!("http://test{}", request.target)).unwrap();
+    assert_eq!(url.path(), "/miot-spec-v2/instance");
+    assert_eq!(
+        url.query_pairs().find(|(key, _)| key == "type").unwrap().1,
+        instance["type"].as_str().unwrap()
+    );
+    assert!(!request.headers.to_lowercase().contains("authorization"));
+}
+
+#[test]
 fn authorization_state_matches_upstream_device_binding() {
     for (uuid, expected_state) in [
         (

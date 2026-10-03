@@ -51,7 +51,7 @@ impl Error for CapabilityError {}
 /// Instance IDs, vendor suffixes, descriptions, and order carry no semantics.
 pub fn parse_outlet(key: DeviceKey, instance: &Value) -> Result<ParsedOutlet, CapabilityError> {
     let device_type = string(instance, "type")?;
-    if !is_standard_type(device_type, "device", "outlet", "0000A002") {
+    if !is_outlet_type(device_type) {
         return Err(CapabilityError::UnsupportedDevice);
     }
     let mut candidates = Vec::new();
@@ -98,6 +98,10 @@ pub fn parse_outlet(key: DeviceKey, instance: &Value) -> Result<ParsedOutlet, Ca
         },
         main_power: PropertyBinding { siid, piid },
     })
+}
+
+pub(crate) fn is_outlet_type(value: &str) -> bool {
+    is_standard_type(value, "device", "outlet", "0000A002")
 }
 
 fn is_standard_type(value: &str, entity: &str, name: &str, type_id: &str) -> bool {

@@ -24,4 +24,27 @@ CREATE TABLE xiaomi_auth (
     certificate_pem TEXT NOT NULL
 ) STRICT;
 
-PRAGMA user_version = 1;
+CREATE TABLE device_cache (
+    uid TEXT NOT NULL,
+    source TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    home_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    instance_type TEXT NOT NULL,
+    category TEXT NOT NULL,
+    capabilities TEXT NOT NULL,
+    siid INTEGER NOT NULL,
+    piid INTEGER NOT NULL,
+    PRIMARY KEY (uid, source, device_id)
+) STRICT;
+
+CREATE TABLE device_identity (
+    source TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    unique_id TEXT NOT NULL UNIQUE,
+    endpoint INTEGER NOT NULL,
+    PRIMARY KEY (source, device_id)
+) STRICT;
+
+PRAGMA user_version = 2;

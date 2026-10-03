@@ -1,7 +1,27 @@
 use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use std::{error::Error as StdError, fmt};
 
-const CURRENT_VERSION: i64 = 1;
+const CURRENT_VERSION: i64 = 2;
+
+const DEVICE_CACHE_COLUMNS: &[Column] = &[
+    Column::new("uid", "TEXT", true, true),
+    Column::new("source", "TEXT", true, true),
+    Column::new("device_id", "TEXT", true, true),
+    Column::new("home_id", "TEXT", true, false),
+    Column::new("group_id", "TEXT", true, false),
+    Column::new("model", "TEXT", true, false),
+    Column::new("instance_type", "TEXT", true, false),
+    Column::new("category", "TEXT", true, false),
+    Column::new("capabilities", "TEXT", true, false),
+    Column::new("siid", "INTEGER", true, false),
+    Column::new("piid", "INTEGER", true, false),
+];
+const DEVICE_IDENTITY_COLUMNS: &[Column] = &[
+    Column::new("source", "TEXT", true, true),
+    Column::new("device_id", "TEXT", true, true),
+    Column::new("unique_id", "TEXT", true, false),
+    Column::new("endpoint", "INTEGER", true, false),
+];
 
 const IDENTITY_COLUMNS: &[Column] = &[
     Column::new("id", "INTEGER", false, true),
@@ -86,24 +106,50 @@ impl Column {
 pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
     let version = connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
     match version {
-        0 => {
+        0 | 1 => {
             validate_table(connection, "identity", IDENTITY_COLUMNS)?;
             validate_table(connection, "blobs", BLOB_COLUMNS)?;
+            if version == 1 {
+                validate_table(connection, "xiaomi_auth", XIAOMI_COLUMNS)?;
+            }
             let transaction = connection.transaction()?;
-            migrate_v0_to_v1(&transaction)?;
+            if version == 0 {
+                migrate_v0_to_v1(&transaction)?;
+            }
+            migrate_v1_to_v2(&transaction)?;
             validate_table(&transaction, "identity", IDENTITY_COLUMNS)?;
             validate_table(&transaction, "blobs", BLOB_COLUMNS)?;
             validate_table(&transaction, "xiaomi_auth", XIAOMI_COLUMNS)?;
+            validate_table(&transaction, "device_cache", DEVICE_CACHE_COLUMNS)?;
+            validate_table(&transaction, "device_identity", DEVICE_IDENTITY_COLUMNS)?;
             transaction.commit()?;
             Ok(())
         }
         CURRENT_VERSION => {
             validate_table(connection, "identity", IDENTITY_COLUMNS)?;
             validate_table(connection, "blobs", BLOB_COLUMNS)?;
-            validate_table(connection, "xiaomi_auth", XIAOMI_COLUMNS)
+            validate_table(connection, "xiaomi_auth", XIAOMI_COLUMNS)?;
+            validate_table(connection, "device_cache", DEVICE_CACHE_COLUMNS)?;
+            validate_table(connection, "device_identity", DEVICE_IDENTITY_COLUMNS)
         }
         _ => Err(MigrationError::UnsupportedVersion),
     }
+}
+
+fn migrate_v1_to_v2(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "CREATE TABLE device_cache (
+            uid TEXT NOT NULL, source TEXT NOT NULL, device_id TEXT NOT NULL,
+            home_id TEXT NOT NULL, group_id TEXT NOT NULL, model TEXT NOT NULL, instance_type TEXT NOT NULL,
+            category TEXT NOT NULL, capabilities TEXT NOT NULL, siid INTEGER NOT NULL, piid INTEGER NOT NULL,
+            PRIMARY KEY (uid, source, device_id)
+        ) STRICT;
+        CREATE TABLE device_identity (
+            source TEXT NOT NULL, device_id TEXT NOT NULL, unique_id TEXT NOT NULL UNIQUE, endpoint INTEGER NOT NULL,
+            PRIMARY KEY (source, device_id)
+        ) STRICT;
+        PRAGMA user_version = 2;"
+    )
 }
 
 fn migrate_v0_to_v1(transaction: &Transaction<'_>) -> rusqlite::Result<()> {

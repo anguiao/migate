@@ -1,7 +1,9 @@
+mod catalog;
 mod client;
 mod error;
 mod oauth;
 
+pub use catalog::{CloudDevice, OwnedHome, OwnedHomes, group_id};
 pub use client::{CLOUD_BASE_URL, CloudClient, HomePage, TokenResponse};
 pub use error::{CloudError, CloudErrorKind};
 pub use oauth::{AUTHORIZATION_URL, AuthorizationAttempt, validate_saved_redirect_uri};

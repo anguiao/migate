@@ -38,6 +38,7 @@ pub struct HomePage {
 pub struct CloudClient {
     client: HttpClient,
     base_url: String,
+    pub(super) instance_base_url: String,
 }
 
 impl CloudClient {
@@ -47,7 +48,9 @@ impl CloudClient {
 
     #[cfg(test)]
     pub(crate) fn for_test(base_url: &str, timeout: Duration) -> Result<Self, CloudError> {
-        Self::build(base_url, timeout)
+        let mut client = Self::build(base_url, timeout)?;
+        client.instance_base_url = base_url.trim_end_matches('/').to_owned();
+        Ok(client)
     }
 
     fn build(base_url: &str, timeout: Duration) -> Result<Self, CloudError> {
@@ -64,6 +67,7 @@ impl CloudClient {
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_owned(),
+            instance_base_url: "https://miot-spec.org".to_owned(),
         })
     }
 
@@ -218,7 +222,7 @@ impl CloudClient {
         nonempty_string(result_object(&value, operation)?, "cert", operation)
     }
 
-    async fn protected_post(
+    pub(super) async fn protected_post(
         &self,
         operation: &'static str,
         path: &str,
@@ -245,7 +249,7 @@ impl CloudClient {
         Url::parse(&format!("{}{path}", self.base_url)).map_err(|_| CloudError::protocol(operation))
     }
 
-    async fn send(
+    pub(super) async fn send(
         &self,
         request: Request<String>,
         operation: &'static str,
@@ -284,7 +288,7 @@ fn oauth_error_code(value: &Value) -> Option<i64> {
     details.get("error")?.as_i64()
 }
 
-fn result_object<'a>(
+pub(super) fn result_object<'a>(
     value: &'a Value,
     operation: &'static str,
 ) -> Result<&'a Map<String, Value>, CloudError> {
@@ -301,7 +305,7 @@ fn result_object<'a>(
         .ok_or_else(|| CloudError::protocol(operation))
 }
 
-fn nonempty_string(
+pub(super) fn nonempty_string(
     result: &Map<String, Value>,
     key: &str,
     operation: &'static str,

@@ -4,11 +4,13 @@ mod tokens;
 pub use report::{AuthError, AuthReport, AuthenticationState, CertificateUpdate, FailureReason};
 
 use crate::{
-    storage::{StorageError, TokenSet, XiaomiRecord, XiaomiStore},
+    device::DeviceKey,
+    storage::{CachedDevice, StorageError, TokenSet, XiaomiRecord, XiaomiStore},
     xiaomi::{
         certificate::{CertificateValidity, ClientIdentity, validate_certificate},
         cloud::{
-            AuthorizationAttempt, CloudClient, CloudError, REGION, validate_saved_redirect_uri,
+            AuthorizationAttempt, CloudClient, CloudError, HomePage, OwnedHome, REGION,
+            validate_saved_redirect_uri,
         },
     },
 };
@@ -19,6 +21,14 @@ pub struct AuthService {
     store: XiaomiStore,
     cloud: CloudClient,
     now: fn() -> i64,
+}
+
+#[derive(Debug)]
+pub struct BridgePreparation {
+    pub credentials: Option<XiaomiRecord>,
+    pub report: AuthReport,
+    pub homes: Vec<OwnedHome>,
+    pub cached_device: Option<CachedDevice>,
 }
 
 impl AuthService {
@@ -236,6 +246,70 @@ impl AuthService {
     }
 
     pub async fn check(&self) -> Result<AuthReport, AuthError> {
+        self.check_mode(None).await
+    }
+
+    /// Prepare authentication without the standalone all-home device probe.
+    /// A cloud failure remains diagnostic; local authorization is determined
+    /// by the gateway using these saved credentials and same-account cache.
+    pub async fn prepare_bridge(&self, key: &DeviceKey) -> Result<BridgePreparation, AuthError> {
+        let mut homes = Vec::new();
+        let report = self.check_mode(Some(&mut homes)).await?;
+        if matches!(
+            report.authentication,
+            AuthenticationState::Unavailable(
+                FailureReason::AccountIdentityMismatch
+                    | FailureReason::CannotDetermineAccountIdentity
+            )
+        ) {
+            homes.clear();
+        }
+        let credentials = self.load_validated()?.map(|stored| stored.record);
+        let cached_device = match &credentials {
+            Some(record) => self.store.devices().load(&record.uid, key)?,
+            None => None,
+        };
+        Ok(BridgePreparation {
+            credentials,
+            report,
+            homes,
+            cached_device,
+        })
+    }
+
+    /// Load the current account's static topology before network preparation.
+    pub fn load_bridge_cache(&self, key: &DeviceKey) -> Result<Option<CachedDevice>, AuthError> {
+        let Some(stored) = self.load_validated()? else {
+            return Ok(None);
+        };
+        self.store
+            .devices()
+            .load(&stored.record.uid, key)
+            .map_err(AuthError::Storage)
+    }
+
+    async fn read_check_home(
+        &self,
+        access_token: &str,
+        homes: Option<&mut Vec<OwnedHome>>,
+    ) -> Result<HomePage, CloudError> {
+        match homes {
+            Some(homes) => {
+                let catalog = self.cloud.get_owned_homes(access_token).await?;
+                *homes = catalog.homes;
+                Ok(HomePage {
+                    uid: catalog.uid,
+                    dids: Vec::new(),
+                })
+            }
+            None => self.cloud.get_home(access_token).await,
+        }
+    }
+
+    async fn check_mode(
+        &self,
+        mut bridge_homes: Option<&mut Vec<OwnedHome>>,
+    ) -> Result<AuthReport, AuthError> {
         let Some(stored) = self.load_validated()? else {
             return Ok(AuthReport {
                 authentication: AuthenticationState::NotSignedIn,
@@ -257,7 +331,10 @@ impl AuthService {
             return self.request_failure_report(failure, old_validity);
         }
 
-        let home = match self.cloud.get_home(&tokens.access_token).await {
+        let home = match self
+            .read_check_home(&tokens.access_token, bridge_homes.as_deref_mut())
+            .await
+        {
             Ok(home) => home,
             Err(error) if error.is_unauthorized() && !refreshed => {
                 if let Err(failure) = self
@@ -266,7 +343,10 @@ impl AuthService {
                 {
                     return self.request_failure_report(failure, old_validity);
                 }
-                match self.cloud.get_home(&tokens.access_token).await {
+                match self
+                    .read_check_home(&tokens.access_token, bridge_homes.as_deref_mut())
+                    .await
+                {
                     Ok(home) => home,
                     Err(error) => {
                         return Ok(self.protected_failure_report(error, old_validity, true));
@@ -278,10 +358,11 @@ impl AuthService {
             }
         };
 
-        if let Err(error) = self
-            .cloud
-            .get_devices(&tokens.access_token, &home.dids)
-            .await
+        if bridge_homes.is_none()
+            && let Err(error) = self
+                .cloud
+                .get_devices(&tokens.access_token, &home.dids)
+                .await
         {
             if error.is_unauthorized() && !refreshed {
                 if let Err(failure) = self

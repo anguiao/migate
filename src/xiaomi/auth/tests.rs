@@ -23,6 +23,189 @@ use std::{
 const NOW: i64 = 2_000_000_000;
 const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
+fn cached_bridge_device(uid: &str) -> crate::storage::CachedDevice {
+    crate::storage::CachedDevice {
+        uid: uid.into(),
+        home_id: "local-home".into(),
+        group_id: crate::xiaomi::cloud::group_id(uid, "local-home"),
+        model: "vendor.plug".into(),
+        instance_type: "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1".into(),
+        outlet: crate::xiaomi::capability::ParsedOutlet {
+            description: crate::device::DeviceDescription {
+                key: crate::device::DeviceKey::new("xiaomi", "target"),
+                category: crate::device::Category::Outlet,
+                capabilities: vec![crate::device::Capability::OnOff],
+            },
+            main_power: crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+        },
+    }
+}
+
+#[test]
+fn bridge_preparation_reads_homes_once_and_skips_the_independent_device_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .xiaomi()
+        .replace(&valid_record(
+            "uid",
+            "old-access",
+            NOW + 500,
+            NOW + 10 * 24 * 60 * 60,
+        ))
+        .unwrap();
+    let homes =
+        json!({"code":0,"result":{"homelist":[{"uid":"uid","id":"local-home","dids":["target"]}]}});
+    let (auth, requests) = service(&store, vec![MockResponse::json(200, &homes.to_string())]);
+    let prepared =
+        block_on(auth.prepare_bridge(&crate::device::DeviceKey::new("xiaomi", "target"))).unwrap();
+    assert!(prepared.report.is_success());
+    assert_eq!(
+        prepared.credentials.unwrap().tokens.access_token,
+        "old-access"
+    );
+    assert_eq!(prepared.homes[0].home_id, "local-home");
+    assert_eq!(requests.try_iter().count(), 1);
+}
+
+#[test]
+fn bridge_cloud_or_refresh_failure_preserves_same_account_cache_and_valid_certificate() {
+    for (refresh_at, status) in [(NOW + 500, 503), (NOW - 1, 401)] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let original = valid_record("uid", "old-access", refresh_at, NOW + 10 * 24 * 60 * 60);
+        store.xiaomi().replace(&original).unwrap();
+        let cached = cached_bridge_device("uid");
+        store.devices().save(&cached).unwrap();
+        store
+            .devices()
+            .save(&cached_bridge_device("other-account"))
+            .unwrap();
+        let (auth, requests) = service(&store, vec![MockResponse::json(status, "cloud failure")]);
+        let prepared = block_on(auth.prepare_bridge(&cached.outlet.description.key)).unwrap();
+        assert!(!prepared.report.is_success());
+        assert!(prepared.report.certificate.unwrap().currently_valid(NOW));
+        assert_eq!(prepared.credentials, Some(original));
+        assert_eq!(prepared.cached_device, Some(cached.clone()));
+        assert!(prepared.homes.is_empty());
+        assert_eq!(
+            auth.load_bridge_cache(&cached.outlet.description.key)
+                .unwrap(),
+            Some(cached)
+        );
+        assert_eq!(requests.try_iter().count(), 1);
+        if status == 401 {
+            assert!(matches!(
+                prepared.report.authentication,
+                AuthenticationState::SignInRequired(_)
+            ));
+        }
+    }
+}
+
+#[test]
+fn bridge_account_mismatch_does_not_expose_another_accounts_directory_or_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .xiaomi()
+        .replace(&valid_record(
+            "old-account",
+            "access",
+            NOW + 500,
+            NOW + 10 * 24 * 60 * 60,
+        ))
+        .unwrap();
+    let other = cached_bridge_device("new-account");
+    store.devices().save(&other).unwrap();
+    let homes = json!({"code":0,"result":{"homelist":[{"uid":"new-account","id":"local-home","dids":["target"]}]}});
+    let (auth, _) = service(&store, vec![MockResponse::json(200, &homes.to_string())]);
+    let prepared = block_on(auth.prepare_bridge(&other.outlet.description.key)).unwrap();
+    assert!(matches!(
+        prepared.report.authentication,
+        AuthenticationState::Unavailable(FailureReason::AccountIdentityMismatch)
+    ));
+    assert!(prepared.homes.is_empty());
+    assert!(prepared.cached_device.is_none());
+    assert_eq!(prepared.credentials.unwrap().uid, "old-account");
+}
+
+#[test]
+fn bridge_preparation_renews_with_processed_credentials_and_storage_failure_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .xiaomi()
+        .replace(&valid_record("uid", "old-access", NOW - 1, NOW + 60))
+        .unwrap();
+    let homes =
+        json!({"code":0,"result":{"homelist":[{"uid":"uid","id":"local-home","dids":["target"]}]}});
+    let (base, requests) = dynamic_mock_server(3, move |request| {
+        if request.target.contains("get_token") {
+            MockResponse::json(200, &token_body("new-access", "new-refresh"))
+        } else if request.target.ends_with("gethome") {
+            MockResponse::json(200, &homes.to_string())
+        } else {
+            certificate_response(request)
+        }
+    });
+    let auth = AuthService::with_clock(
+        store.xiaomi(),
+        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        now,
+    );
+    let key = crate::device::DeviceKey::new("xiaomi", "target");
+    let prepared = block_on(auth.prepare_bridge(&key)).unwrap();
+    assert!(prepared.report.is_success());
+    assert_eq!(
+        prepared.report.certificate_update,
+        CertificateUpdate::Updated
+    );
+    assert_eq!(
+        prepared.credentials.unwrap().tokens.access_token,
+        "new-access"
+    );
+    assert_eq!(requests.try_iter().count(), 3);
+
+    let cached = cached_bridge_device("uid");
+    store.devices().save(&cached).unwrap();
+    Connection::open(store.path())
+        .unwrap()
+        .execute("UPDATE device_cache SET capabilities = 'broken'", [])
+        .unwrap();
+    let (auth, _) = service(&store, vec![MockResponse::json(503, "cloud unavailable")]);
+    assert!(matches!(
+        block_on(auth.prepare_bridge(&key)),
+        Err(AuthError::Storage(_))
+    ));
+}
+
+#[test]
+fn independent_check_keeps_its_cloud_device_probe_without_a_local_gateway() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .xiaomi()
+        .replace(&valid_record(
+            "uid",
+            "access",
+            NOW + 500,
+            NOW + 10 * 24 * 60 * 60,
+        ))
+        .unwrap();
+    let (auth, requests) = service(
+        &store,
+        vec![
+            MockResponse::json(200, &home_body(Some("uid"), &["target"])),
+            MockResponse::json(503, "device read unavailable"),
+        ],
+    );
+    assert!(!block_on(auth.check()).unwrap().is_success());
+    let requests = requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].target.ends_with("device_list_page"));
+}
+
 fn now() -> i64 {
     NOW
 }

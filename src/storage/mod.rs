@@ -1,9 +1,11 @@
+mod device;
 mod error;
 mod identity;
 mod matter;
 mod migration;
 mod xiaomi;
 
+pub use device::{CachedDevice, DeviceIdentity, DeviceStore};
 pub use error::StorageError;
 pub use identity::Identity;
 pub use matter::MatterStore;
@@ -75,6 +77,17 @@ impl Store {
 
     pub fn xiaomi(&self) -> XiaomiStore {
         XiaomiStore::new(self.clone())
+    }
+
+    pub fn devices(&self) -> DeviceStore {
+        DeviceStore::new(self.clone())
+    }
+
+    pub fn load_or_create_device_identity(
+        &self,
+        key: &crate::device::DeviceKey,
+    ) -> Result<DeviceIdentity, StorageError> {
+        device::load_or_create_identity(self, key)
     }
 
     fn database_error(&self, operation: impl Into<String>, error: rusqlite::Error) -> StorageError {
