@@ -2,11 +2,21 @@
 
 MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（Xiaomi/MIoT）设备映射为标准 Matter 设备，接入 Apple Home 等生态。
 
-当前支持本机前台运行的一盏虚拟开关灯、Matter 桥接、终端控制和配对存储，以及中国大陆服务区的米家 OAuth 登录、令牌管理和中枢客户端证书准备。中枢连接、设备控制和真实设备的 Matter 映射属于后续阶段。
+当前在 macOS / Apple Silicon 本机前台运行，通过局域网小米中枢桥接本轮选定的一个真实插座，支持标准能力解析、基础开关、主动通知、断线恢复、终端控制和 Matter 身份与配对存储，以及中国大陆服务区的 OAuth 登录、令牌管理和客户端证书准备。产品不再提供虚拟灯或替代设备。
+
+子设备声明 On/Off Plug-in Unit（`0x010A`，revision 3），当前仅实现基础 On/Off 和 Reachable，保留 Identify/Groups，省略标准插座要求的 Lighting/Scenes 功能，存在已知符合性限制。Apple Home 基础链路的兼容性仍须真机验证。
+
+```sh
+cargo run --locked -- auth login
+cargo run --locked
+```
+
+仓库 Cargo 配置默认使用 `.migate/`；直接运行构建产物时目录规则不同，详见运行指南。
 
 - [运行与 Apple Home 配对指南](docs/running.md)
 - [起步方案](docs/specs/2026-09-08-virtual-light-bootstrap/spec.md)
 - [米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md)
+- [最小设备模型方案](docs/specs/2026-10-03-minimal-device-model/spec.md)
 
 米家认证协议参考[小米官方 Home Assistant 集成](https://github.com/XiaoMi/ha_xiaomi_home)，使用该集成的 OAuth 应用配置。MiGate 是个人爱好项目，该授权归属于 HA 应用，不代表小米为 MiGate 提供独立授权或官方支持。参考来源与使用前提见[米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md#认证方案与云端依赖)；注明来源不会扩大[上游许可证](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/LICENSE.md)的授权范围。
 
@@ -15,8 +25,9 @@ MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（X
 ## 开发检查
 
 ```sh
+cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-`cargo test` 包含真实网桥进程测试，使用临时数据目录和系统分配的空闲端口，验证多个实例共存、mDNS 公告、终端控制及退出和重启行为。该测试使用 macOS 的 Bonjour 与 `dns-sd`，无需停止正在运行的网桥。
+`cargo test` 使用临时目录、可控协议对端与测试专用 source，复用生产的设备与运行组装入口，覆盖 Matter 命令、属性、订阅及退出和重启。进程回归使用系统分配端口、macOS Bonjour 和 `dns-sd` 检查多个实例及 mDNS 公告；普通检查不访问个人账号、真实中枢或插座。

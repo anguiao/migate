@@ -1,17 +1,22 @@
 #![recursion_limit = "256"]
 
-use std::{env, future::Future, process::ExitCode};
+use std::{env, process::ExitCode};
 
 use async_signal::{Signal, Signals};
 use futures_lite::{StreamExt, future, io::BufReader};
 use migate::{
     RuntimeError,
     config::{AuthCommand, Command, Config},
-    matter::Bridge,
+    device::DeviceKey,
+    runtime::{BridgeOptions, DeviceSetup, default_device_label, run_prepared_bridge},
     storage::{Store, XiaomiStore},
     terminal::{self, AuthStatus},
-    virtual_device::VirtualLight,
-    xiaomi::{auth::AuthService, cloud::CloudClient},
+    xiaomi::{
+        auth::{AuthService, AuthenticationState},
+        cloud::CloudClient,
+        discovery::Discovery,
+        source::XiaomiSource,
+    },
 };
 
 fn main() -> ExitCode {
@@ -102,6 +107,9 @@ fn run_auth(
     })
 }
 
+// Temporary selection for this validation round; protocols receive an ordinary DeviceKey.
+const VALIDATION_DEVICE_DID: &str = "571329355";
+
 fn run_bridge(
     store: Store,
     identity: migate::storage::Identity,
@@ -110,19 +118,20 @@ fn run_bridge(
     data_dir: std::path::PathBuf,
     matter_port: u16,
 ) -> Result<(), RuntimeError> {
-    log::info!(
-        "MiGate bridge_id={} light_id={}",
-        identity.bridge_id,
-        identity.light_id
-    );
-    log::info!(
-        "endpoint 0=root, 1=Aggregator, 2=MiGate Virtual Light (virtual-light-1); initial state: off"
-    );
-    let local_report = auth.local_status()?;
-    let status = AuthStatus::new(local_report, executable, data_dir);
+    let report = auth.local_status()?;
+    let unsigned = matches!(report.authentication, AuthenticationState::NotSignedIn);
+    let status = AuthStatus::new(report, executable, data_dir);
     status.log(terminal::current_time());
-    let light = VirtualLight::new();
-    let bridge = Bridge::new(&light, &identity, store.matter());
+    if unsigned {
+        return Err("Xiaomi sign-in is required".into());
+    }
+    let (discovery, driver) = Discovery::start()?;
+    let (source, ready) = XiaomiSource::new(
+        store.clone(),
+        CloudClient::new()?,
+        discovery,
+        DeviceKey::new("xiaomi", VALIDATION_DEVICE_DID),
+    )?;
     let mut signals = Signals::new([Signal::Int])?;
     future::block_on(async {
         let interrupt = async {
@@ -133,121 +142,40 @@ fn run_bridge(
             log::info!("Received Ctrl-C; stopping MiGate");
             Ok(())
         };
-        let input = async {
-            terminal::bridge::run_input(
-                &light,
-                &status,
-                BufReader::new(blocking::Unblock::new(std::io::stdin())),
-                blocking::Unblock::new(std::io::stdout()),
-            )
-            .await
-            .map_err(|e| format!("Terminal I/O failed: {e}"))?;
-            log::info!("Terminal input ended; bridge is still running");
-            future::pending::<Result<(), RuntimeError>>().await
-        };
-        let auth_check =
-            run_once_then_pending(async { auth.check().await.map_err(Into::into) }, |report| {
-                if status.replace(report) {
-                    status.log(terminal::current_time());
-                }
-                Ok(())
-            });
-        let result = future::or(
-            interrupt,
-            future::or(
-                bridge.run(matter_port, |event| {
-                    terminal::pairing::write_event(std::io::stdout().lock(), event)
-                }),
-                future::or(auth_check, input),
-            ),
-        )
-        .await;
-        // Service futures have been dropped; a recorded storage failure still takes precedence.
-        bridge.check_failure()?;
-        result
-    })
-}
-
-async fn run_once_then_pending<T>(
-    task: impl Future<Output = Result<T, RuntimeError>>,
-    completed: impl FnOnce(T) -> Result<(), RuntimeError>,
-) -> Result<(), RuntimeError> {
-    completed(task.await?)?;
-    future::pending().await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{cell::Cell, rc::Rc};
-
-    #[test]
-    fn completed_background_task_stays_pending_but_errors_end_it() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let auth = AuthService::new(store.xiaomi(), CloudClient::new().unwrap());
-        let callback_called = Rc::new(Cell::new(false));
-        let completed = callback_called.clone();
-        let ordinary_failure = run_once_then_pending(
-            async { auth.check().await.map_err(Into::into) },
-            move |report| {
-                assert!(!report.is_success());
-                completed.set(true);
-                Ok(())
+        let networking = future::or(
+            async {
+                source.run(|report| status.update_source(report)).await?;
+                Err::<(), RuntimeError>("Xiaomi source ended unexpectedly".into())
+            },
+            async {
+                driver.run().await?;
+                Err::<(), RuntimeError>("Gateway discovery ended unexpectedly".into())
             },
         );
-        let mut ordinary_failure = std::pin::pin!(ordinary_failure);
-        assert!(future::block_on(future::poll_once(ordinary_failure.as_mut())).is_none());
-        assert!(callback_called.get());
-
-        let callback_called = Rc::new(Cell::new(false));
-        let completed = callback_called.clone();
-        let network_pending =
-            run_once_then_pending(future::pending::<Result<(), RuntimeError>>(), move |_| {
-                completed.set(true);
-                Ok(())
-            });
-        let mut network_pending = std::pin::pin!(network_pending);
-        assert!(future::block_on(future::poll_once(network_pending.as_mut())).is_none());
-        assert!(!callback_called.get());
-
-        let storage_error = run_once_then_pending(
-            async { Err::<(), RuntimeError>("storage failed".into()) },
-            |_| Ok(()),
-        );
-        let mut storage_error = std::pin::pin!(storage_error);
-        let result = future::block_on(future::poll_once(storage_error.as_mut()));
-        assert_eq!(result.unwrap().unwrap_err().to_string(), "storage failed");
-    }
-
-    #[test]
-    fn winning_interrupt_drops_background_task() {
-        struct Dropped(Rc<Cell<bool>>);
-        impl Drop for Dropped {
-            fn drop(&mut self) {
-                self.0.set(true);
-            }
-        }
-
-        let dropped = Rc::new(Cell::new(false));
-        let wrote = Rc::new(Cell::new(false));
-        let marker = Dropped(dropped.clone());
-        let completion_write = wrote.clone();
-        future::block_on(async {
-            let background = run_once_then_pending(
-                async move {
-                    let _marker = marker;
-                    future::pending::<Result<(), RuntimeError>>().await
-                },
-                move |_| {
-                    completion_write.set(true);
-                    Ok(())
-                },
-            );
-            let result = future::or(async { Ok::<_, RuntimeError>(()) }, background).await;
-            assert!(result.is_ok());
-        });
-        assert!(dropped.get());
-        assert!(!wrote.get());
-    }
+        run_prepared_bridge(
+            BridgeOptions {
+                store: &store,
+                identity: &identity,
+                status: &status,
+                port: matter_port,
+            },
+            async {
+                let prepared = ready.wait().await?;
+                let default_label = default_device_label(
+                    &prepared.metadata.model,
+                    &prepared.device.description().key.id,
+                );
+                Ok(DeviceSetup {
+                    device: prepared.device,
+                    default_label,
+                })
+            },
+            networking,
+            BufReader::new(blocking::Unblock::new(std::io::stdin())),
+            blocking::Unblock::new(std::io::stdout()),
+            interrupt,
+            |event| terminal::pairing::write_event(std::io::stdout().lock(), event),
+        )
+        .await
+    })
 }

@@ -1,5 +1,8 @@
 use super::super::{NODE, basic_info, bridged_info, model, storage::StoreAdapter};
-use crate::{storage::Store, virtual_device::VirtualLight};
+use crate::{
+    device::{Availability, CommandError},
+    storage::Store,
+};
 use event_listener::Event;
 use futures_lite::future::{block_on, or};
 use rs_matter::{
@@ -8,20 +11,21 @@ use rs_matter::{
     crypto::test_only_crypto,
     dm::{
         Dataver, Privilege,
-        clusters::{identify, scenes},
+        clusters::{decl::bridged_device_basic_information as bridged, groups, identify},
         devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET},
         networks::eth::EthNetwork,
     },
     error::Error,
+    fabric::GroupKeyMapping,
     im::{
-        AttrPath, EthInteractionModelState, GenericPath, IMStatusCode, InteractionModel, OpCode,
-        StatusResp,
+        AttrPath, AttrResp, CmdDataTag, CmdResp, EthInteractionModelState, EventPath, EventResp,
+        GenericPath, IMStatusCode, InteractionModel, OpCode, StatusResp,
         client::{ImClient, SubscribeOutcome, TxOutcome},
         encoding::ReportDataResp,
     },
     persist::PERSISTENT_SUBSCRIPTIONS_START,
     respond::DefaultResponder,
-    tlv::{FromTLV, TLVElement},
+    tlv::{FromTLV, TLVElement, TLVTag, TLVWrite},
     transport::{
         exchange::{Exchange, MatterBuffers},
         network::{Address, NetworkReceive, NetworkSend, NoNetwork},
@@ -29,7 +33,7 @@ use rs_matter::{
     },
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::VecDeque,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     num::NonZeroU8,
@@ -82,17 +86,19 @@ impl NetworkReceive for ReceivePipe<'_> {
 // commissioning. Each boot has fresh Matter instances and a new session ID.
 fn connect(matter: &Matter<'_>, local: u64, peer: u64, session_id: u16) {
     let fabric = NonZeroU8::new(1).unwrap();
-    matter.with_state(|state| {
-        state.fabrics.add_with_post_init(|_| Ok(())).unwrap();
-        let mut acl = AclEntry::new(None, Privilege::ADMIN, AuthMode::Case);
-        acl.add_subject(peer).unwrap();
-        state
-            .fabrics
-            .fabric_mut(fabric)
-            .unwrap()
-            .acl_add(acl)
-            .unwrap();
-    });
+    if !matter.has_fabrics() {
+        matter.with_state(|state| {
+            state.fabrics.add_with_post_init(|_| Ok(())).unwrap();
+            let mut acl = AclEntry::new(None, Privilege::ADMIN, AuthMode::Case);
+            acl.add_subject(peer).unwrap();
+            state
+                .fabrics
+                .fabric_mut(fabric)
+                .unwrap()
+                .acl_add(acl)
+                .unwrap();
+        });
+    }
     let mut session = ReservedSession::reserve_now(matter, test_only_crypto()).unwrap();
     session
         .update(
@@ -114,12 +120,11 @@ fn connect(matter: &Matter<'_>, local: u64, peer: u64, session_id: u16) {
     session.complete();
 }
 
-async fn subscribe(client: &Matter<'_>) -> Result<u32, Error> {
-    let paths = [AttrPath::from_gp(&GenericPath::new(
-        Some(2),
-        Some(6),
-        Some(0),
-    ))];
+async fn subscribe(client: &Matter<'_>, initial: bool) -> Result<u32, Error> {
+    let paths = [
+        AttrPath::from_gp(&GenericPath::new(Some(2), Some(6), Some(0))),
+        AttrPath::from_gp(&GenericPath::new(Some(2), Some(57), Some(17))),
+    ];
     let exchange = Exchange::initiate(
         client,
         test_only_crypto(),
@@ -143,7 +148,15 @@ async fn subscribe(client: &Matter<'_>) -> Result<u32, Error> {
         }
     };
     loop {
-        assert_power(&chunk.response()?, false);
+        assert_power(&chunk.response()?, initial);
+        assert_eq!(
+            chunk
+                .response()?
+                .attrs::<bool>(57, 17)
+                .map(|(endpoint, value)| (endpoint, value.unwrap()))
+                .collect::<Vec<_>>(),
+            [(2, true)]
+        );
         match chunk.complete().await? {
             SubscribeOutcome::NextChunk(next) => chunk = next,
             SubscribeOutcome::Established(subscription) => return Ok(subscription.subscription_id),
@@ -162,7 +175,8 @@ fn assert_power(report: &ReportDataResp<'_>, power: bool) {
 async fn expect_report(
     client: &Matter<'_>,
     subscription_id: u32,
-    power: bool,
+    power: Option<bool>,
+    reachable: Option<bool>,
 ) -> Result<(), Error> {
     let mut exchange = Exchange::accept(client).await?;
     exchange.recv_fetch().await?;
@@ -171,7 +185,26 @@ async fn expect_report(
         assert_eq!(rx.meta().proto_opcode, OpCode::ReportData as u8);
         let report = ReportDataResp::from_tlv(&TLVElement::new(rx.payload()))?;
         assert_eq!(report.subscription_id, Some(subscription_id));
-        assert_power(&report, power);
+        if let Some(expected) = reachable {
+            assert_eq!(
+                report
+                    .attrs::<bool>(57, 17)
+                    .map(|(endpoint, value)| (endpoint, value.unwrap()))
+                    .collect::<Vec<_>>(),
+                [(2, expected)]
+            );
+        }
+        if let Some(power) = power {
+            assert_power(&report, power);
+        } else {
+            let responses = report
+                .attr_reports
+                .as_ref()
+                .unwrap()
+                .iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            assert!(responses.iter().any(|response| matches!(response, AttrResp::Status(status) if status.path.cluster == Some(6) && status.status.status == IMStatusCode::Failure)));
+        }
     }
     exchange
         .send_with(|_, buffer| {
@@ -202,21 +235,42 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let kv = matter.kv(protocol.clone());
     matter.startup(&kv).unwrap();
     let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    if boot > 1 {
+        assert!(matter.has_fabrics());
+    }
     connect(&matter, SERVER_ID, CLIENT_ID, boot);
+    if boot == 1 {
+        matter.with_state(|state| {
+            state
+                .fabrics
+                .fabric_mut(NonZeroU8::new(1).unwrap())
+                .unwrap()
+                .groups_mut()
+                .key_map_add(GroupKeyMapping {
+                    group_id: 123,
+                    group_key_set_id: 1,
+                })
+                .unwrap()
+        });
+    }
     connect(&client, CLIENT_ID, SERVER_ID, boot);
     let crypto = test_only_crypto();
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
-    let light = VirtualLight::new();
-    let scenes = scenes::ScenesState::<16>::new();
+    let (device, mut receiver) = super::test_device();
+    let child = store
+        .load_or_create_device_identity(&device.description().key)
+        .unwrap();
+    let initial = boot == 3;
+    let rejection = RefCell::new(None::<CommandError>);
+    let accepted = Cell::new(0);
     let identify = identify::IdentifyHandler::new(Dataver::new(boot.into()));
-    let inner = model::on_off(&light, &scenes, Dataver::new(boot.into()));
+    let inner = model::on_off(&device, Dataver::new(boot.into()));
     let handler = model::handler(
-        &light,
-        &identity.light_id,
-        bridged_info::load_label(&store.matter()).unwrap(),
+        &device,
+        &child.unique_id,
+        bridged_info::load_label(&store.matter(), "Test Outlet").unwrap(),
         &identify,
-        &scenes,
         &inner,
         rand::rng(),
     );
@@ -228,21 +282,35 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let id = block_on(async {
         im.startup().await.unwrap();
         let services = async {
+            let adapter = async {
+                loop {
+                    let request = receiver.next().await.unwrap();
+                    if let Some(error) = rejection.borrow_mut().take() {
+                        request.reject(error);
+                    } else {
+                        request.accept().unwrap();
+                        accepted.set(accepted.get() + 1);
+                    }
+                }
+            };
             or(
-                matter.run(
-                    &crypto,
-                    SendPipe(&outgoing),
-                    ReceivePipe(&incoming),
-                    NoNetwork,
-                ),
+                adapter,
                 or(
-                    client.run(
+                    matter.run(
                         &crypto,
-                        SendPipe(&incoming),
-                        ReceivePipe(&outgoing),
+                        SendPipe(&outgoing),
+                        ReceivePipe(&incoming),
                         NoNetwork,
                     ),
-                    or(responder.run::<4, 4>(), im.run()),
+                    or(
+                        client.run(
+                            &crypto,
+                            SendPipe(&incoming),
+                            ReceivePipe(&outgoing),
+                            NoNetwork,
+                        ),
+                        or(responder.run::<4, 4>(), im.run()),
+                    ),
                 ),
             )
             .await
@@ -250,33 +318,80 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
             panic!("Matter services exited during subscription test");
         };
         let controller = async {
+            if boot == 1 {
+                group_request(&client, true).await;
+            }
+            if boot == 1 {
+                read_state(&client, None, false, &[]).await;
+                invoke_status(&client, 1, true, IMStatusCode::Failure).await;
+                invoke_status(&client, 99, true, IMStatusCode::UnsupportedCommand).await;
+                invoke_status(&client, 1, false, IMStatusCode::InvalidCommand).await;
+                assert_eq!(accepted.get(), 0);
+                device.set_availability(Availability::Available);
+                invoke_status(&client, 2, true, IMStatusCode::Failure).await;
+                read_state(&client, None, false, &[]).await;
+                device.observe(false);
+                *rejection.borrow_mut() = Some(CommandError::Rejected("denied".into()));
+                invoke_status(&client, 1, true, IMStatusCode::Failure).await;
+                *rejection.borrow_mut() = Some(CommandError::Timeout);
+                invoke_status(&client, 1, true, IMStatusCode::Failure).await;
+                *rejection.borrow_mut() =
+                    Some(CommandError::SendFailed("transport stopped".into()));
+                invoke_status(&client, 1, true, IMStatusCode::Failure).await;
+                invoke_status(&client, 1, true, IMStatusCode::Success).await;
+                read_state(&client, Some(true), true, &[true]).await;
+                device.set_availability(Availability::Unavailable("offline".into()));
+                read_state(&client, Some(true), false, &[true, false]).await;
+                device.set_availability(Availability::Unavailable("another reason".into()));
+                read_state(&client, Some(true), false, &[true, false]).await;
+                device.set_availability(Availability::Available);
+                read_state(&client, Some(true), true, &[true, false, true]).await;
+                device.observe(initial);
+            }
             let mut id = if let Some(id) = previous_subscription {
                 // No new SubscribeRequest: resume under the original ID and
-                // report the reset power value. Real CASE is validated manually.
-                expect_report(&client, id, false).await.unwrap();
+                // report a fresh source value. Real CASE is validated manually.
+                expect_report(&client, id, None, Some(false)).await.unwrap();
+                device.observe(initial);
+                device.set_availability(Availability::Available);
+                expect_report(&client, id, Some(initial), Some(true))
+                    .await
+                    .unwrap();
                 id
             } else {
-                let first = subscribe(&client).await.unwrap();
+                let first = subscribe(&client, initial).await.unwrap();
                 wait_committed(&state).await;
-                let replacement = subscribe(&client).await.unwrap();
+                let replacement = subscribe(&client, initial).await.unwrap();
                 assert_ne!(first, replacement);
                 replacement
             };
-            for (command, power) in [("on", true), ("off", false)] {
+            if boot > 1 {
+                group_request(&client, false).await;
+            }
+            for (command, power) in if initial {
+                [("off", false), ("on", true)]
+            } else {
+                [("on", true), ("off", false)]
+            } {
                 wait_committed(&state).await;
-                super::terminal_command(&light, command);
-                expect_report(&client, id, power).await.unwrap();
+                super::terminal_command(&device, command).await;
+                expect_report(&client, id, Some(power), None).await.unwrap();
             }
             wait_committed(&state).await;
             if boot == 2 {
                 // A new subscription must not reuse the restored ID.
-                let replacement = subscribe(&client).await.unwrap();
+                let replacement = subscribe(&client, device.snapshot().power.value().unwrap())
+                    .await
+                    .unwrap();
                 assert!(replacement > id);
                 id = replacement;
             }
             wait_committed(&state).await;
-            super::terminal_command(&light, "on");
-            expect_report(&client, id, true).await.unwrap();
+            let final_power = !device.snapshot().power.value().unwrap();
+            super::terminal_command(&device, if final_power { "on" } else { "off" }).await;
+            expect_report(&client, id, Some(final_power), None)
+                .await
+                .unwrap();
             id
         };
         or(
@@ -290,6 +405,12 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     });
     protocol.check_failure().unwrap();
     assert!(
+        store
+            .matter()
+            .contains(rs_matter::persist::FABRIC_KEYS_START + 1)
+            .unwrap()
+    );
+    assert!(
         Store::open(directory)
             .unwrap()
             .matter()
@@ -300,7 +421,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
 }
 
 #[test]
-fn replaced_subscription_survives_restarts_and_reports_terminal_changes() {
+fn test_fabric_groups_and_subscription_survive_restarts_and_report_terminal_changes() {
     env_logger::Builder::from_default_env().is_test(true).init();
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
@@ -325,4 +446,230 @@ fn replaced_subscription_survives_restarts_and_reports_terminal_changes() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+async fn invoke_status(client: &Matter<'_>, command: u32, valid: bool, expected: IMStatusCode) {
+    let exchange = Exchange::initiate(
+        client,
+        test_only_crypto(),
+        NonZeroU8::new(1).unwrap(),
+        SERVER_ID,
+    )
+    .await
+    .unwrap();
+    let mut sender = exchange.invoke_sender(None).await.unwrap();
+    let chunk = loop {
+        match sender.tx().await.unwrap() {
+            TxOutcome::BuildRequest(builder) => {
+                sender = builder
+                    .invoke_requests()
+                    .unwrap()
+                    .push()
+                    .unwrap()
+                    .path(2, 6, command)
+                    .unwrap()
+                    .data(|writer| {
+                        let tag = TLVTag::Context(CmdDataTag::Data as u8);
+                        if valid {
+                            writer.start_struct(&tag)?;
+                            writer.end_container()
+                        } else {
+                            writer.bool(&tag, true)
+                        }
+                    })
+                    .unwrap()
+                    .end()
+                    .unwrap()
+                    .end()
+                    .unwrap()
+                    .end()
+                    .unwrap();
+            }
+            TxOutcome::GotResponse(chunk) => break chunk,
+        }
+    };
+    let actual = match chunk.response().unwrap() {
+        Some(response) => {
+            let mut entries = response.invoke_responses.as_ref().unwrap().iter();
+            let CmdResp::Status(status) = entries.next().unwrap().unwrap() else {
+                panic!("command status expected")
+            };
+            assert_eq!(status.path.endpoint, Some(2));
+            assert_eq!(status.path.cluster, Some(6));
+            assert_eq!(status.path.cmd, Some(command));
+            assert!(entries.next().is_none());
+            status.status.status
+        }
+        None => {
+            assert!(chunk.is_status_only());
+            IMStatusCode::Success
+        }
+    };
+    assert_eq!(actual, expected);
+    assert!(chunk.complete().await.unwrap().is_none());
+}
+async fn read_state(
+    client: &Matter<'_>,
+    power: Option<bool>,
+    reachable: bool,
+    expected_events: &[bool],
+) {
+    let attrs = [
+        AttrPath::from_gp(&GenericPath::new(Some(2), Some(6), Some(0))),
+        AttrPath::from_gp(&GenericPath::new(Some(2), Some(57), Some(17))),
+    ];
+    let events = [EventPath::from_gp(&GenericPath::new(
+        Some(2),
+        Some(57),
+        Some(3),
+    ))];
+    let exchange = Exchange::initiate(
+        client,
+        test_only_crypto(),
+        NonZeroU8::new(1).unwrap(),
+        SERVER_ID,
+    )
+    .await
+    .unwrap();
+    let mut sender = exchange.read_sender().await.unwrap();
+    let mut chunk = loop {
+        match sender.tx().await.unwrap() {
+            TxOutcome::BuildRequest(builder) => {
+                sender = builder
+                    .attr_requests_from(&attrs)
+                    .unwrap()
+                    .event_requests_from(&events)
+                    .unwrap()
+                    .fabric_filtered(false)
+                    .unwrap()
+                    .end()
+                    .unwrap();
+            }
+            TxOutcome::GotResponse(chunk) => break chunk,
+        }
+    };
+    let mut observed_events = Vec::new();
+    let mut saw_power = false;
+    let mut saw_reachable = false;
+    loop {
+        {
+            let report = chunk.response().unwrap();
+            if let Some(attrs) = &report.attr_reports {
+                for attr in attrs.iter() {
+                    match attr.unwrap() {
+                        AttrResp::Data(data) if data.path.cluster == Some(6) => {
+                            assert_eq!(Some(data.data.bool().unwrap()), power);
+                            saw_power = true;
+                        }
+                        AttrResp::Status(status) if status.path.cluster == Some(6) => {
+                            assert_eq!(power, None);
+                            assert_eq!(status.status.status, IMStatusCode::Failure);
+                            saw_power = true;
+                        }
+                        AttrResp::Data(data) if data.path.cluster == Some(57) => {
+                            assert_eq!(data.data.bool().unwrap(), reachable);
+                            saw_reachable = true;
+                        }
+                        _ => panic!("unexpected attribute response"),
+                    }
+                }
+            }
+            if let Some(events) = &report.event_reports {
+                for event in events.iter() {
+                    let EventResp::Data(event) = event.unwrap() else {
+                        panic!("event data expected")
+                    };
+                    assert_eq!(event.path.endpoint, Some(2));
+                    assert_eq!(event.path.cluster, Some(57));
+                    assert_eq!(event.path.event, Some(3));
+                    observed_events.push(
+                        bridged::ReachableChanged::from_tlv(&event.data)
+                            .unwrap()
+                            .reachable_new_value()
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+        match chunk.complete().await.unwrap() {
+            Some(next) => chunk = next,
+            None => break,
+        }
+    }
+    assert!(saw_power && saw_reachable);
+    assert_eq!(observed_events, expected_events);
+}
+
+async fn group_request(client: &Matter<'_>, add: bool) {
+    let exchange = Exchange::initiate(
+        client,
+        test_only_crypto(),
+        NonZeroU8::new(1).unwrap(),
+        SERVER_ID,
+    )
+    .await
+    .unwrap();
+    let mut sender = exchange.invoke_sender(None).await.unwrap();
+    let chunk = loop {
+        match sender.tx().await.unwrap() {
+            TxOutcome::BuildRequest(builder) => {
+                sender = builder
+                    .invoke_requests()
+                    .unwrap()
+                    .push()
+                    .unwrap()
+                    .path(2, 4, if add { 0 } else { 2 })
+                    .unwrap()
+                    .data(|writer| {
+                        writer.start_struct(&TLVTag::Context(CmdDataTag::Data as u8))?;
+                        if add {
+                            writer.u16(&TLVTag::Context(0), 123)?;
+                            writer.utf8(&TLVTag::Context(1), "Room")?;
+                        } else {
+                            writer.start_array(&TLVTag::Context(0))?;
+                            writer.end_container()?;
+                        }
+                        writer.end_container()
+                    })
+                    .unwrap()
+                    .end()
+                    .unwrap()
+                    .end()
+                    .unwrap()
+                    .end()
+                    .unwrap();
+            }
+            TxOutcome::GotResponse(chunk) => break chunk,
+        }
+    };
+    {
+        let response = chunk.response().unwrap().unwrap();
+        if add {
+            let (endpoint, result) = response
+                .responses::<groups::AddGroupResponse<'_>>(4, 0)
+                .next()
+                .unwrap();
+            let result = result.unwrap();
+            assert_eq!(endpoint, 2);
+            assert_eq!(result.status().unwrap(), IMStatusCode::Success as u8);
+            assert_eq!(result.group_id().unwrap(), 123);
+        } else {
+            let (endpoint, result) = response
+                .responses::<groups::GetGroupMembershipResponse<'_>>(4, 2)
+                .next()
+                .unwrap();
+            assert_eq!(endpoint, 2);
+            assert_eq!(
+                result
+                    .unwrap()
+                    .group_list()
+                    .unwrap()
+                    .iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                [123]
+            );
+        }
+    }
+    assert!(chunk.complete().await.unwrap().is_none());
 }

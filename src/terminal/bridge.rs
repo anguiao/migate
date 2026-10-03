@@ -1,35 +1,50 @@
 use super::{AuthStatus, current_time};
-use crate::{device::Command, virtual_device::VirtualLight};
-
+use crate::device::{Availability, Command, Device, Power};
 pub const COMMAND_HELP: &str = "Available commands: on, off, status, help";
 
-pub fn handle_line(
-    light: &VirtualLight,
+pub async fn handle_line(
+    device: &Device,
     status: &AuthStatus,
     line: &str,
     now: i64,
 ) -> Option<String> {
-    let (snapshot, command_executed) = match line.trim() {
+    let key = &device.description().key;
+    let command = match line.trim() {
         "" => return None,
-        "on" => (light.execute(Command::On), true),
-        "off" => (light.execute(Command::Off), true),
-        "status" => (light.snapshot(), false),
+        "on" => Some(Command::On),
+        "off" => Some(Command::Off),
+        "status" => None,
         _ => return Some(format!("{COMMAND_HELP}\n{}", status.render(now))),
     };
-    let result = format!(
-        "{}: {}",
-        snapshot.id,
-        if snapshot.power { "on" } else { "off" }
-    );
-    if command_executed {
-        log::info!("terminal {result}");
+    if let Some(command) = command {
+        return Some(match device.execute(command).await {
+            Ok(_) => {
+                log::info!("terminal {} {command:?}: accepted", key.id);
+                format!("{}: command accepted", key.id)
+            }
+            Err(error) => format!("{}: {error}", key.id),
+        });
     }
-    Some(result)
+    let snapshot = device.snapshot();
+    let power = match snapshot.power {
+        Power::Unknown => "unknown",
+        Power::On => "on",
+        Power::Off => "off",
+    };
+    let availability = match snapshot.availability {
+        Availability::Initializing => "initializing".into(),
+        Availability::Available => "available".into(),
+        Availability::Unavailable(reason) => format!("unavailable ({reason})"),
+    };
+    Some(format!(
+        "{}: {power}\nDevice: {availability}.\n{}",
+        key.id,
+        status.render(now)
+    ))
 }
-
 /// Read commands until EOF. The caller keeps the bridge alive after this returns.
 pub async fn run_input(
-    light: &VirtualLight,
+    device: &Device,
     status: &AuthStatus,
     mut input: impl futures_lite::io::AsyncBufRead + Unpin,
     mut output: impl futures_lite::io::AsyncWrite + Unpin,
@@ -41,7 +56,7 @@ pub async fn run_input(
         if input.read_line(&mut line).await? == 0 {
             return Ok(());
         }
-        if let Some(result) = handle_line(light, status, &line, current_time()) {
+        if let Some(result) = handle_line(device, status, &line, current_time()).await {
             output.write_all(result.as_bytes()).await?;
             output.write_all(b"\n").await?;
             output.flush().await?;

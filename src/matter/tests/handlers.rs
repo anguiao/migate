@@ -1,10 +1,13 @@
 use super::super::{
     NODE, basic_info,
     bridged_info::{self, BridgedHandler},
-    model::{self, LIGHT_ENDPOINT},
+    model::{self, DEVICE_ENDPOINT},
     storage::StoreAdapter,
 };
-use crate::{storage::Store, virtual_device::VirtualLight};
+use crate::{
+    device::{Availability, CommandError, Power},
+    storage::Store,
+};
 use futures_lite::future::{block_on, poll_once};
 use rs_matter::{
     MATTER_PORT, Matter,
@@ -15,16 +18,14 @@ use rs_matter::{
         OperationContext, OwnAttrChangeNotifier, OwnEventEmitter, ReadContext, ReadReplyInstance,
         WriteContext,
         clusters::{
-            app::on_off,
             decl::bridged_device_basic_information::{self as bridged, ClusterHandler as _},
             identify,
             net_comm::NetworksAccess,
-            scenes,
         },
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
         networks::eth::EthNetwork,
     },
-    error::Error,
+    error::{Error, ErrorCode},
     im::{
         EthInteractionModelState, ImStats, InteractionModel,
         encoding::{EventPriority, IMBuffer},
@@ -47,16 +48,18 @@ struct Context<'a, H> {
     attribute: AttrDetails,
     data: TLVElement<'a>,
     changes: RefCell<Vec<(u16, u32, u32)>>,
+    events: RefCell<Vec<(u16, u32, u32)>>,
 }
 
 impl<'a, H> Context<'a, H> {
     fn new(base: &'a H, cluster_id: u32, attr_id: u32) -> Self {
         Self {
             base,
-            command: CmdDetails::new(LIGHT_ENDPOINT, cluster_id, 1, 1, false, None),
+            command: CmdDetails::new(DEVICE_ENDPOINT, cluster_id, 1, 1, false, None),
             attribute: attr(cluster_id, attr_id),
             data: TLVElement::new(&[0x15, 0x18]),
             changes: RefCell::new(Vec::new()),
+            events: RefCell::new(Vec::new()),
         }
     }
 }
@@ -117,12 +120,14 @@ impl<H: HandlerContext> EventEmitter for Context<'_, H> {
     where
         F: FnOnce(EventTLVWrite<'_>) -> Result<(), Error>,
     {
-        self.base.emit_event(e, c, event, priority, f)
+        let number = self.base.emit_event(e, c, event, priority, f)?;
+        self.events.borrow_mut().push((e, c, event));
+        Ok(number)
     }
 }
 impl<H> MatchContext for Context<'_, H> {
     fn endpt(&self) -> Option<u16> {
-        Some(LIGHT_ENDPOINT)
+        Some(DEVICE_ENDPOINT)
     }
     fn cluster(&self) -> Option<u32> {
         Some(self.attribute.cluster_id)
@@ -130,13 +135,13 @@ impl<H> MatchContext for Context<'_, H> {
 }
 impl<H: HandlerContext> OwnAttrChangeNotifier for Context<'_, H> {
     fn notify_own_attr_changed(&self, a: u32) {
-        self.notify_attr_changed(LIGHT_ENDPOINT, self.attribute.cluster_id, a);
+        self.notify_attr_changed(DEVICE_ENDPOINT, self.attribute.cluster_id, a);
     }
     fn notify_own_cluster_changed(&self) {
-        self.notify_cluster_changed(LIGHT_ENDPOINT, self.attribute.cluster_id);
+        self.notify_cluster_changed(DEVICE_ENDPOINT, self.attribute.cluster_id);
     }
     fn notify_own_endpoint_changed(&self) {
-        self.notify_endpoint_changed(LIGHT_ENDPOINT);
+        self.notify_endpoint_changed(DEVICE_ENDPOINT);
     }
 }
 impl<H: HandlerContext> OwnEventEmitter for Context<'_, H> {
@@ -150,7 +155,7 @@ impl<H: HandlerContext> OwnEventEmitter for Context<'_, H> {
         F: FnOnce(EventTLVWrite<'_>) -> Result<(), Error>,
     {
         self.emit_event(
-            LIGHT_ENDPOINT,
+            DEVICE_ENDPOINT,
             self.attribute.cluster_id,
             event,
             priority,
@@ -186,7 +191,7 @@ impl<H: HandlerContext> WriteContext for Context<'_, H> {
 }
 fn attr(cluster_id: u32, attr_id: u32) -> AttrDetails {
     AttrDetails {
-        endpoint_id: LIGHT_ENDPOINT,
+        endpoint_id: DEVICE_ENDPOINT,
         cluster_id,
         attr_id,
         list_index: None,
@@ -200,68 +205,119 @@ fn attr(cluster_id: u32, attr_id: u32) -> AttrDetails {
     }
 }
 #[test]
-fn actual_handler_invoke_read_and_report_share_the_device() {
+fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
+    let (device, mut receiver) = super::test_device();
+    let child = store
+        .load_or_create_device_identity(&device.description().key)
+        .unwrap();
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let light = VirtualLight::new();
-    let scenes = scenes::ScenesState::<16>::new();
     let identify = identify::IdentifyHandler::new(Dataver::new(1));
-    let inner = model::on_off(&light, &scenes, Dataver::new(1));
+    let inner = model::on_off(&device, Dataver::new(1));
     let handler = model::handler(
-        &light,
-        &identity.light_id,
-        bridged_info::load_label(&store.matter()).unwrap(),
+        &device,
+        &child.unique_id,
+        "Test Outlet".into(),
         &identify,
-        &scenes,
         &inner,
         rand::rng(),
     );
     let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
     let mut ctx = Context::new(&im, 6, 0);
     block_on(async {
+        let mut out = [0; 128];
+        let mut write = WriteBuf::new(&mut out);
+        assert_eq!(
+            handler
+                .read(&ctx, ReadReplyInstance::new(&ctx.attribute, &mut write))
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::Failure
+        );
+        device.observe(false);
+        device.set_availability(Availability::Available);
         for (command, power) in [(1, true), (0, false), (2, true), (2, false)] {
             ctx.command.cmd_id = command;
+            let before = device.snapshot();
             let mut out = [0; 128];
-            handler
-                .invoke(
-                    &ctx,
-                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out)),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                super::terminal_command(&light, "status").unwrap(),
-                format!("virtual-light-1: {}", if power { "on" } else { "off" })
-            );
+            let mut invoke = pin!(handler.invoke(
+                &ctx,
+                InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out))
+            ));
+            assert!(poll_once(invoke.as_mut()).await.is_none());
+            assert_eq!(device.snapshot(), before);
+            receiver.next().await.unwrap().accept().unwrap();
+            invoke.await.unwrap();
+            assert_eq!(device.snapshot().power.value(), Some(power));
         }
-        ctx.data = TLVElement::new(&[0x15]);
-        assert!(
-            handler
+        for bytes in [&[][..], &[0x15], &[0x15, 0x24], &[0x15, 0x35, 0], &[0x09]] {
+            ctx.data = TLVElement::new(bytes);
+            let error = handler
                 .invoke(
                     &ctx,
-                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128]))
+                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128])),
                 )
                 .await
-                .is_err()
-        );
-        assert!(!light.snapshot().power);
-        super::terminal_command(&light, "on");
+                .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::InvalidCommand);
+            assert!(poll_once(receiver.next()).await.is_none());
+        }
+        ctx.data = TLVElement::new(&[0x15, 0x18]);
+        ctx.command.cmd_id = 1;
+        let mut out = [0; 128];
+        let mut invoke = pin!(handler.invoke(
+            &ctx,
+            InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out))
+        ));
+        assert!(poll_once(invoke.as_mut()).await.is_none());
+        receiver
+            .next()
+            .await
+            .unwrap()
+            .reject(CommandError::Rejected("denied".into()));
+        assert_eq!(invoke.await.unwrap_err().code(), ErrorCode::Failure);
+        assert_eq!(device.snapshot().power, Power::Off);
+        let mut run = pin!(handler.run(&ctx));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        ctx.changes.borrow_mut().clear();
+        device.observe(true);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
+        let count = ctx.changes.borrow().len();
+        device.observe(true);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(ctx.changes.borrow().len(), count);
+        device.observe(false);
+        device.observe(true);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(ctx.changes.borrow().len(), count);
+        device.set_availability(Availability::Unavailable("offline".into()));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().contains(&(2, 57, 17)));
+        assert!(ctx.events.borrow().contains(&(2, 57, 3)));
+        let count = ctx.changes.borrow().len();
+        let events = ctx.events.borrow().len();
+        device.set_availability(Availability::Unavailable("another reason".into()));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(ctx.changes.borrow().len(), count);
+        assert_eq!(ctx.events.borrow().len(), events);
         let mut out = [0; 128];
         let mut write = WriteBuf::new(&mut out);
         handler
             .read(&ctx, ReadReplyInstance::new(&ctx.attribute, &mut write))
             .await
             .unwrap();
-        let root = TLVElement::new(write.as_slice());
         assert!(
-            root.structure()
+            TLVElement::new(write.as_slice())
+                .structure()
                 .unwrap()
                 .find_ctx(1)
                 .unwrap()
@@ -272,14 +328,6 @@ fn actual_handler_invoke_read_and_report_share_the_device() {
                 .bool()
                 .unwrap()
         );
-        let mut run = pin!(handler.run(&ctx));
-        assert!(poll_once(&mut run).await.is_none());
-        assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
-        assert!(on_off::ClusterAsyncHandler::dataver(&inner) > 1);
-        let count = ctx.changes.borrow().len();
-        super::terminal_command(&light, "on");
-        assert!(poll_once(&mut run).await.is_none());
-        assert_eq!(ctx.changes.borrow().len(), count);
     });
 }
 
@@ -288,28 +336,30 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
+    let (device, _receiver) = super::test_device();
+    let child = store
+        .load_or_create_device_identity(&device.description().key)
+        .unwrap();
     let info = basic_info(&identity);
-    let label = bridged_info::load_label(&store.matter()).unwrap();
+    let label = bridged_info::load_label(&store.matter(), "Test Outlet").unwrap();
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let bridged = BridgedHandler::new(Dataver::new(1), &identity.light_id, label);
+    let bridged = BridgedHandler::new(&device, Dataver::new(1), &child.unique_id, label);
     let handler = Async(bridged::HandlerAdaptor(&bridged));
     let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
-    let ctx = Context::new(
-        &im,
-        BridgedHandler::CLUSTER.id,
-        bridged::AttributeId::NodeLabel as _,
-    );
-    bridged.set_node_label(&ctx, "Study Light").unwrap();
+    let ctx = Context::new(&im, 57, bridged::AttributeId::NodeLabel as _);
+    assert!(!bridged.reachable(&ctx).unwrap());
+    bridged.set_node_label(&ctx, "Study Outlet").unwrap();
     assert_eq!(
-        bridged_info::load_label(&Store::open(dir.path()).unwrap().matter()).unwrap(),
-        "Study Light"
+        bridged_info::load_label(&Store::open(dir.path()).unwrap().matter(), "Test Outlet")
+            .unwrap(),
+        "Study Outlet"
     );
     let count = ctx.changes.borrow().len();
-    bridged.set_node_label(&ctx, "Study Light").unwrap();
+    bridged.set_node_label(&ctx, "Study Outlet").unwrap();
     assert_eq!(ctx.changes.borrow().len(), count);
     assert!(bridged.set_node_label(&ctx, &"x".repeat(33)).is_err());
     let mut bytes = [0; 64];
@@ -322,6 +372,12 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         .unwrap();
     assert_eq!(
         TLVElement::new(writer.as_slice()).utf8().unwrap(),
-        "Study Light"
+        "Study Outlet"
+    );
+    assert_eq!(
+        store
+            .load_or_create_device_identity(&device.description().key)
+            .unwrap(),
+        child
     );
 }

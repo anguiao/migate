@@ -1,6 +1,6 @@
 mod bridged_info;
-mod light;
 mod model;
+mod on_off;
 mod pairing;
 mod storage;
 
@@ -8,8 +8,8 @@ pub use pairing::PairingEvent;
 
 use crate::{
     RuntimeError,
+    device::Device,
     storage::{Identity, MatterStore, StorageError},
-    virtual_device::VirtualLight,
 };
 use model::{NODE, basic_info, initialize_basic_info};
 use rs_matter::{
@@ -17,7 +17,7 @@ use rs_matter::{
     crypto::{Crypto, default_crypto},
     dm::{
         Dataver,
-        clusters::{identify, scenes},
+        clusters::identify,
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
         networks::eth::EthNetwork,
     },
@@ -32,17 +32,27 @@ use storage::StoreAdapter;
 
 const WINDOW_SECONDS: u16 = 900;
 
-/// The fixed virtual-light bridge and storage failures that outlive its run future.
+/// The fixed device bridge and storage failures that outlive its run future.
 pub struct Bridge<'a> {
-    light: &'a VirtualLight,
+    device: &'a Device,
+    device_id: &'a str,
+    default_label: &'a str,
     identity: &'a Identity,
     store: StoreAdapter,
 }
 
 impl<'a> Bridge<'a> {
-    pub fn new(light: &'a VirtualLight, identity: &'a Identity, store: MatterStore) -> Self {
+    pub fn new(
+        device: &'a Device,
+        identity: &'a Identity,
+        device_id: &'a str,
+        default_label: &'a str,
+        store: MatterStore,
+    ) -> Self {
         Self {
-            light,
+            device,
+            device_id,
+            default_label,
             identity,
             store: StoreAdapter::new(store),
         }
@@ -64,7 +74,7 @@ impl<'a> Bridge<'a> {
     ) -> Result<(), RuntimeError> {
         self.check_failure()?;
         let store = &self.store;
-        let label = bridged_info::load_label(store.storage())?;
+        let label = bridged_info::load_label(store.storage(), self.default_label)?;
         let missing_basic_info = !store
             .storage()
             .contains(rs_matter::persist::BASIC_INFO_KEY)?;
@@ -82,15 +92,13 @@ impl<'a> Bridge<'a> {
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let mut random = crypto.rand()?;
-        let scenes = scenes::ScenesState::<16>::new();
         let identify = identify::IdentifyHandler::new(Dataver::new_rand(&mut random));
-        let on_off = model::on_off(self.light, &scenes, Dataver::new_rand(&mut random));
+        let on_off = model::on_off(self.device, Dataver::new_rand(&mut random));
         let handler = model::handler(
-            self.light,
-            &self.identity.light_id,
+            self.device,
+            self.device_id,
             label,
             &identify,
-            &scenes,
             &on_off,
             random,
         );
@@ -155,4 +163,4 @@ impl<'a> Bridge<'a> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

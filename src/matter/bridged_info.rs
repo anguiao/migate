@@ -1,7 +1,10 @@
-use crate::storage::{MatterStore, StorageError};
+use crate::{
+    device::{Availability, Device, DeviceSnapshot},
+    storage::{MatterStore, StorageError},
+};
 use rs_matter::{
     dm::{
-        Cluster, Dataver, InvokeContext, ReadContext, WriteContext,
+        Cluster, Dataver, HandlerContext, InvokeContext, ReadContext, WriteContext,
         clusters::decl::bridged_device_basic_information as bridged,
     },
     error::{Error, ErrorCode},
@@ -12,7 +15,6 @@ use rs_matter::{
 use std::cell::RefCell;
 
 pub(super) const LABEL_KEY: u16 = rs_matter::persist::VENDOR_KEYS_START;
-const DEFAULT_LABEL: &str = "MiGate Virtual Light";
 const MAX_LABEL_BYTES: usize = 32;
 
 fn validate_label(label: &str) -> Result<(), Error> {
@@ -22,9 +24,9 @@ fn validate_label(label: &str) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn load_label(store: &MatterStore) -> Result<String, StorageError> {
+pub(super) fn load_label(store: &MatterStore, default: &str) -> Result<String, StorageError> {
     let Some(data) = store.get(LABEL_KEY)? else {
-        return Ok(DEFAULT_LABEL.into());
+        return Ok(default.into());
     };
     TLVElement::new(&data)
         .utf8()
@@ -42,17 +44,32 @@ pub(super) fn load_label(store: &MatterStore) -> Result<String, StorageError> {
 }
 
 pub(super) struct BridgedHandler<'a> {
+    device: &'a Device,
     dataver: Dataver,
     identity: &'a str,
     label: RefCell<String>,
+    changes: RefCell<Option<crate::device::Changes>>,
+    reported: std::cell::Cell<bool>,
+}
+
+fn reachable(snapshot: &DeviceSnapshot) -> bool {
+    snapshot.availability == Availability::Available && snapshot.power.value().is_some()
 }
 
 impl<'a> BridgedHandler<'a> {
-    pub(super) fn new(dataver: Dataver, identity: &'a str, label: String) -> Self {
+    pub(super) fn new(
+        device: &'a Device,
+        dataver: Dataver,
+        identity: &'a str,
+        label: String,
+    ) -> Self {
         Self {
+            device,
             dataver,
             identity,
             label: RefCell::new(label),
+            changes: RefCell::new(Some(device.subscribe())),
+            reported: std::cell::Cell::new(reachable(&device.snapshot())),
         }
     }
 }
@@ -63,7 +80,8 @@ impl bridged::ClusterHandler for BridgedHandler<'_> {
         .with_attrs(
             with!(required; bridged::AttributeId::UniqueID | bridged::AttributeId::NodeLabel),
         )
-        .with_cmds(with!());
+        .with_cmds(with!())
+        .with_events(with!(bridged::EventId::ReachableChanged));
 
     fn dataver(&self) -> u32 {
         self.dataver.get()
@@ -74,7 +92,26 @@ impl bridged::ClusterHandler for BridgedHandler<'_> {
     }
 
     fn reachable(&self, _ctx: impl ReadContext) -> Result<bool, Error> {
-        Ok(true)
+        Ok(reachable(&self.device.snapshot()))
+    }
+
+    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        let mut changes = self.changes.borrow_mut().take().expect("handler runs once");
+        loop {
+            let value = reachable(&changes.changed().await);
+            if self.reported.replace(value) != value {
+                bridged::ReachableChanged::emit_for(
+                    &ctx,
+                    super::model::DEVICE_ENDPOINT,
+                    |builder| builder.reachable_new_value(value)?.end(),
+                )?;
+                ctx.notify_attr_changed(
+                    super::model::DEVICE_ENDPOINT,
+                    Self::CLUSTER.id,
+                    bridged::AttributeId::Reachable as _,
+                );
+            }
+        }
     }
 
     fn unique_id<P: TLVBuilderParent>(
@@ -121,8 +158,8 @@ mod tests {
     fn bridged_label_defaults_and_detects_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap().matter();
-        assert_eq!(load_label(&store).unwrap(), "MiGate Virtual Light");
+        assert_eq!(load_label(&store, "Test Outlet").unwrap(), "Test Outlet");
         store.put(LABEL_KEY, &[0x15]).unwrap();
-        assert!(load_label(&store).is_err());
+        assert!(load_label(&store, "Test Outlet").is_err());
     }
 }

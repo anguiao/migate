@@ -1,4 +1,8 @@
-use migate::{config::Config, device::Command, storage::Store, virtual_device::VirtualLight};
+use migate::{
+    config::Config,
+    device::{Capability, Category, Device, DeviceDescription, DeviceKey, Power},
+    storage::Store,
+};
 use rusqlite::Connection;
 use std::{error::Error as _, fs};
 
@@ -32,14 +36,19 @@ fn initializes_and_restores_identity_without_power() {
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
         assert_ne!(identity.bridge_id, identity.light_id);
-        let light = VirtualLight::new();
-        light.execute(Command::On);
+        let description = DeviceDescription {
+            key: DeviceKey::new("xiaomi", "test-outlet"),
+            category: Category::Outlet,
+            capabilities: vec![Capability::OnOff],
+        };
+        let (device, _receiver) = Device::new(description.clone());
+        device.observe(true);
         drop(store);
         assert_eq!(
             Store::open(&dir).unwrap().load_identity().unwrap(),
             identity
         );
-        assert!(!VirtualLight::new().snapshot().power);
+        assert_eq!(Device::new(description).0.snapshot().power, Power::Unknown);
     }
     assert_ne!(
         Store::open(root.path().join("new"))

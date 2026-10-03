@@ -26,13 +26,15 @@ struct TestProcess {
 }
 
 impl TestProcess {
-    fn bridge(directory: &Path) -> (Self, u16) {
-        let mut process = Self::spawn(
-            Command::new(env!("CARGO_BIN_EXE_migate"))
-                .env("MIGATE_MATTER_PORT", "0")
-                .arg("--data-dir")
-                .arg(directory),
-        );
+    fn bridge(directory: &Path, initial: bool) -> (Self, u16) {
+        let gate = directory.join("source-ready");
+        if gate.exists() {
+            fs::remove_file(&gate).unwrap();
+        }
+        let mut process = Self::spawn(helper_command(directory).env(
+            "MIGATE_TEST_INITIAL_POWER",
+            if initial { "on" } else { "off" },
+        ));
         process.wait_for_output(Stream::Stderr, "mDNS services updated");
         let (_, stderr) = process.output();
         let port: u16 = stderr
@@ -68,6 +70,19 @@ impl TestProcess {
             "local.",
         ]));
         lookup.wait_for_output(Stream::Stdout, &format!(":{port} (interface"));
+        process.send("status\n");
+        process.wait_for_output(
+            Stream::Stdout,
+            "test-outlet: unknown\nDevice: initializing.",
+        );
+        fs::write(&gate, b"ready").unwrap();
+        process.wait_for_output(
+            Stream::Stderr,
+            &format!(
+                "Fake source initial read: {}",
+                if initial { "on" } else { "off" }
+            ),
+        );
         (process, port)
     }
 
@@ -437,19 +452,19 @@ fn ctrl_c_cancels_unfinished_login_with_failure() {
 }
 
 #[test]
-fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
+fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_power() {
     let peer_directory = tempfile::tempdir().unwrap();
-    let (mut peer, peer_port) = TestProcess::bridge(peer_directory.path());
+    let (mut peer, peer_port) = TestProcess::bridge(peer_directory.path(), false);
     let directory = tempfile::tempdir().unwrap();
     let mut identity = None;
-    for close_input in [false, true] {
-        let (mut process, port) = TestProcess::bridge(directory.path());
+    for (close_input, initial) in [(false, false), (true, true)] {
+        let (mut process, port) = TestProcess::bridge(directory.path(), initial);
         assert_ne!(port, peer_port);
-        process.send("status\non\n");
+        process.send("status\non\nstatus\n");
         if close_input {
             process.close_input();
         }
-        process.wait_for_output(Stream::Stdout, "virtual-light-1: on\n");
+        process.wait_for_output(Stream::Stdout, "test-outlet: command accepted\n");
         if close_input {
             process.wait_for_output(
                 Stream::Stderr,
@@ -463,13 +478,26 @@ fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
             "{output}"
         );
         assert!(output.contains("Manual pairing code: "), "{output}");
-        assert!(output.contains("virtual-light-1: off"), "{output}");
-        assert!(output.contains("virtual-light-1: on"), "{output}");
+        assert!(
+            output.contains(&format!(
+                "test-outlet: {}",
+                if initial { "on" } else { "off" }
+            )),
+            "{output}"
+        );
+        assert!(output.contains("test-outlet: on"), "{output}");
+        assert!(errors.contains("Fake source stopped"), "{errors}");
         assert!(errors.contains(directory.path().to_str().unwrap()));
-        let restored = migate::storage::Store::open(directory.path())
-            .unwrap()
-            .load_identity()
-            .unwrap();
+        let reopened = migate::storage::Store::open(directory.path()).unwrap();
+        let restored = (
+            reopened.load_identity().unwrap(),
+            reopened
+                .load_or_create_device_identity(&migate::device::DeviceKey::new(
+                    "xiaomi",
+                    "test-outlet",
+                ))
+                .unwrap(),
+        );
         if let Some(identity) = &identity {
             assert_eq!(identity, &restored);
         } else {
@@ -477,7 +505,7 @@ fn explicit_directory_eof_and_interrupt_keep_identity_and_reset_power() {
         }
     }
     peer.send("status\n");
-    peer.wait_for_output(Stream::Stdout, "virtual-light-1: off\n");
+    peer.wait_for_output(Stream::Stdout, "test-outlet: off\n");
     peer.interrupt();
 }
 
@@ -495,4 +523,155 @@ fn test_process_is_reaped_when_an_assertion_panics() {
         .output()
         .unwrap();
     assert!(!probe.status.success(), "child survived test failure");
+}
+
+fn helper_command(directory: &Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "bridge_helper_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("MIGATE_TEST_HELPER_DIRECTORY", directory);
+    command
+}
+
+// The ordinary test returns immediately; only the isolated test subprocess enables it.
+#[test]
+fn bridge_helper_child() {
+    let Some(directory) = std::env::var_os("MIGATE_TEST_HELPER_DIRECTORY") else {
+        return;
+    };
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            use async_signal::{Signal, Signals};
+            use futures_lite::{StreamExt, future, io::BufReader};
+            use migate::{
+                device::{
+                    Availability, Capability, Category, Device, DeviceDescription, DeviceKey,
+                },
+                runtime::{BridgeOptions, DeviceSetup, run_prepared_bridge},
+                terminal::{self, AuthStatus},
+                xiaomi::{auth::AuthService, cloud::CloudClient},
+            };
+            env_logger::Builder::new()
+                .filter_level(log::LevelFilter::Info)
+                .target(env_logger::Target::Stderr)
+                .init();
+            let directory = std::path::PathBuf::from(directory);
+            let store = migate::storage::Store::open(&directory).unwrap();
+            let identity = store.load_identity().unwrap();
+            log::info!("Data directory: {}", directory.display());
+            let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+                .local_status()
+                .unwrap();
+            let status = AuthStatus::new(report, "/bin/migate".into(), directory.clone());
+            let (device, mut receiver) = Device::new(DeviceDescription {
+                key: DeviceKey::new("xiaomi", "test-outlet"),
+                category: Category::Outlet,
+                capabilities: vec![Capability::OnOff],
+            });
+            let source_device = device.clone();
+            let gate = directory.join("source-ready");
+            let initial =
+                std::env::var("MIGATE_TEST_INITIAL_POWER").is_ok_and(|value| value == "on");
+            struct Guard;
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    log::info!("Fake source stopped");
+                }
+            }
+            let source = async move {
+                let _guard = Guard;
+                while !gate.try_exists()? {
+                    async_io::Timer::after(Duration::from_millis(10)).await;
+                }
+                source_device.observe(initial);
+                source_device.set_availability(Availability::Available);
+                log::info!(
+                    "Fake source initial read: {}",
+                    if initial { "on" } else { "off" }
+                );
+                while let Some(request) = receiver.next().await {
+                    request.accept()?;
+                }
+                Ok::<(), migate::RuntimeError>(())
+            };
+            let mut signals = Signals::new([Signal::Int]).unwrap();
+            let interrupt = async {
+                signals.next().await.ok_or("signal stream ended")??;
+                Ok(())
+            };
+            let result = future::block_on(run_prepared_bridge(
+                BridgeOptions {
+                    store: &store,
+                    identity: &identity,
+                    status: &status,
+                    port: 0,
+                },
+                async {
+                    Ok(DeviceSetup {
+                        device,
+                        default_label: "Test Outlet".into(),
+                    })
+                },
+                source,
+                BufReader::new(blocking::Unblock::new(std::io::stdin())),
+                blocking::Unblock::new(std::io::stdout()),
+                interrupt,
+                |event| terminal::pairing::write_event(std::io::stdout().lock(), event),
+            ));
+            if let Err(error) = result {
+                panic!("isolated bridge failed: {error}");
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn production_without_credentials_fails_without_pairing_or_fake_device() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+        .arg("--data-dir")
+        .arg(directory.path())
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert!(!stdout.contains("pairing code"), "{stdout}");
+    assert!(stderr.contains("Xiaomi sign-in is required"), "{stderr}");
+    assert!(stderr.contains("auth login"), "{stderr}");
+    assert!(!stderr.contains("Matter UDP listening"), "{stderr}");
+}
+
+#[test]
+fn shared_runtime_reports_corrupt_matter_storage_without_overwriting_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = migate::storage::Store::open(directory.path()).unwrap();
+    store
+        .matter()
+        .put(rs_matter::persist::BASIC_INFO_KEY, &[0xff, 0x11])
+        .unwrap();
+    let result = helper_command(directory.path()).output().unwrap();
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert!(
+        stderr.contains(directory.path().to_str().unwrap()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("restore Matter data"), "{stderr}");
+    assert!(stderr.contains("Fake source stopped"), "{stderr}");
+    assert_eq!(
+        store
+            .matter()
+            .get(rs_matter::persist::BASIC_INFO_KEY)
+            .unwrap(),
+        Some(vec![0xff, 0x11])
+    );
 }

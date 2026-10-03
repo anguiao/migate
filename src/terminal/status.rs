@@ -13,6 +13,7 @@ pub struct AuthStatus {
     report: RefCell<AuthReport>,
     executable: PathBuf,
     data_dir: PathBuf,
+    source: RefCell<Option<(crate::xiaomi::source::GatewayStatus, Option<String>)>>,
 }
 
 impl AuthStatus {
@@ -21,6 +22,7 @@ impl AuthStatus {
             report: RefCell::new(report),
             executable,
             data_dir,
+            source: RefCell::new(None),
         }
     }
 
@@ -34,7 +36,30 @@ impl AuthStatus {
     }
 
     pub fn render(&self, now: i64) -> String {
-        format_report(&self.report.borrow(), now, &self.executable, &self.data_dir)
+        let mut report =
+            format_report(&self.report.borrow(), now, &self.executable, &self.data_dir);
+        if let Some((gateway, problem)) = &*self.source.borrow() {
+            let _ = write!(report, "\n{}", format_gateway(gateway));
+            if let Some(problem) = problem {
+                let _ = write!(report, "\nDevice description: {problem}.");
+            }
+        }
+        report
+    }
+
+    pub fn update_source(&self, status: crate::xiaomi::source::SourceStatus) {
+        if self.replace(status.authentication) {
+            self.log(current_time());
+        }
+        let next = (status.gateway, status.catalog_problem);
+        let mut source = self.source.borrow_mut();
+        if source.as_ref() != Some(&next) {
+            log::info!("{}", format_gateway(&next.0));
+            if let Some(problem) = &next.1 {
+                log::warn!("Device description: {problem}.");
+            }
+            *source = Some(next);
+        }
     }
 
     pub fn log(&self, now: i64) {
@@ -62,7 +87,10 @@ impl AuthStatus {
         if let CertificateUpdate::Failed(reason) = &report.certificate_update {
             log::warn!("Gateway certificate update failed: {reason}.");
         }
-        if matches!(report.authentication, AuthenticationState::NotSignedIn) {
+        if matches!(
+            report.authentication,
+            AuthenticationState::NotSignedIn | AuthenticationState::SignInRequired(_)
+        ) {
             log::info!(
                 "Sign in with: {}",
                 login_command(&self.executable, &self.data_dir)
@@ -80,7 +108,10 @@ pub fn format_report(report: &AuthReport, now: i64, executable: &Path, data_dir:
     if let CertificateUpdate::Failed(reason) = &report.certificate_update {
         let _ = write!(output, "\nGateway certificate update failed: {reason}.");
     }
-    if matches!(report.authentication, AuthenticationState::NotSignedIn) {
+    if matches!(
+        report.authentication,
+        AuthenticationState::NotSignedIn | AuthenticationState::SignInRequired(_)
+    ) {
         let _ = write!(
             output,
             "\nSign in with:\n  {}",
@@ -88,6 +119,16 @@ pub fn format_report(report: &AuthReport, now: i64, executable: &Path, data_dir:
         );
     }
     output
+}
+
+fn format_gateway(status: &crate::xiaomi::source::GatewayStatus) -> String {
+    use crate::xiaomi::source::GatewayStatus;
+    match status {
+        GatewayStatus::Discovering => "Gateway: discovering local gateway.".into(),
+        GatewayStatus::Connecting(did) => format!("Gateway: connecting ({did})."),
+        GatewayStatus::Connected(did) => format!("Gateway: connected ({did})."),
+        GatewayStatus::Unavailable(reason) => format!("Gateway: unavailable. {reason}."),
+    }
 }
 
 fn format_authentication(authentication: &AuthenticationState) -> String {
@@ -154,9 +195,57 @@ pub fn current_time() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matter::tests::test_device;
     use crate::terminal::bridge;
-    use crate::virtual_device::VirtualLight;
     use crate::xiaomi::auth::AuthReport;
+
+    #[test]
+    fn sign_in_required_preserves_the_login_hint() {
+        let report = AuthReport::for_test(
+            AuthenticationState::SignInRequired(
+                crate::xiaomi::auth::FailureReason::AccountIdentityMismatch,
+            ),
+            None,
+            CertificateUpdate::NotNeeded,
+            0,
+        );
+        assert!(
+            format_report(&report, 0, Path::new("/bin/migate"), Path::new("/data"))
+                .contains("auth login")
+        );
+    }
+
+    #[test]
+    fn connected_gateway_keeps_authentication_and_catalog_diagnostics_visible() {
+        use crate::xiaomi::source::{GatewayStatus, SourceStatus};
+        let status = AuthStatus::new(
+            AuthReport::for_test(
+                AuthenticationState::Checking,
+                None,
+                CertificateUpdate::NotNeeded,
+                0,
+            ),
+            "/bin/migate".into(),
+            "/data".into(),
+        );
+        status.update_source(SourceStatus {
+            authentication: AuthReport::for_test(
+                AuthenticationState::SignInRequired(
+                    crate::xiaomi::auth::FailureReason::AccountIdentityMismatch,
+                ),
+                None,
+                CertificateUpdate::NotNeeded,
+                0,
+            ),
+            gateway: GatewayStatus::Connected("gateway".into()),
+            catalog_problem: Some("refresh failed".into()),
+        });
+        let report = status.render(0);
+        assert!(report.contains("Xiaomi: sign-in required"));
+        assert!(report.contains("auth login"));
+        assert!(report.contains("Gateway: connected (gateway)."));
+        assert!(report.contains("Device description: refresh failed."));
+    }
 
     #[test]
     fn certificate_dates_are_recomputed_for_each_render() {
@@ -199,9 +288,14 @@ mod tests {
         );
         let status = AuthStatus::new(checking, "/bin/migate".into(), "/data".into());
         assert!(
-            bridge::handle_line(&VirtualLight::new(), &status, "help", 1_700_000_000)
-                .unwrap()
-                .contains("Xiaomi: checking authentication (cn)...")
+            futures_lite::future::block_on(bridge::handle_line(
+                &test_device().0,
+                &status,
+                "help",
+                1_700_000_000
+            ))
+            .unwrap()
+            .contains("Xiaomi: checking authentication (cn)...")
         );
 
         let authenticated = AuthReport::for_test(
@@ -214,8 +308,13 @@ mod tests {
             1_700_000_000,
         );
         assert!(status.replace(authenticated));
-        let help =
-            bridge::handle_line(&VirtualLight::new(), &status, "help", 1_700_000_000).unwrap();
+        let help = futures_lite::future::block_on(bridge::handle_line(
+            &test_device().0,
+            &status,
+            "help",
+            1_700_000_000,
+        ))
+        .unwrap();
         assert!(help.contains("Xiaomi: authenticated (cn)."), "{help}");
         assert!(!help.contains("checking authentication"), "{help}");
 
