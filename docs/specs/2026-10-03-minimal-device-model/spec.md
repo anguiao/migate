@@ -149,7 +149,9 @@ cargo run --locked
 
 ## Matter 映射与虚拟灯移除
 
-真实设备使用标准 On/Off Plug-in Unit 和 Bridged Node 语义，并提供所需标准簇。主电源映射到 On/Off 属性及 On、Off、Toggle 命令，可用性映射到桥接基本信息中的 Reachable。协议栈沿用 `rs-matter`。
+真实设备声明 On/Off Plug-in Unit（`0x010A`）和 Bridged Node 语义。主电源映射到 On/Off 属性及 On、Off、Toggle 命令，可用性映射到桥接基本信息中的 Reachable。协议栈沿用 `rs-matter`。
+
+当前最小实现只提供基础开关链路，不包含 Lighting、计时关闭、全局场景或 Scenes Management。标准插座类型还要求这些功能，因此存在已知符合性限制，不能声称完整符合标准插座要求。Apple Home 基础链路的互操作性须经真机验证；若问题与这些缺项有关，再补齐所需功能。
 
 所有启用的、能够改变开关值的 Matter 路径都必须经过统一设备命令边界。不能让协议栈默认 hook、场景恢复或灯具专用处理器直接修改本地值并绕过真实设备。仅声明所实现插座类型需要且正确支持的功能，不保留虚拟灯的灯具专用功能。
 
