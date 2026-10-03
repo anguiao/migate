@@ -28,16 +28,16 @@ use rustls::{
 use std::{net::TcpListener, sync::Arc, time::Duration};
 use time::OffsetDateTime;
 
-struct TlsFixture {
-    ca_pem: String,
+pub(super) struct TlsFixture {
+    pub(super) ca_pem: String,
     server_pem: String,
     server_key: String,
-    credentials: XiaomiRecord,
+    pub(super) credentials: XiaomiRecord,
     force_tls12: bool,
 }
 
 impl TlsFixture {
-    fn new(expired_server: bool) -> Self {
+    pub(super) fn new(expired_server: bool) -> Self {
         Self::server_case(
             -120,
             if expired_server { -60 } else { 3600 },
@@ -90,7 +90,7 @@ impl TlsFixture {
         }
     }
 
-    fn server_config(&self) -> Arc<ServerConfig> {
+    pub(super) fn server_config(&self) -> Arc<ServerConfig> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let mut roots = RootCertStore::empty();
         roots
