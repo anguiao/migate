@@ -35,6 +35,7 @@ pub struct HomePage {
     pub dids: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct CloudClient {
     client: HttpClient,
     base_url: String,

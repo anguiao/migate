@@ -277,6 +277,12 @@ impl AuthService {
         })
     }
 
+    /// Saved local credentials remain useful when cloud preparation is pending
+    /// or unavailable. Gateway TLS performs current validity and authorization.
+    pub fn saved_bridge_credentials(&self) -> Result<Option<XiaomiRecord>, AuthError> {
+        Ok(self.load_validated()?.map(|stored| stored.record))
+    }
+
     /// Load the current account's static topology before network preparation.
     pub fn load_bridge_cache(&self, key: &DeviceKey) -> Result<Option<CachedDevice>, AuthError> {
         let Some(stored) = self.load_validated()? else {

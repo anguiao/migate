@@ -28,16 +28,16 @@ use rustls::{
 use std::{net::TcpListener, sync::Arc, time::Duration};
 use time::OffsetDateTime;
 
-pub(super) struct TlsFixture {
-    pub(super) ca_pem: String,
+pub(crate) struct TlsFixture {
+    pub(crate) ca_pem: String,
     server_pem: String,
     server_key: String,
-    pub(super) credentials: XiaomiRecord,
+    pub(crate) credentials: XiaomiRecord,
     force_tls12: bool,
 }
 
 impl TlsFixture {
-    pub(super) fn new(expired_server: bool) -> Self {
+    pub(crate) fn new(expired_server: bool) -> Self {
         Self::server_case(
             -120,
             if expired_server { -60 } else { 3600 },
@@ -76,7 +76,9 @@ impl TlsFixture {
                 uid: "isolated-account".into(),
                 region: "cn".into(),
                 oauth_client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-                redirect_uri: "http://unused.invalid".into(),
+                redirect_uri:
+                    "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
+                        .into(),
                 tokens: TokenSet {
                     access_token: "unused".into(),
                     refresh_token: "unused".into(),
@@ -90,7 +92,7 @@ impl TlsFixture {
         }
     }
 
-    pub(super) fn server_config(&self) -> Arc<ServerConfig> {
+    pub(crate) fn server_config(&self) -> Arc<ServerConfig> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let mut roots = RootCertStore::empty();
         roots

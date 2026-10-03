@@ -49,9 +49,9 @@ pub enum CentralEvent {
 }
 
 #[derive(Clone, Copy)]
-struct Timing {
-    request: Duration,
-    keepalive: Option<Duration>,
+pub(super) struct Timing {
+    pub(super) request: Duration,
+    pub(super) keepalive: Option<Duration>,
 }
 impl Default for Timing {
     fn default() -> Self {
@@ -316,7 +316,7 @@ fn property_topic(prefix: &str, did: &str, binding: PropertyBinding) -> String {
     )
 }
 
-trait Transport: AsyncRead + AsyncWrite + Unpin {}
+pub(super) trait Transport: AsyncRead + AsyncWrite + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Unpin> Transport for T {}
 struct Output {
     bytes: Vec<u8>,
@@ -370,7 +370,7 @@ pub async fn connect(
     )
     .await
 }
-async fn start(
+pub(super) async fn start(
     mut stream: Box<dyn Transport>,
     client_id: &str,
     mut timing: Timing,
@@ -1220,4 +1220,4 @@ fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

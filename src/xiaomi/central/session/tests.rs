@@ -12,21 +12,30 @@ use std::{
     rc::Rc,
 };
 
-struct Broker {
+pub(crate) struct Broker {
     stream: TlsStream<Async<TcpStream>>,
     frames: wire::Frames,
-    client_id: String,
+    pub(crate) client_id: String,
     deferred: VecDeque<Packet>,
 }
 
 impl Broker {
-    async fn next(&mut self) -> Packet {
+    pub(crate) fn new(stream: TlsStream<Async<TcpStream>>) -> Self {
+        Self {
+            stream,
+            frames: wire::Frames::default(),
+            client_id: String::new(),
+            deferred: VecDeque::new(),
+        }
+    }
+
+    pub(crate) async fn next(&mut self) -> Packet {
         if let Some(packet) = self.deferred.pop_front() {
             return packet;
         }
         self.next_wire().await
     }
-    async fn wait_for(&mut self, matches: impl Fn(&Packet) -> bool) -> Packet {
+    pub(crate) async fn wait_for(&mut self, matches: impl Fn(&Packet) -> bool) -> Packet {
         if let Some(index) = self.deferred.iter().position(&matches) {
             return self.deferred.remove(index).unwrap();
         }
@@ -39,25 +48,41 @@ impl Broker {
         }
     }
     async fn next_wire(&mut self) -> Packet {
+        self.next_optional()
+            .await
+            .expect("client closed before the expected packet")
+    }
+    pub(crate) async fn next_optional(&mut self) -> Option<Packet> {
         loop {
             if let Some(packet) = self.frames.next_packet().unwrap() {
-                return packet;
+                return Some(packet);
             }
             let mut bytes = [0; 4096];
-            let len = self.stream.read(&mut bytes).await.unwrap();
-            assert!(len > 0, "client closed before the expected packet");
+            let len = self.stream.read(&mut bytes).await.ok()?;
+            if len == 0 {
+                return None;
+            }
             self.frames.push(&bytes[..len]).unwrap();
         }
     }
-    async fn send(&mut self, packet: Packet) {
+    pub(crate) async fn send(&mut self, packet: Packet) {
         self.stream
             .write_all(&encode_packet(&packet).unwrap())
             .await
             .unwrap();
         self.stream.flush().await.unwrap();
     }
-    async fn setup(&mut self) {
-        let Packet::Connect(connect) = self.next().await else {
+    pub(crate) async fn setup(&mut self) {
+        assert!(
+            self.setup_if_connected().await,
+            "CONNECT expected before close"
+        );
+    }
+    pub(crate) async fn setup_if_connected(&mut self) -> bool {
+        let Some(packet) = self.next_optional().await else {
+            return false;
+        };
+        let Packet::Connect(connect) = packet else {
             panic!("CONNECT expected")
         };
         assert!(connect.clean_session);
@@ -69,7 +94,10 @@ impl Broker {
             false,
         )))
         .await;
-        let Packet::Subscribe(subscribe) = self.next().await else {
+        let Some(packet) = self.next_optional().await else {
+            return false;
+        };
+        let Packet::Subscribe(subscribe) = packet else {
             panic!("SUBSCRIBE expected")
         };
         assert_eq!(
@@ -88,8 +116,9 @@ impl Broker {
             vec![SubscribeReasonCode::QoS2; 2],
         )))
         .await;
+        true
     }
-    async fn subscription(&mut self) {
+    pub(crate) async fn subscription(&mut self) {
         let Packet::Subscribe(subscribe) = self.next().await else {
             panic!("property SUBSCRIBE expected")
         };
@@ -103,7 +132,7 @@ impl Broker {
         )))
         .await;
     }
-    async fn reply(&mut self, outgoing: &Publish, value: Value, pkid: u16) {
+    pub(crate) async fn reply(&mut self, outgoing: &Publish, value: Value, pkid: u16) {
         let message = wire::decode_mips(&outgoing.payload).unwrap();
         let mut reply = Publish::new(
             format!("{}/reply", self.client_id),
@@ -396,13 +425,13 @@ fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
 }
 
 impl Broker {
-    async fn acknowledge(&mut self, publish: &Publish) {
+    pub(crate) async fn acknowledge(&mut self, publish: &Publish) {
         self.send(Packet::PubRec(PubRec::new(publish.pkid))).await;
         self.wait_for(|packet| matches!(packet,Packet::PubRel(ack) if ack.pkid==publish.pkid))
             .await;
         self.send(Packet::PubComp(PubComp::new(publish.pkid))).await;
     }
-    fn business(&self, publish: &Publish, value: Value) -> Packet {
+    pub(crate) fn business(&self, publish: &Publish, value: Value) -> Packet {
         Packet::Publish(Publish::new(
             format!("{}/reply", self.client_id),
             QoS::AtMostOnce,
@@ -413,7 +442,7 @@ impl Broker {
             ),
         ))
     }
-    async fn batch(&mut self, packets: Vec<Packet>) {
+    pub(crate) async fn batch(&mut self, packets: Vec<Packet>) {
         let bytes = packets
             .iter()
             .flat_map(|packet| encode_packet(packet).unwrap())

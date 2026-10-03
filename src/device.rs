@@ -133,7 +133,7 @@ impl Error for CommandError {}
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
-trait Clock: Send + Sync {
+pub(crate) trait Clock: Send + Sync {
     fn now(&self) -> Duration;
     fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
@@ -190,6 +190,14 @@ pub struct Device(Arc<Inner>);
 impl Device {
     pub fn new(description: DeviceDescription) -> (Self, CommandReceiver) {
         Self::with_clock(description, Box::new(SystemClock(Instant::now())))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        description: DeviceDescription,
+        clock: Box<dyn Clock>,
+    ) -> (Self, CommandReceiver) {
+        Self::with_clock(description, clock)
     }
 
     fn with_clock(
