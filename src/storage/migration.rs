@@ -1,7 +1,8 @@
+use super::identity;
 use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use std::{error::Error as StdError, fmt};
 
-const CURRENT_VERSION: i64 = 2;
+const CURRENT_VERSION: i64 = 3;
 
 const DEVICE_CACHE_COLUMNS: &[Column] = &[
     Column::new("uid", "TEXT", true, true),
@@ -24,6 +25,10 @@ const DEVICE_IDENTITY_COLUMNS: &[Column] = &[
 ];
 
 const IDENTITY_COLUMNS: &[Column] = &[
+    Column::new("id", "INTEGER", false, true),
+    Column::new("bridge_id", "TEXT", true, false),
+];
+const LEGACY_IDENTITY_COLUMNS: &[Column] = &[
     Column::new("id", "INTEGER", false, true),
     Column::new("bridge_id", "TEXT", true, false),
     Column::new("light_id", "TEXT", true, false),
@@ -104,36 +109,55 @@ impl Column {
 }
 
 pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
-    let version = connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+    let transaction = connection.transaction()?;
+    let version = transaction.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
     match version {
-        0 | 1 => {
-            validate_table(connection, "identity", IDENTITY_COLUMNS)?;
-            validate_table(connection, "blobs", BLOB_COLUMNS)?;
-            if version == 1 {
-                validate_table(connection, "xiaomi_auth", XIAOMI_COLUMNS)?;
+        0..=2 => {
+            validate_table(&transaction, "identity", LEGACY_IDENTITY_COLUMNS)?;
+            validate_table(&transaction, "blobs", BLOB_COLUMNS)?;
+            if version >= 1 {
+                validate_table(&transaction, "xiaomi_auth", XIAOMI_COLUMNS)?;
             }
-            let transaction = connection.transaction()?;
+            if version >= 2 {
+                validate_table(&transaction, "device_cache", DEVICE_CACHE_COLUMNS)?;
+                validate_table(&transaction, "device_identity", DEVICE_IDENTITY_COLUMNS)?;
+            }
+            identity::load(&transaction)?;
             if version == 0 {
                 migrate_v0_to_v1(&transaction)?;
             }
-            migrate_v1_to_v2(&transaction)?;
-            validate_table(&transaction, "identity", IDENTITY_COLUMNS)?;
-            validate_table(&transaction, "blobs", BLOB_COLUMNS)?;
-            validate_table(&transaction, "xiaomi_auth", XIAOMI_COLUMNS)?;
-            validate_table(&transaction, "device_cache", DEVICE_CACHE_COLUMNS)?;
-            validate_table(&transaction, "device_identity", DEVICE_IDENTITY_COLUMNS)?;
-            transaction.commit()?;
-            Ok(())
+            if version < 2 {
+                migrate_v1_to_v2(&transaction)?;
+            }
+            migrate_v2_to_v3(&transaction)?;
         }
-        CURRENT_VERSION => {
-            validate_table(connection, "identity", IDENTITY_COLUMNS)?;
-            validate_table(connection, "blobs", BLOB_COLUMNS)?;
-            validate_table(connection, "xiaomi_auth", XIAOMI_COLUMNS)?;
-            validate_table(connection, "device_cache", DEVICE_CACHE_COLUMNS)?;
-            validate_table(connection, "device_identity", DEVICE_IDENTITY_COLUMNS)
-        }
-        _ => Err(MigrationError::UnsupportedVersion),
+        CURRENT_VERSION => {}
+        _ => return Err(MigrationError::UnsupportedVersion),
     }
+    validate_current_schema(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn validate_current_schema(connection: &Connection) -> Result<(), MigrationError> {
+    validate_table(connection, "identity", IDENTITY_COLUMNS)?;
+    validate_table(connection, "blobs", BLOB_COLUMNS)?;
+    validate_table(connection, "xiaomi_auth", XIAOMI_COLUMNS)?;
+    validate_table(connection, "device_cache", DEVICE_CACHE_COLUMNS)?;
+    validate_table(connection, "device_identity", DEVICE_IDENTITY_COLUMNS)
+}
+
+fn migrate_v2_to_v3(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "CREATE TABLE identity_v3 (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            bridge_id TEXT NOT NULL CHECK (length(bridge_id) = 32)
+        ) STRICT;
+        INSERT INTO identity_v3 (id, bridge_id) SELECT id, bridge_id FROM identity;
+        DROP TABLE identity;
+        ALTER TABLE identity_v3 RENAME TO identity;
+        PRAGMA user_version = 3;",
+    )
 }
 
 fn migrate_v1_to_v2(transaction: &Transaction<'_>) -> rusqlite::Result<()> {

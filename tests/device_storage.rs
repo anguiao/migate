@@ -185,19 +185,30 @@ fn corrupted_cached_instance_type_cannot_restore_an_outlet_or_overwrite_valid_da
 #[test]
 fn version_one_storage_upgrades_without_changing_pairing_or_bridge_identity() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let identity = store.load_identity().unwrap();
-    store.matter().put(7, b"paired").unwrap();
-    let path = store.path().to_owned();
-    drop(store);
+    let path = dir.path().join("state.db");
     let db = Connection::open(&path).unwrap();
+    db.execute_batch(include_str!("fixtures/storage-v2.sql"))
+        .unwrap();
     db.execute_batch(
         "DROP TABLE device_cache; DROP TABLE device_identity; PRAGMA user_version = 1;",
     )
     .unwrap();
+    db.execute(
+        "INSERT INTO identity VALUES (1, ?1, ?2)",
+        [
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+        ],
+    )
+    .unwrap();
+    db.execute("INSERT INTO blobs VALUES (7, ?1)", [b"paired".as_slice()])
+        .unwrap();
     drop(db);
     let upgraded = Store::open(dir.path()).unwrap();
-    assert_eq!(upgraded.load_identity().unwrap(), identity);
+    assert_eq!(
+        upgraded.load_identity().unwrap().bridge_id,
+        "11111111111111111111111111111111"
+    );
     assert_eq!(upgraded.matter().get(7).unwrap(), Some(b"paired".to_vec()));
     assert!(upgraded.xiaomi().load().unwrap().is_none());
     upgraded.devices().save(&cached("account")).unwrap();
@@ -206,19 +217,26 @@ fn version_one_storage_upgrades_without_changing_pairing_or_bridge_identity() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
 }
 
 #[test]
 fn failed_version_one_upgrade_keeps_the_previous_version_and_data() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let identity = store.load_identity().unwrap();
-    let path = store.path().to_owned();
-    drop(store);
+    let path = dir.path().join("state.db");
     let db = Connection::open(&path).unwrap();
+    db.execute_batch(include_str!("fixtures/storage-v2.sql"))
+        .unwrap();
     db.execute_batch("DROP TABLE device_cache; DROP TABLE device_identity; PRAGMA user_version = 1; CREATE VIEW device_identity AS SELECT 'block migration' AS source;").unwrap();
+    db.execute(
+        "INSERT INTO identity VALUES (1, ?1, ?2)",
+        [
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+        ],
+    )
+    .unwrap();
     assert!(Store::open(dir.path()).is_err());
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -229,7 +247,7 @@ fn failed_version_one_upgrade_keeps_the_previous_version_and_data() {
         db.query_row("SELECT bridge_id FROM identity", [], |row| row
             .get::<_, String>(0))
             .unwrap(),
-        identity.bridge_id
+        "11111111111111111111111111111111"
     );
     assert!(
         !db.query_row(

@@ -1,7 +1,6 @@
 CREATE TABLE identity (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    bridge_id TEXT NOT NULL CHECK (length(bridge_id) = 32),
-    light_id TEXT NOT NULL CHECK (length(light_id) = 32 AND light_id <> bridge_id)
+    bridge_id TEXT NOT NULL CHECK (length(bridge_id) = 32)
 ) STRICT;
 
 CREATE TABLE blobs (
@@ -47,4 +46,4 @@ CREATE TABLE device_identity (
     PRIMARY KEY (source, device_id)
 ) STRICT;
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;

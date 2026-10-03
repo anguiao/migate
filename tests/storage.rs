@@ -31,11 +31,19 @@ fn initializes_and_restores_identity_without_power() {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
-        assert_ne!(identity.bridge_id, identity.light_id);
+        let db = Connection::open(store.path()).unwrap();
+        let columns = db
+            .prepare("PRAGMA table_info(identity)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(columns, ["id", "bridge_id"]);
         let description = DeviceDescription {
             key: DeviceKey::new("xiaomi", "test-outlet"),
             category: Category::Outlet,
@@ -291,7 +299,7 @@ fn migrates_unversioned_storage_without_changing_existing_data() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
 }
 
@@ -299,7 +307,7 @@ fn migrates_unversioned_storage_without_changing_existing_data() {
 fn rejects_unsupported_or_damaged_schemas_without_changing_data() {
     for (setup, expected) in [
         (
-            "PRAGMA user_version = 3; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
+            "PRAGMA user_version = 4; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
             "future",
         ),
         (
