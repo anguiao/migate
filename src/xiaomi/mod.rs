@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod capability;
 pub mod certificate;
 pub mod cloud;
 
