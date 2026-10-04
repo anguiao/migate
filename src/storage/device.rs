@@ -1,12 +1,9 @@
 use super::{StorageError, Store};
 use crate::{
-    device::{
-        Capability, Category, DeviceDescription, DeviceKey, FunctionDescription,
-        PhysicalDeviceDescription,
-    },
+    device::{Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription},
     xiaomi::{
         capability::{ParsedDevice, ParsedFunction, PropertyBinding, is_outlet_type},
-        cloud::{OwnedHome, group_id},
+        cloud::group_id,
     },
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
@@ -24,27 +21,14 @@ pub struct CachedPhysicalDevice {
 impl CachedPhysicalDevice {
     pub fn physical_description(&self, label: impl Into<String>) -> PhysicalDeviceDescription {
         PhysicalDeviceDescription {
-            key: self.device.description.key.clone(),
+            key: self.device.key.clone(),
             label: label.into(),
             functions: self
                 .device
                 .functions
                 .iter()
-                .map(|function| FunctionDescription {
-                    id: function.id.clone(),
-                    label: function.label.clone(),
-                    category: self.device.description.category,
-                    capabilities: self.device.description.capabilities.clone(),
-                })
+                .map(|function| function.description.clone())
                 .collect(),
-        }
-    }
-    pub fn home(&self) -> OwnedHome {
-        OwnedHome {
-            uid: self.uid.clone(),
-            home_id: self.home_id.clone(),
-            group_id: self.group_id.clone(),
-            dids: vec![self.device.description.key.id.clone()],
         }
     }
 }
@@ -53,11 +37,6 @@ pub struct CachedScope {
     pub uid: String,
     pub home_id: String,
     pub group_id: String,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeviceIdentity {
-    pub unique_id: String,
-    pub endpoint: u16,
 }
 #[derive(Clone)]
 pub struct DeviceStore {
@@ -86,30 +65,6 @@ impl DeviceStore {
             .and_then(|()| validate_key(key))
             .map_err(|error| self.invalid(operation, error))?;
         load_cached(self.store.connection(), uid, home_id, key)
-            .map_err(|error| self.store.database_error(operation, error))
-    }
-    pub fn list_parsed(
-        &self,
-        uid: &str,
-        home_id: &str,
-    ) -> Result<Vec<CachedPhysicalDevice>, StorageError> {
-        let operation = "list static Xiaomi device descriptions";
-        validate_text(uid)
-            .and_then(|()| validate_text(home_id))
-            .map_err(|error| self.invalid(operation, error))?;
-        let keys=self.store.connection().prepare("SELECT source,device_id FROM device_cache WHERE uid=?1 AND home_id=?2 ORDER BY source,device_id").and_then(|mut statement|statement.query_map(params![uid,home_id], |row|Ok(DeviceKey::new(row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()).map_err(|error|self.store.database_error(operation,error))?;
-        keys.iter()
-            .map(|key| {
-                load_cached(self.store.connection(), uid, home_id, key)
-                    .and_then(|cached| cached.ok_or(rusqlite::Error::InvalidQuery))
-                    .map_err(|error| self.store.database_error(operation, error))
-            })
-            .collect()
-    }
-    pub fn save_parsed(&self, cached: &CachedPhysicalDevice) -> Result<(), StorageError> {
-        let operation = "save static Xiaomi device description";
-        validate_cached(cached).map_err(|error| self.invalid(operation, error))?;
-        save_cached(self.store.connection(), cached)
             .map_err(|error| self.store.database_error(operation, error))
     }
     pub fn save_scope(&self, scope: &CachedScope) -> Result<(), StorageError> {
@@ -173,11 +128,9 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
     })?;
     validate_text(&cached.model)?;
     validate_text(&cached.instance_type)?;
-    validate_key(&cached.device.description.key)?;
-    if cached.device.description.key.source != "xiaomi"
+    validate_key(&cached.device.key)?;
+    if cached.device.key.source != "xiaomi"
         || !is_outlet_type(&cached.instance_type)
-        || cached.device.description.category != Category::Outlet
-        || cached.device.description.capabilities != [Capability::OnOff]
         || cached.device.functions.is_empty()
     {
         return Err("Stored Xiaomi device description is invalid");
@@ -185,9 +138,11 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
     let mut ids = std::collections::HashSet::new();
     let mut bindings = std::collections::HashSet::new();
     for function in &cached.device.functions {
-        validate_text(&function.id)?;
-        if !ids.insert(&function.id)
+        validate_text(&function.description.id)?;
+        if !ids.insert(&function.description.id)
             || !bindings.insert((function.power.siid, function.power.piid))
+            || function.description.category != Category::Outlet
+            || function.description.capabilities != [Capability::OnOff]
             || function.power.siid == 0
             || function.power.piid == 0
         {
@@ -212,15 +167,37 @@ pub(super) fn save_cached(
         .functions
         .iter()
         .map(|function| CachedFunction {
-            id: function.id.clone(),
-            label: function.label.clone(),
+            id: function.description.id.clone(),
+            label: function.description.label.clone(),
             siid: function.power.siid,
             piid: function.power.piid,
         })
         .collect::<Vec<_>>();
     let functions = serde_json::to_string(&functions).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let key = &cached.device.description.key;
-    connection.execute("INSERT INTO device_cache(uid,source,device_id,home_id,group_id,model,instance_type,category,capabilities,functions,refresh_siid,refresh_piid) VALUES (?1,?2,?3,?4,?5,?6,?7,'outlet','on_off',?8,?9,?10) ON CONFLICT(uid,home_id,source,device_id) DO UPDATE SET group_id=excluded.group_id,model=excluded.model,instance_type=excluded.instance_type,category=excluded.category,capabilities=excluded.capabilities,functions=excluded.functions,refresh_siid=excluded.refresh_siid,refresh_piid=excluded.refresh_piid",params![cached.uid,key.source,key.id,cached.home_id,cached.group_id,cached.model,cached.instance_type,functions,cached.device.refresh_trigger.map(|binding|binding.siid),cached.device.refresh_trigger.map(|binding|binding.piid)])?;
+    let key = &cached.device.key;
+    connection.execute(
+        "INSERT INTO device_cache (
+            uid, source, device_id, home_id, group_id, model, instance_type,
+            category, capabilities, functions, refresh_siid, refresh_piid
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'outlet', 'on_off', ?8, ?9, ?10)
+         ON CONFLICT(uid, home_id, source, device_id) DO UPDATE SET
+            group_id=excluded.group_id, model=excluded.model,
+            instance_type=excluded.instance_type, category=excluded.category,
+            capabilities=excluded.capabilities, functions=excluded.functions,
+            refresh_siid=excluded.refresh_siid, refresh_piid=excluded.refresh_piid",
+        params![
+            cached.uid,
+            key.source,
+            key.id,
+            cached.home_id,
+            cached.group_id,
+            cached.model,
+            cached.instance_type,
+            functions,
+            cached.device.refresh_trigger.map(|binding| binding.siid),
+            cached.device.refresh_trigger.map(|binding| binding.piid)
+        ],
+    )?;
     Ok(())
 }
 fn load_cached(
@@ -229,7 +206,26 @@ fn load_cached(
     home_id: &str,
     key: &DeviceKey,
 ) -> rusqlite::Result<Option<CachedPhysicalDevice>> {
-    let data=connection.query_row("SELECT group_id,model,instance_type,category,capabilities,functions,refresh_siid,refresh_piid FROM device_cache WHERE uid=?1 AND home_id=?2 AND source=?3 AND device_id=?4",params![uid,home_id,key.source,key.id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?,row.get::<_,Option<u32>>(6)?,row.get::<_,Option<u32>>(7)?))).optional()?;
+    let data = connection
+        .query_row(
+            "SELECT group_id, model, instance_type, category, capabilities, functions,
+                    refresh_siid, refresh_piid
+             FROM device_cache WHERE uid=?1 AND home_id=?2 AND source=?3 AND device_id=?4",
+            params![uid, home_id, key.source, key.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<u32>>(6)?,
+                    row.get::<_, Option<u32>>(7)?,
+                ))
+            },
+        )
+        .optional()?;
     let Some((
         group_id,
         model,
@@ -260,16 +256,16 @@ fn load_cached(
         model,
         instance_type,
         device: ParsedDevice {
-            description: DeviceDescription {
-                key: key.clone(),
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
-            },
+            key: key.clone(),
             functions: functions
                 .into_iter()
                 .map(|function| ParsedFunction {
-                    id: function.id,
-                    label: function.label,
+                    description: FunctionDescription {
+                        id: function.id,
+                        label: function.label,
+                        category: Category::Outlet,
+                        capabilities: vec![Capability::OnOff],
+                    },
                     power: PropertyBinding {
                         siid: function.siid,
                         piid: function.piid,
@@ -284,6 +280,10 @@ fn load_cached(
 }
 
 fn save_scope(connection: &Connection, scope: &CachedScope) -> rusqlite::Result<()> {
-    connection.execute("INSERT INTO xiaomi_scope VALUES (?1,?2,?3) ON CONFLICT(uid) DO UPDATE SET home_id=excluded.home_id,group_id=excluded.group_id",params![scope.uid,scope.home_id,scope.group_id])?;
+    connection.execute(
+        "INSERT INTO xiaomi_scope VALUES (?1, ?2, ?3)
+         ON CONFLICT(uid) DO UPDATE SET home_id=excluded.home_id, group_id=excluded.group_id",
+        params![scope.uid, scope.home_id, scope.group_id],
+    )?;
     Ok(())
 }

@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     RuntimeError,
-    device::{Capability, Category, CommandReceiver, Device, DeviceDescription, DeviceKey},
+    device::{Capability, Category, CommandReceiver, DeviceKey, PhysicalDevice},
     storage::Store,
 };
 use futures_lite::future::{block_on, or};
@@ -50,21 +50,22 @@ pub(super) fn physical(
             .collect(),
     })
 }
-pub(crate) fn test_registry(store: &Store, device: &Device) -> crate::device::DeviceRegistry {
-    let physical = crate::device::PhysicalDevice::from_single(device.clone(), "Test Outlet".into());
-    store.devices().publish(physical.description()).unwrap();
+pub(crate) fn test_registry(
+    store: &Store,
+    device: &PhysicalDevice,
+) -> crate::device::DeviceRegistry {
+    let stored = store.devices().publish(&device.description()).unwrap();
+    device.set_label(stored.label);
     let registry = crate::device::DeviceRegistry::new();
-    registry.insert(physical);
+    registry.insert(device.clone());
     registry
 }
-pub(crate) fn test_device() -> (Device, CommandReceiver) {
-    Device::new(DeviceDescription {
-        key: DeviceKey::new("xiaomi", "test-outlet"),
-        category: Category::Outlet,
-        capabilities: vec![Capability::OnOff],
-    })
+pub(crate) fn test_device() -> (PhysicalDevice, CommandReceiver) {
+    let (device, mut receivers) = physical("test-outlet", false);
+    device.set_label("Test Outlet".into());
+    (device, receivers.remove(0))
 }
-pub(super) async fn terminal_command(device: &Device, line: &str) -> Option<String> {
+pub(super) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Option<String> {
     use crate::{
         terminal::{self, AuthStatus},
         xiaomi::auth::{AuthReport, AuthenticationState, CertificateUpdate},
@@ -80,7 +81,7 @@ pub(super) async fn terminal_command(device: &Device, line: &str) -> Option<Stri
     let store = Store::open(directory.path()).unwrap();
     let registry = test_registry(&store, device);
     let line = if matches!(line, "on" | "off") {
-        format!("{line} {}", device.description().key.id)
+        format!("{line} {}", device.key().id)
     } else {
         line.into()
     };

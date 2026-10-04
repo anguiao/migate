@@ -31,14 +31,14 @@ fn cached_bridge_device(uid: &str) -> crate::storage::CachedPhysicalDevice {
         model: "vendor.plug".into(),
         instance_type: "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1".into(),
         device: crate::xiaomi::capability::ParsedDevice {
-            description: crate::device::DeviceDescription {
-                key: crate::device::DeviceKey::new("xiaomi", "target"),
-                category: crate::device::Category::Outlet,
-                capabilities: vec![crate::device::Capability::OnOff],
-            },
+            key: crate::device::DeviceKey::new("xiaomi", "target"),
             functions: vec![crate::xiaomi::capability::ParsedFunction {
-                id: "main".into(),
-                label: "主电源".into(),
+                description: crate::device::FunctionDescription {
+                    id: "main".into(),
+                    label: "主电源".into(),
+                    category: crate::device::Category::Outlet,
+                    capabilities: vec![crate::device::Capability::OnOff],
+                },
                 power: crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
             }],
             refresh_trigger: None,
@@ -79,10 +79,10 @@ fn bridge_cloud_or_refresh_failure_preserves_same_account_cache_and_valid_certif
         let original = valid_record("uid", "old-access", refresh_at, NOW + 10 * 24 * 60 * 60);
         store.xiaomi().replace(&original).unwrap();
         let cached = cached_bridge_device("uid");
-        store.devices().save_parsed(&cached).unwrap();
+        store.devices().publish_cached(&cached, "Outlet").unwrap();
         store
             .devices()
-            .save_parsed(&cached_bridge_device("other-account"))
+            .publish_cached(&cached_bridge_device("other-account"), "Outlet")
             .unwrap();
         let (auth, requests) = service(&store, vec![MockResponse::json(status, "cloud failure")]);
         let prepared = block_on(auth.prepare_bridge()).unwrap();
@@ -96,7 +96,7 @@ fn bridge_cloud_or_refresh_failure_preserves_same_account_cache_and_valid_certif
                 .load_parsed(
                     &prepared.credentials.as_ref().unwrap().uid,
                     "local-home",
-                    &cached.device.description.key
+                    &cached.device.key
                 )
                 .unwrap(),
             Some(cached)
@@ -125,7 +125,7 @@ fn bridge_account_mismatch_does_not_expose_another_accounts_directory_or_cache()
         ))
         .unwrap();
     let other = cached_bridge_device("new-account");
-    store.devices().save_parsed(&other).unwrap();
+    store.devices().publish_cached(&other, "Outlet").unwrap();
     let homes = json!({"code":0,"result":{"homelist":[{"uid":"new-account","id":"local-home","roomlist":[],"dids":["target"]}]}});
     let (auth, _) = service(&store, vec![MockResponse::json(200, &homes.to_string())]);
     let prepared = block_on(auth.prepare_bridge()).unwrap();
@@ -137,7 +137,7 @@ fn bridge_account_mismatch_does_not_expose_another_accounts_directory_or_cache()
     assert!(
         store
             .devices()
-            .load_parsed("old-account", "local-home", &other.device.description.key)
+            .load_parsed("old-account", "local-home", &other.device.key)
             .unwrap()
             .is_none()
     );
@@ -180,7 +180,7 @@ fn bridge_preparation_renews_with_processed_credentials_without_reading_device_c
     assert_eq!(requests.try_iter().count(), 3);
 
     let cached = cached_bridge_device("uid");
-    store.devices().save_parsed(&cached).unwrap();
+    store.devices().publish_cached(&cached, "Outlet").unwrap();
     Connection::open(store.path())
         .unwrap()
         .execute("UPDATE device_cache SET capabilities = 'broken'", [])
@@ -191,7 +191,7 @@ fn bridge_preparation_renews_with_processed_credentials_without_reading_device_c
     assert!(
         store
             .devices()
-            .load_parsed("uid", "local-home", &cached.device.description.key)
+            .load_parsed("uid", "local-home", &cached.device.key)
             .is_err()
     );
 }
@@ -744,6 +744,62 @@ fn home_401_refreshes_once_and_retries_home_with_new_token() {
             .to_ascii_lowercase()
             .contains("authorization: bearerfresh")
     );
+}
+
+#[test]
+fn home_or_device_refresh_exhausts_the_certificate_refresh_allowance() {
+    for rejected_home in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let original = valid_record("uid", "old", NOW + 500, NOW + 60);
+        store.xiaomi().replace(&original).unwrap();
+        let mut responses = Vec::new();
+        if !rejected_home {
+            responses.push(MockResponse::json(200, &home_body(Some("uid"), &["did"])));
+        }
+        responses.extend([
+            MockResponse::json(401, "access denied"),
+            MockResponse::json(200, &token_body("fresh", "rotated")),
+        ]);
+        if rejected_home {
+            responses.push(MockResponse::json(200, &home_body(Some("uid"), &["did"])));
+        }
+        responses.extend([
+            MockResponse::json(200, devices_body()),
+            MockResponse::json(401, "certificate denied"),
+        ]);
+        let expected_requests = responses.len();
+        let (auth, requests) = service(&store, responses);
+        let report = block_on(auth.check()).unwrap();
+        assert!(matches!(
+            report.authentication,
+            AuthenticationState::SignInRequired(_)
+        ));
+        assert!(matches!(
+            report.certificate_update,
+            CertificateUpdate::Failed(_)
+        ));
+        let saved = store.xiaomi().load().unwrap().unwrap();
+        assert_eq!(saved.tokens.refresh_token, "rotated");
+        assert_eq!(saved.certificate_pem, original.certificate_pem);
+        let requests = requests.try_iter().collect::<Vec<_>>();
+        assert_eq!(requests.len(), expected_requests);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.target.contains("get_token"))
+                .count(),
+            1
+        );
+        assert!(
+            requests
+                .last()
+                .unwrap()
+                .headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearerfresh")
+        );
+    }
 }
 
 #[test]

@@ -1,23 +1,29 @@
 use super::{
     model::{GatewayStatus, Ready, SourceError, SourceStatus, TopologyReady},
     runner::XiaomiSource,
-    state::{Context, DeviceRecord, Live},
+    state::{Context, DeviceSlot, Live},
+    tasks::TaskSet,
 };
 use crate::{
-    device::{Availability, Clock, DeviceRegistry, PhysicalDevice},
-    storage::{StorageError, Store},
+    device::{Availability, DeviceRegistry, PhysicalDevice},
+    storage::Store,
     xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
 };
 use event_listener::Event;
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     future::Future,
     pin::Pin,
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
+pub(super) trait Clock: Send + Sync {
+    fn now(&self) -> Duration;
+    fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
 pub(super) fn system_clock() -> Arc<dyn Clock> {
     Arc::new(SystemClock(Instant::now()))
 }
@@ -47,58 +53,19 @@ impl XiaomiSource {
             .transpose()?
             .flatten();
         let registry = DeviceRegistry::new();
-        let mut records = BTreeMap::new();
+        let mut devices = BTreeMap::new();
         let mut consumers = Vec::new();
         if let Some(scope) = &scope {
-            let cached = store.devices().list_parsed(&scope.uid, &scope.home_id)?;
-            let published = store.devices().list_published()?;
-            for metadata in cached {
-                let Some(stored) = published
-                    .iter()
-                    .find(|stored| stored.key == metadata.device.description.key)
-                else {
-                    continue;
-                };
-                if metadata.device.functions.len() != stored.functions.len()
-                    || stored.functions.iter().any(|stored| {
-                        !metadata.device.functions.iter().any(|function| {
-                            function.id == stored.key.id
-                                && metadata.device.description.category == stored.category
-                                && metadata.device.description.capabilities == stored.capabilities
-                        })
-                    })
-                {
-                    return Err(StorageError::new(
-                        store.path(),
-                        "restore Xiaomi device topology",
-                        "Cached functions differ from the published identity",
-                    )
-                    .into());
-                }
-                let mut description = metadata.physical_description(stored.label.clone());
-                for function in &mut description.functions {
-                    function.label = stored
-                        .functions
-                        .iter()
-                        .find(|stored| stored.key.id == function.id)
-                        .unwrap()
-                        .label
-                        .clone();
-                }
-                let (physical, receivers) = PhysicalDevice::new(description);
+            for (metadata, stored) in store.devices().restore_cached(&scope.uid, &scope.home_id)? {
+                let (physical, receivers) = PhysicalDevice::new(stored.description());
                 physical.set_availability(Availability::Unavailable(
                     "restoring local gateway connection".into(),
                 ));
                 registry.insert(physical.clone());
-                records.insert(
-                    metadata.device.description.key.id.clone(),
-                    DeviceRecord {
-                        cached: metadata.clone(),
-                        physical,
-                        blocked: None,
-                    },
-                );
-                consumers.push((metadata, receivers));
+                let did = metadata.device.key.id.clone();
+                let slot = DeviceSlot::restored(metadata, physical);
+                consumers.push((slot.admitted.as_ref().unwrap().clone(), receivers));
+                devices.insert(did, slot);
             }
         }
         let ready = Rc::new(Ready::default());
@@ -106,25 +73,16 @@ impl XiaomiSource {
             ready.finish(Ok(registry.clone()));
         }
         let report = auth.local_status()?;
-        let members = records.keys().cloned().collect::<BTreeSet<_>>();
-        let descriptions = records
-            .iter()
-            .map(|(did, record)| (did.clone(), record.cached.clone()))
-            .collect();
         let context = Rc::new(Context {
             live: RefCell::new(Live {
                 credentials,
                 scope,
-                members,
-                records,
-                descriptions,
-                access: BTreeMap::new(),
-                loading: BTreeMap::new(),
+                devices,
                 session: None,
             }),
             registry,
             store,
-            tasks: RefCell::new(Vec::new()),
+            tasks: TaskSet::default(),
             changed: Event::new(),
             status: RefCell::new(SourceStatus {
                 authentication: report,
@@ -133,18 +91,16 @@ impl XiaomiSource {
                 pending: Vec::new(),
             }),
             status_changed: Event::new(),
+            cloud_problem: RefCell::new(None),
+            access_problem: RefCell::new(None),
             ready: ready.clone(),
             clock,
-            rejected_token: RefCell::new(None),
-            refreshing_token: RefCell::new(None),
-            refreshed_token: RefCell::new(None),
+
             sync_requested: Cell::new(true),
             sync_changed: Event::new(),
-            cloud_paused: Cell::new(false),
-            fatal: RefCell::new(None),
         });
-        for (metadata, receivers) in consumers {
-            context.add_consumers(&metadata, receivers);
+        for (record, receivers) in consumers {
+            context.add_consumers(record, receivers);
         }
         Ok((
             Self {

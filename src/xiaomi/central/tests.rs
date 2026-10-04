@@ -355,6 +355,7 @@ fn mqtt_frames_accept_short_disconnect_and_reject_invalid_flags_and_sizes() {
     for bytes in [
         vec![0xd1, 0],
         vec![0xc0, 1, 0],
+        vec![0xe0, 1, 0xff],
         vec![0x30, 0xff, 0xff, 0xff, 0x7f],
         vec![0x30, 0xff, 0xff, 0xff, 0xff, 0],
     ] {
@@ -383,7 +384,10 @@ fn complete_frames_with_missing_mandatory_fields_are_errors_and_reason_only_pack
         (vec![0x70, 3, 0, 1, 0x92], 0x92),
     ] {
         let mut frames = MqttFrames::default();
-        frames.push(&bytes).unwrap();
+        frames.push(&bytes[..2]).unwrap();
+        assert!(frames.next_packet().unwrap().is_none());
+        frames.push(&bytes[2..]).unwrap();
+        frames.push(&[0xd0, 0]).unwrap();
         let actual = match frames.next_packet().unwrap().unwrap() {
             Packet::Disconnect(packet) => packet.reason_code as u8,
             Packet::PubAck(packet) => packet.reason as u8,
@@ -393,6 +397,10 @@ fn complete_frames_with_missing_mandatory_fields_are_errors_and_reason_only_pack
             other => panic!("unexpected packet {other:?}"),
         };
         assert_eq!(actual, reason);
+        assert!(matches!(
+            frames.next_packet().unwrap(),
+            Some(Packet::PingResp)
+        ));
         assert!(frames.next_packet().unwrap().is_none());
     }
 }

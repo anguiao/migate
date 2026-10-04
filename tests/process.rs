@@ -557,10 +557,9 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
         let restored = (
             reopened.load_identity().unwrap(),
             reopened
-                .load_or_create_device_identity(&migate::device::DeviceKey::new(
-                    "xiaomi",
-                    "test-outlet",
-                ))
+                .devices()
+                .load_published(&migate::device::DeviceKey::new("xiaomi", "test-outlet"))
+                .unwrap()
                 .unwrap(),
         );
         if let Some(identity) = &identity {
@@ -645,12 +644,11 @@ fn bridge_helper_child() {
                     capabilities: vec![Capability::OnOff],
                 }],
             });
-            store.devices().publish(physical.description()).unwrap();
-            let device = physical.functions()[0].clone();
+            store.devices().publish(&physical.description()).unwrap();
             let mut receiver = receivers.remove(0);
             let registry = DeviceRegistry::new();
-            registry.insert(physical);
-            let source_device = device.clone();
+            registry.insert(physical.clone());
+            let source_device = physical;
             let gate = directory.join("source-ready");
             let initial =
                 std::env::var("MIGATE_TEST_INITIAL_POWER").is_ok_and(|value| value == "on");
@@ -665,7 +663,7 @@ fn bridge_helper_child() {
                 while !gate.try_exists()? {
                     async_io::Timer::after(Duration::from_millis(10)).await;
                 }
-                source_device.observe(initial);
+                source_device.functions()[0].observe(initial);
                 source_device.set_availability(Availability::Available);
                 log::info!(
                     "Fake source initial read: {}",

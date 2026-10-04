@@ -6,8 +6,8 @@ use std::{
 use event_listener::Event;
 
 use super::{
-    model::{Capability, Command, CommandError, DeviceSnapshot},
-    state::Device,
+    model::{Capability, Command, CommandError, FunctionSnapshot},
+    state::Function,
 };
 
 #[derive(Default)]
@@ -30,12 +30,12 @@ impl Queue {
     }
 }
 
-impl Device {
+impl Function {
     /// Completion means the downstream adapter accepted the command, not that
     /// the physical action has been independently confirmed.
     /// Dropping the future withdraws a queued command. An adapter that already
     /// received it still owns its result and may update the shared snapshot.
-    pub async fn execute(&self, command: Command) -> Result<DeviceSnapshot, CommandError> {
+    pub async fn execute(&self, command: Command) -> Result<FunctionSnapshot, CommandError> {
         if !self.description().capabilities.contains(&Capability::OnOff) {
             return Err(CommandError::Unsupported);
         }
@@ -52,7 +52,7 @@ impl Device {
             });
         }
         let _submission = Submission {
-            device: self.clone(),
+            function: self.clone(),
             completion: completion.clone(),
         };
         self.0.submitted.notify(usize::MAX);
@@ -62,12 +62,12 @@ impl Device {
 
 #[derive(Default)]
 pub(super) struct Completion {
-    result: Mutex<Option<Result<DeviceSnapshot, CommandError>>>,
+    result: Mutex<Option<Result<FunctionSnapshot, CommandError>>>,
     changed: Event,
 }
 
 impl Completion {
-    pub(super) fn finish(&self, result: Result<DeviceSnapshot, CommandError>) {
+    pub(super) fn finish(&self, result: Result<FunctionSnapshot, CommandError>) {
         let mut current = self.result.lock().unwrap();
         if current.is_none() {
             *current = Some(result);
@@ -75,7 +75,7 @@ impl Completion {
         }
     }
 
-    async fn wait(&self) -> Result<DeviceSnapshot, CommandError> {
+    async fn wait(&self) -> Result<FunctionSnapshot, CommandError> {
         loop {
             let listener = self.changed.listen();
             if let Some(result) = self.result.lock().unwrap().clone() {
@@ -93,13 +93,13 @@ struct PendingCommand {
 
 /// A waiting caller owns its place in the queue, until the adapter takes over.
 struct Submission {
-    device: Device,
+    function: Function,
     completion: Arc<Completion>,
 }
 
 impl Drop for Submission {
     fn drop(&mut self) {
-        let mut state = self.device.0.state.lock().unwrap();
+        let mut state = self.function.0.state.lock().unwrap();
         state
             .queue
             .pending
@@ -109,22 +109,22 @@ impl Drop for Submission {
 
 /// The single command consumer preserves receive order across adapter sessions.
 pub struct CommandReceiver {
-    pub(super) device: Device,
+    pub(super) function: Function,
 }
 
 impl CommandReceiver {
     pub async fn next(&mut self) -> Option<CommandRequest> {
-        let active = self.device.0.state.lock().unwrap().queue.active.clone();
+        let active = self.function.0.state.lock().unwrap().queue.active.clone();
         if let Some(active) = active {
             let _ = active.wait().await;
-            self.device.0.state.lock().unwrap().queue.active = None;
+            self.function.0.state.lock().unwrap().queue.active = None;
         }
         loop {
-            let listener = self.device.0.submitted.listen();
+            let listener = self.function.0.submitted.listen();
             let request = {
-                let mut state = self.device.0.state.lock().unwrap();
+                let mut state = self.function.0.state.lock().unwrap();
                 if let Some(pending) = state.queue.pending.pop_front() {
-                    let snapshot = self.device.snapshot_locked(&state);
+                    let snapshot = self.function.snapshot_locked(&state);
                     let target =
                         snapshot.availability.command_result().and_then(|()| {
                             match pending.command {
@@ -147,7 +147,7 @@ impl CommandReceiver {
                     state.queue.active = Some(pending.completion.clone());
                     Some(CommandRequest {
                         target,
-                        device: self.device.clone(),
+                        function: self.function.clone(),
                         completion: pending.completion,
                     })
                 } else if state.queue.closed {
@@ -166,34 +166,25 @@ impl CommandReceiver {
 
 impl Drop for CommandReceiver {
     fn drop(&mut self) {
-        let mut state = self.device.0.state.lock().unwrap();
-        state.queue.closed = true;
-        let completions = state.queue.drain_completions();
-        for completion in completions {
-            completion.finish(Err(CommandError::Cancelled));
-        }
+        self.function.close();
     }
 }
 
 /// A protocol-independent absolute write owned by the adapter until completion.
 pub struct CommandRequest {
     pub target: bool,
-    device: Device,
+    function: Function,
     completion: Arc<Completion>,
 }
 
 impl CommandRequest {
-    pub fn accept(self) -> Result<DeviceSnapshot, CommandError> {
-        let mut state = self.device.0.state.lock().unwrap();
+    pub fn accept(self) -> Result<FunctionSnapshot, CommandError> {
+        let mut state = self.function.0.state.lock().unwrap();
         let mut result = self.completion.result.lock().unwrap();
         if let Some(completed) = &*result {
             return completed.clone();
         }
-        let accepted = if state.queue.closed {
-            Err(CommandError::Cancelled)
-        } else {
-            Ok(self.device.update_power(&mut state, self.target))
-        };
+        let accepted = Ok(self.function.update_power(&mut state, self.target));
         *result = Some(accepted.clone());
         self.completion.changed.notify(usize::MAX);
         accepted

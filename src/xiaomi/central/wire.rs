@@ -132,26 +132,19 @@ impl Frames {
             {
                 return Err(malformed("MQTT", "nonempty ping packet"));
             }
-            mqttbytes::PacketType::Disconnect if header.frame_length() == 2 => {
-                let _ = self.bytes.split_to(2);
-                return Ok(Some(Packet::Disconnect(v5::Disconnect::new())));
+            mqttbytes::PacketType::Disconnect if self.bytes[1] <= 1 => {
+                // MQTT 5 permits omitting the reason and property length;
+                // mqttbytes 0.6 requires both for DISCONNECT decoding.
+                let mut packet = v5::Disconnect::new();
+                if self.bytes[1] == 1 {
+                    packet.reason_code = self.bytes[2]
+                        .try_into()
+                        .map_err(|_| malformed("MQTT", "invalid disconnect reason"))?;
+                }
+                let _ = self.bytes.split_to(header.frame_length());
+                return Ok(Some(Packet::Disconnect(packet)));
             }
             _ => {}
-        }
-        // MQTT 5 permits omitting Property Length on reason-only DISCONNECT
-        // and QoS acknowledgements. mqttbytes 0.6 expects it unconditionally.
-        // Supply the equivalent empty property set to its typed decoder.
-        let reason_only = (self.bytes[0] == 0xe0 && self.bytes[1] == 1)
-            || (matches!(self.bytes[0] >> 4, 4..=7) && self.bytes[1] == 3);
-        if reason_only {
-            let length = header.frame_length();
-            let mut packet = BytesMut::from(&self.bytes[..length]);
-            packet[1] += 1;
-            packet.extend_from_slice(&[0]);
-            let decoded = v5::read(&mut packet, MAX_FRAME_SIZE)
-                .map_err(|_| malformed("MQTT", "invalid packet body"))?;
-            let _ = self.bytes.split_to(length);
-            return Ok(Some(decoded));
         }
         // Framing has already proved completeness. An insufficient body is
         // malformed, even if the decoder reports InsufficientBytes after

@@ -1,11 +1,11 @@
 use super::directory::{prepare_directory, private_permissions};
 use super::{
     StorageError,
-    device::{DeviceIdentity, DeviceStore},
+    device::DeviceStore,
     identity::{self, Identity},
     lock,
     matter::MatterStore,
-    migration, registry,
+    migration,
     xiaomi::XiaomiStore,
 };
 use rusqlite::Connection;
@@ -80,13 +80,6 @@ impl Store {
         DeviceStore::new(self.clone())
     }
 
-    pub fn load_or_create_device_identity(
-        &self,
-        key: &crate::device::DeviceKey,
-    ) -> Result<DeviceIdentity, StorageError> {
-        registry::load_or_create_identity(self, key)
-    }
-
     pub(super) fn connection(&self) -> &Connection {
         &self.inner.connection
     }
@@ -118,7 +111,7 @@ fn require_empty_directory(directory: &Path) -> Result<(), StorageError> {
 
 fn initialize(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
-    transaction.execute_batch(include_str!("schema.sql"))?;
+    transaction.execute_batch(migration::SCHEMA)?;
     identity::insert(&transaction)?;
     transaction.commit()
 }

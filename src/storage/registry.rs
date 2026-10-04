@@ -1,11 +1,13 @@
 use super::{
-    StorageError, Store,
+    StorageError,
     device::{
-        CachedPhysicalDevice, DeviceIdentity, DeviceStore, save_cached, validate_cached,
-        validate_key, validate_text,
+        CachedPhysicalDevice, DeviceStore, save_cached, validate_cached, validate_key,
+        validate_text,
     },
 };
-use crate::device::{Capability, Category, DeviceKey, FunctionKey, PhysicalDeviceDescription};
+use crate::device::{
+    Capability, Category, DeviceKey, FunctionDescription, FunctionKey, PhysicalDeviceDescription,
+};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
 
@@ -57,6 +59,36 @@ pub struct StoredDevice {
     pub functions: Vec<StoredFunction>,
     pub published: bool,
 }
+impl StoredDevice {
+    /// Build runtime metadata from the identity and names committed at admission.
+    pub fn description(&self) -> PhysicalDeviceDescription {
+        PhysicalDeviceDescription {
+            key: self.key.clone(),
+            label: self.label.clone(),
+            functions: self
+                .functions
+                .iter()
+                .map(|function| FunctionDescription {
+                    id: function.key.id.clone(),
+                    label: function.label.clone(),
+                    category: function.category,
+                    capabilities: function.capabilities.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn matches_functions(&self, functions: &[FunctionDescription]) -> bool {
+        self.functions.len() == functions.len()
+            && self.functions.iter().all(|stored| {
+                functions.iter().any(|function| {
+                    stored.key.id == function.id
+                        && stored.category == function.category
+                        && stored.capabilities == function.capabilities
+                })
+            })
+    }
+}
 struct Record {
     device: StoredDevice,
     named: bool,
@@ -78,22 +110,35 @@ pub(super) fn validate_label(label: &str) -> Result<(), &'static str> {
     }
 }
 impl DeviceStore {
+    /// Restore only published members of this account and home, with one topology check.
+    pub fn restore_cached(
+        &self,
+        uid: &str,
+        home_id: &str,
+    ) -> Result<Vec<(CachedPhysicalDevice, StoredDevice)>, StorageError> {
+        let mut restored = Vec::new();
+        for stored in self.list_published()? {
+            let Some(cached) = self.load_parsed(uid, home_id, &stored.key)? else {
+                continue;
+            };
+            if !stored.matches_functions(&cached.physical_description("").functions) {
+                return Err(self.invalid(
+                    "restore Xiaomi device topology",
+                    "Cached functions differ from the published identity",
+                ));
+            }
+            restored.push((cached, stored));
+        }
+        Ok(restored)
+    }
+
     pub fn publish(
         &self,
         description: &PhysicalDeviceDescription,
     ) -> Result<StoredDevice, AdmissionError> {
         let operation = "publish device identity";
         validate_description(description).map_err(|error| self.invalid(operation, error))?;
-        let transaction = self
-            .store
-            .connection()
-            .unchecked_transaction()
-            .map_err(|error| self.store.database_error(operation, error))?;
-        let result = self.publish_in(&transaction, description, operation)?;
-        transaction
-            .commit()
-            .map_err(|error| self.store.database_error(operation, error))?;
-        Ok(result)
+        self.publish_record(description, None)
     }
     /// Commit a compatible adapter description and its complete published identity together.
     pub fn publish_cached(
@@ -103,33 +148,28 @@ impl DeviceStore {
     ) -> Result<StoredDevice, AdmissionError> {
         let operation = "publish Xiaomi device";
         validate_cached(cached).map_err(|error| self.invalid(operation, error))?;
-        let description = cached.physical_description(label);
-        validate_description(&description).map_err(|error| self.invalid(operation, error))?;
+        self.publish_record(&cached.physical_description(label), Some(cached))
+    }
+    fn publish_record(
+        &self,
+        description: &PhysicalDeviceDescription,
+        cached: Option<&CachedPhysicalDevice>,
+    ) -> Result<StoredDevice, AdmissionError> {
+        let operation = "publish device identity";
         let transaction = self
             .store
             .connection()
             .unchecked_transaction()
             .map_err(|error| self.store.database_error(operation, error))?;
-        let result = self.publish_in(&transaction, &description, operation)?;
-        save_cached(&transaction, cached)
-            .map_err(|error| self.store.database_error(operation, error))?;
+        let result = self.publish_in(&transaction, description, operation)?;
+        if let Some(cached) = cached {
+            save_cached(&transaction, cached)
+                .map_err(|error| self.store.database_error(operation, error))?;
+        }
         transaction
             .commit()
             .map_err(|error| self.store.database_error(operation, error))?;
         Ok(result)
-    }
-    fn require_capacity(
-        &self,
-        connection: &Connection,
-        required: usize,
-        operation: &'static str,
-    ) -> Result<(), AdmissionError> {
-        if !has_capacity(connection, required)
-            .map_err(|error| self.store.database_error(operation, error))?
-        {
-            return Err(AdmissionError::EndpointExhausted);
-        }
-        Ok(())
     }
     fn publish_in(
         &self,
@@ -141,15 +181,7 @@ impl DeviceStore {
             .map_err(|error| self.store.database_error(operation, error))?;
         match record {
             Some(record) => {
-                let matches = record.device.functions.len() == description.functions.len()
-                    && record.device.functions.iter().all(|stored| {
-                        description.functions.iter().any(|function| {
-                            stored.key.id == function.id
-                                && stored.category == function.category
-                                && stored.capabilities == function.capabilities
-                        })
-                    });
-                if !matches {
+                if !record.device.matches_functions(&description.functions) {
                     return Err(AdmissionError::IncompatibleFunctions);
                 }
                 if !record.named {
@@ -177,8 +209,17 @@ impl DeviceStore {
                 } else {
                     description.functions.len() + 1
                 };
-                self.require_capacity(connection, required, operation)?;
-                create_record(connection, description, true)
+                let last = connection
+                    .query_row(
+                        "SELECT COALESCE(MAX(endpoint),1) FROM endpoint_allocation",
+                        [],
+                        |row| row.get::<_, u16>(0),
+                    )
+                    .map_err(|error| self.store.database_error(operation, error))?;
+                if required > 65534usize.saturating_sub(last.into()) {
+                    return Err(AdmissionError::EndpointExhausted);
+                }
+                create_record(connection, description, last + 1)
                     .map_err(|error| self.store.database_error(operation, error))?;
             }
         }
@@ -253,18 +294,6 @@ impl DeviceStore {
         }
         Ok(())
     }
-    pub fn set_function_label(&self, key: &FunctionKey, label: &str) -> Result<(), StorageError> {
-        let operation = "write device function label";
-        validate_key(&key.device)
-            .and_then(|()| validate_text(&key.id))
-            .and_then(|()| validate_label(label))
-            .map_err(|error| self.invalid(operation, error))?;
-        let changed=self.store.connection().execute("UPDATE device_function SET label=?4 WHERE source=?1 AND device_id=?2 AND function_id=?3",params![key.device.source,key.device.id,key.id,label]).map_err(|error|self.store.database_error(operation,error))?;
-        if changed == 0 {
-            return Err(self.invalid(operation, "Function identity does not exist"));
-        }
-        Ok(())
-    }
 }
 fn validate_description(description: &PhysicalDeviceDescription) -> Result<(), &'static str> {
     validate_key(&description.key)?;
@@ -283,36 +312,13 @@ fn validate_description(description: &PhysicalDeviceDescription) -> Result<(), &
     }
     Ok(())
 }
-fn has_capacity(connection: &Connection, required: usize) -> rusqlite::Result<bool> {
-    let last = connection.query_row(
-        "SELECT COALESCE(MAX(endpoint),1) FROM endpoint_allocation",
-        [],
-        |row| row.get::<_, u32>(0),
-    )?;
-    Ok(required <= 65534u32.saturating_sub(last) as usize)
-}
-fn allocate(connection: &Connection, key: &DeviceKey, slot: &str) -> rusqlite::Result<u16> {
-    let endpoint = connection.query_row(
-        "SELECT COALESCE(MAX(endpoint),1)+1 FROM endpoint_allocation",
-        [],
-        |row| row.get::<_, u32>(0),
-    )?;
-    if endpoint > 65534 {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    connection.execute(
-        "INSERT INTO endpoint_allocation VALUES (?1,?2,?3,?4)",
-        params![endpoint, key.source, key.id, slot],
-    )?;
-    Ok(endpoint as u16)
-}
 fn create_record(
     connection: &Connection,
     description: &PhysicalDeviceDescription,
-    published: bool,
+    endpoint: u16,
 ) -> rusqlite::Result<()> {
     let single = description.functions.len() == 1;
-    let endpoint = allocate(
+    reserve_endpoint(
         connection,
         &description.key,
         if single {
@@ -320,23 +326,25 @@ fn create_record(
         } else {
             ""
         },
+        endpoint,
     )?;
     connection.execute(
-        "INSERT INTO device_identity VALUES (?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO device_identity VALUES (?1,?2,?3,?4,?5,1)",
         params![
             description.key.source,
             description.key.id,
             Uuid::new_v4().simple().to_string(),
             endpoint,
-            published.then(|| import_label(&description.label)),
-            published
+            import_label(&description.label)
         ],
     )?;
-    for function in &description.functions {
+    for (index, function) in description.functions.iter().enumerate() {
         let endpoint = if single {
             endpoint
         } else {
-            allocate(connection, &description.key, &function.id)?
+            let child = endpoint + index as u16 + 1;
+            reserve_endpoint(connection, &description.key, &function.id, child)?;
+            child
         };
         connection.execute(
             "INSERT INTO device_function VALUES (?1,?2,?3,?4,?5,'outlet','on_off')",
@@ -351,8 +359,34 @@ fn create_record(
     }
     Ok(())
 }
+fn reserve_endpoint(
+    connection: &Connection,
+    key: &DeviceKey,
+    slot: &str,
+    endpoint: u16,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO endpoint_allocation VALUES (?1,?2,?3,?4)",
+        params![endpoint, key.source, key.id, slot],
+    )?;
+    Ok(())
+}
 fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Option<Record>> {
-    let identity=connection.query_row("SELECT unique_id,endpoint,label,published FROM device_identity WHERE source=?1 AND device_id=?2",params![key.source,key.id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u16>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,bool>(3)?))).optional()?;
+    let identity = connection
+        .query_row(
+            "SELECT unique_id, endpoint, label, published FROM device_identity
+             WHERE source=?1 AND device_id=?2",
+            params![key.source, key.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u16>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            },
+        )
+        .optional()?;
     let Some((unique_id, endpoint, label, published)) = identity else {
         return Ok(None);
     };
@@ -367,7 +401,24 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let functions=connection.prepare("SELECT function_id,endpoint,label,category,capabilities FROM device_function WHERE source=?1 AND device_id=?2 ORDER BY endpoint").and_then(|mut statement|statement.query_map(params![key.source,key.id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u16>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>())?;
+    let functions = connection
+        .prepare(
+            "SELECT function_id, endpoint, label, category, capabilities FROM device_function
+             WHERE source=?1 AND device_id=?2 ORDER BY endpoint",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![key.source, key.id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u16>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
     if functions.is_empty() {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -423,52 +474,4 @@ fn check_allocation(
         return Err(rusqlite::Error::InvalidQuery);
     }
     Ok(())
-}
-pub(super) fn load_or_create_identity(
-    store: &Store,
-    key: &DeviceKey,
-) -> Result<DeviceIdentity, StorageError> {
-    let operation = "load or create real device identity";
-    validate_key(key).map_err(|error| StorageError::new(store.path(), operation, error))?;
-    let transaction = store
-        .connection()
-        .unchecked_transaction()
-        .map_err(|error| store.database_error(operation, error))?;
-    if load_record(&transaction, key)
-        .map_err(|error| store.database_error(operation, error))?
-        .is_none()
-    {
-        if !has_capacity(&transaction, 1).map_err(|error| store.database_error(operation, error))? {
-            return Err(StorageError::new(
-                store.path(),
-                operation,
-                "Device endpoint numbers are exhausted",
-            ));
-        }
-        create_record(
-            &transaction,
-            &PhysicalDeviceDescription {
-                key: key.clone(),
-                label: String::new(),
-                functions: vec![crate::device::FunctionDescription {
-                    id: "main".into(),
-                    label: "主电源".into(),
-                    category: Category::Outlet,
-                    capabilities: vec![Capability::OnOff],
-                }],
-            },
-            false,
-        )
-        .map_err(|error| store.database_error(operation, error))?;
-    }
-    let record = load_record(&transaction, key)
-        .and_then(|record| record.ok_or(rusqlite::Error::InvalidQuery))
-        .map_err(|error| store.database_error(operation, error))?;
-    transaction
-        .commit()
-        .map_err(|error| store.database_error(operation, error))?;
-    Ok(DeviceIdentity {
-        unique_id: record.device.unique_id,
-        endpoint: record.device.endpoint,
-    })
 }

@@ -1,4 +1,8 @@
-use migate::{device::DeviceKey, storage::Store, xiaomi::cloud::group_id};
+use migate::{
+    device::{Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription},
+    storage::Store,
+    xiaomi::cloud::group_id,
+};
 use rusqlite::{Connection, params};
 fn legacy() -> (tempfile::TempDir, Connection) {
     let dir = tempfile::tempdir().unwrap();
@@ -67,18 +71,28 @@ fn legacy_active_single_device_keeps_endpoint_uuid_and_label_and_other_blobs() {
     }
 }
 #[test]
-fn legacy_unpublished_identity_without_cache_is_retained_without_publication() {
+fn legacy_unpublished_identity_is_retained_and_reused_when_published() {
     let (dir, db) = legacy();
     db.execute("DELETE FROM device_cache", []).unwrap();
     let store = Store::open(dir.path()).unwrap();
     assert!(store.devices().list_published().unwrap().is_empty());
-    assert_eq!(
-        store
-            .load_or_create_device_identity(&DeviceKey::new("xiaomi", "did"))
-            .unwrap()
-            .unique_id,
-        "22222222222222222222222222222222"
-    );
+    let device = store
+        .devices()
+        .publish(&PhysicalDeviceDescription {
+            key: DeviceKey::new("xiaomi", "did"),
+            label: "Outlet".into(),
+            functions: vec![FunctionDescription {
+                id: "main".into(),
+                label: "主电源".into(),
+                category: Category::Outlet,
+                capabilities: vec![Capability::OnOff],
+            }],
+        })
+        .unwrap();
+    assert_eq!(device.unique_id, "22222222222222222222222222222222");
+    assert_eq!(device.endpoint, 2);
+    assert_eq!(device.functions[0].endpoint, 2);
+    assert_eq!(device.label, "Outlet");
 }
 #[test]
 fn invalid_legacy_metadata_label_duplicate_endpoint_and_ddl_failure_roll_back_all_data() {

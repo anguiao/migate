@@ -1,7 +1,7 @@
 use super::{
     bootstrap, cloud, local,
     model::{SourceError, SourceStatus, TopologyReady},
-    state::{self, Context},
+    state::Context,
 };
 use crate::{
     storage::Store,
@@ -71,7 +71,7 @@ impl XiaomiSource {
                     &self.discovery,
                     self.context.clone(),
                 ),
-                state::tasks(self.context.clone()),
+                self.context.tasks.run(),
             ),
         )
         .await
@@ -81,12 +81,14 @@ impl Drop for XiaomiSource {
     fn drop(&mut self) {
         self.context.disconnect("Xiaomi source stopped".into());
         for physical in self.context.registry.list() {
-            self.context.registry.remove(&physical.description().key);
+            self.context.registry.remove(physical.key());
         }
-        for life in self.context.live.borrow().loading.values() {
-            life.close();
+        for slot in self.context.live.borrow().devices.values() {
+            if let Some(life) = &slot.loading {
+                life.close();
+            }
         }
-        self.context.tasks.borrow_mut().clear();
+        self.context.tasks.clear();
         self.context.ready.finish(Err(SourceError::Cancelled));
     }
 }

@@ -46,17 +46,13 @@ fn run() -> Result<(), RuntimeError> {
     let executable = env::current_exe()?;
     match config.command {
         Command::Auth(command) => run_auth(command, store.xiaomi(), &executable, &config.data_dir),
-        Command::Bridge => {
-            let auth = AuthService::new(store.xiaomi(), CloudClient::new()?);
-            run_bridge(
-                store,
-                identity,
-                auth,
-                executable,
-                config.data_dir,
-                config.matter_port,
-            )
-        }
+        Command::Bridge => run_bridge(
+            store,
+            identity,
+            executable,
+            config.data_dir,
+            config.matter_port,
+        ),
     }
 }
 
@@ -105,11 +101,12 @@ fn run_auth(
 fn run_bridge(
     store: Store,
     identity: migate::storage::Identity,
-    auth: AuthService,
     executable: std::path::PathBuf,
     data_dir: std::path::PathBuf,
     matter_port: u16,
 ) -> Result<(), RuntimeError> {
+    let cloud = CloudClient::new()?;
+    let auth = AuthService::new(store.xiaomi(), cloud.clone());
     let report = auth.local_status()?;
     if matches!(report.authentication, AuthenticationState::NotSignedIn) {
         return Err(format!(
@@ -121,7 +118,7 @@ fn run_bridge(
     let status = AuthStatus::new(report, executable, data_dir);
     status.log(terminal::current_time());
     let (discovery, driver) = Discovery::start()?;
-    let (source, ready) = XiaomiSource::new(store.clone(), CloudClient::new()?, discovery)?;
+    let (source, ready) = XiaomiSource::new(store.clone(), cloud, discovery)?;
     future::block_on(async {
         let interrupt = async {
             let signal = shutdown_signal().await?;

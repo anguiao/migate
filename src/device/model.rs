@@ -32,13 +32,6 @@ pub enum Capability {
     OnOff,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeviceDescription {
-    pub key: DeviceKey,
-    pub category: Category,
-    pub capabilities: Vec<Capability>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Power {
     Unknown,
@@ -80,7 +73,7 @@ impl Availability {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeviceSnapshot {
+pub struct FunctionSnapshot {
     pub power: Power,
     pub availability: Availability,
     pub revision: u64,

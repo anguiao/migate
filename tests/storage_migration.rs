@@ -121,7 +121,7 @@ fn every_legacy_version_preserves_all_real_data_and_only_removes_light_identity(
             assert_eq!(cached.model, "vendor.plug");
             assert_eq!(cached.device.functions[0].power.siid, 12);
             assert_eq!(cached.device.functions[0].power.piid, 9);
-            let identity = store.load_or_create_device_identity(&key).unwrap();
+            let identity = store.devices().load_published(&key).unwrap().unwrap();
             assert_eq!(identity.unique_id, DEVICE_ID);
             assert_eq!(identity.endpoint, 2);
         }

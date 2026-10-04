@@ -143,7 +143,7 @@ impl SessionDriver {
                     return Err(CentralError::Protocol);
                 }
                 match publish.qos {
-                    QoS::AtMostOnce => self.message(publish, on_event)?,
+                    QoS::AtMostOnce => self.message(publish, on_event),
                     QoS::AtLeastOnce => {
                         if publish.pkid == 0 {
                             return Err(CentralError::Protocol);
@@ -154,7 +154,7 @@ impl SessionDriver {
                             None,
                             None,
                         )?;
-                        self.message(publish, on_event)?;
+                        self.message(publish, on_event);
                     }
                     QoS::ExactlyOnce => {
                         if publish.pkid == 0 {
@@ -187,7 +187,7 @@ impl SessionDriver {
                     return Err(CentralError::Protocol);
                 }
                 if let Some(publish) = self.incoming.remove(&ack.pkid) {
-                    self.message(publish, on_event)?;
+                    self.message(publish, on_event);
                 }
                 self.enqueue(
                     Packet::PubComp(PubComp::new(ack.pkid)),
@@ -212,7 +212,15 @@ impl SessionDriver {
         }
         Ok(())
     }
-    fn message(
+    fn message(&mut self, publish: Publish, on_event: &mut impl FnMut(CentralEvent)) {
+        // MQTT already delimited this payload. A bad device message must not
+        // tear down the shared transport or interrupt other devices' requests.
+        if let Err(error) = self.dispatch_message(publish, on_event) {
+            log::warn!("Ignoring invalid gateway message: {error}");
+        }
+    }
+
+    fn dispatch_message(
         &mut self,
         publish: Publish,
         on_event: &mut impl FnMut(CentralEvent),

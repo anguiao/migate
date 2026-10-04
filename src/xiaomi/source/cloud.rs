@@ -12,7 +12,17 @@ use crate::{
     },
 };
 use futures_lite::future;
-use std::{collections::BTreeSet, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
+
+#[derive(Default)]
+enum CloudSync {
+    #[default]
+    Idle,
+    // Retained during refresh so concurrent failures coalesce into the same attempt.
+    Rejected(String),
+    Refreshed(String),
+    Paused,
+}
 pub(super) const MEMBER_INTERVAL: Duration = Duration::from_secs(300);
 fn transient(error: &CloudError) -> bool {
     matches!(
@@ -28,11 +38,12 @@ pub(super) async fn run(
     discovery: &Discovery,
     context: Rc<Context>,
 ) -> Result<(), SourceError> {
+    let sync = Rc::new(RefCell::new(CloudSync::default()));
     let mut backoff = Backoff::new();
     let mut due = context.clock.now();
     loop {
         let listener = context.sync_changed.listen();
-        if context.cloud_paused.get() {
+        if matches!(*sync.borrow(), CloudSync::Paused) {
             future::pending::<()>().await;
         }
         if !context.sync_requested.replace(false) && context.clock.now() < due {
@@ -42,87 +53,49 @@ pub(super) async fn run(
             .await;
             continue;
         }
-        let stamp = {
-            let live = context.live.borrow();
-            (
-                live.credentials.as_ref().map(|record| record.uid.clone()),
-                live.scope.clone(),
-                live.generation(),
-            )
+        let rejected = match &*sync.borrow() {
+            CloudSync::Rejected(token) => Some(token.clone()),
+            _ => None,
         };
-        let rejected = context.rejected_token.borrow_mut().take();
-        *context.refreshing_token.borrow_mut() = rejected.clone();
         let preparation = if let Some(token) = &rejected {
             auth.prepare_bridge_after_unauthorized(token).await?
         } else {
             auth.prepare_bridge().await?
         };
-        context.refreshing_token.borrow_mut().take();
         let fresh = preparation
             .credentials
             .as_ref()
-            .map(|record| record.tokens.access_token.clone());
-        let late_rejected = context.rejected_token.borrow().clone();
-        if matches!(
+            .map(|record| &record.tokens.access_token);
+        let authenticated = matches!(
             preparation.report.authentication,
             AuthenticationState::Authenticated
-        ) && (rejected.is_some()
-            || fresh
-                .as_ref()
-                .is_some_and(|token| late_rejected.as_ref().is_some_and(|old| old != token)))
+        );
         {
-            *context.refreshed_token.borrow_mut() = fresh.clone();
-            if late_rejected
-                .as_ref()
-                .is_some_and(|old| Some(old) != fresh.as_ref())
-            {
-                context.rejected_token.borrow_mut().take();
+            let mut state = sync.borrow_mut();
+            match &*state {
+                CloudSync::Rejected(token)
+                    if authenticated && (rejected.is_some() || Some(token) != fresh) =>
+                {
+                    *state = CloudSync::Refreshed(fresh.unwrap().clone());
+                }
+                CloudSync::Refreshed(token) if Some(token) != fresh => {
+                    *state = CloudSync::Idle;
+                }
+                CloudSync::Paused => {
+                    let renewed = authenticated
+                        && context
+                            .live
+                            .borrow()
+                            .credentials
+                            .as_ref()
+                            .is_some_and(|old| Some(&old.tokens.access_token) != fresh);
+                    if !renewed {
+                        continue;
+                    }
+                    *state = CloudSync::Idle;
+                }
+                _ => {}
             }
-        } else if matches!(
-            preparation.report.authentication,
-            AuthenticationState::Unavailable(_)
-        ) && rejected.is_some()
-        {
-            *context.rejected_token.borrow_mut() = rejected;
-        }
-        if context
-            .refreshed_token
-            .borrow()
-            .as_ref()
-            .is_some_and(|token| Some(token) != fresh.as_ref())
-        {
-            context.refreshed_token.borrow_mut().take();
-        }
-        if context.cloud_paused.get() {
-            let renewed = matches!(
-                preparation.report.authentication,
-                AuthenticationState::Authenticated
-            ) && preparation.credentials.as_ref().is_some_and(|fresh| {
-                context
-                    .live
-                    .borrow()
-                    .credentials
-                    .as_ref()
-                    .is_some_and(|old| {
-                        old.uid == fresh.uid && old.tokens.access_token != fresh.tokens.access_token
-                    })
-            });
-            if !renewed {
-                continue;
-            }
-            context.cloud_paused.set(false);
-        }
-        let current = {
-            let live = context.live.borrow();
-            (
-                live.credentials.as_ref().map(|record| record.uid.clone()),
-                live.scope.clone(),
-                live.generation(),
-            )
-        };
-        if current != stamp {
-            context.request_sync();
-            continue;
         }
         super::state::update_auth(&context, &preparation);
         let Some(credentials) = preparation.credentials else {
@@ -135,13 +108,10 @@ pub(super) async fn run(
             preparation.report.authentication,
             AuthenticationState::SignInRequired(_)
         ) {
-            context.cloud_paused.set(true);
+            *sync.borrow_mut() = CloudSync::Paused;
             continue;
         }
-        if !matches!(
-            preparation.report.authentication,
-            AuthenticationState::Authenticated
-        ) {
+        if !authenticated {
             if let AuthenticationState::Unavailable(reason) = &preparation.report.authentication {
                 context.set_catalog_problem(Some(reason.to_string()));
             }
@@ -188,96 +158,74 @@ pub(super) async fn run(
         let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
         let removed = {
             let live = context.live.borrow();
-            live.members
-                .difference(&members)
+            live.devices
+                .keys()
+                .filter(|did| !members.contains(*did))
                 .cloned()
                 .collect::<Vec<_>>()
         };
         context.live.borrow_mut().scope = Some(scope.clone());
-        context.live.borrow_mut().members = members.clone();
         for did in removed {
             context.remove(&did)?;
+        }
+        for did in &members {
+            context
+                .live
+                .borrow_mut()
+                .devices
+                .entry(did.clone())
+                .or_default();
         }
         context.set_catalog_problem(None);
         context.changed.notify(usize::MAX);
         super::local::refresh_access(&context);
         for did in members {
-            let prepare = {
-                let live = context.live.borrow();
-                if live.loading.contains_key(&did) {
-                    false
-                } else if let Some(record) = live.records.get(&did) {
-                    record.blocked.is_some()
-                        || live
-                            .access
-                            .get(&did)
-                            .and_then(|access| access.as_ref().ok())
-                            .is_some_and(|access| {
-                                access.model != record.cached.model
-                                    || access.instance_type != record.cached.instance_type
-                            })
-                } else {
-                    live.descriptions.get(&did).is_none_or(|cached| {
-                        live.access
-                            .get(&did)
-                            .and_then(|access| access.as_ref().ok())
-                            .is_some_and(|access| {
-                                access.model != cached.model
-                                    || access.instance_type != cached.instance_type
-                            })
-                    })
-                }
-            };
+            let prepare = context.live.borrow().devices[&did].needs_description();
             if !prepare {
-                context.reconcile(&did);
+                context.reconcile(&did)?;
                 continue;
             }
             let life = Rc::new(Lifetime::default());
             context
                 .live
                 .borrow_mut()
-                .loading
-                .insert(did.clone(), life.clone());
+                .devices
+                .get_mut(&did)
+                .unwrap()
+                .loading = Some(life.clone());
             let current = context.clone();
             let client = cloud.clone();
             let credentials = credentials.clone();
             let home = home.clone();
+            let sync = sync.clone();
             let task = async move {
-                let result = future::or(
-                    async { Some(catalog::load_device(&client, &credentials, &home, &did).await) },
+                let Some(result) = future::or(
                     async {
                         life.ended().await;
                         None
                     },
+                    async { Some(catalog::load_device(&client, &credentials, &home, &did).await) },
                 )
-                .await;
-                if life.closed.get() {
+                .await
+                else {
                     return Ok(());
-                }
-                let valid = {
-                    let live = current.live.borrow();
-                    live.scope.as_ref() == Some(&scope_for(&home))
-                        && live.members.contains(&did)
-                        && live
-                            .credentials
-                            .as_ref()
-                            .is_some_and(|record| record.uid == home.uid)
                 };
-                current.live.borrow_mut().loading.remove(&did);
-                if !valid {
-                    return Ok(());
-                }
-                match result.unwrap() {
+                current
+                    .live
+                    .borrow_mut()
+                    .devices
+                    .get_mut(&did)
+                    .unwrap()
+                    .loading = None;
+                match result {
                     Ok(cached) => {
-                        if let Some(record) = current.live.borrow_mut().records.get_mut(&did) {
-                            record.blocked = None;
+                        {
+                            let mut live = current.live.borrow_mut();
+                            let slot = live.devices.get_mut(&did).unwrap();
+                            slot.blocked = None;
+                            slot.candidate = Some(cached);
                         }
-                        current
-                            .live
-                            .borrow_mut()
-                            .descriptions
-                            .insert(did.clone(), cached);
-                        current.reconcile(&did);
+                        current.reconcile(&did)?;
                     }
                     Err(error) => {
                         match &error {
@@ -293,21 +241,23 @@ pub(super) async fn run(
                                     && record.tokens.access_token == credentials.tokens.access_token
                             })
                         {
-                            if current.refreshed_token.borrow().as_ref()
-                                == Some(&credentials.tokens.access_token)
-                            {
-                                current.cloud_paused.set(true);
-                                current.status.borrow_mut().authentication.authentication =
-                                    AuthenticationState::SignInRequired(FailureReason::Cloud(
-                                        error.clone(),
-                                    ));
-                                current.status_changed.notify(usize::MAX);
-                            } else {
-                                let token = &credentials.tokens.access_token;
-                                if current.rejected_token.borrow().as_ref() != Some(token)
-                                    && current.refreshing_token.borrow().as_ref() != Some(token)
+                            let mut state = sync.borrow_mut();
+                            match &*state {
+                                CloudSync::Refreshed(token)
+                                    if token == &credentials.tokens.access_token =>
                                 {
-                                    *current.rejected_token.borrow_mut() = Some(token.clone());
+                                    *state = CloudSync::Paused;
+                                    current.status.borrow_mut().authentication.authentication =
+                                        AuthenticationState::SignInRequired(FailureReason::Cloud(
+                                            error.clone(),
+                                        ));
+                                    current.status_changed.notify(usize::MAX);
+                                }
+                                CloudSync::Rejected(_) | CloudSync::Paused => {}
+                                _ => {
+                                    *state = CloudSync::Rejected(
+                                        credentials.tokens.access_token.clone(),
+                                    );
                                     current.request_sync();
                                 }
                             }
@@ -316,7 +266,7 @@ pub(super) async fn run(
                 }
                 Ok(())
             };
-            context.tasks.borrow_mut().push(Box::pin(task));
+            context.tasks.spawn(task);
             context.changed.notify(usize::MAX);
         }
         let retry_certificate = matches!(&preparation.report.certificate_update,crate::xiaomi::auth::CertificateUpdate::Failed(FailureReason::Cloud(error)) if transient(error));
@@ -327,12 +277,5 @@ pub(super) async fn run(
                 backoff = Backoff::new();
                 MEMBER_INTERVAL
             };
-    }
-}
-fn scope_for(home: &crate::xiaomi::cloud::OwnedHome) -> CachedScope {
-    CachedScope {
-        uid: home.uid.clone(),
-        home_id: home.home_id.clone(),
-        group_id: home.group_id.clone(),
     }
 }

@@ -12,8 +12,7 @@ use std::time::Instant;
 impl SessionDriver {
     pub(super) fn finish(&self, request: Request, result: ResultValue) {
         log::debug!(
-            "Gateway request completed: generation={}, operation={}, did={}, request_id={:?}, error={:?}",
-            self.shared.generation,
+            "Gateway request completed: operation={}, did={}, request_id={:?}, error={:?}",
             request.kind.operation(),
             request.kind.did(),
             request.id,
@@ -22,7 +21,7 @@ impl SessionDriver {
         self.shared
             .outstanding
             .set(self.shared.outstanding.get() - 1);
-        request.finish(result);
+        (request.complete)(result);
     }
     pub(super) fn finish_all(&mut self, error: CentralError) {
         self.shared.closed.set(true);
@@ -40,17 +39,6 @@ impl SessionDriver {
             self.finish(request, Err(error.clone()));
         }
         self.shared.event.notify(usize::MAX);
-    }
-    pub(super) fn can_drain(&self) -> bool {
-        let queue = self.shared.queue.borrow();
-        !queue.is_empty()
-            && (self.publications.len() < self.receive_max
-                || queue.iter().any(|request| {
-                    matches!(
-                        request.kind,
-                        RequestKind::Subscribe { .. } | RequestKind::Unsubscribe { .. }
-                    )
-                }))
     }
     pub(super) fn drain_requests(&mut self) -> Result<(), CentralError> {
         loop {

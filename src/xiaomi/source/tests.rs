@@ -1,6 +1,6 @@
-use super::*;
+use super::{bootstrap::Clock, *};
 use crate::{
-    device::{Availability, Clock, DeviceKey, Power},
+    device::{Availability, DeviceKey, Power},
     storage::{CachedPhysicalDevice, CachedScope, Store},
     xiaomi::{
         capability::parse_device,
@@ -61,10 +61,7 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     store.devices().publish_cached(&kept, "saved name").unwrap();
     let deleted = cached(&tls.credentials.uid, "deleted", false);
     store.devices().publish_cached(&deleted, "deleted").unwrap();
-    store
-        .devices()
-        .remove(&deleted.device.description.key)
-        .unwrap();
+    store.devices().remove(&deleted.device.key).unwrap();
     let mut other = cached(&tls.credentials.uid, "other-home", false);
     other.home_id = "other".into();
     other.group_id = group_id(&other.uid, &other.home_id);
@@ -209,13 +206,10 @@ impl Rig {
                 .save_scope(&scope(&tls.credentials.uid))
                 .unwrap();
             for record in &data {
-                if members.contains(&record.device.description.key.id.as_str()) {
+                if members.contains(&record.device.key.id.as_str()) {
                     store
                         .devices()
-                        .publish_cached(
-                            record,
-                            &format!("name {}", record.device.description.key.id),
-                        )
+                        .publish_cached(record, &format!("name {}", record.device.key.id))
                         .unwrap();
                 }
             }
@@ -268,7 +262,7 @@ impl Rig {
                     }
                     return response;
                 }
-                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.description.key.id)).map(|record|json!({"did":record.device.description.key.id,"model":record.model,"spec_type":record.instance_type})).collect::<Vec<_>>()}})
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"model":record.model,"spec_type":record.instance_type})).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
                 let multi = request.target.contains("cuco-cp7pd");
                 let mut value: Value = serde_json::from_str(if multi {
@@ -469,6 +463,14 @@ struct Peer {
     changed: Event,
 }
 impl Peer {
+    fn lists(&self) -> usize {
+        self.state
+            .borrow()
+            .seen
+            .iter()
+            .filter(|(operation, _)| operation == "getDevList")
+            .count()
+    }
     fn notify(&self, did: &str, siid: u32, value: bool) {
         let client = self.state.borrow().client_id.clone();
         self.send(Packet::Publish(Publish::new(
@@ -628,7 +630,7 @@ async fn peer_run(mut broker: Broker, peer: Rc<Peer>, data: Vec<CachedPhysicalDe
                             assert!(payload.get("filter").is_none());
                             let mut list = serde_json::Map::new();
                             for record in &data {
-                                let did = &record.device.description.key.id;
+                                let did = &record.device.key.id;
                                 if state.omit.contains(did) {
                                     continue;
                                 }
@@ -712,7 +714,12 @@ async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
                                 work.subscribed.borrow().len()
                                     == physical.functions().len()
                                         + usize::from(
-                                            work.cached.borrow().device.refresh_trigger.is_some(),
+                                            work.record
+                                                .cached
+                                                .borrow()
+                                                .device
+                                                .refresh_trigger
+                                                .is_some(),
                                         )
                             })
                 })
@@ -799,7 +806,13 @@ fn cached_local_control_survives_temporary_cloud_detail_failures() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
-                control.context.live.borrow().loading.is_empty()
+                control
+                    .context
+                    .live
+                    .borrow()
+                    .devices
+                    .values()
+                    .all(|slot| slot.loading.is_none())
                     && matches!(
                         control
                             .context
@@ -1212,7 +1225,13 @@ fn five_minute_member_sync_does_not_poll_healthy_channel_power() {
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one", "multi"]).await;
             until(|| {
-                control.context.live.borrow().loading.is_empty()
+                control
+                    .context
+                    .live
+                    .borrow()
+                    .devices
+                    .values()
+                    .all(|slot| slot.loading.is_none())
                     && control
                         .clock
                         .deadlines
@@ -1255,17 +1274,6 @@ fn five_minute_member_sync_does_not_poll_healthy_channel_power() {
                     .snapshot()
                     .power
                     == Power::On
-                    && matches!(
-                        control
-                            .context
-                            .live
-                            .borrow()
-                            .session
-                            .as_ref()
-                            .unwrap()
-                            .access,
-                        super::state::AccessRefresh::Idle
-                    )
             })
             .await;
             for _ in 0..10 {
@@ -1570,6 +1578,157 @@ fn whole_gateway_list_failures_preserve_confirmed_access_and_availability() {
     }
 }
 #[test]
+fn gateway_list_retries_recover_without_events_and_preserve_cloud_diagnostics() {
+    for timeout in [false, true] {
+        let rig = Rig::new(true, &["one"]);
+        rig.cloud.lock().unwrap().status = 503;
+        block_on(rig.run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            peer.state.borrow_mut().list_error = !timeout;
+            peer.state.borrow_mut().list_timeout = timeout;
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                until(|| {
+                    control.context.access_problem.borrow().is_some()
+                        && control.context.cloud_problem.borrow().is_some()
+                })
+                .await;
+                assert_eq!(peer.lists(), 1);
+                for _ in 0..10 {
+                    super::local::refresh_access(&control.context);
+                    future::yield_now().await;
+                }
+                assert_eq!(peer.lists(), 1);
+                {
+                    let mut state = peer.state.borrow_mut();
+                    state.list_error = false;
+                    state.list_timeout = false;
+                }
+                advance_to(&control.clock, Duration::from_secs(1)).await;
+                initialized(control, &peer, &["one"]).await;
+                assert_eq!(peer.lists(), 2);
+                assert!(control.context.access_problem.borrow().is_none());
+                assert!(control.context.cloud_problem.borrow().is_some());
+                assert_eq!(
+                    control.context.status.borrow().catalog_problem,
+                    *control.context.cloud_problem.borrow()
+                );
+                function(&control.context.registry, "one", "main")
+                    .execute(Command::On)
+                    .await
+                    .unwrap();
+            })
+            .await;
+        }));
+    }
+}
+#[test]
+fn disconnect_cancels_gateway_list_backoff_before_a_new_session_starts() {
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.state.borrow_mut().list_error = true;
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| control.context.access_problem.borrow().is_some()).await;
+            assert_eq!(peer.lists(), 1);
+        })
+        .await;
+        until(|| {
+            matches!(
+                c.context.status.borrow().gateway,
+                GatewayStatus::Unavailable(_)
+            )
+        })
+        .await;
+        advance_to(&c.clock, Duration::from_secs(1)).await;
+        let peer = Rc::new(Peer::default());
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| {
+                control
+                    .clock
+                    .deadlines
+                    .lock()
+                    .unwrap()
+                    .contains(&Duration::from_secs(301))
+            })
+            .await;
+            peer.state.borrow_mut().online.insert("one".into(), false);
+            super::local::refresh_access(&control.context);
+            until(|| {
+                matches!(
+                    function(&control.context.registry, "one", "main")
+                        .snapshot()
+                        .availability,
+                    Availability::Unavailable(_)
+                )
+            })
+            .await;
+            let requests = peer.lists();
+            control.clock.advance(Duration::from_secs(30));
+            for _ in 0..10 {
+                future::yield_now().await;
+            }
+            assert_eq!(peer.lists(), requests);
+            assert!(control.context.access_problem.borrow().is_none());
+        })
+        .await;
+    }));
+}
+#[test]
+fn a_complete_cloud_snapshot_remains_valid_across_a_local_reconnect() {
+    let rig = Rig::new(true, &["one", "multi"]);
+    let (release, gate) = flume::unbounded();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.members = vec!["multi".into()];
+        cloud.home_gate = Some(gate);
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            initialized(control, &peer, &["one", "multi"]).await;
+            until(|| control.cloud.lock().unwrap().homes == 1).await;
+        })
+        .await;
+        until(|| {
+            matches!(
+                c.context.status.borrow().gateway,
+                GatewayStatus::Unavailable(_)
+            )
+        })
+        .await;
+        advance_to(&c.clock, Duration::from_secs(1)).await;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            initialized(control, &peer, &["one", "multi"]).await;
+            release.send(()).unwrap();
+            until(|| {
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .is_none()
+            })
+            .await;
+            assert!(
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "multi"))
+                    .is_some()
+            );
+            function(&control.context.registry, "multi", "usb")
+                .execute(Command::On)
+                .await
+                .unwrap();
+        })
+        .await;
+    }));
+}
+#[test]
 fn pending_cloud_descriptions_retry_on_a_later_event_without_blocking_cached_control() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().members = vec!["one".into(), "multi".into()];
@@ -1652,15 +1811,23 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                 .unwrap()
                 .unwrap();
             assert_eq!(before.label, "Controller saved name");
-            let mut changed = control.context.live.borrow().records["one"].cached.clone();
+            let mut changed = control.context.live.borrow().devices["one"]
+                .admitted
+                .as_ref()
+                .unwrap()
+                .cached
+                .borrow()
+                .clone();
             changed.device.functions[0].power.siid = 7;
             control
                 .context
                 .live
                 .borrow_mut()
-                .descriptions
-                .insert("one".into(), changed);
-            control.context.reconcile("one");
+                .devices
+                .get_mut("one")
+                .unwrap()
+                .candidate = Some(changed);
+            control.context.reconcile("one").unwrap();
             until(|| {
                 peer.count("subscribe", "one", 7) == 1
                     && function(&control.context.registry, "one", "main")
@@ -1722,8 +1889,12 @@ fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_desc
         let control = &c;
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one", "multi"]).await;
-            let original = control.context.live.borrow().records["multi"]
+            let original = control.context.live.borrow().devices["multi"]
+                .admitted
+                .as_ref()
+                .unwrap()
                 .cached
+                .borrow()
                 .clone();
             let mut incompatible = original.clone();
             incompatible.device.functions.pop();
@@ -1731,9 +1902,11 @@ fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_desc
                 .context
                 .live
                 .borrow_mut()
-                .descriptions
-                .insert("multi".into(), incompatible);
-            control.context.reconcile("multi");
+                .devices
+                .get_mut("multi")
+                .unwrap()
+                .candidate = Some(incompatible);
+            control.context.reconcile("multi").unwrap();
             let physical = control
                 .context
                 .registry
@@ -1759,7 +1932,7 @@ fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_desc
                 control
                     .store
                     .devices()
-                    .load_parsed(&original.uid, "local", &physical.description().key)
+                    .load_parsed(&original.uid, "local", physical.key())
                     .unwrap()
                     .unwrap(),
                 original
@@ -1772,7 +1945,7 @@ fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_desc
                 .context
                 .live
                 .borrow_mut()
-                .records
+                .devices
                 .get_mut("multi")
                 .unwrap()
                 .blocked = None;
@@ -1780,9 +1953,11 @@ fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_desc
                 .context
                 .live
                 .borrow_mut()
-                .descriptions
-                .insert("multi".into(), original);
-            control.context.reconcile("multi");
+                .devices
+                .get_mut("multi")
+                .unwrap()
+                .candidate = Some(original);
+            control.context.reconcile("multi").unwrap();
             initialized(control, &peer, &["one", "multi"]).await;
         })
         .await;
@@ -1926,7 +2101,18 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
         let control = &c;
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
-            until(|| control.context.cloud_paused.get()).await;
+            until(|| {
+                matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+                )
+            })
+            .await;
             let before = control.cloud.lock().unwrap().homes;
             control.cloud.lock().unwrap().status = 200;
             control.clock.advance(Duration::from_secs(600));
@@ -1971,7 +2157,15 @@ fn candidate_unauthorized_requests_coalesce_into_one_token_refresh_and_resume_pr
             control.cloud.lock().unwrap().detail_status = 200;
             initialized(control, &peer, &["one", "multi", "two"]).await;
             assert_eq!(control.cloud.lock().unwrap().tokens, 1);
-            assert!(!control.context.cloud_paused.get());
+            assert!(!matches!(
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .authentication
+                    .authentication,
+                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+            ));
             assert_eq!(
                 control
                     .store
@@ -2004,15 +2198,23 @@ fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_va
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
-            let mut changed = control.context.live.borrow().records["one"].cached.clone();
+            let mut changed = control.context.live.borrow().devices["one"]
+                .admitted
+                .as_ref()
+                .unwrap()
+                .cached
+                .borrow()
+                .clone();
             changed.device.functions[0].power.siid = 7;
             control
                 .context
                 .live
                 .borrow_mut()
-                .descriptions
-                .insert("one".into(), changed);
-            control.context.reconcile("one");
+                .devices
+                .get_mut("one")
+                .unwrap()
+                .candidate = Some(changed);
+            control.context.reconcile("one").unwrap();
             until(|| peer.count("get", "one", 7) == 1).await;
             peer.release("one", 2, accepted("one", 2, 0)).await;
             assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
@@ -2071,7 +2273,7 @@ fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials
                     detail_release.send(()).unwrap();
                 } else {
                     detail_release.send(()).unwrap();
-                    until(|| control.context.rejected_token.borrow().is_some()).await;
+                    until(|| control.context.sync_requested.get()).await;
                     assert_eq!(control.cloud.lock().unwrap().token_done, 0);
                     assert_eq!(
                         control
@@ -2096,14 +2298,28 @@ fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials
                         .tokens
                         .access_token
                         == "fresh-access"
-                        && control.context.live.borrow().loading.is_empty()
+                        && control
+                            .context
+                            .live
+                            .borrow()
+                            .devices
+                            .values()
+                            .all(|slot| slot.loading.is_none())
                 })
                 .await;
                 assert_eq!(control.cloud.lock().unwrap().detail_done, 1);
                 control.context.request_sync();
                 initialized(control, &peer, &["one", "multi"]).await;
                 assert_eq!(control.cloud.lock().unwrap().tokens, 1);
-                assert!(!control.context.cloud_paused.get());
+                assert!(!matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+                ));
                 assert!(matches!(
                     control
                         .context
@@ -2138,7 +2354,18 @@ fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopp
             let control = &c;
             c.peer(peer, |peer| async move {
                 initialized(control, &peer, &["one"]).await;
-                until(|| control.context.cloud_paused.get()).await;
+                until(|| {
+                    matches!(
+                        control
+                            .context
+                            .status
+                            .borrow()
+                            .authentication
+                            .authentication,
+                        crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+                    )
+                })
+                .await;
                 assert_eq!(control.cloud.lock().unwrap().tokens, 1);
                 control.clock.advance(Duration::from_secs(600));
                 control.context.request_sync();
@@ -2264,7 +2491,13 @@ fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
             initialized(control, &peer, &["one"]).await;
             until(|| {
                 control.cloud.lock().unwrap().tokens == 1
-                    && control.context.live.borrow().loading.is_empty()
+                    && control
+                        .context
+                        .live
+                        .borrow()
+                        .devices
+                        .values()
+                        .all(|slot| slot.loading.is_none())
             })
             .await;
             assert_eq!(control.cloud.lock().unwrap().details, 2);
@@ -2291,7 +2524,15 @@ fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
                 future::yield_now().await;
             }
             assert_eq!(control.cloud.lock().unwrap().tokens, 1);
-            assert!(!control.context.cloud_paused.get());
+            assert!(!matches!(
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .authentication
+                    .authentication,
+                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+            ));
             function(&control.context.registry, "one", "main")
                 .execute(Command::On)
                 .await
@@ -2299,6 +2540,79 @@ fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
             advance_to(&control.clock, Duration::from_secs(1)).await;
             initialized(control, &peer, &["one", "multi", "two"]).await;
             assert_eq!(control.cloud.lock().unwrap().tokens, 2);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn restored_and_updated_description_order_cannot_cross_wire_channel_commands() {
+    let mut rig = Rig::new(true, &["multi"]);
+    let mut reordered = rig.data[1].clone();
+    reordered.device.functions.reverse();
+    rig.store
+        .devices()
+        .publish_cached(&reordered, "ignored later name")
+        .unwrap();
+    let (mut source, ready) = XiaomiSource::build(
+        rig.store.clone(),
+        rig.source.cloud.clone(),
+        rig.discovery.clone(),
+        rig.clock.clone(),
+    )
+    .unwrap();
+    source.test_ca = rig.source.test_ca.clone();
+    source.request_timeout = rig.source.request_timeout;
+    rig.source = source;
+    rig.ready = ready;
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["multi"]).await;
+            let key = DeviceKey::new("xiaomi", "multi");
+            let physical = control.context.registry.get(&key).unwrap();
+            let runtime_order = physical
+                .functions()
+                .iter()
+                .map(|function| function.function_key().id.clone())
+                .collect::<Vec<_>>();
+            let cached_order = reordered
+                .device
+                .functions
+                .iter()
+                .map(|function| function.description.id.clone())
+                .collect::<Vec<_>>();
+            assert_ne!(runtime_order, cached_order);
+            for (id, siid) in [("outlet_1", 3), ("outlet_2", 4), ("usb", 9)] {
+                physical
+                    .function(id)
+                    .unwrap()
+                    .execute(Command::On)
+                    .await
+                    .unwrap();
+                assert_eq!(peer.count("rpcReq", "multi", siid), 1);
+            }
+            reordered.device.functions.reverse();
+            control
+                .context
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut("multi")
+                .unwrap()
+                .candidate = Some(reordered);
+            control.context.reconcile("multi").unwrap();
+            for (id, siid) in [("outlet_1", 3), ("outlet_2", 4), ("usb", 9)] {
+                physical
+                    .function(id)
+                    .unwrap()
+                    .execute(Command::Off)
+                    .await
+                    .unwrap();
+                assert_eq!(peer.count("rpcReq", "multi", siid), 2);
+            }
         })
         .await;
     }));

@@ -1,6 +1,9 @@
 use migate::{
     config::Config,
-    device::{Capability, Category, Device, DeviceDescription, DeviceKey, Power},
+    device::{
+        Capability, Category, DeviceKey, FunctionDescription, PhysicalDevice,
+        PhysicalDeviceDescription, Power,
+    },
     storage::Store,
 };
 use rusqlite::Connection;
@@ -44,19 +47,29 @@ fn initializes_and_restores_identity_without_power() {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(columns, ["id", "bridge_id"]);
-        let description = DeviceDescription {
+        let description = PhysicalDeviceDescription {
             key: DeviceKey::new("xiaomi", "test-outlet"),
-            category: Category::Outlet,
-            capabilities: vec![Capability::OnOff],
+            label: "Test Outlet".into(),
+            functions: vec![FunctionDescription {
+                id: "main".into(),
+                label: "Main power".into(),
+                category: Category::Outlet,
+                capabilities: vec![Capability::OnOff],
+            }],
         };
-        let (device, _receiver) = Device::new(description.clone());
-        device.observe(true);
+        let (device, _receiver) = PhysicalDevice::new(description.clone());
+        device.functions()[0].observe(true);
         drop(store);
         assert_eq!(
             Store::open(&dir).unwrap().load_identity().unwrap(),
             identity
         );
-        assert_eq!(Device::new(description).0.snapshot().power, Power::Unknown);
+        assert_eq!(
+            PhysicalDevice::new(description).0.functions()[0]
+                .snapshot()
+                .power,
+            Power::Unknown
+        );
     }
     assert_ne!(
         Store::open(root.path().join("new"))
@@ -335,6 +348,33 @@ fn rejects_unsupported_or_damaged_schemas_without_changing_data() {
                 .get::<_, String>(0))
                 .unwrap(),
             expected
+        );
+    }
+}
+
+#[test]
+fn current_schema_validation_rejects_missing_columns_and_replacement_views() {
+    for damage in [
+        "ALTER TABLE blobs DROP COLUMN value;",
+        "ALTER TABLE blobs RENAME TO saved_blobs; CREATE VIEW blobs AS SELECT * FROM saved_blobs;",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let db = Connection::open(store.path()).unwrap();
+        drop(store);
+        db.execute_batch(damage).unwrap();
+        assert!(Store::open(dir.path()).is_err(), "{damage}");
+        assert_eq!(
+            db.query_row("SELECT bridge_id FROM identity", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            identity.bridge_id,
+        );
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            4
         );
     }
 }

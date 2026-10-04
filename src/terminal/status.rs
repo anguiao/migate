@@ -56,9 +56,7 @@ impl AuthStatus {
                 AuthenticationState::SignInRequired(_)
             )
         {
-            report.push_str(
-                "\nSign in independently, then restart MiGate to load the updated credentials.",
-            );
+            report.push_str("\nStop MiGate, sign in with the same data directory, then restart.");
         }
         report
     }

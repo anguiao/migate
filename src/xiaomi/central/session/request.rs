@@ -13,7 +13,7 @@ use std::{
         OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,7 +33,6 @@ pub struct DeviceEntry {
     pub access: Result<DeviceAccess, CentralError>,
 }
 
-#[derive(Clone)]
 pub(super) enum Response {
     Device(Option<DeviceAccess>),
     Devices(Vec<DeviceEntry>),
@@ -41,19 +40,16 @@ pub(super) enum Response {
     Unit,
 }
 pub(super) type ResultValue = Result<Response, CentralError>;
-type Callback = Box<dyn FnOnce(ResultValue)>;
-struct Completion {
-    result: RefCell<Option<ResultValue>>,
+struct Completion<T> {
+    result: RefCell<Option<Result<T, CentralError>>>,
     event: Event,
 }
 pub(super) struct Request {
     pub(super) kind: RequestKind,
     pub(super) deadline: Instant,
-    completion: Rc<Completion>,
-    callback: Option<Callback>,
+    pub(super) complete: Box<dyn FnOnce(ResultValue)>,
     pub(super) id: Option<u32>,
 }
-#[derive(Clone)]
 pub(super) enum RequestKind {
     ListAll,
     List {
@@ -134,27 +130,17 @@ impl RequestKind {
         !matches!(self, Self::ListAll | Self::Unsubscribe { .. }) && self.did() == did
     }
 }
-impl Request {
-    pub(super) fn finish(mut self, result: ResultValue) {
-        if let Some(callback) = self.callback.take() {
-            callback(result.clone());
-        }
-        *self.completion.result.borrow_mut() = Some(result);
-        self.completion.event.notify(usize::MAX);
-    }
-}
 pub(super) struct Shared {
     pub(super) queue: RefCell<VecDeque<Request>>,
     pub(super) event: Event,
     pub(super) closed: Cell<bool>,
     pub(super) outstanding: Cell<usize>,
-    pub(super) generation: u64,
     pub(super) cancellations: RefCell<VecDeque<Cancellation>>,
 }
 
 pub(super) struct Cancellation {
     pub(super) did: String,
-    pub(super) queued: Vec<Request>,
+    pub(super) queued: VecDeque<Request>,
 }
 
 /// Requests are enqueued when these methods are called. Dropping the returned
@@ -165,9 +151,6 @@ pub struct SessionHandle {
     pub(super) timing: Timing,
 }
 impl SessionHandle {
-    pub fn generation(&self) -> u64 {
-        self.shared.generation
-    }
     pub fn close(&self) {
         self.shared.closed.set(true);
         self.shared.event.notify(usize::MAX);
@@ -176,10 +159,14 @@ impl SessionHandle {
         &self,
         on_result: F,
     ) -> impl Future<Output = Result<Vec<DeviceEntry>, CentralError>> + use<F> {
-        let callback: Callback =
-            Box::new(move |result| on_result(result.and_then(devices_response)));
-        let result = self.submit(RequestKind::ListAll, self.timing.request, Some(callback));
-        async move { devices_response(result.await?) }
+        self.submit(
+            RequestKind::ListAll,
+            |response| match response {
+                Response::Devices(devices) => devices,
+                _ => unreachable!("device list request returns devices"),
+            },
+            on_result,
+        )
     }
 
     /// Cancel this device's existing work before the driver processes another frame.
@@ -191,15 +178,9 @@ impl SessionHandle {
             return Err(CentralError::Cancelled);
         }
         let mut queue = self.shared.queue.borrow_mut();
-        let mut queued = Vec::new();
-        let mut retained = VecDeque::new();
-        while let Some(request) = queue.pop_front() {
-            if request.kind.cancelled_for(did) {
-                queued.push(request);
-            } else {
-                retained.push_back(request);
-            }
-        }
+        let (queued, retained) = queue
+            .drain(..)
+            .partition(|request| request.kind.cancelled_for(did));
         *queue = retained;
         self.shared
             .cancellations
@@ -217,52 +198,38 @@ impl SessionHandle {
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), CentralError>> + use<> {
-        let result = self.cancel_device(did).map(|()| {
-            self.submit(
-                RequestKind::Unsubscribe { did: did.into() },
-                self.timing.request,
-                None,
-            )
-        });
-        async move { result?.await.map(|_| ()) }
+        let result = self
+            .cancel_device(did)
+            .map(|()| self.submit(RequestKind::Unsubscribe { did: did.into() }, |_| (), |_| {}));
+        async move { result?.await }
     }
     pub fn get_device_list<F: FnOnce(Result<Option<DeviceAccess>, CentralError>) + 'static>(
         &self,
         did: &str,
         on_result: F,
     ) -> impl Future<Output = Result<Option<DeviceAccess>, CentralError>> + use<F> {
-        let callback: Callback = Box::new(move |result| {
-            on_result(result.and_then(|response| match response {
-                Response::Device(device) => Ok(device),
-                _ => Err(CentralError::Protocol),
-            }))
-        });
-        let result = self.submit(
+        self.submit(
             RequestKind::List { did: did.into() },
-            self.timing.request,
-            Some(callback),
-        );
-        async move {
-            match result.await? {
-                Response::Device(device) => Ok(device),
-                _ => Err(CentralError::Protocol),
-            }
-        }
+            |response| match response {
+                Response::Device(device) => device,
+                _ => unreachable!("filtered device list request returns a device"),
+            },
+            on_result,
+        )
     }
     pub fn subscribe_property(
         &self,
         did: &str,
         binding: PropertyBinding,
     ) -> impl Future<Output = Result<(), CentralError>> + use<> {
-        let result = self.submit(
+        self.submit(
             RequestKind::Subscribe {
                 did: did.into(),
                 binding,
             },
-            self.timing.request,
-            None,
-        );
-        async move { result.await.map(|_| ()) }
+            |_| (),
+            |_| {},
+        )
     }
     pub fn read_property<F: FnOnce(Result<bool, CentralError>) + 'static>(
         &self,
@@ -270,26 +237,17 @@ impl SessionHandle {
         binding: PropertyBinding,
         on_result: F,
     ) -> impl Future<Output = Result<bool, CentralError>> + use<F> {
-        let callback: Callback = Box::new(move |result| {
-            on_result(result.and_then(|response| match response {
-                Response::Power(value) => Ok(value),
-                _ => Err(CentralError::Protocol),
-            }))
-        });
-        let result = self.submit(
+        self.submit(
             RequestKind::Read {
                 did: did.into(),
                 binding,
             },
-            self.timing.request,
-            Some(callback),
-        );
-        async move {
-            match result.await? {
-                Response::Power(value) => Ok(value),
-                _ => Err(CentralError::Protocol),
-            }
-        }
+            |response| match response {
+                Response::Power(value) => value,
+                _ => unreachable!("property read returns a power value"),
+            },
+            on_result,
+        )
     }
     pub fn set_property<F: FnOnce(Result<(), CentralError>) + 'static>(
         &self,
@@ -298,41 +256,42 @@ impl SessionHandle {
         value: bool,
         on_result: F,
     ) -> impl Future<Output = Result<(), CentralError>> + use<F> {
-        let callback: Callback = Box::new(move |result| on_result(result.map(|_| ())));
-        let result = self.submit(
+        self.submit(
             RequestKind::Write {
                 did: did.into(),
                 binding,
                 value,
             },
-            self.timing.request,
-            Some(callback),
-        );
-        async move { result.await.map(|_| ()) }
+            |_| (),
+            on_result,
+        )
     }
-    fn submit(
+    fn submit<T: Clone + 'static, F: FnOnce(Result<T, CentralError>) + 'static>(
         &self,
         kind: RequestKind,
-        remaining: Duration,
-        callback: Option<Callback>,
-    ) -> impl Future<Output = ResultValue> + use<> {
+        decode: fn(Response) -> T,
+        on_result: F,
+    ) -> impl Future<Output = Result<T, CentralError>> + use<T, F> {
         let completion = Rc::new(Completion {
             result: RefCell::new(None),
             event: Event::new(),
         });
-        let now = Instant::now();
-        let deadline = now.checked_add(remaining);
         let request = Request {
             kind,
-            deadline: deadline.unwrap_or(now),
-            completion: completion.clone(),
-            callback,
+            deadline: Instant::now() + self.timing.request,
+            complete: Box::new({
+                let completion = completion.clone();
+                move |result| {
+                    let result = result.map(decode);
+                    on_result(result.clone());
+                    *completion.result.borrow_mut() = Some(result);
+                    completion.event.notify(usize::MAX);
+                }
+            }),
             id: None,
         };
-        let error = if deadline.is_none() || !valid_request(&request.kind) {
+        let error = if !valid_request(&request.kind) {
             Some(CentralError::InvalidInput)
-        } else if remaining.is_zero() {
-            Some(CentralError::Timeout)
         } else if self.shared.closed.get() {
             Some(CentralError::Cancelled)
         } else if self.shared.outstanding.get() >= LIMIT {
@@ -341,7 +300,7 @@ impl SessionHandle {
             None
         };
         if let Some(error) = error {
-            request.finish(Err(error));
+            (request.complete)(Err(error));
         } else {
             self.shared
                 .outstanding
@@ -369,26 +328,16 @@ pub(super) fn valid_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 fn valid_request(kind: &RequestKind) -> bool {
-    if matches!(kind, RequestKind::ListAll) {
-        return true;
-    }
     let (did, binding) = match kind {
-        RequestKind::List { did } => (did, None),
-        RequestKind::Unsubscribe { did } => (did, None),
+        RequestKind::ListAll => return true,
+        RequestKind::List { did } | RequestKind::Unsubscribe { did } => (did, None),
         RequestKind::Subscribe { did, binding }
         | RequestKind::Read { did, binding }
         | RequestKind::Write { did, binding, .. } => (did, Some(binding)),
-        RequestKind::ListAll => unreachable!(),
     };
     valid_identifier(did) && binding.is_none_or(|binding| binding.siid > 0 && binding.piid > 0)
 }
 
-fn devices_response(response: Response) -> Result<Vec<DeviceEntry>, CentralError> {
-    match response {
-        Response::Devices(devices) => Ok(devices),
-        _ => Err(CentralError::Protocol),
-    }
-}
 pub(super) fn next_mips_id() -> Result<u32, CentralError> {
     static IDS: OnceLock<AtomicU64> = OnceLock::new();
     let next = IDS

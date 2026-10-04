@@ -322,7 +322,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
                 device.set_availability(Availability::Available);
                 invoke_status(&client, 2, true, IMStatusCode::Failure).await;
                 read_state(&client, None, true, &[true]).await;
-                device.observe(false);
+                device.functions()[0].observe(false);
                 *rejection.borrow_mut() = Some(CommandError::Rejected("denied".into()));
                 invoke_status(&client, 1, true, IMStatusCode::Failure).await;
                 *rejection.borrow_mut() = Some(CommandError::Timeout);
@@ -338,13 +338,13 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
                 read_state(&client, Some(true), false, &[true, false]).await;
                 device.set_availability(Availability::Available);
                 read_state(&client, Some(true), true, &[true, false, true]).await;
-                device.observe(initial);
+                device.functions()[0].observe(initial);
             }
             let mut id = if let Some(id) = previous_subscription {
                 // No new SubscribeRequest: resume under the original ID and
                 // report a fresh source value. Real CASE is validated manually.
                 expect_report(&client, id, None, Some(false)).await.unwrap();
-                device.observe(initial);
+                device.functions()[0].observe(initial);
                 device.set_availability(Availability::Available);
                 expect_report(&client, id, Some(initial), Some(true))
                     .await
@@ -372,14 +372,17 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
             wait_committed(&state).await;
             if boot == 2 {
                 // A new subscription must not reuse the restored ID.
-                let replacement = subscribe(&client, device.snapshot().power.value().unwrap())
-                    .await
-                    .unwrap();
+                let replacement = subscribe(
+                    &client,
+                    device.functions()[0].snapshot().power.value().unwrap(),
+                )
+                .await
+                .unwrap();
                 assert!(replacement > id);
                 id = replacement;
             }
             wait_committed(&state).await;
-            let final_power = !device.snapshot().power.value().unwrap();
+            let final_power = !device.functions()[0].snapshot().power.value().unwrap();
             super::terminal_command(&device, if final_power { "on" } else { "off" }).await;
             expect_report(&client, id, Some(final_power), None)
                 .await
@@ -775,7 +778,7 @@ async fn receive_observed(client: &Matter<'_>, id: u32) -> Result<Observed, Erro
     Ok(observed)
 }
 
-fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
+fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) -> (u32, String) {
     let store = Store::open(directory).unwrap();
     let identity = store.load_identity().unwrap();
     let info = basic_info(&identity);
@@ -835,15 +838,15 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                 AttrPath::from_gp(&GenericPath::new(Some(0), Some(0x1d), Some(3))),
                 AttrPath::from_gp(&GenericPath::new(Some(1), Some(0x1d), Some(3))),
             ];
-            let id = if boot == 1 {
+            let (id, unique_id) = if boot == 1 {
                 let (initial, empty) = subscribe_paths(&client, &paths).await.unwrap();
                 wait_committed(&state).await;
                 assert!(empty.powers.is_empty());
                 assert_eq!(empty.parts[&0], [1]);
                 let before = empty.versions[&0];
-                store.devices().publish(single.description()).unwrap();
+                store.devices().publish(&single.description()).unwrap();
                 registry.insert(single.clone());
-                let stored = store.devices().publish(multi.description()).unwrap();
+                let stored = store.devices().publish(&multi.description()).unwrap();
                 assert_eq!(stored.endpoint, 3);
                 registry.insert(multi.clone());
                 let added = receive_observed(&client, initial).await.unwrap();
@@ -892,21 +895,23 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                         .any(|endpoint| [4, 5, 6].contains(endpoint))
                 );
                 wait_committed(&state).await;
-                id
+                (id, stored.unique_id)
             } else {
-                let id = previous.unwrap();
+                let (id, unique_id) = previous.unwrap();
                 let restored = receive_observed(&client, id).await.unwrap();
                 assert_eq!(restored.unsupported, [4]);
                 assert_eq!(restored.parts[&0], [1, 2]);
                 assert_eq!(restored.powers.keys().copied().collect::<Vec<_>>(), [2]);
                 wait_committed(&state).await;
-                let old = store
-                    .load_or_create_device_identity(&multi.description().key)
-                    .unwrap();
-                let readded = store.devices().publish(multi.description()).unwrap();
-                assert_eq!(readded.unique_id, old.unique_id);
-                assert_eq!(readded.endpoint, old.endpoint);
+                let readded = store.devices().publish(&multi.description()).unwrap();
+                assert_eq!(readded.unique_id, unique_id);
+                assert_eq!(readded.endpoint, 3);
                 assert_eq!(readded.label, "Named multi");
+                let (multi, _receivers) = crate::device::PhysicalDevice::new(readded.description());
+                multi.set_availability(Availability::Available);
+                for function in multi.functions() {
+                    function.observe(false);
+                }
                 registry.insert(multi.clone());
                 let added = receive_observed(&client, id).await.unwrap();
                 assert_eq!(added.parts[&0], [1, 2, 3, 4, 5, 6]);
@@ -919,13 +924,13 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                     (added.powers[&4].0.wrapping_add(1), true)
                 );
                 wait_committed(&state).await;
-                id
+                (id, readded.unique_id)
             };
             single.functions()[0].observe(true);
             let changed = receive_observed(&client, id).await.unwrap();
             assert!(changed.powers[&2].1);
             wait_committed(&state).await;
-            id
+            (id, unique_id)
         };
         or(
             services,
@@ -952,7 +957,7 @@ fn dynamic_subscription_reports_add_delete_and_restores_deleted_paths_after_rest
         .spawn(|| {
             let directory = tempfile::tempdir().unwrap();
             let id = dynamic_boot(directory.path(), 1, None);
-            assert_eq!(dynamic_boot(directory.path(), 2, Some(id)), id);
+            assert_eq!(dynamic_boot(directory.path(), 2, Some(id.clone())), id);
         })
         .unwrap()
         .join()

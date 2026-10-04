@@ -104,7 +104,6 @@ impl Pagination {
         &mut self,
         has_more: Option<bool>,
         cursor: Option<String>,
-        progress: usize,
         operation: &'static str,
     ) -> Result<Option<String>, CloudError> {
         if !has_more.unwrap_or(false) {
@@ -113,7 +112,7 @@ impl Pagination {
         let cursor = cursor
             .filter(|cursor| !cursor.is_empty())
             .ok_or_else(|| CloudError::protocol(operation))?;
-        if progress == 0 || !self.cursors.insert(cursor.clone()) {
+        if !self.cursors.insert(cursor.clone()) {
             return Err(CloudError::protocol(operation));
         }
         Ok(Some(cursor))
@@ -168,12 +167,7 @@ impl CloudClient {
             });
         }
         let mut pages = Pagination::default();
-        let mut cursor = pages.advance(
-            result.has_more,
-            result.max_id,
-            catalog.homes.len(),
-            operation,
-        )?;
+        let mut cursor = pages.advance(result.has_more, result.max_id, operation)?;
         while let Some(start_id) = cursor {
             let result: MembersResponse = self
                 .protected_post(
@@ -183,7 +177,6 @@ impl CloudClient {
                     json!({"start_id":start_id,"limit":150}),
                 )
                 .await?;
-            let mut progress = 0;
             for record in result.info {
                 let id = record.id.into_string();
                 let index = home_indices
@@ -194,12 +187,11 @@ impl CloudClient {
                         return Err(CloudError::protocol(operation));
                     }
                     if seen_members.insert((id.clone(), did.clone())) {
-                        progress += 1;
                         catalog.homes[*index].dids.push(did);
                     }
                 }
             }
-            cursor = pages.advance(result.has_more, result.max_id, progress, operation)?;
+            cursor = pages.advance(result.has_more, result.max_id, operation)?;
         }
         Ok(catalog)
     }
@@ -218,7 +210,6 @@ impl CloudClient {
         let operation = "read Xiaomi device description";
         let mut cursor = None;
         let mut pages = Pagination::default();
-        let mut seen_devices = HashSet::new();
         let mut found = None;
         loop {
             let mut body =
@@ -234,9 +225,7 @@ impl CloudClient {
                     body,
                 )
                 .await?;
-            let mut progress = 0;
             for record in result.list {
-                progress += usize::from(seen_devices.insert(record.did.clone()));
                 if record.did == did {
                     let details: DeviceDescription =
                         serde_json::from_value(Value::Object(record.details))
@@ -248,7 +237,7 @@ impl CloudClient {
                     });
                 }
             }
-            cursor = pages.advance(result.has_more, result.next_start_did, progress, operation)?;
+            cursor = pages.advance(result.has_more, result.next_start_did, operation)?;
             if cursor.is_none() {
                 return Ok(found);
             }

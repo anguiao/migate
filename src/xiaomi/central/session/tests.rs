@@ -1431,15 +1431,57 @@ fn dropping_unpolled_driver_completes_queued_callback_and_closes_handle() {
 }
 
 #[test]
-fn reconnect_has_new_generation_and_never_completes_from_old_session_id() {
+fn result_callbacks_can_submit_requests_after_waiters_are_dropped() {
+    block_on(pair(
+        |mut broker| async move {
+            broker.setup().await;
+            for value in [true, false] {
+                let Packet::Publish(read) = broker.next().await else {
+                    panic!("read expected")
+                };
+                broker.acknowledge(&read).await;
+                let id = wire::decode_mips(&read.payload).unwrap().id;
+                broker
+                    .send(Packet::Publish(Publish::new(
+                        format!("{}/reply", broker.client_id),
+                        QoS::AtMostOnce,
+                        wire::encode_mips(id, None, &json!({"value":value})),
+                    )))
+                    .await;
+            }
+            assert!(broker.next_optional().await.is_none());
+        },
+        |handle, driver| async move {
+            let next = handle.clone();
+            drop(handle.read_property(
+                "target",
+                PropertyBinding { siid: 2, piid: 1 },
+                move |result| {
+                    assert_eq!(result, Ok(true));
+                    let close = next.clone();
+                    drop(next.read_property(
+                        "target",
+                        PropertyBinding { siid: 2, piid: 1 },
+                        move |result| {
+                            assert_eq!(result, Ok(false));
+                            close.close();
+                        },
+                    ));
+                },
+            ));
+            driver.run(|_| {}).await.unwrap();
+        },
+    ));
+}
+
+#[test]
+fn reconnect_never_completes_from_old_session_request_id() {
     block_on(async {
         let fixture = TlsFixture::new(false);
         let old = Rc::new(Cell::new(0));
         let old_id = old.clone();
-        let generations = Rc::new(RefCell::new(Vec::new()));
         for session in 0..2 {
             let server_old = old_id.clone();
-            let client_generations = generations.clone();
             pair_fixture(
                 &fixture,
                 move |mut broker| async move {
@@ -1465,7 +1507,6 @@ fn reconnect_has_new_generation_and_never_completes_from_old_session_id() {
                     async_io::Timer::after(Duration::from_millis(20)).await;
                 },
                 move |handle, driver| async move {
-                    client_generations.borrow_mut().push(handle.generation());
                     let work = async {
                         assert!(
                             !handle
@@ -1490,7 +1531,6 @@ fn reconnect_has_new_generation_and_never_completes_from_old_session_id() {
             )
             .await;
         }
-        assert_ne!(generations.borrow()[0], generations.borrow()[1]);
     });
 }
 

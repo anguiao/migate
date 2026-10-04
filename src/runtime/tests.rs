@@ -49,9 +49,9 @@ fn preparation_interrupt_drops_source_and_cancels_queued_commands() {
         let identity = store.load_identity().unwrap();
         let status = status(&store);
         let (device, receiver) = test_device();
-        device.observe(false);
+        device.functions()[0].observe(false);
         device.set_availability(crate::device::Availability::Available);
-        let command = device.execute(crate::device::Command::On);
+        let command = device.functions()[0].execute(crate::device::Command::On);
         let mut command = Box::pin(command);
         assert!(poll_once(command.as_mut()).await.is_none());
         let dropped = Rc::new(Cell::new(false));
@@ -132,9 +132,10 @@ fn source_completion_after_matter_startup_stops_serving_and_drops_commands() {
                     let identity = store.load_identity().unwrap();
                     let status = status(&store);
                     let (device, receiver) = test_device();
-                    device.observe(false);
+                    device.functions()[0].observe(false);
                     device.set_availability(crate::device::Availability::Available);
-                    let mut command = Box::pin(device.execute(crate::device::Command::On));
+                    let mut command =
+                        Box::pin(device.functions()[0].execute(crate::device::Command::On));
                     assert!(poll_once(command.as_mut()).await.is_none());
                     let started = event_listener::Event::new();
                     let listening = started.listen();
@@ -182,7 +183,10 @@ fn source_completion_after_matter_startup_stops_serving_and_drops_commands() {
                     );
                     assert!(dropped.get());
                     assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
-                    assert_eq!(device.snapshot().power, crate::device::Power::Off);
+                    assert_eq!(
+                        device.functions()[0].snapshot().power,
+                        crate::device::Power::Off
+                    );
                 }
             })
         })
@@ -202,11 +206,13 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 let identity = store.load_identity().unwrap();
                 let status = status(&store);
                 let (device, mut receiver) = test_device();
-                device.observe(false);
+                device.functions()[0].observe(false);
                 device.set_availability(crate::device::Availability::Available);
-                let before = device.snapshot();
-                let mut active = Box::pin(device.execute(crate::device::Command::On));
-                let mut queued = Box::pin(device.execute(crate::device::Command::Toggle));
+                let before = device.functions()[0].snapshot();
+                let mut active =
+                    Box::pin(device.functions()[0].execute(crate::device::Command::On));
+                let mut queued =
+                    Box::pin(device.functions()[0].execute(crate::device::Command::Toggle));
                 assert!(poll_once(active.as_mut()).await.is_none());
                 assert!(poll_once(queued.as_mut()).await.is_none());
                 let stop = event_listener::Event::new();
@@ -249,7 +255,7 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 assert!(dropped.get());
                 assert_eq!(active.await, Err(crate::device::CommandError::Cancelled));
                 assert_eq!(queued.await, Err(crate::device::CommandError::Cancelled));
-                assert_eq!(device.snapshot(), before);
+                assert_eq!(device.functions()[0].snapshot(), before);
             })
         })
         .unwrap()

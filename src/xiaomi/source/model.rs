@@ -99,13 +99,13 @@ pub struct SourceStatus {
 #[derive(Default)]
 pub(super) struct Ready {
     result: RefCell<Option<Result<DeviceRegistry, SourceError>>>,
-    completed: std::cell::Cell<bool>,
     changed: Event,
 }
 impl Ready {
     pub(super) fn finish(&self, result: Result<DeviceRegistry, SourceError>) {
-        if !self.completed.replace(true) {
-            *self.result.borrow_mut() = Some(result);
+        let mut current = self.result.borrow_mut();
+        if current.is_none() {
+            *current = Some(result);
             self.changed.notify(usize::MAX);
         }
     }
@@ -116,7 +116,7 @@ impl TopologyReady {
     pub async fn wait(self) -> Result<DeviceRegistry, SourceError> {
         loop {
             let listener = self.0.changed.listen();
-            if let Some(result) = self.0.result.borrow_mut().take() {
+            if let Some(result) = self.0.result.borrow().clone() {
                 return result;
             }
             listener.await;

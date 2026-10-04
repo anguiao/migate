@@ -11,8 +11,6 @@ use rs_matter::{
     tlv::{TLVBuilderParent, Utf8Str, Utf8StrBuilder},
     with,
 };
-use std::cell::RefCell;
-
 const MAX_LABEL_BYTES: usize = 32;
 
 fn validate_label(label: &str) -> Result<(), Error> {
@@ -29,8 +27,6 @@ pub(super) struct BridgedHandler {
     protocol: super::storage::StoreAdapter,
     dataver: Dataver,
     identity: String,
-    label: RefCell<String>,
-    changes: RefCell<Option<crate::device::Changes>>,
     reported: std::cell::Cell<bool>,
 }
 
@@ -42,16 +38,15 @@ impl BridgedHandler {
         store: DeviceStore,
         protocol: super::storage::StoreAdapter,
     ) -> Self {
+        let reported = std::cell::Cell::new(device.availability() == Availability::Available);
         Self {
-            device: device.clone(),
+            device,
             endpoint: stored.endpoint,
             store,
             protocol,
             dataver,
             identity: stored.unique_id.clone(),
-            label: RefCell::new(stored.label.clone()),
-            changes: RefCell::new(Some(device.functions()[0].subscribe())),
-            reported: std::cell::Cell::new(device.availability() == Availability::Available),
+            reported,
         }
     }
 }
@@ -78,9 +73,9 @@ impl bridged::ClusterHandler for BridgedHandler {
     }
 
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        let mut changes = self.changes.borrow_mut().take().expect("handler runs once");
+        let mut changes = self.device.subscribe();
+        let mut value = self.device.availability() == Availability::Available;
         loop {
-            let value = changes.changed().await.availability == Availability::Available;
             if self.reported.replace(value) != value {
                 bridged::ReachableChanged::emit_for(&ctx, self.endpoint, |builder| {
                     builder.reachable_new_value(value)?.end()
@@ -91,6 +86,7 @@ impl bridged::ClusterHandler for BridgedHandler {
                     bridged::AttributeId::Reachable as _,
                 );
             }
+            value = changes.changed().await == Availability::Available;
         }
     }
 
@@ -107,20 +103,18 @@ impl bridged::ClusterHandler for BridgedHandler {
         _ctx: impl ReadContext,
         builder: Utf8StrBuilder<P>,
     ) -> Result<P, Error> {
-        builder.set(&self.label.borrow())
+        builder.set(&self.device.label())
     }
 
     fn set_node_label(&self, ctx: impl WriteContext, value: Utf8Str<'_>) -> Result<(), Error> {
         validate_label(value)?;
-        if *self.label.borrow() != value {
+        if self.device.label() != value {
             self.protocol
                 .check_failure()
                 .map_err(|_| ErrorCode::StdIoError)?;
-            self.protocol.record(
-                self.store
-                    .set_device_label(&self.device.description().key, value),
-            )?;
-            *self.label.borrow_mut() = value.to_owned();
+            self.protocol
+                .record(self.store.set_device_label(self.device.key(), value))?;
+            self.device.set_label(value.to_owned());
             ctx.notify_changed();
         }
         Ok(())

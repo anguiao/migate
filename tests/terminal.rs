@@ -48,7 +48,7 @@ fn fixture() -> (
                 .collect(),
         });
         physical.set_availability(Availability::Available);
-        store.devices().publish(physical.description()).unwrap();
+        store.devices().publish(&physical.description()).unwrap();
         registry.insert(physical);
         receivers.append(&mut consumers);
     }
@@ -116,33 +116,33 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
 fn list_and_status_read_shared_power_and_persisted_names() {
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
-        let physical = registry.get(&DeviceKey::new("xiaomi", "multi")).unwrap();
+        let key = DeviceKey::new("xiaomi", "multi");
+        store
+            .devices()
+            .set_device_label(&key, "Saved Home name")
+            .unwrap();
+        let stored = store.devices().load_published(&key).unwrap().unwrap();
+        let (physical, _consumers) = PhysicalDevice::new(stored.description());
+        registry.remove(&key);
+        registry.insert(physical.clone());
         physical.function("usb").unwrap().observe(true);
-        store
-            .devices()
-            .set_device_label(&physical.description().key, "Saved Home name")
-            .unwrap();
-        store
-            .devices()
-            .set_function_label(
-                physical.function("usb").unwrap().function_key(),
-                "Saved USB",
-            )
-            .unwrap();
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
             .await
             .unwrap()
             .unwrap();
         assert!(list.contains("Saved Home name"));
-        assert!(list.contains("usb (Saved USB): on"));
+        assert!(list.contains("usb (usb): on"));
         assert!(list.contains("one (name one)"));
+        physical.set_label("Live Home name".into());
         let selected = handle_line(&registry, &store.devices(), &status, "status multi", 0)
             .await
             .unwrap()
             .unwrap();
         assert!(!selected.contains("one (name one)"));
+        assert!(selected.contains("Live Home name"));
+        assert!(!selected.contains("Saved Home name"));
         assert!(selected.contains("Xiaomi: not signed in"));
-        registry.remove(&physical.description().key);
+        registry.remove(physical.key());
         assert!(
             handle_line(&registry, &store.devices(), &status, "on multi usb", 0)
                 .await
@@ -218,20 +218,6 @@ fn input_and_output_errors_propagate() {
     })
 }
 #[test]
-fn a_missing_published_identity_returns_a_storage_error() {
-    block_on(async {
-        let (_dir, store, status, registry, _receivers) = fixture();
-        store
-            .devices()
-            .remove(&DeviceKey::new("xiaomi", "one"))
-            .unwrap();
-        let error = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("no published identity"));
-    })
-}
-#[test]
 fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
@@ -239,6 +225,10 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             .devices()
             .set_device_label(&DeviceKey::new("xiaomi", "multi"), "Home edited name")
             .unwrap();
+        registry
+            .get(&DeviceKey::new("xiaomi", "multi"))
+            .unwrap()
+            .set_label("Home edited name".into());
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
             .local_status()
             .unwrap();

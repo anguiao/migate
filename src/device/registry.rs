@@ -35,7 +35,7 @@ impl DeviceRegistry {
             .unwrap()
             .devices
             .iter()
-            .find(|device| &device.description().key == key)
+            .find(|device| device.key() == key)
             .cloned()
     }
     pub fn list(&self) -> Vec<PhysicalDevice> {
@@ -46,7 +46,7 @@ impl DeviceRegistry {
         if state
             .devices
             .iter()
-            .any(|present| present.description().key == device.description().key)
+            .any(|present| present.key() == device.key())
         {
             return;
         }
@@ -59,7 +59,7 @@ impl DeviceRegistry {
         let index = state
             .devices
             .iter()
-            .position(|device| &device.description().key == key)?;
+            .position(|device| device.key() == key)?;
         let removed = state.devices.remove(index);
         removed.close();
         state.revision = state.revision.wrapping_add(1);

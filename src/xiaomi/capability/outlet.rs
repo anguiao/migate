@@ -4,7 +4,7 @@ use super::{
     CapabilityError, ParsedDevice, ParsedFunction, PropertyBinding,
     description::{Description, Property, Urn, array, string},
 };
-use crate::device::{Capability, Category, DeviceDescription, DeviceKey};
+use crate::device::{Capability, Category, DeviceKey, FunctionDescription};
 
 /// Parse stable outlet functions without treating vendor extensions as standard switches.
 pub fn parse_device(key: DeviceKey, instance: &Value) -> Result<ParsedDevice, CapabilityError> {
@@ -12,19 +12,18 @@ pub fn parse_device(key: DeviceKey, instance: &Value) -> Result<ParsedDevice, Ca
     if !instance.urn.standard("device", "outlet", 0x0000A002) {
         return Err(CapabilityError::UnsupportedDevice);
     }
-    let description = DeviceDescription {
-        key,
-        category: Category::Outlet,
-        capabilities: vec![Capability::OnOff],
-    };
     if instance.urn.vendor == "cuco-cp7pd" {
-        parse_cp7pd(description, &instance)
+        parse_cp7pd(key, &instance)
     } else {
         Ok(ParsedDevice {
-            description,
+            key,
             functions: vec![ParsedFunction {
-                id: "main".into(),
-                label: "主电源".into(),
+                description: FunctionDescription {
+                    id: "main".into(),
+                    label: "主电源".into(),
+                    category: Category::Outlet,
+                    capabilities: vec![Capability::OnOff],
+                },
                 power: standard_main_power(&instance)?,
             }],
             refresh_trigger: None,
@@ -81,7 +80,7 @@ fn power_binding(siid: u32, property: &Property<'_>) -> Result<PropertyBinding, 
 }
 
 fn parse_cp7pd(
-    description: DeviceDescription,
+    key: DeviceKey,
     instance: &Description<'_>,
 ) -> Result<ParsedDevice, CapabilityError> {
     if instance.urn.version != 1 || instance.urn.suffix.is_some() {
@@ -95,13 +94,17 @@ fn parse_cp7pd(
         ("usb", "USB", 9, "miot-spec-v2", 0x0000780C),
     ] {
         functions.push(ParsedFunction {
-            id: id.into(),
-            label: label.into(),
+            description: FunctionDescription {
+                id: id.into(),
+                label: label.into(),
+                category: Category::Outlet,
+                capabilities: vec![Capability::OnOff],
+            },
             power: cp7pd_binding(instance, id, siid, namespace, type_id)?,
         });
     }
     Ok(ParsedDevice {
-        description,
+        key,
         functions,
         refresh_trigger: Some(refresh_trigger),
     })

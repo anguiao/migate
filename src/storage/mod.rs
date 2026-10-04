@@ -9,7 +9,7 @@ mod registry;
 mod store;
 mod xiaomi;
 
-pub use device::{CachedPhysicalDevice, CachedScope, DeviceIdentity, DeviceStore};
+pub use device::{CachedPhysicalDevice, CachedScope, DeviceStore};
 pub use error::StorageError;
 pub use identity::Identity;
 pub use lock::InstanceLock;

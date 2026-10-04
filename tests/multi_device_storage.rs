@@ -1,8 +1,5 @@
 use migate::{
-    device::{
-        Capability, Category, DeviceKey, FunctionDescription, FunctionKey,
-        PhysicalDeviceDescription,
-    },
+    device::{Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription},
     storage::{CachedPhysicalDevice, CachedScope, Store},
     xiaomi::{
         capability::{ParsedDevice, ParsedFunction, PropertyBinding},
@@ -33,17 +30,17 @@ fn cached(uid: &str, home: &str) -> CachedPhysicalDevice {
         model: "cuco.plug.cp7pd".into(),
         instance_type: "urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:1".into(),
         device: ParsedDevice {
-            description: migate::device::DeviceDescription {
-                key: DeviceKey::new("xiaomi", "multi"),
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
-            },
+            key: DeviceKey::new("xiaomi", "multi"),
             functions: [3, 4, 9]
                 .into_iter()
                 .zip(["outlet_1", "outlet_2", "usb"])
                 .map(|(siid, id)| ParsedFunction {
-                    id: id.into(),
-                    label: id.into(),
+                    description: FunctionDescription {
+                        id: id.into(),
+                        label: id.into(),
+                        category: Category::Outlet,
+                        capabilities: vec![Capability::OnOff],
+                    },
                     power: PropertyBinding { siid, piid: 1 },
                 })
                 .collect(),
@@ -67,14 +64,9 @@ fn physical_and_function_identities_names_and_historical_endpoints_survive_remov
             .collect::<Vec<_>>(),
         [3, 4, 5]
     );
-    let key = FunctionKey::new(desc.key.clone(), "usb");
     store
         .devices()
         .set_device_label(&desc.key, "Home name")
-        .unwrap();
-    store
-        .devices()
-        .set_function_label(&key, "USB name")
         .unwrap();
     store.devices().remove(&desc.key).unwrap();
     assert!(store.devices().list_published().unwrap().is_empty());
@@ -88,7 +80,7 @@ fn physical_and_function_identities_names_and_historical_endpoints_survive_remov
     assert_eq!(restored.unique_id, first.unique_id);
     assert_eq!(restored.endpoint, first.endpoint);
     assert_eq!(restored.label, "Home name");
-    assert_eq!(restored.functions[2].label, "USB name");
+    assert_eq!(restored.functions[2].label, "usb");
     let mut incompatible = renamed;
     incompatible.functions.pop();
     assert!(store.devices().publish(&incompatible).is_err());
@@ -168,11 +160,11 @@ fn canonical_cache_and_selected_scope_are_account_and_home_scoped() {
     let first = cached("account", "home-one");
     let mut second = cached("account", "home-two");
     second.device.functions[0].power.siid = 30;
-    store.devices().save_parsed(&first).unwrap();
-    store.devices().save_parsed(&second).unwrap();
+    store.devices().publish_cached(&first, "Outlet").unwrap();
+    store.devices().publish_cached(&second, "Outlet").unwrap();
     store
         .devices()
-        .save_parsed(&cached("other", "home-one"))
+        .publish_cached(&cached("other", "home-one"), "Outlet")
         .unwrap();
     let scope = CachedScope {
         uid: "account".into(),
@@ -187,28 +179,27 @@ fn canonical_cache_and_selected_scope_are_account_and_home_scoped() {
     assert_eq!(
         store
             .devices()
-            .list_parsed("account", "home-one")
-            .unwrap()
-            .as_slice(),
-        std::slice::from_ref(&first)
+            .load_parsed("account", "home-one", &first.device.key)
+            .unwrap(),
+        Some(first.clone())
     );
     assert_eq!(
         store
             .devices()
-            .load_parsed("account", "home-two", &second.device.description.key)
+            .load_parsed("account", "home-two", &second.device.key)
             .unwrap(),
         Some(second)
     );
     assert!(
         store
             .devices()
-            .load_parsed("account", "missing", &first.device.description.key)
+            .load_parsed("account", "missing", &first.device.key)
             .unwrap()
             .is_none()
     );
     let mut invalid = first;
     invalid.group_id = "wrong".into();
-    assert!(store.devices().save_parsed(&invalid).is_err());
+    assert!(store.devices().publish_cached(&invalid, "Outlet").is_err());
 }
 
 #[test]
@@ -231,25 +222,25 @@ fn publishing_cached_device_is_one_transaction_and_incompatible_changes_keep_the
     assert_eq!(
         store
             .devices()
-            .load_parsed("account", "home", &original.device.description.key)
+            .load_parsed("account", "home", &original.device.key)
             .unwrap(),
         Some(original.clone())
     );
     assert_eq!(
         store
             .devices()
-            .load_published(&original.device.description.key)
+            .load_published(&original.device.key)
             .unwrap(),
         Some(published)
     );
     Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER reject_new_cache AFTER INSERT ON device_cache BEGIN SELECT RAISE(ABORT,'private'); END;").unwrap();
     let mut another = original;
-    another.device.description.key.id = "new".into();
+    another.device.key.id = "new".into();
     assert!(store.devices().publish_cached(&another, "new").is_err());
     assert!(
         store
             .devices()
-            .load_published(&another.device.description.key)
+            .load_published(&another.device.key)
             .unwrap()
             .is_none()
     );
@@ -299,5 +290,62 @@ fn invalid_function_sets_are_rejected_atomically_and_device_count_has_no_sample_
             .get::<_, u32>(0))
             .unwrap(),
         80
+    );
+}
+
+#[test]
+fn restoration_uses_committed_names_and_checks_only_published_topology() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let original = cached("account", "home");
+    store
+        .devices()
+        .publish_cached(&original, "Initial name")
+        .unwrap();
+    store
+        .devices()
+        .set_device_label(&original.device.key, "Home name")
+        .unwrap();
+    let mut deleted = original.clone();
+    deleted.device.key.id = "deleted".into();
+    store.devices().publish_cached(&deleted, "Deleted").unwrap();
+    store.devices().remove(&deleted.device.key).unwrap();
+    // A valid cached candidate cannot silently change a published function identity.
+    let mut candidate = original.clone();
+    candidate.device.functions.reverse();
+    store
+        .devices()
+        .publish_cached(&candidate, "Outlet")
+        .unwrap();
+    drop(store);
+
+    let store = Store::open(dir.path()).unwrap();
+    let restored = store.devices().restore_cached("account", "home").unwrap();
+    assert_eq!(restored.len(), 1);
+    let (bindings, identity) = &restored[0];
+    assert_eq!(bindings, &candidate);
+    let (physical, _receivers) = migate::device::PhysicalDevice::new(identity.description());
+    assert_eq!(physical.label(), "Home name");
+    assert_eq!(physical.function("usb").unwrap().description().label, "usb");
+    assert!(
+        store
+            .devices()
+            .restore_cached("other", "home")
+            .unwrap()
+            .is_empty()
+    );
+
+    Connection::open(store.path()).unwrap().execute(
+        "UPDATE device_cache SET functions = json_remove(functions, '$[0]') WHERE device_id = 'multi'",
+        [],
+    ).unwrap();
+    assert!(store.devices().restore_cached("account", "home").is_err());
+    store.devices().remove(&original.device.key).unwrap();
+    assert!(
+        store
+            .devices()
+            .restore_cached("account", "home")
+            .unwrap()
+            .is_empty()
     );
 }

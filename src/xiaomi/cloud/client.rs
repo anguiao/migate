@@ -11,7 +11,6 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{collections::HashSet, error::Error as StdError, fmt, time::Duration};
 use url::Url;
-use uuid::Uuid;
 
 pub const CLOUD_BASE_URL: &str = "https://ha.api.io.mi.com";
 const PROBE_DEVICE_LIMIT: usize = 150;
@@ -99,14 +98,10 @@ impl CloudClient {
 
     pub async fn refresh_token(
         &self,
-        oauth_client_uuid: &str,
         redirect_uri: &str,
         refresh_token: &str,
     ) -> Result<TokenResponse, CloudError> {
-        if Uuid::parse_str(oauth_client_uuid).is_err()
-            || redirect_uri.is_empty()
-            || refresh_token.is_empty()
-        {
+        if redirect_uri.is_empty() || refresh_token.is_empty() {
             return Err(CloudError::input("refresh access token"));
         }
         self.token_request(

@@ -210,7 +210,7 @@ fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
 }
 
 #[test]
-fn catalog_rejects_invalid_or_stalled_pagination_and_accepts_null_lists() {
+fn catalog_rejects_invalid_or_repeated_cursors_and_accepts_null_lists() {
     for result in [json!({"homelist":null}), json!({"homelist":[]})] {
         let (base, _) = mock_server(vec![MockResponse::json(
             200,
@@ -229,7 +229,6 @@ fn catalog_rejects_invalid_or_stalled_pagination_and_accepts_null_lists() {
         json!({"homelist":{}}),
         json!({"homelist":[{"uid":"account","id":"home","roomlist":[],"dids":7}]}),
         json!({"homelist":[{"uid":"account","id":"home","roomlist":[]}],"has_more":true}),
-        json!({"homelist":[],"has_more":true,"max_id":"next"}),
         json!({"homelist":[{"uid":"account","id":"home","roomlist":[]}],"has_more":"yes"}),
     ] {
         let (base, _) = mock_server(vec![MockResponse::json(
@@ -259,7 +258,7 @@ fn catalog_rejects_invalid_or_stalled_pagination_and_accepts_null_lists() {
     );
     assert_eq!(requests.try_iter().count(), 2);
 
-    let repeated = json!({"code":0,"result":{"info":[{"id":"home","dids":null}],"has_more":true,"max_id":"different"}});
+    let repeated = json!({"code":0,"result":{"info":[{"id":"home","dids":null}],"has_more":true,"max_id":"same"}});
     let (base, requests) = mock_server(vec![
         MockResponse::json(200, &initial.to_string()),
         MockResponse::json(200, &repeated.to_string()),
@@ -275,7 +274,7 @@ fn catalog_rejects_invalid_or_stalled_pagination_and_accepts_null_lists() {
 }
 
 #[test]
-fn device_pages_reject_missing_fields_and_stalled_progress() {
+fn device_pages_reject_missing_fields_and_repeated_cursors() {
     let home = OwnedHome {
         uid: "account".into(),
         home_id: "home".into(),
@@ -285,7 +284,6 @@ fn device_pages_reject_missing_fields_and_stalled_progress() {
     for result in [
         json!({}),
         json!({"list":{}}),
-        json!({"list":[],"has_more":true,"next_start_did":"next"}),
         json!({"list":[{"did":"target","model":"model"}]}),
         json!({"list":[{"did":"other"}],"has_more":true}),
     ] {
@@ -303,7 +301,7 @@ fn device_pages_reject_missing_fields_and_stalled_progress() {
     }
     let responses = [
         json!({"list":[{"did":"other"}],"has_more":true,"next_start_did":"one"}),
-        json!({"list":[{"did":"other"}],"has_more":true,"next_start_did":"two"}),
+        json!({"list":[{"did":"other"}],"has_more":true,"next_start_did":"one"}),
     ];
     let (base, requests) = mock_server(
         responses
@@ -329,6 +327,59 @@ fn device_pages_reject_missing_fields_and_stalled_progress() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn owned_catalog_reads_past_empty_and_overlapping_pages_before_returning_membership() {
+    let responses = [
+        json!({"homelist":[{"uid":"account","id":"home","dids":["first"],"roomlist":[]}],"has_more":true,"max_id":"one"}),
+        json!({"info":[{"id":"home","dids":["first"]}],"has_more":true,"max_id":"two"}),
+        json!({"info":[],"has_more":true,"max_id":"three"}),
+        json!({"info":[{"id":"home","roomlist":[{"dids":["last"]}]}]}),
+    ];
+    let (base, requests) = mock_server(
+        responses
+            .into_iter()
+            .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
+            .collect(),
+    );
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let catalog = future::block_on(cloud.get_owned_homes("token")).unwrap();
+    assert_eq!(catalog.homes[0].dids, ["first", "last"]);
+    assert_eq!(requests.try_iter().count(), 4);
+}
+
+#[test]
+fn device_lookup_reads_past_empty_and_overlapping_pages_without_broadening_dids() {
+    let home = OwnedHome {
+        uid: "account".into(),
+        home_id: "home".into(),
+        group_id: group_id("account", "home"),
+        dids: vec!["target".into()],
+    };
+    let responses = [
+        json!({"list":[],"has_more":true,"next_start_did":"one"}),
+        json!({"list":[{"did":"other"}],"has_more":true,"next_start_did":"two"}),
+        json!({"list":[{"did":"other"}],"has_more":true,"next_start_did":"three"}),
+        json!({"list":[{"did":"target","model":"vendor.plug","spec_type":"instance-type"}]}),
+    ];
+    let (base, requests) = mock_server(
+        responses
+            .into_iter()
+            .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
+            .collect(),
+    );
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let device = future::block_on(cloud.get_device("token", &home, "target"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(device.did, "target");
+    let requests = requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(requests.len(), 4);
+    for request in requests {
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["dids"], json!(["target"]));
+    }
 }
 
 #[test]
@@ -453,12 +504,8 @@ fn token_requests_match_wire_protocol() {
         .query_pairs()
         .collect::<std::collections::HashMap<_, _>>();
     let exchanged = future::block_on(client.exchange_token(&attempt, "code-secret")).unwrap();
-    let refreshed = future::block_on(client.refresh_token(
-        attempt.oauth_client_uuid(),
-        attempt.redirect_uri(),
-        "refresh-input",
-    ))
-    .unwrap();
+    let refreshed =
+        future::block_on(client.refresh_token(attempt.redirect_uri(), "refresh-input")).unwrap();
     assert_eq!(exchanged.access_token, "access-secret");
     assert_eq!(exchanged.refresh_token, "refresh-secret");
     assert_eq!(exchanged.expires_in, 1000);
@@ -541,12 +588,8 @@ fn token_errors_preserve_oauth_codes_without_response_text() {
         let attempt = AuthorizationAttempt::new(None).unwrap();
         let errors = [
             future::block_on(client.exchange_token(&attempt, "code-secret")).unwrap_err(),
-            future::block_on(client.refresh_token(
-                attempt.oauth_client_uuid(),
-                attempt.redirect_uri(),
-                "refresh-secret",
-            ))
-            .unwrap_err(),
+            future::block_on(client.refresh_token(attempt.redirect_uri(), "refresh-secret"))
+                .unwrap_err(),
         ];
         for (error, operation) in errors
             .into_iter()

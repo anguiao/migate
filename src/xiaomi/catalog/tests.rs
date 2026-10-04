@@ -173,18 +173,15 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
         records
     });
     assert_eq!(records[0].model, records[1].model);
-    assert_ne!(
-        records[0].device.description.key,
-        records[1].device.description.key
-    );
-    assert_eq!(records[0].device.functions[0].id, "main");
+    assert_ne!(records[0].device.key, records[1].device.key);
+    assert_eq!(records[0].device.functions[0].description.id, "main");
     assert_eq!(
         records[2]
             .device
             .functions
             .iter()
             .map(|function| (
-                function.id.as_str(),
+                function.description.id.as_str(),
                 function.power.siid,
                 function.power.piid
             ))
@@ -219,7 +216,7 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
     assert_eq!(
         store
             .devices()
-            .list_parsed("account", "local")
+            .restore_cached("account", "local")
             .unwrap()
             .len(),
         3

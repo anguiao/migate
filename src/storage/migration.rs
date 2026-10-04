@@ -4,96 +4,7 @@ use std::{error::Error as StdError, fmt};
 
 const CURRENT_VERSION: i64 = 4;
 
-const DEVICE_CACHE_COLUMNS: &[Column] = &[
-    Column::new("uid", "TEXT", true, true),
-    Column::new("source", "TEXT", true, true),
-    Column::new("device_id", "TEXT", true, true),
-    Column::new("home_id", "TEXT", true, false),
-    Column::new("group_id", "TEXT", true, false),
-    Column::new("model", "TEXT", true, false),
-    Column::new("instance_type", "TEXT", true, false),
-    Column::new("category", "TEXT", true, false),
-    Column::new("capabilities", "TEXT", true, false),
-    Column::new("siid", "INTEGER", true, false),
-    Column::new("piid", "INTEGER", true, false),
-];
-const DEVICE_IDENTITY_COLUMNS: &[Column] = &[
-    Column::new("source", "TEXT", true, true),
-    Column::new("device_id", "TEXT", true, true),
-    Column::new("unique_id", "TEXT", true, false),
-    Column::new("endpoint", "INTEGER", true, false),
-];
-
-const DEVICE_CACHE_V4_COLUMNS: &[Column] = &[
-    Column::new("uid", "TEXT", true, true),
-    Column::new("source", "TEXT", true, true),
-    Column::new("device_id", "TEXT", true, true),
-    Column::new("home_id", "TEXT", true, true),
-    Column::new("group_id", "TEXT", true, false),
-    Column::new("model", "TEXT", true, false),
-    Column::new("instance_type", "TEXT", true, false),
-    Column::new("category", "TEXT", true, false),
-    Column::new("capabilities", "TEXT", true, false),
-    Column::new("functions", "TEXT", true, false),
-    Column::new("refresh_siid", "INTEGER", false, false),
-    Column::new("refresh_piid", "INTEGER", false, false),
-];
-const DEVICE_IDENTITY_V4_COLUMNS: &[Column] = &[
-    Column::new("source", "TEXT", true, true),
-    Column::new("device_id", "TEXT", true, true),
-    Column::new("unique_id", "TEXT", true, false),
-    Column::new("endpoint", "INTEGER", true, false),
-    Column::new("label", "TEXT", false, false),
-    Column::new("published", "INTEGER", true, false),
-];
-const DEVICE_FUNCTION_COLUMNS: &[Column] = &[
-    Column::new("source", "TEXT", true, true),
-    Column::new("device_id", "TEXT", true, true),
-    Column::new("function_id", "TEXT", true, true),
-    Column::new("endpoint", "INTEGER", true, false),
-    Column::new("label", "TEXT", true, false),
-    Column::new("category", "TEXT", true, false),
-    Column::new("capabilities", "TEXT", true, false),
-];
-const ENDPOINT_ALLOCATION_COLUMNS: &[Column] = &[
-    Column::new("endpoint", "INTEGER", false, true),
-    Column::new("source", "TEXT", true, false),
-    Column::new("device_id", "TEXT", true, false),
-    Column::new("slot", "TEXT", true, false),
-];
-const XIAOMI_SCOPE_COLUMNS: &[Column] = &[
-    Column::new("uid", "TEXT", true, true),
-    Column::new("home_id", "TEXT", true, false),
-    Column::new("group_id", "TEXT", true, false),
-];
-
-const IDENTITY_COLUMNS: &[Column] = &[
-    Column::new("id", "INTEGER", false, true),
-    Column::new("bridge_id", "TEXT", true, false),
-];
-const LEGACY_IDENTITY_COLUMNS: &[Column] = &[
-    Column::new("id", "INTEGER", false, true),
-    Column::new("bridge_id", "TEXT", true, false),
-    Column::new("light_id", "TEXT", true, false),
-];
-const BLOB_COLUMNS: &[Column] = &[
-    Column::new("key", "INTEGER", false, true),
-    Column::new("value", "BLOB", true, false),
-];
-const XIAOMI_COLUMNS: &[Column] = &[
-    Column::new("id", "INTEGER", false, true),
-    Column::new("uid", "TEXT", true, false),
-    Column::new("region", "TEXT", true, false),
-    Column::new("oauth_client_uuid", "TEXT", true, false),
-    Column::new("redirect_uri", "TEXT", true, false),
-    Column::new("access_token", "TEXT", true, false),
-    Column::new("refresh_token", "TEXT", true, false),
-    Column::new("expires_at", "INTEGER", true, false),
-    Column::new("refresh_at", "INTEGER", true, false),
-    Column::new("virtual_did", "TEXT", true, false),
-    Column::new("private_key_pem", "TEXT", true, false),
-    Column::new("certificate_pem", "TEXT", true, false),
-];
+pub(super) const SCHEMA: &str = concat!(include_str!("schema.sql"), include_str!("devices-v4.sql"));
 
 #[derive(Debug)]
 pub(super) enum MigrationError {
@@ -127,44 +38,11 @@ impl From<rusqlite::Error> for MigrationError {
     }
 }
 
-#[derive(Eq, PartialEq)]
-struct Column {
-    name: &'static str,
-    data_type: &'static str,
-    not_null: bool,
-    primary_key: bool,
-}
-
-impl Column {
-    const fn new(
-        name: &'static str,
-        data_type: &'static str,
-        not_null: bool,
-        primary_key: bool,
-    ) -> Self {
-        Self {
-            name,
-            data_type,
-            not_null,
-            primary_key,
-        }
-    }
-}
-
 pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
     let transaction = connection.transaction()?;
     let version = transaction.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
     match version {
         0..=2 => {
-            validate_table(&transaction, "identity", LEGACY_IDENTITY_COLUMNS)?;
-            validate_table(&transaction, "blobs", BLOB_COLUMNS)?;
-            if version >= 1 {
-                validate_table(&transaction, "xiaomi_auth", XIAOMI_COLUMNS)?;
-            }
-            if version >= 2 {
-                validate_table(&transaction, "device_cache", DEVICE_CACHE_COLUMNS)?;
-                validate_table(&transaction, "device_identity", DEVICE_IDENTITY_COLUMNS)?;
-            }
             identity::load(&transaction)?;
             if version == 0 {
                 migrate_v0_to_v1(&transaction)?;
@@ -176,11 +54,6 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError>
             migrate_v3_to_v4(&transaction)?;
         }
         3 => {
-            validate_table(&transaction, "identity", IDENTITY_COLUMNS)?;
-            validate_table(&transaction, "blobs", BLOB_COLUMNS)?;
-            validate_table(&transaction, "xiaomi_auth", XIAOMI_COLUMNS)?;
-            validate_table(&transaction, "device_cache", DEVICE_CACHE_COLUMNS)?;
-            validate_table(&transaction, "device_identity", DEVICE_IDENTITY_COLUMNS)?;
             identity::load(&transaction)?;
             migrate_v3_to_v4(&transaction)?;
         }
@@ -193,18 +66,42 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError>
 }
 
 fn validate_current_schema(connection: &Connection) -> Result<(), MigrationError> {
-    validate_table(connection, "identity", IDENTITY_COLUMNS)?;
-    validate_table(connection, "blobs", BLOB_COLUMNS)?;
-    validate_table(connection, "xiaomi_auth", XIAOMI_COLUMNS)?;
-    validate_table(connection, "device_cache", DEVICE_CACHE_V4_COLUMNS)?;
-    validate_table(connection, "device_identity", DEVICE_IDENTITY_V4_COLUMNS)?;
-    validate_table(connection, "device_function", DEVICE_FUNCTION_COLUMNS)?;
-    validate_table(
-        connection,
-        "endpoint_allocation",
-        ENDPOINT_ALLOCATION_COLUMNS,
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(SCHEMA)?;
+    let mut tables = expected.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")?;
+    for table in tables.query_map([], |row| row.get::<_, String>(0))? {
+        let table = table?;
+        if table_columns(connection, &table)? != table_columns(&expected, &table)? {
+            return Err(MigrationError::InvalidSchema);
+        }
+    }
+    Ok(())
+}
+
+fn table_columns(
+    connection: &Connection,
+    table: &str,
+) -> Result<Vec<(String, String, bool, u32)>, MigrationError> {
+    let is_table = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1 AND type = 'table')",
+        [table],
+        |row| row.get::<_, bool>(0),
     )?;
-    validate_table(connection, "xiaomi_scope", XIAOMI_SCOPE_COLUMNS)
+    if !is_table {
+        return Err(MigrationError::InvalidSchema);
+    }
+    let mut columns =
+        connection.prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info(?1)")?;
+    Ok(columns
+        .query_map([table], |row| {
+            Ok((
+                row.get(0)?,
+                row.get::<_, String>(1)?.to_ascii_uppercase(),
+                row.get(2)?,
+                row.get(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 fn migrate_v2_to_v3(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -256,51 +153,9 @@ fn migrate_v0_to_v1(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
     )
 }
 
-fn validate_table(
-    connection: &Connection,
-    table: &str,
-    expected: &[Column],
-) -> Result<(), MigrationError> {
-    let object_type = connection
-        .query_row(
-            "SELECT type FROM sqlite_schema WHERE name = ?1",
-            [table],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if object_type.as_deref() != Some("table") {
-        return Err(MigrationError::InvalidSchema);
-    }
-
-    let sql = format!("PRAGMA table_info({table})");
-    let mut statement = connection.prepare(&sql)?;
-    let actual = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, bool>(5)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let matches = actual.len() == expected.len()
-        && actual.iter().zip(expected).all(|(actual, expected)| {
-            actual.0 == expected.name
-                && actual.1.eq_ignore_ascii_case(expected.data_type)
-                && actual.2 == expected.not_null
-                && actual.3 == expected.primary_key
-        });
-    if matches {
-        Ok(())
-    } else {
-        Err(MigrationError::InvalidSchema)
-    }
-}
-
 fn migrate_v3_to_v4(transaction: &Transaction<'_>) -> Result<(), MigrationError> {
     use crate::{
-        device::{Capability, Category, DeviceDescription, DeviceKey},
+        device::{Capability, Category, DeviceKey, FunctionDescription},
         storage::device::{CachedPhysicalDevice, save_cached, validate_cached},
         xiaomi::capability::{ParsedDevice, ParsedFunction, PropertyBinding},
     };
@@ -346,14 +201,14 @@ fn migrate_v3_to_v4(transaction: &Transaction<'_>) -> Result<(), MigrationError>
             model,
             instance_type,
             device: ParsedDevice {
-                description: DeviceDescription {
-                    key: DeviceKey::new(source, id),
-                    category: Category::Outlet,
-                    capabilities: vec![Capability::OnOff],
-                },
+                key: DeviceKey::new(source, id),
                 functions: vec![ParsedFunction {
-                    id: "main".into(),
-                    label: "主电源".into(),
+                    description: FunctionDescription {
+                        id: "main".into(),
+                        label: "主电源".into(),
+                        category: Category::Outlet,
+                        capabilities: vec![Capability::OnOff],
+                    },
                     power: PropertyBinding { siid, piid },
                 }],
                 refresh_trigger: None,
@@ -375,10 +230,9 @@ fn migrate_v3_to_v4(transaction: &Transaction<'_>) -> Result<(), MigrationError>
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let active = identities.iter().any(|(source, id, _, _)| {
-        caches.iter().any(|cached| {
-            cached.device.description.key.source == *source
-                && cached.device.description.key.id == *id
-        })
+        caches
+            .iter()
+            .any(|cached| cached.device.key.source == *source && cached.device.key.id == *id)
     });
     let old_label = if active {
         let data = transaction
@@ -418,7 +272,7 @@ fn migrate_v3_to_v4(transaction: &Transaction<'_>) -> Result<(), MigrationError>
         }
         let relevant = caches
             .iter()
-            .filter(|cached| cached.device.description.key == key)
+            .filter(|cached| cached.device.key == key)
             .collect::<Vec<_>>();
         let label = if relevant.is_empty() {
             None

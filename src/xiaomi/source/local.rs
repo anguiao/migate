@@ -1,13 +1,13 @@
 use super::{
     model::{GatewayStatus, SourceError},
-    state::{Backoff, Context, MAX_BACKOFF, Session, Task},
+    state::{AccessRefresh, Backoff, Context, MAX_BACKOFF, Session},
 };
 use crate::xiaomi::{
-    central::{self, CentralEvent},
+    central::{self, CentralError, CentralEvent, SessionHandle},
     discovery::{Discovery, DiscoveryChanges, GatewayRoute},
 };
 use futures_lite::future;
-use std::{rc::Rc, task::Poll, time::Duration};
+use std::{rc::Rc, time::Duration};
 pub(super) async fn run(
     context: Rc<Context>,
     discovery: Discovery,
@@ -32,7 +32,9 @@ pub(super) async fn run(
             future::or(
                 async {
                     changes.changed().await?;
-                    context.request_sync();
+                    if context.live.borrow().scope.is_none() {
+                        context.request_sync();
+                    }
                     Ok::<(), SourceError>(())
                 },
                 future::or(
@@ -102,63 +104,73 @@ pub(super) async fn run(
         }
         let connected_since = context.clock.now();
         let result = if let Some((selected, (handle, driver))) = connected {
+            let reconnecting = route.is_some();
             route = Some(selected.clone());
             first_deadline = None;
-            let generation = handle.generation();
-            context.live.borrow_mut().session = Some(Session::new(handle));
+            let session = Session::new(handle.clone());
+            let access = session.access.clone();
+            let tasks = session.tasks.clone();
+            context.live.borrow_mut().session = Some(session);
 
             context.set_gateway(GatewayStatus::Connected(selected.did.clone()));
             refresh_access(&context);
-            context.request_sync();
+            if reconnecting {
+                context.request_sync();
+            }
             context.changed.notify(usize::MAX);
             let events = context.clone();
             let driving = async {
                 driver
-                    .run(move |event| {
-                        if !events.session_current(generation) {
-                            return;
-                        }
-                        match event {
-                            CentralEvent::Property {
-                                did,
-                                binding,
-                                value,
-                            } => {
-                                let work = events
-                                    .live
-                                    .borrow()
-                                    .session
-                                    .as_ref()
-                                    .and_then(|session| session.devices.get(&did).cloned());
-                                if let Some(work) = work {
-                                    let cached = work.cached.borrow();
-                                    if cached.device.refresh_trigger == Some(binding) {
-                                        work.refresh();
-                                    } else if let Some(function) = cached
-                                        .device
-                                        .functions
-                                        .iter()
-                                        .find(|function| function.power == binding)
-                                    {
-                                        work.physical
-                                            .function(&function.id)
-                                            .unwrap()
-                                            .observe(value);
-                                    }
+                    .run(move |event| match event {
+                        CentralEvent::Property {
+                            did,
+                            binding,
+                            value,
+                        } => {
+                            let work = events
+                                .live
+                                .borrow()
+                                .session
+                                .as_ref()
+                                .unwrap()
+                                .devices
+                                .get(&did)
+                                .cloned();
+                            if let Some(work) = work {
+                                let cached = work.record.cached.borrow();
+                                if cached.device.refresh_trigger == Some(binding) {
+                                    work.refresh();
+                                } else if let Some(function) = cached
+                                    .device
+                                    .functions
+                                    .iter()
+                                    .find(|function| function.power == binding)
+                                {
+                                    work.record
+                                        .physical
+                                        .function(&function.description.id)
+                                        .unwrap()
+                                        .observe(value);
                                 }
                             }
-                            CentralEvent::DeviceListChanged { .. } => {
-                                refresh_access(&events);
-                                events.request_sync();
-                            }
+                        }
+                        CentralEvent::DeviceListChanged { .. } => {
+                            refresh_access(&events);
+                            events.request_sync();
                         }
                     })
                     .await
                     .map_err(SourceError::Central)
             };
             future::or(
-                route_watch(&discovery, &mut changes, &context, &selected, generation),
-                future::or(driving, session_tasks(context.clone(), generation)),
+                route_watch(&discovery, &mut changes, &context, &selected),
+                future::or(
+                    driving,
+                    future::or(
+                        access_refreshes(context.clone(), handle, access),
+                        tasks.run(),
+                    ),
+                ),
             )
             .await
         } else {
@@ -176,74 +188,46 @@ pub(super) async fn run(
     }
 }
 pub(super) fn refresh_access(context: &Rc<Context>) {
-    let Some(handle) = ({
-        let mut live = context.live.borrow_mut();
-        live.session
-            .as_mut()
-            .and_then(|session| session.access.request().then(|| session.handle.clone()))
-    }) else {
-        return;
-    };
-    let generation = handle.generation();
-    let current = context.clone();
-    drop(handle.get_devices(move |result| {
-        if !current.session_current(generation) {
-            return;
-        }
-        let again = current
-            .live
-            .borrow_mut()
-            .session
-            .as_mut()
-            .unwrap()
-            .access
-            .finish();
-        match result {
-            Ok(entries) => current.apply_access(entries),
-            Err(error) => current.set_catalog_problem(Some(error.to_string())),
-        }
-        if again {
-            refresh_access(&current);
-        }
-    }));
+    if let Some(session) = &context.live.borrow().session {
+        session.access.request();
+    }
 }
-async fn session_tasks(context: Rc<Context>, generation: u64) -> Result<(), SourceError> {
-    let mut tasks = Vec::<Task>::new();
+async fn access_refreshes(
+    context: Rc<Context>,
+    handle: SessionHandle,
+    access: Rc<AccessRefresh>,
+) -> Result<(), SourceError> {
     loop {
-        let changed = {
-            let mut live = context.live.borrow_mut();
-            let Some(session) = live.session.as_mut() else {
-                return Ok(());
-            };
-            if session.handle.generation() != generation {
-                return Ok(());
-            }
-            tasks.append(&mut session.tasks);
-            session.changed.clone()
-        };
-        let listener = changed.listen();
-        future::or(
-            future::poll_fn(|cx| {
-                let mut i = 0;
-                while i < tasks.len() {
-                    match tasks[i].as_mut().poll(cx) {
-                        Poll::Ready(result) => {
-                            drop(tasks.swap_remove(i));
-                            if let Err(error) = result {
-                                return Poll::Ready(Err(error));
-                            }
-                        }
-                        Poll::Pending => i += 1,
+        access.next().await;
+        let mut backoff = Backoff::new();
+        loop {
+            let current = context.clone();
+            let result = handle
+                .get_devices(move |result| match result {
+                    Ok(entries) => {
+                        current.set_access_problem(None);
+                        current.observe_access(entries);
                     }
+                    Err(CentralError::Cancelled) => {}
+                    Err(error) => current.set_access_problem(Some(error.to_string())),
+                })
+                .await;
+            match result {
+                Ok(_) => {
+                    context.reconcile_all()?;
+                    break;
                 }
-                Poll::Pending
-            }),
-            async {
-                listener.await;
-                Ok(())
-            },
-        )
-        .await?;
+                Err(CentralError::Cancelled) => return Ok(()),
+                Err(_) => {
+                    context
+                        .clock
+                        .wait_until(context.clock.now() + backoff.failed(false))
+                        .await;
+                    // The retry also covers refresh requests received during backoff.
+                    access.requested.set(false);
+                }
+            }
+        }
     }
 }
 async fn route_watch(
@@ -251,20 +235,15 @@ async fn route_watch(
     changes: &mut DiscoveryChanges,
     context: &Context,
     route: &GatewayRoute,
-    generation: u64,
 ) -> Result<(), SourceError> {
     loop {
         let listener = context.changed.listen();
-        if !context.session_current(generation) {
-            return Err(SourceError::Cancelled);
-        }
         if discovery
             .snapshot()
             .route(&route.group_id, Some(route))
             .as_ref()
             != Some(route)
         {
-            context.disconnect("current gateway route changed".into());
             return Err(SourceError::NoLocalGateway);
         }
         future::or(

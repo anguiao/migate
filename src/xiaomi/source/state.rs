@@ -1,33 +1,31 @@
 use super::{
+    bootstrap::Clock,
     model::{GatewayStatus, PendingDevice, Ready, SourceError, SourceStatus},
+    tasks::TaskSet,
     work::DeviceWork,
 };
 use crate::{
-    device::{Availability, Clock, CommandReceiver, DeviceKey, DeviceRegistry, PhysicalDevice},
+    device::{Availability, CommandReceiver, DeviceKey, DeviceRegistry, PhysicalDevice},
     storage::{AdmissionError, CachedPhysicalDevice, CachedScope, Store, XiaomiRecord},
     xiaomi::{
         auth::BridgePreparation,
-        central::{DeviceAccess, DeviceEntry, SessionHandle},
+        capability::PropertyBinding,
+        central::{CentralError, DeviceAccess, DeviceEntry, SessionHandle},
     },
 };
 use event_listener::Event;
-use futures_lite::future;
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet},
-    future::Future,
-    pin::Pin,
+    collections::BTreeMap,
     rc::Rc,
     sync::Arc,
-    task::Poll,
     time::Duration,
 };
 pub(super) const MAX_BACKOFF: Duration = Duration::from_secs(30);
-pub(super) type Task = Pin<Box<dyn Future<Output = Result<(), SourceError>>>>;
 #[derive(Default)]
 pub(super) struct Lifetime {
-    pub(super) closed: Cell<bool>,
-    pub(super) changed: Event,
+    closed: Cell<bool>,
+    changed: Event,
 }
 impl Lifetime {
     pub(super) fn close(&self) {
@@ -44,90 +42,119 @@ impl Lifetime {
         }
     }
 }
+/// The accepted binding and physical state are shared by commands and session work.
 pub(super) struct DeviceRecord {
-    pub(super) cached: CachedPhysicalDevice,
+    pub(super) cached: RefCell<CachedPhysicalDevice>,
     pub(super) physical: PhysicalDevice,
+}
+impl DeviceRecord {
+    pub(super) fn binding(&self, id: &str) -> PropertyBinding {
+        self.cached
+            .borrow()
+            .device
+            .functions
+            .iter()
+            .find(|function| function.description.id == id)
+            .unwrap()
+            .power
+    }
+}
+/// One entry owns all preparation and admission state for a current home member.
+#[derive(Default)]
+pub(super) struct DeviceSlot {
+    /// A description awaiting admission; accepted descriptions live only in the record.
+    pub(super) candidate: Option<CachedPhysicalDevice>,
+    pub(super) admitted: Option<Rc<DeviceRecord>>,
+    pub(super) loading: Option<Rc<Lifetime>>,
+    pub(super) access: Option<Result<DeviceAccess, CentralError>>,
     pub(super) blocked: Option<String>,
+}
+impl DeviceSlot {
+    pub(super) fn restored(cached: CachedPhysicalDevice, physical: PhysicalDevice) -> Self {
+        Self {
+            admitted: Some(Rc::new(DeviceRecord {
+                cached: RefCell::new(cached),
+                physical,
+            })),
+            ..Self::default()
+        }
+    }
+    pub(super) fn needs_description(&self) -> bool {
+        if self.loading.is_some() {
+            return false;
+        }
+        let differs = |cached: &CachedPhysicalDevice| {
+            self.access
+                .as_ref()
+                .and_then(|access| access.as_ref().ok())
+                .is_some_and(|access| {
+                    access.model != cached.model || access.instance_type != cached.instance_type
+                })
+        };
+        match &self.admitted {
+            Some(record) => self.blocked.is_some() || differs(&record.cached.borrow()),
+            None => self.candidate.as_ref().is_none_or(differs),
+        }
+    }
 }
 pub(super) struct Session {
     pub(super) handle: SessionHandle,
-    pub(super) access: AccessRefresh,
+    pub(super) access: Rc<AccessRefresh>,
     pub(super) devices: BTreeMap<String, Rc<DeviceWork>>,
-    pub(super) tasks: Vec<Task>,
-    pub(super) changed: Rc<Event>,
+    pub(super) tasks: Rc<TaskSet>,
 }
 impl Session {
     pub(super) fn new(handle: SessionHandle) -> Self {
         Self {
             handle,
-            access: AccessRefresh::Idle,
+            access: Rc::new(AccessRefresh::default()),
             devices: BTreeMap::new(),
-            tasks: Vec::new(),
-            changed: Rc::new(Event::new()),
+            tasks: Rc::new(TaskSet::default()),
         }
     }
 }
 #[derive(Default)]
-pub(super) enum AccessRefresh {
-    #[default]
-    Idle,
-    Pending,
-    Queued,
+pub(super) struct AccessRefresh {
+    pub(super) requested: Cell<bool>,
+    changed: Event,
 }
 impl AccessRefresh {
-    pub(super) fn request(&mut self) -> bool {
-        match self {
-            Self::Idle => {
-                *self = Self::Pending;
-                true
-            }
-            _ => {
-                *self = Self::Queued;
-                false
-            }
-        }
+    pub(super) fn request(&self) {
+        self.requested.set(true);
+        self.changed.notify(usize::MAX);
     }
-    pub(super) fn finish(&mut self) -> bool {
-        matches!(std::mem::take(self), Self::Queued)
+    pub(super) async fn next(&self) {
+        loop {
+            let listener = self.changed.listen();
+            if self.requested.replace(false) {
+                return;
+            }
+            listener.await;
+        }
     }
 }
 pub(super) struct Live {
     pub(super) credentials: Option<XiaomiRecord>,
     pub(super) scope: Option<CachedScope>,
-    pub(super) members: BTreeSet<String>,
-    pub(super) records: BTreeMap<String, DeviceRecord>,
-    pub(super) descriptions: BTreeMap<String, CachedPhysicalDevice>,
-    pub(super) access: BTreeMap<String, Result<DeviceAccess, crate::xiaomi::central::CentralError>>,
-    pub(super) loading: BTreeMap<String, Rc<Lifetime>>,
+    pub(super) devices: BTreeMap<String, DeviceSlot>,
     pub(super) session: Option<Session>,
-}
-impl Live {
-    pub(super) fn generation(&self) -> Option<u64> {
-        self.session.as_ref().map(|s| s.handle.generation())
-    }
 }
 pub(super) struct Context {
     pub(super) live: RefCell<Live>,
     pub(super) registry: DeviceRegistry,
     pub(super) store: Store,
-    pub(super) tasks: RefCell<Vec<Task>>,
+    pub(super) tasks: TaskSet,
     pub(super) changed: Event,
     pub(super) status: RefCell<SourceStatus>,
+    pub(super) cloud_problem: RefCell<Option<String>>,
+    pub(super) access_problem: RefCell<Option<String>>,
     pub(super) status_changed: Event,
     pub(super) ready: Rc<Ready>,
     pub(super) clock: Arc<dyn Clock>,
-    pub(super) rejected_token: RefCell<Option<String>>,
-    pub(super) refreshing_token: RefCell<Option<String>>,
-    pub(super) refreshed_token: RefCell<Option<String>>,
     pub(super) sync_requested: Cell<bool>,
     pub(super) sync_changed: Event,
-    pub(super) cloud_paused: Cell<bool>,
-    pub(super) fatal: RefCell<Option<SourceError>>,
 }
 impl Context {
-    pub(super) fn session_current(&self, generation: u64) -> bool {
-        self.live.borrow().generation() == Some(generation)
-    }
     pub(super) fn request_sync(&self) {
         self.sync_requested.set(true);
         self.sync_changed.notify(usize::MAX);
@@ -141,6 +168,22 @@ impl Context {
         }
     }
     pub(super) fn set_catalog_problem(&self, problem: Option<String>) {
+        *self.cloud_problem.borrow_mut() = problem;
+        self.update_catalog_problem();
+    }
+    pub(super) fn set_access_problem(&self, problem: Option<String>) {
+        *self.access_problem.borrow_mut() = problem;
+        self.update_catalog_problem();
+    }
+    fn update_catalog_problem(&self) {
+        let problems = [
+            self.cloud_problem.borrow().clone(),
+            self.access_problem.borrow().clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        let problem = (!problems.is_empty()).then(|| problems.join("; "));
         let mut current = self.status.borrow_mut();
         if current.catalog_problem != problem {
             current.catalog_problem = problem;
@@ -151,8 +194,9 @@ impl Context {
         let name = self
             .live
             .borrow()
-            .access
+            .devices
             .get(did)
+            .and_then(|slot| slot.access.as_ref())
             .and_then(|access| access.as_ref().ok())
             .and_then(|access| access.name.clone())
             .unwrap_or_else(|| did.into());
@@ -168,10 +212,6 @@ impl Context {
         }
         self.status_changed.notify(usize::MAX);
     }
-    pub(super) fn fail(&self, error: SourceError) {
-        *self.fatal.borrow_mut() = Some(error);
-        self.changed.notify(usize::MAX);
-    }
     pub(super) fn disconnect(&self, reason: String) {
         let session = self.live.borrow_mut().session.take();
         if let Some(session) = session {
@@ -180,7 +220,10 @@ impl Context {
             }
             session.handle.close();
         }
-        self.live.borrow_mut().access.clear();
+        for slot in self.live.borrow_mut().devices.values_mut() {
+            slot.access = None;
+        }
+        self.set_access_problem(None);
         for physical in self.registry.list() {
             physical.set_availability(Availability::Unavailable(reason.clone()));
         }
@@ -188,69 +231,77 @@ impl Context {
     }
     pub(super) fn add_consumers(
         self: &Rc<Self>,
-        metadata: &CachedPhysicalDevice,
+        record: Rc<DeviceRecord>,
         receivers: Vec<CommandReceiver>,
     ) {
-        for (function, receiver) in metadata.device.functions.iter().zip(receivers) {
-            self.tasks.borrow_mut().push(Box::pin(super::work::consume(
+        for (function, receiver) in record.physical.functions().iter().zip(receivers) {
+            self.tasks.spawn(super::work::consume(
                 receiver,
                 self.clone(),
-                metadata.device.description.key.id.clone(),
-                function.id.clone(),
-            )));
+                record.clone(),
+                function.function_key().id.clone(),
+            ));
         }
-        self.changed.notify(usize::MAX);
     }
-    pub(super) fn install_work(self: &Rc<Self>, did: &str) {
+    fn install_work(self: &Rc<Self>, did: &str) {
         let mut live = self.live.borrow_mut();
-        let Some(record) = live.records.get(did) else {
-            return;
-        };
-        let work = Rc::new(DeviceWork::new(
-            record.cached.clone(),
-            record.physical.clone(),
-        ));
+        let record = live.devices[did].admitted.as_ref().unwrap().clone();
         let Some(session) = live.session.as_mut() else {
             return;
         };
         if session.devices.contains_key(did) {
             return;
         }
+        let work = Rc::new(DeviceWork::new(record));
         let handle = session.handle.clone();
-        let generation = handle.generation();
         session.devices.insert(did.into(), work.clone());
-        session.tasks.push(Box::pin(super::work::run(
-            work,
-            handle,
-            self.clone(),
-            generation,
-        )));
-        session.changed.notify(usize::MAX);
+        session
+            .tasks
+            .spawn(super::work::run(work, handle, self.clone()));
     }
-    pub(super) fn apply_access(self: &Rc<Self>, entries: Vec<DeviceEntry>) {
-        self.live.borrow_mut().access = entries
+    /// Apply only observations in wire order; admission and storage run after the request future wakes.
+    pub(super) fn observe_access(&self, entries: Vec<DeviceEntry>) {
+        let mut entries = entries
             .into_iter()
             .map(|entry| (entry.did, entry.access))
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        let dids = {
+            let mut live = self.live.borrow_mut();
+            for (did, slot) in &mut live.devices {
+                slot.access = entries.remove(did);
+            }
+            live.devices.keys().cloned().collect::<Vec<_>>()
+        };
+        for did in dids {
+            self.update_availability(&did);
+        }
+    }
+    pub(super) fn reconcile_all(self: &Rc<Self>) -> Result<(), SourceError> {
         let dids = self
             .live
             .borrow()
-            .members
-            .iter()
+            .devices
+            .keys()
             .cloned()
             .collect::<Vec<_>>();
         for did in dids {
-            self.reconcile(&did);
+            self.reconcile(&did)?;
         }
         self.changed.notify(usize::MAX);
+        Ok(())
     }
-    pub(super) fn reconcile(self: &Rc<Self>, did: &str) {
-        let (access, cached, existing) = {
+    pub(super) fn reconcile(self: &Rc<Self>, did: &str) -> Result<(), SourceError> {
+        let (access, cached, admitted) = {
             let live = self.live.borrow();
+            let slot = &live.devices[did];
             (
-                live.access.get(did).cloned(),
-                live.descriptions.get(did).cloned(),
-                live.records.contains_key(did),
+                slot.access.clone(),
+                slot.candidate.clone().or_else(|| {
+                    slot.admitted
+                        .as_ref()
+                        .map(|record| record.cached.borrow().clone())
+                }),
+                slot.admitted.clone(),
             )
         };
         let access = match access {
@@ -261,12 +312,12 @@ impl Context {
                     did,
                     Some(format!("missing or invalid gateway information: {error}")),
                 );
-                return;
+                return Ok(());
             }
             None => {
                 self.unavailable_device(did, "device is absent from the local gateway".into());
                 self.problem(did, Some("waiting for gateway device information".into()));
-                return;
+                return Ok(());
             }
         };
         let Some(cached) = cached else {
@@ -274,46 +325,36 @@ impl Context {
                 did,
                 Some("waiting for a complete device description".into()),
             );
-            return;
+            return Ok(());
         };
-        let reason = if access.model != cached.model || access.instance_type != cached.instance_type
-        {
-            Some("local and cloud device descriptions differ".to_owned())
-        } else if !access.spec_v2_access || !access.push_available {
-            Some("device lacks property or push access".to_owned())
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
+        if let Some(reason) = access_problem(&access, &cached) {
             self.unavailable_device(did, reason.clone());
             self.problem(did, Some(reason));
-            return;
+            return Ok(());
         }
-        if existing {
-            let changed = self.live.borrow().records[did].cached != cached;
-            if changed {
-                let label = access.name.as_deref().unwrap_or(did);
-                match self.store.devices().publish_cached(&cached, label) {
+        if let Some(record) = admitted {
+            if *record.cached.borrow() != cached {
+                match self
+                    .store
+                    .devices()
+                    .publish_cached(&cached, access.name.as_deref().unwrap_or(did))
+                {
                     Ok(_) => {
-                        self.live.borrow_mut().records.get_mut(did).unwrap().cached =
-                            cached.clone();
-                        let work = self
+                        *record.cached.borrow_mut() = cached;
+                        if let Some(work) = self
                             .live
                             .borrow()
                             .session
                             .as_ref()
-                            .and_then(|session| session.devices.get(did).cloned());
-                        if let Some(work) = work {
-                            work.update(cached.clone());
+                            .and_then(|session| session.devices.get(did))
+                        {
+                            work.bindings_changed();
                         }
                     }
-                    Err(AdmissionError::Storage(error)) => {
-                        self.fail(error.into());
-                        return;
-                    }
+                    Err(AdmissionError::Storage(error)) => return Err(error.into()),
                     Err(error) => {
                         self.block_device(did, error.to_string());
-                        return;
+                        return Ok(());
                     }
                 }
             }
@@ -325,89 +366,89 @@ impl Context {
                 .unwrap_or_else(|| crate::runtime::default_device_label(&cached.model, did));
             let stored = match self.store.devices().publish_cached(&cached, &label) {
                 Ok(stored) => stored,
-                Err(AdmissionError::Storage(error)) => {
-                    self.fail(error.into());
-                    return;
-                }
+                Err(AdmissionError::Storage(error)) => return Err(error.into()),
                 Err(error) => {
                     self.problem(did, Some(error.to_string()));
-                    return;
+                    return Ok(());
                 }
             };
-            let mut description = cached.physical_description(stored.label);
-            for function in &mut description.functions {
-                function.label = stored
-                    .functions
-                    .iter()
-                    .find(|stored| stored.key.id == function.id)
-                    .unwrap()
-                    .label
-                    .clone();
-            }
-            let (physical, receivers) = PhysicalDevice::new(description);
+            let (physical, receivers) = PhysicalDevice::new(stored.description());
             self.registry.insert(physical.clone());
-            self.live.borrow_mut().records.insert(
-                did.into(),
-                DeviceRecord {
-                    cached: cached.clone(),
-                    physical,
-                    blocked: None,
-                },
-            );
-            self.add_consumers(&cached, receivers);
-            self.install_work(did);
+            let record = Rc::new(DeviceRecord {
+                cached: RefCell::new(cached),
+                physical,
+            });
+            self.live
+                .borrow_mut()
+                .devices
+                .get_mut(did)
+                .unwrap()
+                .admitted = Some(record.clone());
+            self.add_consumers(record, receivers);
         }
+        self.live
+            .borrow_mut()
+            .devices
+            .get_mut(did)
+            .unwrap()
+            .candidate = None;
         self.install_work(did);
-        let (physical, blocked) = {
-            let live = self.live.borrow();
-            let record = &live.records[did];
-            (record.physical.clone(), record.blocked.clone())
-        };
-        let diagnostic = self
+        self.update_availability(did);
+        let live = self.live.borrow();
+        let slot = &live.devices[did];
+        let diagnostic = live
+            .session
+            .as_ref()
+            .and_then(|session| session.devices.get(did))
+            .and_then(|work| work.diagnostic());
+        let problem = slot.blocked.clone().or(diagnostic);
+        drop(live);
+        self.problem(did, problem);
+        if let Some(work) = self
             .live
             .borrow()
             .session
             .as_ref()
             .and_then(|session| session.devices.get(did))
-            .and_then(|work| work.diagnostic());
-        self.problem(did, blocked.clone().or(diagnostic));
-        let was_available = physical.availability() == Availability::Available;
-        let availability = if let Some(reason) = blocked {
-            Availability::Unavailable(reason)
-        } else if access.online {
-            Availability::Available
-        } else {
-            Availability::Unavailable("device is offline".into())
-        };
-        let now_available = availability == Availability::Available;
-        physical.set_availability(availability);
-        let work = self
-            .live
-            .borrow()
-            .session
-            .as_ref()
-            .and_then(|session| session.devices.get(did).cloned());
-        if let Some(work) = work {
+        {
             work.retry_subscriptions();
-            if now_available && !was_available {
-                work.refresh();
-            }
+        }
+        Ok(())
+    }
+    fn update_availability(&self, did: &str) {
+        let live = self.live.borrow();
+        let slot = &live.devices[did];
+        let Some(record) = &slot.admitted else { return };
+        let reason = slot.blocked.clone().or_else(|| match &slot.access {
+            Some(Ok(access)) => access_problem(access, &record.cached.borrow())
+                .or_else(|| (!access.online).then(|| "device is offline".into())),
+            Some(Err(error)) => Some(error.to_string()),
+            None => Some("device is absent from the local gateway".into()),
+        });
+        let was_available = record.physical.availability() == Availability::Available;
+        let availability = reason.map_or(Availability::Available, Availability::Unavailable);
+        let now_available = availability == Availability::Available;
+        record.physical.set_availability(availability);
+        if now_available
+            && !was_available
+            && let Some(work) = live
+                .session
+                .as_ref()
+                .and_then(|session| session.devices.get(did))
+        {
+            work.refresh();
         }
     }
     fn unavailable_device(&self, did: &str, reason: String) {
-        if let Some(record) = self.live.borrow().records.get(did) {
+        if let Some(record) = &self.live.borrow().devices[did].admitted {
             record
                 .physical
                 .set_availability(Availability::Unavailable(reason));
         }
     }
     pub(super) fn block_device(&self, did: &str, reason: String) {
-        if let Some(record) = self.live.borrow_mut().records.get_mut(did) {
-            record.blocked = Some(reason.clone());
-            record
-                .physical
-                .set_availability(Availability::Unavailable(reason.clone()));
-        }
+        self.live.borrow_mut().devices.get_mut(did).unwrap().blocked = Some(reason.clone());
+        self.unavailable_device(did, reason.clone());
         self.problem(did, Some(reason));
     }
     pub(super) fn remove(self: &Rc<Self>, did: &str) -> Result<(), SourceError> {
@@ -416,9 +457,7 @@ impl Context {
         self.registry.remove(&key);
         let handle = {
             let mut live = self.live.borrow_mut();
-            live.records.remove(did);
-            live.descriptions.remove(did);
-            if let Some(life) = live.loading.remove(did) {
+            if let Some(life) = live.devices.remove(did).unwrap().loading {
                 life.close();
             }
             if let Some(session) = live.session.as_mut() {
@@ -438,36 +477,13 @@ impl Context {
         Ok(())
     }
 }
-pub(super) async fn tasks(context: Rc<Context>) -> Result<(), SourceError> {
-    let mut tasks = Vec::<Task>::new();
-    loop {
-        let listener = context.changed.listen();
-        tasks.extend(context.tasks.borrow_mut().drain(..));
-        if let Some(error) = context.fatal.borrow_mut().take() {
-            return Err(error);
-        }
-        future::or(
-            future::poll_fn(|cx| {
-                let mut i = 0;
-                while i < tasks.len() {
-                    match tasks[i].as_mut().poll(cx) {
-                        Poll::Ready(result) => {
-                            drop(tasks.swap_remove(i));
-                            if let Err(error) = result {
-                                return Poll::Ready(Err(error));
-                            }
-                        }
-                        Poll::Pending => i += 1,
-                    }
-                }
-                Poll::Pending
-            }),
-            async {
-                listener.await;
-                Ok(())
-            },
-        )
-        .await?;
+fn access_problem(access: &DeviceAccess, cached: &CachedPhysicalDevice) -> Option<String> {
+    if access.model != cached.model || access.instance_type != cached.instance_type {
+        Some("local and cloud device descriptions differ".into())
+    } else if !access.spec_v2_access || !access.push_available {
+        Some("device lacks property or push access".into())
+    } else {
+        None
     }
 }
 pub(super) fn update_auth(context: &Context, preparation: &BridgePreparation) {

@@ -8,43 +8,23 @@ pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID [
 fn invalid(status: &AuthStatus, now: i64, reason: &str) -> String {
     format!("{reason}\n{COMMAND_HELP}\n{}", status.render(now))
 }
-fn render(
-    registry: &DeviceRegistry,
-    store: &DeviceStore,
-    did: Option<&str>,
-) -> Result<String, StorageError> {
+fn render(registry: &DeviceRegistry, did: Option<&str>) -> String {
     let mut lines = Vec::new();
     for physical in registry
         .list()
         .into_iter()
-        .filter(|physical| did.is_none_or(|did| physical.description().key.id == did))
+        .filter(|physical| did.is_none_or(|did| physical.key().id == did))
     {
-        let key = &physical.description().key;
-        let stored = store.load_published(key)?.ok_or_else(|| {
-            store.invalid(
-                "read bridge device",
-                "Registered device has no published identity",
-            )
-        })?;
+        let key = physical.key();
         let availability = match physical.availability() {
             Availability::Initializing => "initializing".into(),
             Availability::Available => "available".into(),
             Availability::Unavailable(reason) => format!("unavailable ({reason})"),
         };
-        lines.push(format!("{} ({}): {availability}", key.id, stored.label));
+        lines.push(format!("{} ({}): {availability}", key.id, physical.label()));
         for function in physical.functions() {
             let id = &function.function_key().id;
-            let label = &stored
-                .functions
-                .iter()
-                .find(|stored| &stored.key.id == id)
-                .ok_or_else(|| {
-                    store.invalid(
-                        "read bridge function",
-                        "Registered function has no stored identity",
-                    )
-                })?
-                .label;
+            let label = &function.description().label;
             let power = match function.snapshot().power {
                 Power::Unknown => "unknown",
                 Power::On => "on",
@@ -53,11 +33,11 @@ fn render(
             lines.push(format!("  {id} ({label}): {power}"));
         }
     }
-    Ok(if lines.is_empty() {
+    if lines.is_empty() {
         "No devices are currently connected to the bridge.".into()
     } else {
         lines.join("\n")
-    })
+    }
 }
 pub async fn handle_line(
     registry: &DeviceRegistry,
@@ -73,13 +53,16 @@ pub async fn handle_line(
     let text = match (verb, words.as_slice()) {
         ("help", [_]) => format!("{COMMAND_HELP}\n{}", status.render(now)),
         ("list", [_]) => {
-            let mut text = render(registry, store, None)?;
+            let mut text = render(registry, None);
             for pending in status.pending() {
-                let saved = store.load_published(&DeviceKey::new("xiaomi", &pending.did))?;
-                let name = saved
-                    .as_ref()
-                    .map(|stored| stored.label.as_str())
-                    .unwrap_or(&pending.name);
+                let key = DeviceKey::new("xiaomi", &pending.did);
+                let name = match registry.get(&key) {
+                    Some(physical) => physical.label(),
+                    None => store
+                        .load_published(&key)?
+                        .map(|stored| stored.label)
+                        .unwrap_or_else(|| pending.name.clone()),
+                };
                 text.push_str(&format!(
                     "\n{} ({}): pending ({})",
                     pending.did, name, pending.reason
@@ -87,16 +70,12 @@ pub async fn handle_line(
             }
             text
         }
-        ("status", [_]) => format!("{}\n{}", render(registry, store, None)?, status.render(now)),
+        ("status", [_]) => format!("{}\n{}", render(registry, None), status.render(now)),
         ("status", [_, did]) => {
             if registry.get(&DeviceKey::new("xiaomi", *did)).is_none() {
                 invalid(status, now, "Unknown device DID.")
             } else {
-                format!(
-                    "{}\n{}",
-                    render(registry, store, Some(did))?,
-                    status.render(now)
-                )
+                format!("{}\n{}", render(registry, Some(did)), status.render(now))
             }
         }
         ("on" | "off", [_, did] | [_, did, _]) => {

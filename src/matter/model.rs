@@ -1,15 +1,15 @@
 use super::{bridged_info::BridgedHandler, on_off::OnOffHandler, storage::StoreAdapter};
 use crate::{
-    device::{DeviceRegistry, PhysicalDevice},
-    storage::{Identity, StorageError, Store, StoredDevice},
+    device::{DeviceRegistry, Function, PhysicalDevice},
+    storage::{Identity, StorageError, Store},
 };
 use rand::RngExt as _;
 use rs_matter::{
     Matter, clusters, devices,
     dm::{
-        AsyncHandler, Dataver, DeviceType, Endpoint, Handler, HandlerContext, InvokeContext,
-        InvokeReply, LifecycleOp, MatchContext, Metadata, Node, ReadContext, ReadReply,
-        SemanticTag, WriteContext,
+        Async, AsyncHandler, ChainedHandler, Dataver, DeviceType, EmptyHandler, Endpoint,
+        FnMatcher, Handler, HandlerContext, InvokeContext, InvokeReply, LifecycleOp, MatchContext,
+        Metadata, Node, ReadContext, ReadReply, SemanticTag, WriteContext,
         clusters::{
             app::on_off::{self, ClusterAsyncHandler as _},
             basic_info::BasicInfoConfig,
@@ -27,16 +27,25 @@ use rs_matter::{
     utils::sync::DynBase,
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::BTreeMap,
     future::{Future, poll_fn},
-    pin::Pin,
     rc::Rc,
     task::Poll,
 };
 
 const AGGREGATOR_ENDPOINT: u16 = 1;
 const ROOT: Endpoint<'static> = root_endpoint!(eth);
+const AGGREGATOR: Endpoint<'static> = Endpoint::new(
+    AGGREGATOR_ENDPOINT,
+    devices!(DEV_TYPE_AGGREGATOR),
+    clusters!(desc::DescHandler::CLUSTER),
+);
+type RootHandler = ChainedHandler<
+    FnMatcher,
+    Async<desc::HandlerAdaptor<desc::DescHandler<'static>>>,
+    endpoints::EthSysHandler<'static>,
+>;
 // Basic interoperability intentionally omits the standard's Lighting/Scenes requirements.
 const ON_OFF_PLUG: DeviceType = DeviceType {
     dtype: 0x010a,
@@ -94,209 +103,177 @@ struct Versions {
 }
 struct Entry {
     endpoint: u16,
-    started: Cell<bool>,
-    device: Option<PhysicalDevice>,
+    device: PhysicalDevice,
     descriptor: Dataver,
-    children: Vec<u16>,
-    tag: Option<(u8, String)>,
-    groups: Dataver,
-    identify: Option<identify::IdentifyHandler>,
-    on_off: Option<OnOffHandler>,
-    bridged: Option<BridgedHandler>,
+    role: Role,
 }
+enum Role {
+    Single {
+        control: Control,
+        bridged: BridgedHandler,
+    },
+    Parent {
+        children: Vec<u16>,
+        bridged: BridgedHandler,
+    },
+    Child {
+        control: Control,
+        tag: u8,
+        label: String,
+    },
+}
+struct Control {
+    groups: Dataver,
+    identify: identify::IdentifyHandler,
+    on_off: OnOffHandler,
+}
+impl Control {
+    fn new(function: Function, endpoint: u16, versions: Versions) -> Self {
+        Self {
+            groups: Dataver::new(versions.groups),
+            identify: identify::IdentifyHandler::new(Dataver::new(versions.identify)),
+            on_off: OnOffHandler::new(function, endpoint, Dataver::new(versions.on_off)),
+        }
+    }
+    fn handler(&self) -> impl AsyncHandler + '_ {
+        EmptyHandler
+            .chain(
+                |_, cluster| cluster == 4,
+                Async(
+                    groups::GroupsHandler::new_with_identify(
+                        Dataver::new(self.groups.get()),
+                        &self.identify,
+                    )
+                    .adapt(),
+                ),
+            )
+            .chain(
+                |_, cluster| cluster == 3,
+                Async(identify::HandlerAdaptor(&self.identify)),
+            )
+            .chain(
+                |_, cluster| cluster == 6,
+                on_off::HandlerAsyncAdaptor(&self.on_off),
+            )
+    }
+}
+impl Role {
+    fn control(&self) -> Option<&Control> {
+        match self {
+            Self::Single { control, .. } | Self::Child { control, .. } => Some(control),
+            Self::Parent { .. } => None,
+        }
+    }
+    fn bridged(&self) -> Option<&BridgedHandler> {
+        match self {
+            Self::Single { bridged, .. } | Self::Parent { bridged, .. } => Some(bridged),
+            Self::Child { .. } => None,
+        }
+    }
+}
+// Each role composes only its supported clusters; rs-matter owns operation routing.
+macro_rules! dispatch {
+    ($entry:expr, $method:ident($($arg:expr),* $(,)?)) => {
+        match &$entry.role {
+            Role::Single { control, bridged, .. } => AsyncHandler::$method(
+                &ChainedHandler::new(
+                    |_, cluster| cluster == 0x39,
+                    Async(bridged::HandlerAdaptor(bridged)),
+                    control.handler(),
+                ), $($arg),*
+            ).await,
+            Role::Parent { bridged, .. } => AsyncHandler::$method(
+                &EmptyHandler.chain(
+                    |_, cluster| cluster == 0x39,
+                    Async(bridged::HandlerAdaptor(bridged)),
+                ), $($arg),*
+            ).await,
+            Role::Child { control, .. } => control.handler().$method($($arg),*).await,
+        }
+    };
+}
+
 impl Entry {
     fn versions(&self) -> Versions {
+        let control = self.role.control();
         Versions {
             descriptor: self.descriptor.get(),
-            groups: self.groups.get(),
-            identify: self
-                .identify
-                .as_ref()
-                .map_or(0, identify::ClusterHandler::dataver),
-            on_off: self
-                .on_off
-                .as_ref()
-                .map_or(0, on_off::ClusterAsyncHandler::dataver),
+            groups: control.map_or(0, |control| control.groups.get()),
+            identify: control.map_or(0, |control| control.identify.dataver()),
+            on_off: control.map_or(0, |control| control.on_off.dataver()),
             bridged: self
-                .bridged
-                .as_ref()
+                .role
+                .bridged()
                 .map_or(0, bridged::ClusterHandler::dataver),
         }
     }
     fn descriptor(&self) -> desc::DescHandler<'_> {
         desc::DescHandler::new_matching(Dataver::new(self.descriptor.get()), self)
     }
-    fn groups(&self) -> groups::GroupsHandler<'_> {
-        groups::GroupsHandler::new_with_identify(
-            Dataver::new(self.groups.get()),
-            self.identify.as_ref().unwrap(),
-        )
-    }
     fn metadata<'a>(&'a self, tags: &'a [SemanticTag<'a>]) -> Endpoint<'a> {
-        if self.endpoint == AGGREGATOR_ENDPOINT {
-            Endpoint::new(
-                self.endpoint,
-                devices!(DEV_TYPE_AGGREGATOR),
-                clusters!(desc::DescHandler::CLUSTER),
-            )
-        } else if self.on_off.is_some() && self.bridged.is_some() {
-            Endpoint::new(self.endpoint, SINGLE_TYPES, SINGLE_CLUSTERS)
-        } else if self.bridged.is_some() {
-            Endpoint::new(
+        match &self.role {
+            Role::Single { .. } => Endpoint::new(self.endpoint, SINGLE_TYPES, SINGLE_CLUSTERS),
+            Role::Parent { .. } => Endpoint::new(
                 self.endpoint,
                 devices!(DEV_TYPE_BRIDGED_NODE),
                 PARENT_CLUSTERS,
-            )
-        } else {
-            Endpoint::new(self.endpoint, devices!(ON_OFF_PLUG), CHILD_CLUSTERS).with_tags(tags)
+            ),
+            Role::Child { .. } => {
+                Endpoint::new(self.endpoint, devices!(ON_OFF_PLUG), CHILD_CLUSTERS).with_tags(tags)
+            }
         }
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        match ctx.attr().cluster_id {
-            0x1d => Handler::read(&self.descriptor().adapt(), ctx, reply),
-            4 if self.identify.is_some() => Handler::read(&self.groups().adapt(), ctx, reply),
-            3 if self.identify.is_some() => Handler::read(
-                &identify::HandlerAdaptor(self.identify.as_ref().unwrap()),
-                ctx,
-                reply,
-            ),
-            6 if self.on_off.is_some() => {
-                AsyncHandler::read(
-                    &on_off::HandlerAsyncAdaptor(self.on_off.as_ref().unwrap()),
-                    ctx,
-                    reply,
-                )
-                .await
-            }
-            0x39 if self.bridged.is_some() => Handler::read(
-                &bridged::HandlerAdaptor(self.bridged.as_ref().unwrap()),
-                ctx,
-                reply,
-            ),
-            _ => Err(ErrorCode::ClusterNotFound.into()),
+        if ctx.attr().cluster_id == 0x1d {
+            Handler::read(&self.descriptor().adapt(), ctx, reply)
+        } else {
+            dispatch!(self, read(ctx, reply))
         }
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        match ctx.attr().cluster_id {
-            3 if self.identify.is_some() => Handler::write(
-                &identify::HandlerAdaptor(self.identify.as_ref().unwrap()),
-                ctx,
-            ),
-            0x39 if self.bridged.is_some() => Handler::write(
-                &bridged::HandlerAdaptor(self.bridged.as_ref().unwrap()),
-                ctx,
-            ),
-            _ => Err(ErrorCode::AttributeNotFound.into()),
-        }
+        dispatch!(self, write(ctx))
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        match ctx.cmd().cluster_id {
-            4 if self.identify.is_some() => Handler::invoke(&self.groups().adapt(), ctx, reply),
-            3 if self.identify.is_some() => Handler::invoke(
-                &identify::HandlerAdaptor(self.identify.as_ref().unwrap()),
-                ctx,
-                reply,
-            ),
-            6 if self.on_off.is_some() => {
-                AsyncHandler::invoke(
-                    &on_off::HandlerAsyncAdaptor(self.on_off.as_ref().unwrap()),
-                    ctx,
-                    reply,
-                )
-                .await
-            }
-            0x39 if self.bridged.is_some() => Handler::invoke(
-                &bridged::HandlerAdaptor(self.bridged.as_ref().unwrap()),
-                ctx,
-                reply,
-            ),
-            _ => Err(ErrorCode::CommandNotFound.into()),
-        }
+        dispatch!(self, invoke(ctx, reply))
     }
     fn bump(&self, cluster: Option<u32>) {
         if cluster.is_none_or(|id| id == 0x1d) {
             self.descriptor.changed();
         }
-        if cluster.is_none_or(|id| id == 4) && self.identify.is_some() {
-            self.groups.changed();
+        if let Some(control) = self.role.control() {
+            if cluster.is_none_or(|id| id == 4) {
+                control.groups.changed();
+            }
+            if cluster.is_none_or(|id| id == 3) {
+                control.identify.dataver_changed();
+            }
+            if cluster.is_none_or(|id| id == 6) {
+                control.on_off.dataver_changed();
+            }
         }
-        if let Some(handler) = &self.identify
-            && cluster.is_none_or(|id| id == 3)
-        {
-            handler.dataver_changed();
-        }
-        if let Some(handler) = &self.on_off
-            && cluster.is_none_or(|id| id == 6)
-        {
-            handler.dataver_changed();
-        }
-        if let Some(handler) = &self.bridged
+        if let Some(handler) = self.role.bridged()
             && cluster.is_none_or(|id| id == 0x39)
         {
             handler.dataver_changed();
         }
     }
-    fn lifecycle(&self, ctx: impl HandlerContext, op: LifecycleOp) -> Result<(), Error> {
-        if op == LifecycleOp::Startup && self.started.get() {
-            return Ok(());
-        }
-        if let Some(handler) = &self.identify {
-            Handler::lifecycle(&identify::HandlerAdaptor(handler), &ctx, op)?;
-        }
-        if self.identify.is_some() {
-            Handler::lifecycle(&self.groups().adapt(), &ctx, op)?;
-        }
-        if let Some(handler) = &self.on_off {
-            AsyncHandler::lifecycle(&on_off::HandlerAsyncAdaptor(handler), &ctx, op)?;
-        }
-        if let Some(handler) = &self.bridged {
-            Handler::lifecycle(&bridged::HandlerAdaptor(handler), &ctx, op)?;
-        }
-        if op == LifecycleOp::Startup {
-            self.started.set(true);
-        }
-        Ok(())
-    }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        let identify = async {
-            if let Some(handler) = &self.identify {
-                identify::ClusterHandler::run(handler, &ctx).await
-            } else {
-                std::future::pending().await
-            }
-        };
-        let on_off = async {
-            if let Some(handler) = &self.on_off {
-                on_off::ClusterAsyncHandler::run(handler, &ctx).await
-            } else {
-                std::future::pending().await
-            }
-        };
-        let bridged = async {
-            if let Some(handler) = &self.bridged {
-                bridged::ClusterHandler::run(handler, &ctx).await
-            } else {
-                std::future::pending().await
-            }
-        };
-        futures_lite::future::or(identify, futures_lite::future::or(on_off, bridged)).await
+        dispatch!(self, run(ctx))
     }
 }
 impl std::fmt::Debug for Entry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PartsMatcher")
             .field("endpoint", &self.endpoint)
-            .field("children", &self.children)
             .finish()
     }
 }
 impl DynBase for Entry {}
 impl desc::PartsMatcher for Entry {
     fn matches(&self, _our_endpoint: u16, endpoint: u16) -> bool {
-        if self.endpoint == AGGREGATOR_ENDPOINT {
-            endpoint != 0 && endpoint != AGGREGATOR_ENDPOINT
-        } else {
-            self.children.contains(&endpoint)
+        match &self.role {
+            Role::Parent { children, .. } => children.contains(&endpoint),
+            Role::Single { .. } | Role::Child { .. } => false,
         }
     }
 }
@@ -305,7 +282,7 @@ pub(super) struct Model {
     registry: DeviceRegistry,
     store: Store,
     protocol: StoreAdapter,
-    root: endpoints::EthSysHandler<'static>,
+    root: RootHandler,
     entries: RefCell<Vec<Rc<Entry>>>,
     versions: RefCell<BTreeMap<u16, Versions>>,
 }
@@ -321,19 +298,12 @@ pub(super) fn handler(
         protocol,
         root: endpoints::EthSysHandlerBuilder::new()
             .netif_diag(&SysNetifs)
-            .build(&mut random),
-        entries: RefCell::new(vec![Rc::new(Entry {
-            endpoint: AGGREGATOR_ENDPOINT,
-            started: Cell::new(false),
-            device: None,
-            descriptor: Dataver::new_rand(&mut random),
-            children: Vec::new(),
-            tag: None,
-            groups: Dataver::new_rand(&mut random),
-            identify: None,
-            on_off: None,
-            bridged: None,
-        })]),
+            .build(&mut random)
+            .chain(
+                |endpoint, cluster| endpoint == AGGREGATOR_ENDPOINT && cluster == 0x1d,
+                Async(desc::DescHandler::new_aggregator(Dataver::new_rand(&mut random)).adapt()),
+            ),
+        entries: RefCell::new(Vec::new()),
         versions: RefCell::new(BTreeMap::new()),
     };
     model.reconcile(registry.list())?;
@@ -350,30 +320,31 @@ impl Model {
     }
     fn reconcile(&self, devices: Vec<PhysicalDevice>) -> Result<Vec<u16>, StorageError> {
         let old = self.entries.borrow().clone();
-        let mut entries = vec![old[0].clone()];
+        let mut entries = Vec::new();
         let mut changed = Vec::new();
         for device in devices {
+            let before = entries.len();
+            entries.extend(
+                old.iter()
+                    .filter(|entry| entry.device.same_instance(&device))
+                    .cloned(),
+            );
+            if entries.len() != before {
+                continue;
+            }
             let stored = self
                 .store
                 .devices()
-                .load_published(&device.description().key)?
+                .load_published(device.key())?
                 .ok_or_else(|| self.invalid("Canonical device has no published identity"))?;
-            self.check(&device, &stored)?;
-            let mut ids = vec![stored.endpoint];
-            if stored.functions.len() > 1 {
-                ids.extend(stored.functions.iter().map(|function| function.endpoint));
-            }
-            for endpoint in ids {
-                if let Some(entry) = old.iter().find(|entry| {
-                    entry.endpoint == endpoint
-                        && entry
-                            .device
-                            .as_ref()
-                            .is_some_and(|previous| previous.same_instance(&device))
-                }) {
-                    entries.push(entry.clone());
-                    continue;
-                }
+            let multiple = stored.functions.len() > 1;
+            let parent = multiple.then_some((stored.endpoint, None));
+            let functions = stored
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(index, function)| (function.endpoint, Some((index, function))));
+            for (endpoint, function) in parent.into_iter().chain(functions) {
                 let previous = old
                     .iter()
                     .find(|entry| entry.endpoint == endpoint)
@@ -389,18 +360,7 @@ impl Model {
                         bridged: random.random(),
                     }
                 });
-                let function = stored
-                    .functions
-                    .iter()
-                    .find(|function| function.endpoint == endpoint);
-                let control = function.map(|function| {
-                    OnOffHandler::new(
-                        device.function(&function.key.id).unwrap(),
-                        endpoint,
-                        Dataver::new(versions.on_off),
-                    )
-                });
-                let physical = (endpoint == stored.endpoint).then(|| {
+                let bridged = || {
                     BridgedHandler::new(
                         device.clone(),
                         Dataver::new(versions.bridged),
@@ -408,44 +368,41 @@ impl Model {
                         self.store.devices(),
                         self.protocol.clone(),
                     )
-                });
-                let tag = if stored.functions.len() > 1 {
-                    function.map(|function| {
-                        (
-                            stored
-                                .functions
-                                .iter()
-                                .position(|candidate| candidate.key == function.key)
-                                .unwrap() as u8
-                                + 1,
-                            function.label.clone(),
-                        )
-                    })
-                } else {
-                    None
                 };
-                let children = if endpoint == stored.endpoint && stored.functions.len() > 1 {
-                    stored
-                        .functions
-                        .iter()
-                        .map(|function| function.endpoint)
-                        .collect()
-                } else {
-                    Vec::new()
+                let role = match function {
+                    None => Role::Parent {
+                        children: stored
+                            .functions
+                            .iter()
+                            .map(|function| function.endpoint)
+                            .collect(),
+                        bridged: bridged(),
+                    },
+                    Some((index, function)) => {
+                        let control = Control::new(
+                            device.function(&function.key.id).unwrap(),
+                            endpoint,
+                            versions,
+                        );
+                        if multiple {
+                            Role::Child {
+                                control,
+                                tag: index as u8 + 1,
+                                label: function.label.clone(),
+                            }
+                        } else {
+                            Role::Single {
+                                control,
+                                bridged: bridged(),
+                            }
+                        }
+                    }
                 };
                 entries.push(Rc::new(Entry {
                     endpoint,
-                    started: Cell::new(false),
-                    device: Some(device.clone()),
+                    device: device.clone(),
                     descriptor: Dataver::new(versions.descriptor),
-                    children,
-                    tag,
-                    groups: Dataver::new(versions.groups),
-                    identify: control
-                        .as_ref()
-                        .map(|_| identify::IdentifyHandler::new(Dataver::new(versions.identify))),
-                    on_off: control,
-                    bridged: physical,
+                    role,
                 }));
                 changed.push(endpoint);
             }
@@ -465,43 +422,21 @@ impl Model {
         *self.entries.borrow_mut() = entries;
         Ok(changed)
     }
-    fn check(&self, device: &PhysicalDevice, stored: &StoredDevice) -> Result<(), StorageError> {
-        let description = device.description();
-        if description.functions.len() != stored.functions.len()
-            || !stored.functions.iter().all(|stored| {
-                description.functions.iter().any(|function| {
-                    function.id == stored.key.id
-                        && function.category == stored.category
-                        && function.capabilities == stored.capabilities
-                })
-            })
-        {
-            return Err(self.invalid("Canonical functions differ from the published identity"));
-        }
-        Ok(())
-    }
     fn invalid(&self, reason: &'static str) -> StorageError {
         StorageError::new(self.store.path(), "build Matter topology", reason)
     }
     async fn run_devices(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        type Job<'a> = (
-            Rc<Entry>,
-            Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>>,
-        );
         let mut changes = self.registry.subscribe();
-        let mut jobs: Vec<Job<'_>> = Vec::new();
+        let mut jobs: Vec<(Rc<Entry>, _)> = Vec::new();
         let mut devices = self.registry.list();
         loop {
             let changed = self.protocol.record(self.reconcile(devices))?;
             let entries = self.entries.borrow().clone();
             jobs.retain(|(entry, _)| entries.iter().any(|current| Rc::ptr_eq(entry, current)));
             for entry in entries {
-                if entry.endpoint == AGGREGATOR_ENDPOINT
-                    || jobs.iter().any(|(running, _)| Rc::ptr_eq(running, &entry))
-                {
+                if jobs.iter().any(|(running, _)| Rc::ptr_eq(running, &entry)) {
                     continue;
                 }
-                entry.lifecycle(&ctx, LifecycleOp::Startup)?;
                 let running = entry.clone();
                 let context = &ctx;
                 jobs.push((entry, Box::pin(async move { running.run(context).await })));
@@ -545,15 +480,14 @@ impl Metadata for Model {
         let entries = self.entries.borrow();
         let tags = entries
             .iter()
-            .map(|entry| {
-                entry
-                    .tag
-                    .as_ref()
-                    .map(|(tag, label)| vec![SemanticTag::new(0x07, *tag).with_label(label)])
-                    .unwrap_or_default()
+            .map(|entry| match &entry.role {
+                Role::Child { tag, label, .. } => {
+                    vec![SemanticTag::new(0x07, *tag).with_label(label)]
+                }
+                _ => Vec::new(),
             })
             .collect::<Vec<_>>();
-        let mut endpoints = vec![ROOT];
+        let mut endpoints = vec![ROOT, AGGREGATOR];
         endpoints.extend(
             entries
                 .iter()
@@ -565,34 +499,34 @@ impl Metadata for Model {
 }
 impl AsyncHandler for Model {
     fn read_awaits(&self, ctx: impl ReadContext) -> bool {
-        ctx.attr().endpoint_id == 0 && self.root.read_awaits(ctx)
+        ctx.attr().endpoint_id <= AGGREGATOR_ENDPOINT && self.root.read_awaits(ctx)
     }
     fn write_awaits(&self, ctx: impl WriteContext) -> bool {
-        ctx.attr().endpoint_id == 0 && self.root.write_awaits(ctx)
+        ctx.attr().endpoint_id <= AGGREGATOR_ENDPOINT && self.root.write_awaits(ctx)
     }
     fn invoke_awaits(&self, ctx: impl InvokeContext) -> bool {
-        if ctx.cmd().endpoint_id == 0 {
+        if ctx.cmd().endpoint_id <= AGGREGATOR_ENDPOINT {
             self.root.invoke_awaits(ctx)
         } else {
             ctx.cmd().cluster_id == 6
         }
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        if ctx.attr().endpoint_id == 0 {
+        if ctx.attr().endpoint_id <= AGGREGATOR_ENDPOINT {
             self.root.read(ctx, reply).await
         } else {
             self.entry(ctx.attr().endpoint_id)?.read(ctx, reply).await
         }
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        if ctx.attr().endpoint_id == 0 {
+        if ctx.attr().endpoint_id <= AGGREGATOR_ENDPOINT {
             self.root.write(ctx).await
         } else {
             self.entry(ctx.attr().endpoint_id)?.write(ctx).await
         }
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        if ctx.cmd().endpoint_id == 0 {
+        if ctx.cmd().endpoint_id <= AGGREGATOR_ENDPOINT {
             self.root.invoke(ctx, reply).await
         } else {
             self.entry(ctx.cmd().endpoint_id)?.invoke(ctx, reply).await
@@ -608,11 +542,8 @@ impl AsyncHandler for Model {
         }
     }
     fn lifecycle(&self, ctx: impl HandlerContext, op: LifecycleOp) -> Result<(), Error> {
-        self.root.lifecycle(&ctx, op)?;
-        for entry in self.entries.borrow().iter() {
-            entry.lifecycle(&ctx, op)?;
-        }
-        Ok(())
+        // Dynamic clusters keep no persistent lifecycle state.
+        self.root.lifecycle(ctx, op)
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         futures_lite::future::or(self.root.run(&ctx), self.run_devices(&ctx)).await

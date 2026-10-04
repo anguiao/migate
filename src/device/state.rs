@@ -1,22 +1,12 @@
 use super::{
     command::{CommandReceiver, Queue},
     model::{
-        Availability, DeviceDescription, DeviceSnapshot, FunctionKey, PhysicalDeviceDescription,
-        Power,
+        Availability, FunctionDescription, FunctionKey, FunctionSnapshot,
+        PhysicalDeviceDescription, Power,
     },
 };
 use event_listener::Event;
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{Arc, Mutex, Weak},
-    time::Duration,
-};
-
-pub(crate) trait Clock: Send + Sync {
-    fn now(&self) -> Duration;
-    fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-}
+use std::sync::{Arc, Mutex};
 pub(super) struct RuntimeState {
     pub(super) power: Power,
     pub(super) revision: u64,
@@ -28,11 +18,10 @@ struct PhysicalState {
 }
 struct PhysicalInner {
     state: Mutex<PhysicalState>,
-    functions: Mutex<Vec<Weak<Inner>>>,
     changed: Event,
 }
 pub(super) struct Inner {
-    description: DeviceDescription,
+    description: FunctionDescription,
     key: FunctionKey,
     physical: Arc<PhysicalInner>,
     pub(super) state: Mutex<RuntimeState>,
@@ -42,62 +31,58 @@ pub(super) struct Inner {
 
 /// A channel's shared state and command boundary for every protocol adapter.
 #[derive(Clone)]
-pub struct Device(pub(super) Arc<Inner>);
-pub type Function = Device;
+pub struct Function(pub(super) Arc<Inner>);
 
 /// Availability belongs to the physical device; each function has its own state and queue.
 #[derive(Clone)]
 pub struct PhysicalDevice {
-    description: Arc<PhysicalDeviceDescription>,
+    key: super::DeviceKey,
+    label: Arc<Mutex<String>>,
     inner: Arc<PhysicalInner>,
-    functions: Vec<Function>,
+    functions: Arc<[Function]>,
 }
 impl PhysicalDevice {
     pub fn new(description: PhysicalDeviceDescription) -> (Self, Vec<CommandReceiver>) {
-        let inner = new_physical();
-        let mut functions = Vec::new();
-        let mut receivers = Vec::new();
-        for function in &description.functions {
-            let (device, receiver) = Device::with_physical(
-                DeviceDescription {
-                    key: description.key.clone(),
-                    category: function.category,
-                    capabilities: function.capabilities.clone(),
-                },
-                function.id.clone(),
-                inner.clone(),
-            );
-            functions.push(device);
-            receivers.push(receiver);
-        }
+        let inner = Arc::new(PhysicalInner {
+            state: Mutex::new(PhysicalState {
+                availability: Availability::Initializing,
+                revision: 0,
+            }),
+            changed: Event::new(),
+        });
+        let (functions, receivers): (Vec<_>, Vec<_>) = description
+            .functions
+            .into_iter()
+            .map(|function| Function::new(description.key.clone(), function, inner.clone()))
+            .unzip();
         (
             Self {
-                description: Arc::new(description),
+                key: description.key,
+                label: Arc::new(Mutex::new(description.label)),
                 inner,
-                functions,
+                functions: functions.into(),
             },
             receivers,
         )
     }
-    pub fn description(&self) -> &PhysicalDeviceDescription {
-        &self.description
+    pub fn key(&self) -> &super::DeviceKey {
+        &self.key
     }
-    #[cfg(test)]
-    pub(crate) fn from_single(function: Device, label: String) -> Self {
-        let description = function.description();
-        Self {
-            description: Arc::new(PhysicalDeviceDescription {
-                key: description.key.clone(),
-                label,
-                functions: vec![super::FunctionDescription {
-                    id: function.function_key().id.clone(),
-                    label: "主电源".into(),
-                    category: description.category,
-                    capabilities: description.capabilities.clone(),
-                }],
-            }),
-            inner: function.0.physical.clone(),
-            functions: vec![function],
+    pub fn label(&self) -> String {
+        self.label.lock().unwrap().clone()
+    }
+    pub fn set_label(&self, label: String) {
+        *self.label.lock().unwrap() = label;
+    }
+    pub fn description(&self) -> PhysicalDeviceDescription {
+        PhysicalDeviceDescription {
+            key: self.key.clone(),
+            label: self.label(),
+            functions: self
+                .functions
+                .iter()
+                .map(|function| function.description().clone())
+                .collect(),
         }
     }
     pub(crate) fn same_instance(&self, other: &Self) -> bool {
@@ -116,64 +101,48 @@ impl PhysicalDevice {
         self.inner.state.lock().unwrap().availability.clone()
     }
     pub fn set_availability(&self, availability: Availability) {
-        set_availability(&self.inner, availability);
+        let result = availability.command_result();
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.availability == availability {
+                return;
+            }
+            state.availability = availability;
+            state.revision = state.revision.wrapping_add(1);
+        }
+        self.inner.changed.notify(usize::MAX);
+        if let Err(error) = result {
+            for function in self.functions.iter() {
+                let completions = function.0.state.lock().unwrap().queue.drain_pending();
+                for completion in completions {
+                    completion.finish(Err(error.clone()));
+                }
+            }
+        }
+    }
+    pub fn subscribe(&self) -> AvailabilityChanges {
+        AvailabilityChanges {
+            physical: self.inner.clone(),
+            revision: self.inner.state.lock().unwrap().revision,
+        }
     }
     pub(super) fn close(&self) {
-        for function in &self.functions {
+        for function in self.functions.iter() {
             function.close();
         }
     }
 }
-fn new_physical() -> Arc<PhysicalInner> {
-    Arc::new(PhysicalInner {
-        state: Mutex::new(PhysicalState {
-            availability: Availability::Initializing,
-            revision: 0,
-        }),
-        functions: Mutex::new(Vec::new()),
-        changed: Event::new(),
-    })
-}
-fn set_availability(physical: &PhysicalInner, availability: Availability) {
-    let result = availability.command_result();
-    {
-        let mut state = physical.state.lock().unwrap();
-        if state.availability == availability {
-            return;
-        }
-        state.availability = availability;
-        state.revision = state.revision.wrapping_add(1);
-    }
-    physical.changed.notify(usize::MAX);
-    if let Err(error) = result {
-        for function in physical
-            .functions
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(Weak::upgrade)
-        {
-            let completions = function.state.lock().unwrap().queue.drain_pending();
-            for completion in completions {
-                completion.finish(Err(error.clone()));
-            }
-        }
-    }
-}
-impl Device {
-    pub fn new(description: DeviceDescription) -> (Self, CommandReceiver) {
-        Self::with_physical(description, "main".into(), new_physical())
-    }
-    fn with_physical(
-        description: DeviceDescription,
-        id: String,
+impl Function {
+    fn new(
+        physical_key: super::DeviceKey,
+        description: FunctionDescription,
         physical: Arc<PhysicalInner>,
     ) -> (Self, CommandReceiver) {
-        let key = FunctionKey::new(description.key.clone(), id);
-        let device = Self(Arc::new(Inner {
+        let key = FunctionKey::new(physical_key, description.id.clone());
+        let function = Self(Arc::new(Inner {
             description,
             key,
-            physical: physical.clone(),
+            physical,
             state: Mutex::new(RuntimeState {
                 power: Power::Unknown,
                 revision: 0,
@@ -182,29 +151,24 @@ impl Device {
             changed: Event::new(),
             submitted: Event::new(),
         }));
-        physical
-            .functions
-            .lock()
-            .unwrap()
-            .push(Arc::downgrade(&device.0));
         let receiver = CommandReceiver {
-            device: device.clone(),
+            function: function.clone(),
         };
-        (device, receiver)
+        (function, receiver)
     }
-    pub fn description(&self) -> &DeviceDescription {
+    pub fn description(&self) -> &FunctionDescription {
         &self.0.description
     }
     pub fn function_key(&self) -> &FunctionKey {
         &self.0.key
     }
-    pub fn snapshot(&self) -> DeviceSnapshot {
+    pub fn snapshot(&self) -> FunctionSnapshot {
         let state = self.0.state.lock().unwrap();
         self.snapshot_locked(&state)
     }
-    pub(super) fn snapshot_locked(&self, state: &RuntimeState) -> DeviceSnapshot {
+    pub(super) fn snapshot_locked(&self, state: &RuntimeState) -> FunctionSnapshot {
         let physical = self.0.physical.state.lock().unwrap();
-        DeviceSnapshot {
+        FunctionSnapshot {
             power: state.power,
             availability: physical.availability.clone(),
             revision: state.revision.wrapping_add(physical.revision),
@@ -214,10 +178,7 @@ impl Device {
         let mut state = self.0.state.lock().unwrap();
         self.update_power(&mut state, power);
     }
-    pub fn set_availability(&self, availability: Availability) {
-        set_availability(&self.0.physical, availability);
-    }
-    pub(super) fn update_power(&self, state: &mut RuntimeState, power: bool) -> DeviceSnapshot {
+    pub(super) fn update_power(&self, state: &mut RuntimeState, power: bool) -> FunctionSnapshot {
         let power = power.into();
         if state.power != power {
             state.power = power;
@@ -234,24 +195,45 @@ impl Device {
         }
         self.0.submitted.notify(usize::MAX);
     }
-    pub fn subscribe(&self) -> Changes {
-        Changes {
-            device: self.clone(),
+    pub fn subscribe(&self) -> FunctionChanges {
+        FunctionChanges {
+            function: self.clone(),
             revision: self.snapshot().revision,
         }
     }
 }
 /// Notifications can coalesce; consumers always read the same latest snapshot.
-pub struct Changes {
-    device: Device,
+pub struct FunctionChanges {
+    function: Function,
     revision: u64,
 }
-impl Changes {
-    pub async fn changed(&mut self) -> DeviceSnapshot {
+
+/// Physical-device observers are independent of function power changes.
+pub struct AvailabilityChanges {
+    physical: Arc<PhysicalInner>,
+    revision: u64,
+}
+impl AvailabilityChanges {
+    pub async fn changed(&mut self) -> Availability {
         loop {
-            let listener = self.device.0.changed.listen();
-            let physical = self.device.0.physical.changed.listen();
-            let snapshot = self.device.snapshot();
+            let listener = self.physical.changed.listen();
+            {
+                let state = self.physical.state.lock().unwrap();
+                if state.revision != self.revision {
+                    self.revision = state.revision;
+                    return state.availability.clone();
+                }
+            }
+            listener.await;
+        }
+    }
+}
+impl FunctionChanges {
+    pub async fn changed(&mut self) -> FunctionSnapshot {
+        loop {
+            let listener = self.function.0.changed.listen();
+            let physical = self.function.0.physical.changed.listen();
+            let snapshot = self.function.snapshot();
             if snapshot.revision != self.revision {
                 self.revision = snapshot.revision;
                 return snapshot;

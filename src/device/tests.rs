@@ -1,35 +1,41 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
-
 use futures_lite::future::{block_on, poll_once};
 
 use super::{
-    Availability, Capability, Category, Command, CommandError, CommandReceiver, Device,
-    DeviceDescription, DeviceKey, Power,
+    Availability, Capability, Category, Command, CommandError, CommandReceiver, DeviceKey,
+    FunctionDescription, PhysicalDevice, PhysicalDeviceDescription, Power,
 };
 
-fn outlet() -> DeviceDescription {
-    DeviceDescription {
+fn outlet() -> PhysicalDeviceDescription {
+    PhysicalDeviceDescription {
         key: DeviceKey::new("xiaomi", "test-outlet"),
-        category: Category::Outlet,
-        capabilities: vec![Capability::OnOff],
+        label: "Test Outlet".into(),
+        functions: vec![FunctionDescription {
+            id: "main".into(),
+            label: "Main power".into(),
+            category: Category::Outlet,
+            capabilities: vec![Capability::OnOff],
+        }],
     }
 }
 
-fn ready_device() -> (Device, CommandReceiver) {
-    let (device, receiver) = Device::new(outlet());
-    device.observe(false);
-    device.set_availability(Availability::Available);
-    (device, receiver)
+fn new_device(description: PhysicalDeviceDescription) -> (PhysicalDevice, CommandReceiver) {
+    let (physical, mut receivers) = PhysicalDevice::new(description);
+    (physical, receivers.remove(0))
+}
+
+fn ready_device() -> (PhysicalDevice, CommandReceiver) {
+    let (physical, receiver) = new_device(outlet());
+    physical.functions()[0].observe(false);
+    physical.set_availability(Availability::Available);
+    (physical, receiver)
 }
 
 #[test]
 fn new_devices_have_stable_identity_unknown_state_and_initializing_availability() {
-    let (device, _) = Device::new(outlet());
+    let (physical, _) = new_device(outlet());
+    let device = &physical.functions()[0];
     assert_eq!(
-        device.description().key,
+        device.function_key().device,
         DeviceKey::new("xiaomi", "test-outlet")
     );
     assert_eq!(device.snapshot().power, Power::Unknown);
@@ -40,17 +46,18 @@ fn new_devices_have_stable_identity_unknown_state_and_initializing_availability(
 #[test]
 fn notifications_coalesce_and_same_values_do_not_increment_revision() {
     block_on(async {
-        let (device, _receiver) = Device::new(outlet());
+        let (physical, _receiver) = new_device(outlet());
+        let device = &physical.functions()[0];
         let mut changes = device.subscribe();
         device.observe(false);
         device.observe(false);
-        device.set_availability(Availability::Available);
+        physical.set_availability(Availability::Available);
         assert_eq!(device.snapshot().revision, 2);
         let latest = changes.changed().await;
         assert_eq!(latest, device.snapshot());
-        device.set_availability(Availability::Available);
+        physical.set_availability(Availability::Available);
         assert!(poll_once(changes.changed()).await.is_none());
-        device.set_availability(Availability::Unavailable("connection lost".into()));
+        physical.set_availability(Availability::Unavailable("connection lost".into()));
         let latest = changes.changed().await;
         assert_eq!(latest.power, Power::Off);
         assert_eq!(latest.revision, 3);
@@ -60,7 +67,8 @@ fn notifications_coalesce_and_same_values_do_not_increment_revision() {
 #[test]
 fn commands_change_state_only_after_acceptance_and_repeat_targets_are_allowed() {
     block_on(async {
-        let (device, mut receiver) = ready_device();
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
         let mut changes = device.subscribe();
         let command = device.execute(Command::On);
         futures_lite::pin!(command);
@@ -84,7 +92,8 @@ fn commands_change_state_only_after_acceptance_and_repeat_targets_are_allowed() 
 #[test]
 fn rejected_commands_preserve_state_and_later_observations_still_apply() {
     block_on(async {
-        let (device, mut receiver) = ready_device();
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
         let command = device.execute(Command::On);
         futures_lite::pin!(command);
         poll_once(command.as_mut()).await;
@@ -106,7 +115,8 @@ fn rejected_commands_preserve_state_and_later_observations_still_apply() {
 #[test]
 fn commands_are_fifo_and_toggle_uses_snapshot_at_execution_time() {
     block_on(async {
-        let (device, mut receiver) = ready_device();
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
         let first = device.execute(Command::On);
         let second = device.execute(Command::Toggle);
         futures_lite::pin!(first, second);
@@ -128,18 +138,19 @@ fn commands_are_fifo_and_toggle_uses_snapshot_at_execution_time() {
 #[test]
 fn toggle_unknown_and_unavailable_commands_fail_without_sending() {
     block_on(async {
-        let (device, mut receiver) = Device::new(outlet());
+        let (physical, mut receiver) = new_device(outlet());
+        let device = &physical.functions()[0];
         assert_eq!(
             device.execute(Command::On).await,
             Err(CommandError::Unavailable("initializing".into()))
         );
-        device.set_availability(Availability::Available);
+        physical.set_availability(Availability::Available);
         let command = device.execute(Command::Toggle);
         futures_lite::pin!(command);
         poll_once(command.as_mut()).await;
         assert!(poll_once(receiver.next()).await.is_none());
         assert_eq!(command.await, Err(CommandError::UnknownState));
-        device.set_availability(Availability::Unavailable("offline".into()));
+        physical.set_availability(Availability::Unavailable("offline".into()));
         assert_eq!(
             device.execute(Command::On).await,
             Err(CommandError::Unavailable("offline".into()))
@@ -151,9 +162,10 @@ fn toggle_unknown_and_unavailable_commands_fail_without_sending() {
 fn unsupported_capabilities_fail_without_sending() {
     block_on(async {
         let mut description = outlet();
-        description.capabilities.clear();
-        let (device, mut receiver) = Device::new(description);
-        device.set_availability(Availability::Available);
+        description.functions[0].capabilities.clear();
+        let (physical, mut receiver) = new_device(description);
+        let device = &physical.functions()[0];
+        physical.set_availability(Availability::Available);
         assert_eq!(
             device.execute(Command::On).await,
             Err(CommandError::Unsupported)
@@ -162,38 +174,25 @@ fn unsupported_capabilities_fail_without_sending() {
     });
 }
 
-#[derive(Default)]
-struct TestClock {
-    elapsed: Mutex<Duration>,
-}
-
-impl TestClock {
-    fn advance(&self, duration: Duration) {
-        *self.elapsed.lock().unwrap() += duration;
-    }
-}
-
 #[test]
-fn command_lifetime_has_no_business_deadline_while_queued_or_active() {
+fn queued_commands_wait_for_the_active_adapter_request() {
     block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let (device, mut receiver) = Device::new(outlet());
+        let (physical, mut receiver) = new_device(outlet());
+        let device = &physical.functions()[0];
         device.observe(false);
-        device.set_availability(Availability::Available);
+        physical.set_availability(Availability::Available);
         let first = device.execute(Command::On);
         let second = device.execute(Command::Off);
         futures_lite::pin!(first, second);
         poll_once(first.as_mut()).await;
         let request = receiver.next().await.unwrap();
         poll_once(second.as_mut()).await;
-        clock.advance(Duration::from_secs(6));
         assert!(poll_once(first.as_mut()).await.is_none());
         assert!(poll_once(second.as_mut()).await.is_none());
         request.accept().unwrap();
         assert_eq!(first.await.unwrap().power, Power::On);
         let request = receiver.next().await.unwrap();
         assert!(!request.target);
-        clock.advance(Duration::from_secs(20));
         request.accept().unwrap();
         assert_eq!(second.await.unwrap().power, Power::Off);
         assert_eq!(device.snapshot().power, Power::Off);
@@ -203,7 +202,8 @@ fn command_lifetime_has_no_business_deadline_while_queued_or_active() {
 #[test]
 fn receiver_shutdown_cancels_pending_commands_and_future_submissions() {
     block_on(async {
-        let (device, receiver) = ready_device();
+        let (physical, receiver) = ready_device();
+        let device = &physical.functions()[0];
         let command = device.execute(Command::On);
         futures_lite::pin!(command);
         poll_once(command.as_mut()).await;
@@ -217,13 +217,50 @@ fn receiver_shutdown_cancels_pending_commands_and_future_submissions() {
 }
 
 #[test]
+fn receiver_shutdown_cancels_active_commands_without_accepting_stale_results() {
+    block_on(async {
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
+        let command = device.execute(Command::On);
+        futures_lite::pin!(command);
+        poll_once(command.as_mut()).await;
+        let request = receiver.next().await.unwrap();
+        drop(receiver);
+        assert_eq!(request.accept(), Err(CommandError::Cancelled));
+        assert_eq!(command.await, Err(CommandError::Cancelled));
+        assert_eq!(device.snapshot().power, Power::Off);
+    });
+}
+
+#[test]
+fn physical_availability_notifications_do_not_follow_channel_power_changes() {
+    block_on(async {
+        let (physical, _receiver) = ready_device();
+        let function = &physical.functions()[0];
+        let mut physical_changes = physical.subscribe();
+        let mut function_changes = function.subscribe();
+
+        function.observe(true);
+        assert!(poll_once(physical_changes.changed()).await.is_none());
+        assert_eq!(function_changes.changed().await.power, Power::On);
+
+        let offline = Availability::Unavailable("offline".into());
+        physical.set_availability(offline.clone());
+        assert_eq!(physical_changes.changed().await, offline);
+        assert_eq!(function_changes.changed().await.availability, offline);
+        assert!(poll_once(physical_changes.changed()).await.is_none());
+    });
+}
+
+#[test]
 fn active_acceptance_survives_an_offline_observation() {
     block_on(async {
-        let (device, mut receiver) = ready_device();
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
         let mut command = Box::pin(device.execute(Command::On));
         assert!(poll_once(command.as_mut()).await.is_none());
         let request = receiver.next().await.unwrap();
-        device.set_availability(Availability::Unavailable("offline".into()));
+        physical.set_availability(Availability::Unavailable("offline".into()));
         assert!(poll_once(command.as_mut()).await.is_none());
         let accepted = request.accept().unwrap();
         assert_eq!(accepted.power, Power::On);
@@ -242,19 +279,20 @@ fn active_acceptance_survives_an_offline_observation() {
 #[test]
 fn becoming_unavailable_ends_queued_requests_but_preserves_active_acceptance() {
     block_on(async {
-        let (device, mut receiver) = ready_device();
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
         let first = device.execute(Command::On);
         let second = device.execute(Command::On);
         futures_lite::pin!(first, second);
         poll_once(first.as_mut()).await;
         poll_once(second.as_mut()).await;
         let stale = receiver.next().await.unwrap();
-        device.set_availability(Availability::Unavailable("connection lost".into()));
+        physical.set_availability(Availability::Unavailable("connection lost".into()));
         let error = CommandError::Unavailable("connection lost".into());
         assert!(poll_once(first.as_mut()).await.is_none());
         assert_eq!(poll_once(second.as_mut()).await, Some(Err(error.clone())));
         device.observe(false);
-        device.set_availability(Availability::Available);
+        physical.set_availability(Availability::Available);
         assert_eq!(stale.accept().unwrap().power, Power::On);
         assert_eq!(first.await.unwrap().power, Power::On);
         assert!(poll_once(receiver.next()).await.is_none());
@@ -265,7 +303,8 @@ fn becoming_unavailable_ends_queued_requests_but_preserves_active_acceptance() {
 #[test]
 fn dropping_a_queued_command_withdraws_it_before_the_adapter_can_send() {
     block_on(async {
-        let (device, mut receiver) = ready_device();
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
         let mut cancelled = Box::pin(device.execute(Command::On));
         assert!(poll_once(cancelled.as_mut()).await.is_none());
         drop(cancelled);
@@ -283,7 +322,8 @@ fn dropping_a_queued_command_withdraws_it_before_the_adapter_can_send() {
 #[test]
 fn dropping_a_caller_does_not_discard_an_inflight_adapter_result() {
     block_on(async {
-        let (device, mut receiver) = ready_device();
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
         let mut command = Box::pin(device.execute(Command::On));
         assert!(poll_once(command.as_mut()).await.is_none());
         let request = receiver.next().await.unwrap();

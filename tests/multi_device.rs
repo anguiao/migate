@@ -30,7 +30,7 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
         first.observe(false);
         assert_eq!(second.snapshot().power, Power::Unknown);
         assert_eq!(first.function_key().id, "outlet_1");
-        assert_eq!(first.function_key().device, physical.description().key);
+        assert_eq!(first.function_key().device, *physical.key());
         let revision = second.snapshot().revision;
         let mut first_command = Box::pin(first.execute(Command::On));
         let mut second_command = Box::pin(second.execute(Command::Off));
@@ -78,14 +78,14 @@ fn registry_publishes_whole_devices_and_removal_cancels_only_their_commands() {
         poll_once(command.as_mut()).await;
         poll_once(other_command.as_mut()).await;
         let stale = first_receivers[2].next().await.unwrap();
-        registry.remove(&first.description().key).unwrap();
+        registry.remove(first.key()).unwrap();
         assert_eq!(command.await, Err(CommandError::Cancelled));
         assert_eq!(stale.accept(), Err(CommandError::Cancelled));
         assert_eq!(
             function.execute(Command::On).await,
             Err(CommandError::Cancelled)
         );
-        assert!(registry.get(&first.description().key).is_none());
+        assert!(registry.get(first.key()).is_none());
         assert_eq!(changes.changed().await.devices.len(), 1);
         second_receivers[2].next().await.unwrap().accept().unwrap();
         assert_eq!(other_command.await.unwrap().power, Power::Off);
@@ -120,7 +120,7 @@ fn registry_removal_wakes_and_ends_waiting_receivers() {
         registry.insert(other);
         let mut waiting = Box::pin(receivers[0].next());
         assert!(poll_once(waiting.as_mut()).await.is_none());
-        registry.remove(&device.description().key).unwrap();
+        registry.remove(device.key()).unwrap();
         assert!(waiting.await.is_none());
         assert!(poll_once(other_receivers[0].next()).await.is_none());
     });

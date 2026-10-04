@@ -14,7 +14,6 @@ use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     pin::Pin,
     rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
     task::Poll,
     time::Instant,
 };
@@ -88,13 +87,11 @@ impl SessionDriver {
         max_packet: usize,
         receive_max: usize,
     ) -> Result<(SessionHandle, Self), CentralError> {
-        static GENERATION: AtomicU64 = AtomicU64::new(1);
         let shared = Rc::new(Shared {
             queue: Default::default(),
             event: Event::new(),
             closed: Default::default(),
             outstanding: Default::default(),
-            generation: GENERATION.fetch_add(1, Ordering::Relaxed),
             cancellations: Default::default(),
         });
         let now = Instant::now();
@@ -126,8 +123,7 @@ impl SessionDriver {
     pub async fn run(mut self, mut on_event: impl FnMut(CentralEvent)) -> Result<(), CentralError> {
         let result = self.drive(&mut on_event).await;
         log::debug!(
-            "Gateway session stopped: generation={}, error={:?}, queued={}, pending={}, outgoing_qos2={}, incoming_qos2={}, subscriptions={}",
-            self.shared.generation,
+            "Gateway session stopped: error={:?}, queued={}, pending={}, outgoing_qos2={}, incoming_qos2={}, subscriptions={}",
             result.as_ref().err(),
             self.shared.queue.borrow().len(),
             self.pending.len(),
@@ -157,8 +153,7 @@ impl SessionDriver {
                 let (kind, pkid) = wire::packet_context(&packet);
                 self.packet(packet, on_event).inspect_err(|error| {
                     log::debug!(
-                        "Gateway packet failed: generation={}, packet={kind}, packet_id={pkid:?}, error={error}",
-                        self.shared.generation
+                        "Gateway packet failed: packet={kind}, packet_id={pkid:?}, error={error}"
                     );
                 })?;
                 continue;
@@ -169,9 +164,6 @@ impl SessionDriver {
             self.keepalive()?;
             let shared = self.shared.clone();
             let listener = shared.event.listen();
-            if self.ready && self.can_drain() {
-                continue;
-            }
             let deadline = self.next_deadline();
             future::race(
                 async { future::poll_fn(|cx| self.poll_io(cx)).await },
@@ -248,10 +240,7 @@ impl SessionDriver {
     fn expire(&mut self) -> Result<(), CentralError> {
         let now = Instant::now();
         if self.ping_deadline.is_some_and(|deadline| now >= deadline) {
-            log::debug!(
-                "Gateway timed out awaiting PINGRESP: generation={}",
-                self.shared.generation
-            );
+            log::debug!("Gateway timed out awaiting PINGRESP");
             return Err(CentralError::Timeout);
         }
         if let Some((pkid, publication)) = self
@@ -260,8 +249,7 @@ impl SessionDriver {
             .find(|(_, publication)| now >= publication.deadline)
         {
             log::debug!(
-                "Gateway outgoing QoS2 timed out: generation={}, packet_id={pkid}, request_id={}, stage={:?}",
-                self.shared.generation,
+                "Gateway outgoing QoS2 timed out: packet_id={pkid}, request_id={}, stage={:?}",
                 publication.mid,
                 publication.stage
             );
@@ -272,8 +260,7 @@ impl SessionDriver {
                 && (output.offset > 0 || output.request.is_none() && output.pkid.is_none())
         }) {
             log::debug!(
-                "Gateway output timed out: generation={}, packet={}, packet_id={:?}, bytes_written={}, bytes_total={}",
-                self.shared.generation,
+                "Gateway output timed out: packet={}, packet_id={:?}, bytes_written={}, bytes_total={}",
                 output.kind,
                 output.pkid,
                 output.offset,
@@ -332,15 +319,8 @@ impl SessionDriver {
         }
         let expired = {
             let mut queue = self.shared.queue.borrow_mut();
-            let mut expired = Vec::new();
-            let mut retained = VecDeque::new();
-            while let Some(request) = queue.pop_front() {
-                if now >= request.deadline {
-                    expired.push(request)
-                } else {
-                    retained.push_back(request)
-                }
-            }
+            let (expired, retained): (VecDeque<_>, _) =
+                queue.drain(..).partition(|request| now >= request.deadline);
             *queue = retained;
             expired
         };

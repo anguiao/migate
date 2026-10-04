@@ -19,6 +19,7 @@ url = "2"
 x509-parser = "0.18"
 
 futures-lite = "2"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 futures-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 mqttbytes = "0.6"

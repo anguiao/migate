@@ -1,26 +1,25 @@
-use crate::device::{Command, CommandError, Device};
+use crate::device::{Command, CommandError, Function};
 use rs_matter::{
     dm::{Cluster, Dataver, HandlerContext, InvokeContext, ReadContext, clusters::app::on_off},
     error::{Error, ErrorCode},
     with,
 };
 
-/// The shared Device is the only power state and command boundary.
+/// The shared Function is the only power state and command boundary.
 pub(super) struct OnOffHandler {
-    device: Device,
+    function: Function,
     endpoint: u16,
     dataver: Dataver,
-    changes: std::cell::RefCell<Option<crate::device::Changes>>,
     reported: std::cell::Cell<Option<bool>>,
 }
 impl OnOffHandler {
-    pub(super) fn new(device: Device, endpoint: u16, dataver: Dataver) -> Self {
+    pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Self {
+        let reported = std::cell::Cell::new(function.snapshot().power.value());
         Self {
-            device: device.clone(),
+            function,
             endpoint,
             dataver,
-            changes: std::cell::RefCell::new(Some(device.subscribe())),
-            reported: std::cell::Cell::new(device.snapshot().power.value()),
+            reported,
         }
     }
     async fn execute(&self, ctx: impl InvokeContext, command: Command) -> Result<(), Error> {
@@ -28,10 +27,11 @@ impl OnOffHandler {
             .structure()
             .and_then(|_| ctx.data().raw_value())
             .map_err(|_| ErrorCode::InvalidCommand)?;
-        self.device.execute(command).await.map_err(|error| {
+        self.function.execute(command).await.map_err(|error| {
             log::warn!(
-                "Matter {} {command:?} failed: {error}",
-                self.device.description().key.id
+                "Matter {}/{} {command:?} failed: {error}",
+                self.function.function_key().device.id,
+                self.function.function_key().id,
             );
             match error {
                 CommandError::Unsupported => ErrorCode::CommandNotFound,
@@ -40,8 +40,9 @@ impl OnOffHandler {
             }
         })?;
         log::info!(
-            "Matter {} {command:?}: accepted",
-            self.device.description().key.id
+            "Matter {}/{} {command:?}: accepted",
+            self.function.function_key().device.id,
+            self.function.function_key().id,
         );
         Ok(())
     }
@@ -60,7 +61,7 @@ impl on_off::ClusterAsyncHandler for OnOffHandler {
         self.dataver.changed();
     }
     async fn on_off(&self, _ctx: impl ReadContext) -> Result<bool, Error> {
-        self.device
+        self.function
             .snapshot()
             .power
             .value()
@@ -96,9 +97,9 @@ impl on_off::ClusterAsyncHandler for OnOffHandler {
         Err(ErrorCode::CommandNotFound.into())
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        let mut changes = self.changes.borrow_mut().take().expect("handler runs once");
+        let mut changes = self.function.subscribe();
+        let mut value = self.function.snapshot().power.value();
         loop {
-            let value = changes.changed().await.power.value();
             if self.reported.replace(value) != value {
                 ctx.notify_attr_changed(
                     self.endpoint,
@@ -106,6 +107,7 @@ impl on_off::ClusterAsyncHandler for OnOffHandler {
                     on_off::AttributeId::OnOff as _,
                 );
             }
+            value = changes.changed().await.power.value();
         }
     }
 }

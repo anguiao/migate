@@ -1,10 +1,9 @@
 use super::{
     model::SourceError,
-    state::{Context, Lifetime},
+    state::{Context, DeviceRecord, Lifetime},
 };
 use crate::{
-    device::{CommandError, CommandReceiver, PhysicalDevice},
-    storage::CachedPhysicalDevice,
+    device::{CommandError, CommandReceiver},
     xiaomi::{
         capability::PropertyBinding,
         central::{CentralError, SessionHandle},
@@ -20,8 +19,7 @@ use std::{
 };
 pub(super) struct DeviceWork {
     pub(super) life: Lifetime,
-    pub(super) cached: RefCell<CachedPhysicalDevice>,
-    pub(super) physical: PhysicalDevice,
+    pub(super) record: Rc<DeviceRecord>,
     pub(super) subscribed: RefCell<BTreeSet<(u32, u32)>>,
     subscribe_requested: Cell<bool>,
     subscribe_running: Cell<bool>,
@@ -31,11 +29,10 @@ pub(super) struct DeviceWork {
     read_problem: RefCell<Option<String>>,
 }
 impl DeviceWork {
-    pub(super) fn new(cached: CachedPhysicalDevice, physical: PhysicalDevice) -> Self {
+    pub(super) fn new(record: Rc<DeviceRecord>) -> Self {
         Self {
             life: Lifetime::default(),
-            cached: RefCell::new(cached),
-            physical,
+            record,
             subscribed: RefCell::new(BTreeSet::new()),
             subscribe_requested: Cell::new(true),
             subscribe_running: Cell::new(false),
@@ -55,14 +52,14 @@ impl DeviceWork {
         self.refresh_requested.set(true);
         self.changed.notify(usize::MAX);
     }
-    pub(super) fn update(&self, cached: CachedPhysicalDevice) {
-        *self.cached.borrow_mut() = cached;
+    pub(super) fn bindings_changed(&self) {
         self.subscribe_requested.set(true);
         self.refresh_requested.set(true);
         self.changed.notify(usize::MAX);
     }
     fn bindings(&self) -> Vec<PropertyBinding> {
         let mut values = self
+            .record
             .cached
             .borrow()
             .device
@@ -70,7 +67,7 @@ impl DeviceWork {
             .iter()
             .map(|f| f.power)
             .collect::<Vec<_>>();
-        if let Some(trigger) = self.cached.borrow().device.refresh_trigger {
+        if let Some(trigger) = self.record.cached.borrow().device.refresh_trigger {
             values.push(trigger);
         }
         values
@@ -86,18 +83,13 @@ impl DeviceWork {
         (!values.is_empty()).then(|| values.join("; "))
     }
     fn report(&self, context: &Context, did: &str) {
-        let blocked = context
-            .live
-            .borrow()
-            .records
-            .get(did)
-            .and_then(|record| record.blocked.clone());
+        let blocked = context.live.borrow().devices[did].blocked.clone();
         context.problem(did, blocked.or_else(|| self.diagnostic()));
     }
     fn problem(&self, operation: &str, binding: PropertyBinding, error: &CentralError) -> String {
         let message = format!(
             "{} {operation} {}.{}: {error}",
-            self.cached.borrow().device.description.key.id,
+            self.record.cached.borrow().device.key.id,
             binding.siid,
             binding.piid
         );
@@ -109,16 +101,16 @@ pub(super) async fn run(
     work: Rc<DeviceWork>,
     handle: SessionHandle,
     context: Rc<Context>,
-    generation: u64,
 ) -> Result<(), SourceError> {
+    // Poll cancellation first so removed work cannot submit another request.
     future::or(
         async {
             work.life.ended().await;
             Ok(())
         },
         future::or(
-            subscriptions(&work, &handle, &context, generation),
-            refreshes(&work, &handle, &context, generation),
+            subscriptions(&work, &handle, &context),
+            refreshes(&work, &handle, &context),
         ),
     )
     .await
@@ -127,9 +119,8 @@ async fn subscriptions(
     work: &DeviceWork,
     handle: &SessionHandle,
     context: &Context,
-    generation: u64,
 ) -> Result<(), SourceError> {
-    let did = work.cached.borrow().device.description.key.id.clone();
+    let did = work.record.cached.borrow().device.key.id.clone();
     loop {
         let listener = work.changed.listen();
         if !work.subscribe_requested.replace(false) {
@@ -149,16 +140,12 @@ async fn subscriptions(
                 if !work.bindings().contains(&binding) {
                     continue;
                 }
-                if work.life.closed.get() || !context.session_current(generation) {
-                    return Ok(());
-                }
                 match handle.subscribe_property(&did, binding).await {
                     Ok(()) => {
                         work.subscribed
                             .borrow_mut()
                             .insert((binding.siid, binding.piid));
                     }
-                    Err(CentralError::Cancelled) => return Ok(()),
                     Err(error) => {
                         if work.bindings().contains(&binding) {
                             problem = Some(work.problem("subscribe", binding, &error));
@@ -185,70 +172,44 @@ async fn refreshes(
     work: &Rc<DeviceWork>,
     handle: &SessionHandle,
     context: &Rc<Context>,
-    generation: u64,
 ) -> Result<(), SourceError> {
-    let did = work.cached.borrow().device.description.key.id.clone();
+    let did = work.record.cached.borrow().device.key.id.clone();
     loop {
         let listener = work.changed.listen();
         if !work.refresh_requested.replace(false) {
             listener.await;
             continue;
         }
-        let mut pending = work.cached.borrow().device.functions.clone();
+        let mut pending = work.record.cached.borrow().device.functions.clone();
         for attempt in 0..4 {
             let mut failed = Vec::new();
             let mut problem = None;
             for function in pending {
-                if !work
-                    .cached
-                    .borrow()
-                    .device
-                    .functions
-                    .iter()
-                    .any(|current| current.id == function.id && current.power == function.power)
-                {
+                if work.record.binding(&function.description.id) != function.power {
                     continue;
                 }
-                if work.life.closed.get() || !context.session_current(generation) {
-                    return Ok(());
-                }
                 let observing = work.clone();
-                let current = context.clone();
-                let id = function.id.clone();
+                let id = function.description.id.clone();
                 let binding = function.power;
                 let observing_id = id.clone();
-                let result =
-                    handle
-                        .read_property(&did, binding, move |result| {
-                            if current.session_current(generation)
-                                && !observing.life.closed.get()
-                                && observing.cached.borrow().device.functions.iter().any(
-                                    |function| {
-                                        function.id == observing_id && function.power == binding
-                                    },
-                                )
-                                && let Ok(value) = result
-                            {
-                                observing
-                                    .physical
-                                    .function(&observing_id)
-                                    .unwrap()
-                                    .observe(value);
-                            }
-                        })
-                        .await;
+                let result = handle
+                    .read_property(&did, binding, move |result| {
+                        if observing.record.binding(&observing_id) == binding
+                            && let Ok(value) = result
+                        {
+                            observing
+                                .record
+                                .physical
+                                .function(&observing_id)
+                                .unwrap()
+                                .observe(value);
+                        }
+                    })
+                    .await;
                 match result {
                     Ok(_) => {}
-                    Err(CentralError::Cancelled) => return Ok(()),
                     Err(error) => {
-                        if work
-                            .cached
-                            .borrow()
-                            .device
-                            .functions
-                            .iter()
-                            .any(|current| current.id == id && current.power == binding)
-                        {
+                        if work.record.binding(&id) == binding {
                             problem = Some(work.problem("read", binding, &error));
                             failed.push(function);
                         }
@@ -279,9 +240,10 @@ fn command_error(error: CentralError) -> CommandError {
 pub(super) async fn consume(
     mut receiver: CommandReceiver,
     context: Rc<Context>,
-    did: String,
+    record: Rc<DeviceRecord>,
     function_id: String,
 ) -> Result<(), SourceError> {
+    let did = record.physical.key().id.clone();
     while let Some(request) = receiver.next().await {
         let session = context
             .live
@@ -293,37 +255,12 @@ pub(super) async fn consume(
             request.reject(CommandError::Unavailable("gateway is disconnected".into()));
             continue;
         };
-        let binding = context.live.borrow().records.get(&did).and_then(|record| {
-            record
-                .cached
-                .device
-                .functions
-                .iter()
-                .find(|function| function.id == function_id)
-                .map(|function| function.power)
-        });
-        let Some(binding) = binding else {
-            request.reject(CommandError::Cancelled);
-            continue;
-        };
-        let generation = handle.generation();
-        let current = context.clone();
+        let binding = record.binding(&function_id);
         let target = request.target;
-        let command_did = did.clone();
+        let observing = record.clone();
         let command_function = function_id.clone();
         let result = handle.set_property(&did, binding, target, move |result| {
-            if !current.session_current(generation)
-                || !current
-                    .live
-                    .borrow()
-                    .records
-                    .get(&command_did)
-                    .is_some_and(|record| {
-                        record.cached.device.functions.iter().any(|function| {
-                            function.id == command_function && function.power == binding
-                        })
-                    })
-            {
+            if observing.binding(&command_function) != binding {
                 request.reject(CommandError::Cancelled);
             } else {
                 match result {

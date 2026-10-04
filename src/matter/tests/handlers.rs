@@ -247,21 +247,21 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
                 .code(),
             ErrorCode::Failure
         );
-        device.observe(false);
+        device.functions()[0].observe(false);
         device.set_availability(Availability::Available);
         for (command, power) in [(1, true), (0, false), (2, true), (2, false)] {
             ctx.command.cmd_id = command;
-            let before = device.snapshot();
+            let before = device.functions()[0].snapshot();
             let mut out = [0; 128];
             let mut invoke = pin!(handler.invoke(
                 &ctx,
                 InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out))
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
-            assert_eq!(device.snapshot(), before);
+            assert_eq!(device.functions()[0].snapshot(), before);
             receiver.next().await.unwrap().accept().unwrap();
             invoke.await.unwrap();
-            assert_eq!(device.snapshot().power.value(), Some(power));
+            assert_eq!(device.functions()[0].snapshot().power.value(), Some(power));
         }
         for bytes in [&[][..], &[0x15], &[0x15, 0x24], &[0x15, 0x35, 0], &[0x09]] {
             ctx.data = TLVElement::new(bytes);
@@ -289,19 +289,21 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
             .unwrap()
             .reject(CommandError::Rejected("denied".into()));
         assert_eq!(invoke.await.unwrap_err().code(), ErrorCode::Failure);
-        assert_eq!(device.snapshot().power, Power::Off);
+        assert_eq!(device.functions()[0].snapshot().power, Power::Off);
         let mut run = pin!(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
+        assert!(ctx.changes.borrow().contains(&(2, 57, 17)));
         ctx.changes.borrow_mut().clear();
-        device.observe(true);
+        device.functions()[0].observe(true);
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
         let count = ctx.changes.borrow().len();
-        device.observe(true);
+        device.functions()[0].observe(true);
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(ctx.changes.borrow().len(), count);
-        device.observe(false);
-        device.observe(true);
+        device.functions()[0].observe(false);
+        device.functions()[0].observe(true);
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(ctx.changes.borrow().len(), count);
         device.set_availability(Availability::Unavailable("offline".into()));
@@ -349,10 +351,10 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
     let registry = super::test_registry(&store, &device);
-    let physical = registry.get(&device.description().key).unwrap();
+    let physical = registry.get(device.key()).unwrap();
     let stored = store
         .devices()
-        .load_published(&device.description().key)
+        .load_published(device.key())
         .unwrap()
         .unwrap();
     let bridged = BridgedHandler::new(
@@ -379,7 +381,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         Store::open(dir.path())
             .unwrap()
             .devices()
-            .load_published(&device.description().key)
+            .load_published(device.key())
             .unwrap()
             .unwrap()
             .label,
@@ -401,15 +403,13 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         TLVElement::new(writer.as_slice()).utf8().unwrap(),
         "Study Outlet"
     );
-    assert_eq!(
-        store
-            .load_or_create_device_identity(&device.description().key)
-            .unwrap(),
-        crate::storage::DeviceIdentity {
-            unique_id: stored.unique_id,
-            endpoint: stored.endpoint
-        }
-    );
+    let renamed = store
+        .devices()
+        .load_published(device.key())
+        .unwrap()
+        .unwrap();
+    assert_eq!(renamed.unique_id, stored.unique_id);
+    assert_eq!(renamed.endpoint, stored.endpoint);
 }
 
 async fn read_bytes(
@@ -479,11 +479,11 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         let root = Context::at(&im, 0, 0x1d, 3);
         let root_before = report_dataver(&read_bytes(&handler, &root).await.unwrap());
         let (single, mut single_receivers) = super::physical("single", false);
-        let single_stored = store.devices().publish(single.description()).unwrap();
+        let single_stored = store.devices().publish(&single.description()).unwrap();
         assert_eq!(single_stored.endpoint, 2);
         registry.insert(single.clone());
         let (multi, mut receivers) = super::physical("multi", true);
-        let stored = store.devices().publish(multi.description()).unwrap();
+        let stored = store.devices().publish(&multi.description()).unwrap();
         registry.insert(multi.clone());
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(
@@ -603,8 +603,9 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
             .unwrap();
         store.devices().remove(&single_stored.key).unwrap();
         registry.remove(&single_stored.key);
-        let (rejoined, mut replacement_receivers) = super::physical("single", false);
-        let restored = store.devices().publish(rejoined.description()).unwrap();
+        let restored = store.devices().publish(&single.description()).unwrap();
+        let (rejoined, mut replacement_receivers) =
+            crate::device::PhysicalDevice::new(restored.description());
         assert_eq!(restored.unique_id, single_stored.unique_id);
         assert_eq!(restored.endpoint, 2);
         assert_eq!(restored.label, "Retained name");
@@ -666,7 +667,7 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         );
         for index in 0..20 {
             let (device, _receivers) = super::physical(&format!("extra-{index}"), false);
-            store.devices().publish(device.description()).unwrap();
+            store.devices().publish(&device.description()).unwrap();
             registry.insert(device);
         }
         assert!(poll_once(run.as_mut()).await.is_none());
@@ -705,8 +706,8 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         let registry = crate::device::DeviceRegistry::new();
         let (first, _first) = super::physical("first-name", false);
         let (second, _second) = super::physical("second-name", true);
-        let first_stored = store.devices().publish(first.description()).unwrap();
-        let second_stored = store.devices().publish(second.description()).unwrap();
+        let first_stored = store.devices().publish(&first.description()).unwrap();
+        let second_stored = store.devices().publish(&second.description()).unwrap();
         registry.insert(first.clone());
         registry.insert(second.clone());
         let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
@@ -736,6 +737,9 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
             .await
             .unwrap();
         assert_eq!(report_value(&bytes).utf8().unwrap(), "Renamed first");
+        assert_eq!(first.label(), "Renamed first");
+        assert_eq!(first.description().label, "Renamed first");
+        assert_eq!(second.label(), second_stored.label);
         assert_eq!(
             write_label(&handler, &im, first_stored.endpoint, &"界".repeat(11))
                 .await
@@ -782,6 +786,9 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
                 .code(),
             ErrorCode::StdIoError
         );
+        assert_eq!(first.label(), "Renamed first");
+        assert_eq!(first.description().label, "Renamed first");
+        assert_eq!(second.label(), "Renamed multi");
         let failure = protocol.check_failure().unwrap_err();
         assert_eq!(failure.operation(), "write device label");
         assert_eq!(failure.path(), store.path());
@@ -811,6 +818,9 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
             .await
             .unwrap();
         assert_eq!(report_value(&bytes).utf8().unwrap(), "Renamed first");
+        assert_eq!(first.label(), "Renamed first");
+        assert_eq!(first.description().label, "Renamed first");
+        assert_eq!(second.label(), "Renamed multi");
         assert_eq!(
             store
                 .devices()

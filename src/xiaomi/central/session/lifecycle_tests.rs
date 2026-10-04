@@ -6,6 +6,125 @@ fn access(name: Value) -> Value {
 }
 
 #[test]
+fn invalid_device_messages_do_not_disconnect_the_shared_session() {
+    for qos in [QoS::AtMostOnce, QoS::AtLeastOnce, QoS::ExactlyOnce] {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let received = events.clone();
+        block_on(pair(
+            move |mut broker| async move {
+                broker.setup().await;
+                for did in ["target", "other"] {
+                    let Packet::Subscribe(subscription) = broker.next().await else {
+                        panic!("property SUBSCRIBE expected")
+                    };
+                    assert_eq!(
+                        subscription.filters[0].path,
+                        format!("master/appMsg/notify/iot/{did}/property/2.1")
+                    );
+                    broker
+                        .send(Packet::SubAck(SubAck::new(
+                            subscription.pkid,
+                            vec![SubscribeReasonCode::QoS2],
+                        )))
+                        .await;
+                }
+                let Packet::Publish(read) = broker.next().await else {
+                    panic!("read PUBLISH expected")
+                };
+                broker.acknowledge(&read).await;
+
+                let payloads = [
+                    ("appMsg/notify/iot/target/property/2.1", vec![0, 1]),
+                    (
+                        "appMsg/notify/iot/target/property/2.1",
+                        wire::encode_mips(
+                            100,
+                            None,
+                            &json!({"did":"target","siid":2,"piid":1,"value":"on"}),
+                        ),
+                    ),
+                    (
+                        "appMsg/notify/iot/target/property/2.1",
+                        wire::encode_mips(
+                            101,
+                            None,
+                            &json!({"did":"other","siid":2,"piid":1,"value":false}),
+                        ),
+                    ),
+                    (
+                        "appMsg/devListChange",
+                        wire::encode_mips(102, None, &json!({})),
+                    ),
+                    ("reply", vec![0, 1]),
+                    (
+                        "appMsg/notify/iot/other/property/2.1",
+                        wire::encode_mips(
+                            103,
+                            None,
+                            &json!({"did":"other","siid":2,"piid":1,"value":true}),
+                        ),
+                    ),
+                    (
+                        "appMsg/devListChange",
+                        wire::encode_mips(104, None, &json!({"devList":["other"]})),
+                    ),
+                ];
+                for (index, (topic, payload)) in payloads.into_iter().enumerate() {
+                    let pkid = index as u16 + 100;
+                    let mut publish =
+                        Publish::new(format!("{}/{topic}", broker.client_id), qos, payload);
+                    publish.pkid = pkid;
+                    broker.send(Packet::Publish(publish)).await;
+                    match qos {
+                        QoS::AtMostOnce => {}
+                        QoS::AtLeastOnce => {
+                            broker.wait_for(|packet| matches!(packet, Packet::PubAck(ack) if ack.pkid == pkid)).await;
+                        }
+                        QoS::ExactlyOnce => {
+                            broker.wait_for(|packet| matches!(packet, Packet::PubRec(ack) if ack.pkid == pkid)).await;
+                            broker.send(Packet::PubRel(PubRel::new(pkid))).await;
+                            broker.wait_for(|packet| matches!(packet, Packet::PubComp(ack) if ack.pkid == pkid)).await;
+                        }
+                    }
+                }
+                broker.reply(&read, json!({"value":true}), 200).await;
+                assert!(broker.next_optional().await.is_none());
+            },
+            move |handle, driver| async move {
+                let binding = PropertyBinding { siid: 2, piid: 1 };
+                let work = async {
+                    handle.subscribe_property("target", binding).await.unwrap();
+                    handle.subscribe_property("other", binding).await.unwrap();
+                    assert!(
+                        handle
+                            .read_property("other", binding, |_| {})
+                            .await
+                            .unwrap()
+                    );
+                    handle.close();
+                };
+                let (result, ()) =
+                    future::zip(driver.run(|event| received.borrow_mut().push(event)), work).await;
+                result.unwrap();
+            },
+        ));
+        assert_eq!(
+            *events.borrow(),
+            [
+                CentralEvent::Property {
+                    did: "other".into(),
+                    binding: PropertyBinding { siid: 2, piid: 1 },
+                    value: true,
+                },
+                CentralEvent::DeviceListChanged {
+                    dids: vec!["other".into()],
+                },
+            ]
+        );
+    }
+}
+
+#[test]
 fn incomplete_candidates_do_not_reject_the_complete_device_list() {
     let mut bad = access(json!("pending"));
     bad.as_object_mut().unwrap().remove("pushAvailable");

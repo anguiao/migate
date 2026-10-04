@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use crate::device::DeviceDescription;
+use crate::device::{DeviceKey, FunctionDescription};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PropertyBinding {
@@ -10,14 +10,13 @@ pub struct PropertyBinding {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedFunction {
-    pub id: String,
-    pub label: String,
+    pub description: FunctionDescription,
     pub power: PropertyBinding,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedDevice {
-    pub description: DeviceDescription,
+    pub key: DeviceKey,
     pub functions: Vec<ParsedFunction>,
     pub refresh_trigger: Option<PropertyBinding>,
 }
