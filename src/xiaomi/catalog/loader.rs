@@ -89,6 +89,3 @@ pub async fn load_scoped(
         outlet,
     })
 }
-
-#[cfg(test)]
-mod tests;

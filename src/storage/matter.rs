@@ -19,8 +19,7 @@ impl MatterStore {
 
     pub fn get(&self, key: u16) -> Result<Option<Vec<u8>>, StorageError> {
         self.store
-            .inner
-            .connection
+            .connection()
             .query_row("SELECT value FROM blobs WHERE key = ?1", [key], |row| {
                 row.get(0)
             })
@@ -33,8 +32,7 @@ impl MatterStore {
 
     pub fn contains(&self, key: u16) -> Result<bool, StorageError> {
         self.store
-            .inner
-            .connection
+            .connection()
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM blobs WHERE key = ?1)",
                 [key],
@@ -48,8 +46,7 @@ impl MatterStore {
 
     pub fn put(&self, key: u16, value: &[u8]) -> Result<(), StorageError> {
         self.store
-            .inner
-            .connection
+            .connection()
             .execute(
                 "INSERT INTO blobs (key, value) VALUES (?1, ?2)
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -64,8 +61,7 @@ impl MatterStore {
 
     pub fn delete(&self, key: u16) -> Result<(), StorageError> {
         self.store
-            .inner
-            .connection
+            .connection()
             .execute("DELETE FROM blobs WHERE key = ?1", [key])
             .map(|_| ())
             .map_err(|e| {

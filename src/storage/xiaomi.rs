@@ -72,8 +72,7 @@ impl XiaomiStore {
     pub fn load(&self) -> Result<Option<XiaomiRecord>, StorageError> {
         let invalid_slot = self
             .store
-            .inner
-            .connection
+            .connection()
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM xiaomi_auth WHERE id <> 1)",
                 [],
@@ -89,8 +88,7 @@ impl XiaomiStore {
         }
         let record = self
             .store
-            .inner
-            .connection
+            .connection()
             .query_row(
                 "SELECT uid, region, oauth_client_uuid, redirect_uri,
                         access_token, refresh_token, expires_at, refresh_at,
@@ -211,8 +209,7 @@ impl XiaomiStore {
     ) -> Result<(), StorageError> {
         let transaction = self
             .store
-            .inner
-            .connection
+            .connection()
             .unchecked_transaction()
             .map_err(|error| self.store.database_error(operation, error))?;
         body(&transaction).map_err(|error| self.store.database_error(operation, error))?;

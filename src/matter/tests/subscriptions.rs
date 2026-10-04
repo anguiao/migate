@@ -1,4 +1,8 @@
-use super::super::{NODE, basic_info, bridged_info, model, storage::StoreAdapter};
+use super::super::{
+    bridged_info,
+    model::{self, NODE, basic_info},
+    storage::StoreAdapter,
+};
 use crate::{
     device::{Availability, CommandError},
     storage::Store,

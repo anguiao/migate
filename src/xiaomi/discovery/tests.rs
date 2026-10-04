@@ -1,7 +1,16 @@
-use super::*;
+use std::{
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6},
+    sync::Arc,
+};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_lite::future::{block_on, poll_once};
-use mdns_sd::{InterfaceId, ScopedIpV4, ServiceInfo};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
+use mdns_sd::{InterfaceId, ResolvedService, ScopedIp, ScopedIpV4, ServiceEvent, ServiceInfo};
+
+use super::{
+    Discovery, DiscoveryError, GatewayRoute, SERVICE_TYPE,
+    announcement::{Registry, parse_profile, socket_address},
+};
 
 fn profile(did: u64, group: u64, role: u8, mqtt: bool) -> String {
     let mut bytes = [0_u8; 23];

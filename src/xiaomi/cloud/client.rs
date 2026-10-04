@@ -1,17 +1,22 @@
-use super::{AuthorizationAttempt, CLIENT_ID, CloudError, CloudErrorKind};
+use super::{
+    AuthorizationAttempt, CLIENT_ID, CloudError, CloudErrorKind,
+    response::{ApiResponse, Identifier, Members},
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use isahc::{
     AsyncReadResponseExt, HttpClient, Request,
     config::{Configurable as _, RedirectPolicy},
 };
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{collections::HashSet, error::Error as StdError, fmt, time::Duration};
 use url::Url;
 use uuid::Uuid;
 
 pub const CLOUD_BASE_URL: &str = "https://ha.api.io.mi.com";
+const PROBE_DEVICE_LIMIT: usize = 150;
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq)]
 pub struct TokenResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -128,76 +133,65 @@ impl CloudClient {
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(String::new())
             .map_err(|_| CloudError::protocol(operation))?;
-        let value = self.send(request, operation).await?;
-        let result = result_object(&value, operation)
-            .map_err(|error| error.with_oauth_code(oauth_error_code(&value)))?;
-        let access_token = token_string(result, "access_token", operation)?;
-        let refresh_token = token_string(result, "refresh_token", operation)?;
-        let expires_in = result
-            .get("expires_in")
-            .and_then(Value::as_i64)
-            .filter(|value| *value > 0)
-            .ok_or_else(|| CloudError::protocol(operation))?;
-        Ok(TokenResponse {
-            access_token,
-            refresh_token,
-            expires_in,
-        })
+        let response: ApiResponse = self.send(request, operation).await?;
+        let oauth_code = response.oauth_error_code();
+        let result: TokenResponse = response
+            .into_result(operation)
+            .map_err(|error| error.with_oauth_code(oauth_code))?;
+        validate_token(&result.access_token, operation)?;
+        validate_token(&result.refresh_token, operation)?;
+        if result.expires_in <= 0 {
+            return Err(CloudError::protocol(operation));
+        }
+        Ok(result)
     }
 
     pub async fn get_home(&self, access_token: &str) -> Result<HomePage, CloudError> {
+        #[derive(Deserialize)]
+        struct ProbeHomes {
+            homelist: Vec<ProbeHome>,
+        }
+        #[derive(Deserialize)]
+        struct ProbeHome {
+            uid: Option<Identifier>,
+            #[serde(flatten)]
+            members: Members,
+        }
         let operation = "read Xiaomi homes";
-        let value = self.protected_post(operation, "/app/v2/homeroom/gethome", access_token, json!({
+        let result: ProbeHomes = self.protected_post(operation, "/app/v2/homeroom/gethome", access_token, json!({
             "limit": 150, "fetch_share": false, "fetch_share_dev": false, "plat_form": 0, "app_ver": 9
         })).await?;
-        let result = result_object(&value, operation)?;
-        let homes = result
-            .get("homelist")
-            .and_then(Value::as_array)
-            .ok_or_else(|| CloudError::protocol(operation))?;
         let mut uid = None;
         let mut dids = Vec::new();
         let mut seen = HashSet::new();
-        for home in homes {
-            let home = home
-                .as_object()
-                .ok_or_else(|| CloudError::protocol(operation))?;
+        for home in result.homelist {
             if uid.is_none() {
-                uid = parse_uid(home.get("uid"), operation)?;
+                uid = home
+                    .uid
+                    .map(Identifier::into_string)
+                    .filter(|uid| !uid.is_empty());
             }
-            collect_dids(home.get("dids"), &mut dids, &mut seen, operation)?;
-            if let Some(rooms) = home.get("roomlist") {
-                for room in rooms
-                    .as_array()
-                    .ok_or_else(|| CloudError::protocol(operation))?
-                {
-                    let room = room
-                        .as_object()
-                        .ok_or_else(|| CloudError::protocol(operation))?;
-                    collect_dids(room.get("dids"), &mut dids, &mut seen, operation)?;
+            for did in home.members.into_dids() {
+                if dids.len() < PROBE_DEVICE_LIMIT && seen.insert(did.clone()) {
+                    dids.push(did);
                 }
             }
         }
-        dids.truncate(150);
         Ok(HomePage { uid, dids })
     }
 
     pub async fn get_devices(&self, access_token: &str, dids: &[String]) -> Result<(), CloudError> {
+        #[derive(Deserialize)]
+        struct DeviceProbe {
+            #[serde(rename = "list")]
+            _devices: Vec<Map<String, Value>>,
+        }
         if dids.is_empty() {
             return Ok(());
         }
-        let operation = "read Xiaomi devices";
-        let value = self.protected_post(operation, "/app/v2/home/device_list_page", access_token, json!({
-            "limit": 200, "get_split_device": true, "get_third_device": true, "dids": &dids[..dids.len().min(150)]
+        self.protected_post::<DeviceProbe>("read Xiaomi devices", "/app/v2/home/device_list_page", access_token, json!({
+            "limit": 200, "get_split_device": true, "get_third_device": true, "dids": &dids[..dids.len().min(PROBE_DEVICE_LIMIT)]
         })).await?;
-        let result = result_object(&value, operation)?;
-        let list = result
-            .get("list")
-            .and_then(Value::as_array)
-            .ok_or_else(|| CloudError::protocol(operation))?;
-        if list.iter().any(|device| !device.is_object()) {
-            return Err(CloudError::protocol(operation));
-        }
         Ok(())
     }
 
@@ -210,7 +204,11 @@ impl CloudClient {
             return Err(CloudError::input("request gateway certificate"));
         }
         let operation = "request gateway certificate";
-        let value = self
+        #[derive(Deserialize)]
+        struct Certificate {
+            cert: String,
+        }
+        let result: Certificate = self
             .protected_post(
                 operation,
                 "/app/v2/ha/oauth/get_central_crt",
@@ -220,16 +218,19 @@ impl CloudClient {
                 }),
             )
             .await?;
-        nonempty_string(result_object(&value, operation)?, "cert", operation)
+        if result.cert.is_empty() {
+            return Err(CloudError::protocol(operation));
+        }
+        Ok(result.cert)
     }
 
-    pub(super) async fn protected_post(
+    pub(super) async fn protected_post<T: DeserializeOwned>(
         &self,
         operation: &'static str,
         path: &str,
         access_token: &str,
         body: Value,
-    ) -> Result<Value, CloudError> {
+    ) -> Result<T, CloudError> {
         if access_token.is_empty() {
             return Err(CloudError::input(operation));
         }
@@ -243,18 +244,20 @@ impl CloudClient {
             .header("Authorization", format!("Bearer{access_token}"))
             .body(body.to_string())
             .map_err(|_| CloudError::protocol(operation))?;
-        self.send(request, operation).await
+        self.send::<ApiResponse>(request, operation)
+            .await?
+            .into_result(operation)
     }
 
     fn endpoint(&self, path: &str, operation: &'static str) -> Result<Url, CloudError> {
         Url::parse(&format!("{}{path}", self.base_url)).map_err(|_| CloudError::protocol(operation))
     }
 
-    pub(super) async fn send(
+    pub(super) async fn send<T: DeserializeOwned>(
         &self,
         request: Request<String>,
         operation: &'static str,
-    ) -> Result<Value, CloudError> {
+    ) -> Result<T, CloudError> {
         let mut response = self.client.send_async(request).await.map_err(|error| {
             CloudError::new(
                 operation,
@@ -283,52 +286,6 @@ impl CloudClient {
     }
 }
 
-fn oauth_error_code(value: &Value) -> Option<i64> {
-    let message = value.get("message")?.as_str()?;
-    let details: Value = serde_json::from_str(message).ok()?;
-    details.get("error")?.as_i64()
-}
-
-pub(super) fn result_object<'a>(
-    value: &'a Value,
-    operation: &'static str,
-) -> Result<&'a Map<String, Value>, CloudError> {
-    let code = value
-        .get("code")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| CloudError::protocol(operation))?;
-    if code != 0 {
-        return Err(CloudError::new(operation, CloudErrorKind::Business(code)));
-    }
-    value
-        .get("result")
-        .and_then(Value::as_object)
-        .ok_or_else(|| CloudError::protocol(operation))
-}
-
-pub(super) fn nonempty_string(
-    result: &Map<String, Value>,
-    key: &str,
-    operation: &'static str,
-) -> Result<String, CloudError> {
-    result
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| CloudError::protocol(operation))
-}
-
-fn token_string(
-    result: &Map<String, Value>,
-    key: &str,
-    operation: &'static str,
-) -> Result<String, CloudError> {
-    let value = nonempty_string(result, key, operation)?;
-    validate_token(&value, operation)?;
-    Ok(value)
-}
-
 fn validate_token(value: &str, operation: &'static str) -> Result<(), CloudError> {
     if value.is_empty()
         || value.chars().any(char::is_whitespace)
@@ -337,17 +294,6 @@ fn validate_token(value: &str, operation: &'static str) -> Result<(), CloudError
         return Err(CloudError::protocol(operation));
     }
     Ok(())
-}
-
-fn parse_uid(value: Option<&Value>, operation: &'static str) -> Result<Option<String>, CloudError> {
-    match value {
-        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
-        Some(Value::Number(value)) if value.is_i64() || value.is_u64() => {
-            Ok(Some(value.to_string()))
-        }
-        Some(Value::Number(_)) => Err(CloudError::protocol(operation)),
-        _ => Ok(None),
-    }
 }
 
 fn response_read_error_kind(error: &std::io::Error) -> CloudErrorKind {
@@ -365,28 +311,4 @@ fn response_read_error_kind(error: &std::io::Error) -> CloudErrorKind {
         source = current.source();
     }
     CloudErrorKind::Network
-}
-
-fn collect_dids(
-    value: Option<&Value>,
-    dids: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    operation: &'static str,
-) -> Result<(), CloudError> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    for did in value
-        .as_array()
-        .ok_or_else(|| CloudError::protocol(operation))?
-    {
-        let did = did
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| CloudError::protocol(operation))?;
-        if seen.insert(did.to_owned()) && dids.len() < 150 {
-            dids.push(did.to_owned());
-        }
-    }
-    Ok(())
 }

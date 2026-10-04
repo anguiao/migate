@@ -1,10 +1,11 @@
-use super::*;
+use super::{BridgeOptions, DeviceSetup, default_device_label, run_prepared_bridge};
 use crate::{
     matter::tests::test_device,
     xiaomi::{auth::AuthService, cloud::CloudClient},
 };
+use crate::{storage::Store, terminal::AuthStatus};
 use futures_lite::{
-    future::{block_on, poll_once},
+    future::{self, block_on, poll_once},
     io::Cursor,
 };
 use std::{cell::Cell, rc::Rc};

@@ -1,18 +1,42 @@
-use super::*;
+use super::{
+    GatewayStatus, SourceError, SourceStatus, TopologyReady, XiaomiSource, bootstrap,
+    local::wait_retry,
+    state::{Backoff, Context, update_auth},
+};
 use crate::{
-    device::{Availability, DeviceKey, Power},
+    device::{Availability, Clock, CommandError, Device, DeviceKey, Power},
     storage::{CachedDevice, Store},
     xiaomi::{
+        auth::{AuthenticationState, FailureReason},
         capability::parse_outlet,
         central::test_support::TlsFixture,
-        cloud::group_id,
+        cloud::{CloudClient, CloudError, group_id},
         discovery::Discovery,
         test_support::{MockResponse, mock_server},
     },
 };
+use event_listener::Event;
+use futures_lite::future;
 use futures_lite::future::{block_on, poll_once};
 use serde_json::Value;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc};
+
+impl XiaomiSource {
+    fn for_test(
+        store: Store,
+        cloud: CloudClient,
+        discovery: Discovery,
+        key: DeviceKey,
+        ca: String,
+        clock: Arc<dyn Clock>,
+    ) -> Result<(Self, TopologyReady), SourceError> {
+        let (mut source, ready) = Self::build(store, cloud, discovery, key, clock)?;
+        source.test_ca = Some(ca);
+        source.request_timeout = Duration::from_millis(200);
+        Ok((source, ready))
+    }
+}
 
 fn cached(uid: &str) -> CachedDevice {
     let instance: Value =
@@ -70,7 +94,6 @@ use serde_json::json;
 use std::{
     net::{SocketAddr, TcpListener},
     sync::Arc,
-    time::Instant,
 };
 
 fn announcement(address: SocketAddr, uid: &str, name: &str, hub: u64) -> mdns_sd::ServiceEvent {
@@ -139,7 +162,7 @@ impl Clock for TestClock {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum CloudCase {
     Normal,
     Failure,
@@ -148,11 +171,16 @@ enum CloudCase {
     Moved,
     Unsupported,
     DetailUnauthorized,
+    RecoveringAuth,
+    RecoveringDetail,
+    RecoveringCertificate,
+    MovedRecoveringDetail,
     ForeignAccount,
     Slow,
 }
 struct Rig {
     _directory: tempfile::TempDir,
+    cloud_requests: std::sync::mpsc::Receiver<super::super::test_support::ReceivedRequest>,
     store: Store,
     source: XiaomiSource,
     ready: TopologyReady,
@@ -165,6 +193,7 @@ struct Rig {
 }
 struct Control {
     ready: Option<TopologyReady>,
+    cloud_requests: std::sync::mpsc::Receiver<super::super::test_support::ReceivedRequest>,
     store: Store,
     discovery: Discovery,
     events: flume::Sender<mdns_sd::ServiceEvent>,
@@ -194,6 +223,19 @@ impl Rig {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let mut tls = TlsFixture::new(false);
+        let renewed_certificate = tls.credentials.certificate_pem.clone();
+        if matches!(case, CloudCase::RecoveringCertificate) {
+            let identity = crate::xiaomi::certificate::ClientIdentity::from_private_key(
+                &tls.credentials.uid,
+                &tls.credentials.virtual_did,
+                &tls.credentials.private_key_pem,
+            )
+            .unwrap();
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            tls.credentials.certificate_pem =
+                crate::xiaomi::test_support::sign_csr(&identity.csr_pem, now - 3600, now - 60)
+                    .unwrap();
+        }
         if matches!(case, CloudCase::RefreshRejected) {
             tls.credentials.tokens.refresh_at = 1;
         }
@@ -203,14 +245,29 @@ impl Rig {
             store.devices().save(&metadata).unwrap();
         }
         let data = metadata.clone();
-        let (base, _) = dynamic_mock_server(8, move |request| {
+        let mut failed = false;
+        let (base, cloud_requests) = dynamic_mock_server(12, move |request| {
+            if !failed
+                && (matches!(case, CloudCase::RecoveringAuth)
+                    || matches!(
+                        case,
+                        CloudCase::RecoveringDetail | CloudCase::MovedRecoveringDetail
+                    ) && request.target.ends_with("/device_list_page")
+                    || matches!(case, CloudCase::RecoveringCertificate)
+                        && request.target.ends_with("/get_central_crt"))
+            {
+                failed = true;
+                return MockResponse::json(503, "{}");
+            }
             if matches!(case, CloudCase::Failure) {
                 return MockResponse::json(503, "{}");
             }
             if matches!(case, CloudCase::RefreshRejected) {
                 return MockResponse::json(401, "{}");
             }
-            let body = if request.target.ends_with("/gethome") {
+            let body = if request.target.ends_with("/get_central_crt") {
+                json!({"code":0,"result":{"cert":renewed_certificate}})
+            } else if request.target.ends_with("/gethome") {
                 let uid = if matches!(case, CloudCase::ForeignAccount) {
                     "foreign-account"
                 } else {
@@ -218,7 +275,7 @@ impl Rig {
                 };
                 let homes = match case {
                     CloudCase::Missing => json!([{"id":"local","uid":uid,"dids":[]}]),
-                    CloudCase::Moved => {
+                    CloudCase::Moved | CloudCase::MovedRecoveringDetail => {
                         json!([{"id":"local","uid":uid,"dids":[]},{"id":"moved","uid":uid,"dids":["target"]}])
                     }
                     _ => json!([{"id":"local","uid":uid,"dids":["target"]}]),
@@ -262,6 +319,7 @@ impl Rig {
         .unwrap();
         Self {
             _directory: directory,
+            cloud_requests,
             store,
             source,
             ready,
@@ -308,6 +366,7 @@ impl Rig {
         };
         let testing = test(Control {
             ready: Some(self.ready),
+            cloud_requests: self.cloud_requests,
             store: self.store,
             discovery: self.discovery,
             events: self.events,
@@ -417,7 +476,7 @@ where
         discovery,
         DeviceKey::new("xiaomi", "target"),
         tls.ca_pem.clone(),
-        Arc::new(SystemClock(Instant::now())),
+        bootstrap::system_clock(),
     )
     .unwrap();
     let acceptor = TlsAcceptor::from(tls.server_config());
@@ -589,7 +648,7 @@ fn offline_list_then_write_success_cannot_accept_or_panic_and_notify_still_appli
 }
 
 fn system_clock() -> Arc<dyn Clock> {
-    Arc::new(SystemClock(Instant::now()))
+    bootstrap::system_clock()
 }
 async fn wait_for(mut predicate: impl FnMut() -> bool) {
     while !predicate() {
@@ -616,6 +675,12 @@ fn uncached_cloud_failure_and_missing_target_fail_without_waiting_for_discovery(
                             .is_none()
                     );
                     assert!(!matches!(c.exited().await, SourceError::NoLocalGateway));
+                    let statuses = c.statuses.borrow();
+                    assert!(matches!(
+                        statuses.last().unwrap().gateway,
+                        GatewayStatus::Unavailable(_)
+                    ));
+                    assert!(statuses.windows(2).all(|pair| pair[0] != pair[1]));
                 })
                 .await;
         }
@@ -808,7 +873,14 @@ fn actual_discovery_wait_expires_even_if_a_late_announcement_is_ready() {
         let clock = Arc::new(TestClock::default());
         Rig::new(false, CloudCase::Normal, clock.clone())
             .run(|mut c| async move {
-                wait_for(|| clock.deadlines.lock().unwrap().contains(&DISCOVERY_WAIT)).await;
+                wait_for(|| {
+                    clock
+                        .deadlines
+                        .lock()
+                        .unwrap()
+                        .contains(&Duration::from_secs(30))
+                })
+                .await;
                 clock.advance(Duration::from_secs(31));
                 c.events
                     .send(announcement(
@@ -893,19 +965,15 @@ fn unavailable_clears_stable_history_and_retry_delays_cap_at_thirty_seconds() {
     let clock = Arc::new(TestClock::default());
     let rig = Rig::new(true, CloudCase::Failure, clock.clone());
     let context = rig.source.context.clone();
-    context.live.borrow_mut().generation = Some(1);
-    context.prepared(1, 0, false);
+    context.live.borrow_mut().preparation.available_since = Some(clock.now());
     clock.advance(Duration::from_secs(30));
-    // The deadline passed before the session's stable timer was polled.
-    assert!(!context.live.borrow().stable);
+    assert!(context.live.borrow().preparation.available_since.is_some());
     context.unavailable("offline".into());
-    assert!(!context.live.borrow().stable);
+    assert!(context.live.borrow().preparation.available_since.is_none());
     assert!(context.live.borrow().reset_backoff);
     context.live.borrow_mut().reset_backoff = false;
-    let version = context.live.borrow().preparation;
-    context.prepared(1, version, true);
+    context.live.borrow_mut().preparation.available_since = Some(clock.now());
     clock.advance(Duration::from_secs(1));
-    assert!(!context.live.borrow().stable);
     context.unavailable("short availability".into());
     assert!(!context.live.borrow().reset_backoff);
     let mut retry = Backoff::new();
@@ -982,7 +1050,7 @@ fn withdrawn_route_during_connect_never_subscribes_or_sends_application_requests
                 )))
                 .await;
             assert!(broker.next_optional().await.is_none());
-            assert!(c.context.live.borrow().generation.is_none());
+            assert!(c.context.live.borrow().generation().is_none());
             assert_eq!(prepared.device.snapshot().power, Power::Unknown);
             assert!(matches!(
                 prepared.device.snapshot().availability,
@@ -1006,7 +1074,7 @@ fn route_change_cancels_pending_write_and_recovers_with_the_same_device() {
                 async {
                     let mut broker = c.accept().await;
                     initialize(&mut broker, &c.metadata, false).await;
-                    generation.set(c.context.live.borrow().generation);
+                    generation.set(c.context.live.borrow().generation());
                     // A backup cannot interrupt the current master.
                     c.events
                         .send(announcement(
@@ -1020,9 +1088,9 @@ fn route_change_cancels_pending_write_and_recovers_with_the_same_device() {
                         panic!("write expected")
                     };
                     broker.acknowledge(&write).await;
-                    assert_eq!(c.context.live.borrow().generation, generation.get());
+                    assert_eq!(c.context.live.borrow().generation(), generation.get());
                     c.events.send(removed("hub")).unwrap();
-                    wait_for(|| c.context.live.borrow().generation.is_none()).await;
+                    wait_for(|| c.context.live.borrow().generation().is_none()).await;
                     assert!(broker.next_optional().await.is_none());
                     clock.advance(Duration::from_secs(1));
                     let mut replacement = c.accept().await;
@@ -1037,7 +1105,7 @@ fn route_change_cancels_pending_write_and_recovers_with_the_same_device() {
                     ));
                     available(&prepared.device).await;
                     assert_eq!(prepared.device.snapshot().power, Power::On);
-                    assert_ne!(c.context.live.borrow().generation, old_generation.get());
+                    assert_ne!(c.context.live.borrow().generation(), old_generation.get());
                     assert_eq!(
                         prepared.device.description().key,
                         c.metadata.outlet.description.key
@@ -1091,7 +1159,14 @@ fn preparation_superseded_by_offline_reply_cannot_restore_available_from_old_rea
                 prepared.device.snapshot().availability,
                 Availability::Unavailable(_)
             ));
-            assert!(c.context.live.borrow().needs_prepare);
+            assert!(
+                c.context
+                    .live
+                    .borrow()
+                    .preparation
+                    .available_since
+                    .is_none()
+            );
         })
         .await;
     });
@@ -1189,7 +1264,7 @@ fn disconnected_sent_write_is_not_replayed_and_new_session_recovers_the_same_rec
                     };
                     old.acknowledge(&write).await;
                     drop(old);
-                    wait_for(|| c.context.live.borrow().generation.is_none()).await;
+                    wait_for(|| c.context.live.borrow().generation().is_none()).await;
                     clock.advance(Duration::from_secs(1));
                     let mut new = c.accept().await;
                     initialize(&mut new, &c.metadata, true).await;
@@ -1375,7 +1450,7 @@ fn thirty_seconds_available_resets_connection_backoff_before_later_offline() {
             let mut stable = c.accept().await;
             initialize(&mut stable, &c.metadata, false).await;
             clock.advance(Duration::from_secs(30));
-            wait_for(|| c.context.live.borrow().stable).await;
+            available(&prepared.device).await;
             stable
                 .send(Packet::Publish(Publish::new(
                     format!("{}/appMsg/devListChange", stable.client_id),
@@ -1390,11 +1465,19 @@ fn thirty_seconds_available_resets_connection_backoff_before_later_offline() {
             stable
                 .send(stable.business(&refresh, info(&c.metadata, false)))
                 .await;
-            wait_for(|| !c.context.live.borrow().stable).await;
+            wait_for(|| {
+                c.context
+                    .live
+                    .borrow()
+                    .preparation
+                    .available_since
+                    .is_none()
+            })
+            .await;
             let before = clock.deadlines.lock().unwrap().len();
             let deadline = clock.now() + Duration::from_secs(1);
             drop(stable);
-            wait_for(|| c.context.live.borrow().generation.is_none()).await;
+            wait_for(|| c.context.live.borrow().generation().is_none()).await;
             wait_for(|| clock.deadlines.lock().unwrap()[before..].contains(&deadline)).await;
             clock.advance(Duration::from_secs(1));
             let mut recovered = c.accept().await;
@@ -1404,7 +1487,7 @@ fn thirty_seconds_available_resets_connection_backoff_before_later_offline() {
             let before = clock.deadlines.lock().unwrap().len();
             let deadline = clock.now() + Duration::from_secs(2);
             drop(recovered);
-            wait_for(|| c.context.live.borrow().generation.is_none()).await;
+            wait_for(|| c.context.live.borrow().generation().is_none()).await;
             wait_for(|| clock.deadlines.lock().unwrap()[before..].contains(&deadline)).await;
             let polls = clock
                 .polls
@@ -1559,5 +1642,206 @@ fn changed_credentials_and_current_route_still_wake_retry_immediately() {
             }
             assert!(matches!(poll_once(retry.as_mut()).await, Some(Ok(()))));
         }
+    });
+}
+
+#[test]
+fn startup_cloud_retry_recovers_diagnostics_without_interrupting_local_control() {
+    block_on(async {
+        for case in [CloudCase::RecoveringAuth, CloudCase::RecoveringDetail] {
+            let clock = Arc::new(TestClock::default());
+            let rig = Rig::new(true, case, clock.clone());
+            rig.announce();
+            rig.run(|mut c| async move {
+                let prepared = c.ready.take().unwrap().wait().await.unwrap();
+                let mut broker = c.accept().await;
+                initialize(&mut broker, &c.metadata, false).await;
+                available(&prepared.device).await;
+                let generation = c.context.live.borrow().generation();
+                wait_for(|| {
+                    clock
+                        .deadlines
+                        .lock()
+                        .unwrap()
+                        .contains(&Duration::from_secs(1))
+                })
+                .await;
+                assert!(
+                    matches!(
+                        c.context.status.borrow().authentication.authentication,
+                        AuthenticationState::Unavailable(_)
+                    ) || c.context.status.borrow().catalog_problem.is_some()
+                );
+                assert_eq!(
+                    prepared.device.snapshot().availability,
+                    Availability::Available
+                );
+                clock.advance(Duration::from_secs(1));
+                let mut requests = Vec::new();
+                wait_for(|| {
+                    requests.extend(c.cloud_requests.try_iter().map(|request| request.target));
+                    requests.iter().any(|target| target.starts_with("/miot-spec-v2/instance?"))
+                })
+                .await;
+                wait_for(|| {
+                    matches!(
+                        c.context.status.borrow().authentication.authentication,
+                        AuthenticationState::Authenticated
+                    ) && c.context.status.borrow().catalog_problem.is_none()
+                })
+                .await;
+                assert_eq!(c.context.live.borrow().generation(), generation);
+                assert_eq!(
+                    prepared.device.snapshot().availability,
+                    Availability::Available
+                );
+                clock.advance(Duration::from_secs(300));
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                let later = c.cloud_requests.try_iter().map(|request| request.target).collect::<Vec<_>>();
+                assert!(later.is_empty(), "successful {case:?} startup must stop retrying: initial={requests:?}, later={later:?}");
+                assert_eq!(c.context.live.borrow().generation(), generation);
+            })
+            .await;
+        }
+    });
+}
+
+#[test]
+fn moved_device_recovers_after_transient_static_description_failure() {
+    block_on(async {
+        let clock = Arc::new(TestClock::default());
+        let rig = Rig::new(true, CloudCase::MovedRecoveringDetail, clock.clone());
+        rig.run(|mut c| async move {
+            let prepared = c.ready.take().unwrap().wait().await.unwrap();
+            wait_for(|| c.context.live.borrow().blocked.is_some()).await;
+            c.events
+                .send(home_announcement(
+                    c.listener.get_ref().local_addr().unwrap(),
+                    &c.metadata.uid,
+                    "moved",
+                    "new-home",
+                    999,
+                ))
+                .unwrap();
+            wait_for(|| {
+                clock
+                    .deadlines
+                    .lock()
+                    .unwrap()
+                    .contains(&Duration::from_secs(1))
+            })
+            .await;
+            assert!(c.context.status.borrow().catalog_problem.is_some());
+            assert!(c.context.live.borrow().blocked.is_some());
+            assert_eq!(
+                c.store
+                    .devices()
+                    .load(&c.metadata.uid, &c.metadata.outlet.description.key)
+                    .unwrap(),
+                Some(c.metadata.clone())
+            );
+            clock.advance(Duration::from_secs(1));
+            let mut updated = c.metadata.clone();
+            updated.home_id = "moved".into();
+            updated.group_id = group_id(&updated.uid, "moved");
+            let mut broker = c.accept().await;
+            initialize(&mut broker, &updated, true).await;
+            available(&prepared.device).await;
+            assert_eq!(prepared.device.snapshot().power, Power::On);
+            assert_eq!(c.context.metadata(), updated);
+            assert!(c.context.live.borrow().blocked.is_none());
+            assert!(c.context.status.borrow().catalog_problem.is_none());
+            assert_eq!(
+                c.store
+                    .devices()
+                    .load(&updated.uid, &updated.outlet.description.key)
+                    .unwrap(),
+                Some(updated)
+            );
+        })
+        .await;
+    });
+}
+
+#[test]
+fn rejected_authentication_does_not_schedule_startup_retries() {
+    block_on(async {
+        let clock = Arc::new(TestClock::default());
+        Rig::new(true, CloudCase::RefreshRejected, clock.clone())
+            .run(|c| async move {
+                wait_for(|| {
+                    matches!(
+                        c.context.status.borrow().authentication.authentication,
+                        AuthenticationState::SignInRequired(_)
+                    )
+                })
+                .await;
+                assert_eq!(c.cloud_requests.try_iter().count(), 1);
+                assert!(clock.deadlines.lock().unwrap().is_empty());
+                clock.advance(Duration::from_secs(300));
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                assert_eq!(c.cloud_requests.try_iter().count(), 0);
+            })
+            .await;
+    });
+}
+
+#[test]
+fn expired_certificate_recovers_after_transient_renewal_failure_without_reloading_topology() {
+    block_on(async {
+        let clock = Arc::new(TestClock::default());
+        let rig = Rig::new(true, CloudCase::RecoveringCertificate, clock.clone());
+        rig.announce();
+        rig.run(|mut c| async move {
+            let prepared = c.ready.take().unwrap().wait().await.unwrap();
+            wait_for(|| c.context.live.borrow().topology.as_ref().unwrap().dirty).await;
+            assert!(matches!(
+                c.context.status.borrow().authentication.certificate_update,
+                super::super::auth::CertificateUpdate::Failed(FailureReason::Cloud(_))
+            ));
+            assert!(matches!(
+                prepared.device.snapshot().availability,
+                Availability::Unavailable(_)
+            ));
+            assert!(c.context.live.borrow().generation().is_none());
+            clock.advance(Duration::from_secs(1));
+            let mut broker = c.accept().await;
+            initialize(&mut broker, &c.metadata, true).await;
+            available(&prepared.device).await;
+            assert_eq!(prepared.device.snapshot().power, Power::On);
+            assert!(c.context.status.borrow().authentication.is_success());
+            let requests = c
+                .cloud_requests
+                .try_iter()
+                .map(|request| request.target)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|target| target.ends_with("/get_central_crt"))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|target| target.ends_with("/device_list_page"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|target| target.starts_with("/miot-spec-v2/instance?"))
+                    .count(),
+                1
+            );
+            let generation = c.context.live.borrow().generation();
+            clock.advance(Duration::from_secs(300));
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(c.cloud_requests.try_iter().count(), 0);
+            assert_eq!(c.context.live.borrow().generation(), generation);
+        })
+        .await;
     });
 }

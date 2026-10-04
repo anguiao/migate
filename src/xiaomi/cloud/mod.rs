@@ -2,6 +2,7 @@ mod catalog;
 mod client;
 mod error;
 mod oauth;
+mod response;
 
 pub use catalog::{CloudDevice, OwnedHome, OwnedHomes, group_id};
 pub use client::{CLOUD_BASE_URL, CloudClient, HomePage, TokenResponse};

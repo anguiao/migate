@@ -1,4 +1,5 @@
-use super::*;
+use super::{CapabilityError, PropertyBinding, parse_outlet};
+use crate::device::{Capability, Category, DeviceKey};
 use serde_json::{Value, json};
 
 fn key() -> DeviceKey {

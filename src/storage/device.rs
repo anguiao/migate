@@ -53,8 +53,7 @@ impl DeviceStore {
             .map_err(|error| self.invalid(operation, error))?;
         let data = self
             .store
-            .inner
-            .connection
+            .connection()
             .query_row(
                 "SELECT home_id, group_id, model, instance_type, category, capabilities, siid, piid
              FROM device_cache WHERE uid = ?1 AND source = ?2 AND device_id = ?3",
@@ -106,8 +105,7 @@ impl DeviceStore {
         validate_cached(cached).map_err(|error| self.invalid(operation, error))?;
         let transaction = self
             .store
-            .inner
-            .connection
+            .connection()
             .unchecked_transaction()
             .map_err(|error| self.store.database_error(operation, error))?;
         let description = &cached.outlet.description;
@@ -137,8 +135,7 @@ pub(super) fn load_or_create_identity(
     let operation = "load or create real device identity";
     validate_key(key).map_err(|error| StorageError::new(store.path(), operation, error))?;
     let transaction = store
-        .inner
-        .connection
+        .connection()
         .unchecked_transaction()
         .map_err(|error| store.database_error(operation, error))?;
     transaction

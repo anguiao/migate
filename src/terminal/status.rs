@@ -145,7 +145,7 @@ fn format_authentication(authentication: &AuthenticationState) -> String {
     }
 }
 
-fn login_command(executable: &Path, data_dir: &Path) -> String {
+pub fn login_command(executable: &Path, data_dir: &Path) -> String {
     format!(
         "{} --data-dir {} auth login",
         shell_quote(executable),

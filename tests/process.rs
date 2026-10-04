@@ -143,7 +143,11 @@ impl TestProcess {
         }
     }
 
-    fn interrupt(mut self) -> (String, String) {
+    fn interrupt(self) -> (String, String) {
+        self.stop("-INT")
+    }
+
+    fn stop(mut self, signal: &str) -> (String, String) {
         assert!(
             self.child.try_wait().unwrap().is_none(),
             "process exited before Ctrl-C: {}",
@@ -151,7 +155,7 @@ impl TestProcess {
         );
         assert!(
             Command::new("kill")
-                .args(["-INT", &self.child.id().to_string()])
+                .args([signal, &self.child.id().to_string()])
                 .status()
                 .unwrap()
                 .success()
@@ -163,7 +167,7 @@ impl TestProcess {
             }
             assert!(
                 Instant::now() < deadline,
-                "Ctrl-C did not exit within {TIMEOUT:?}: {}",
+                "{signal} did not exit within {TIMEOUT:?}: {}",
                 self.output().1
             );
             thread::sleep(POLL_INTERVAL);
@@ -452,6 +456,67 @@ fn ctrl_c_cancels_unfinished_login_with_failure() {
 }
 
 #[test]
+fn a_data_directory_cannot_be_used_by_two_processes_and_exit_releases_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut owner = TestProcess::spawn(
+        Command::new(env!("CARGO_BIN_EXE_migate"))
+            .arg("--data-dir")
+            .arg(directory.path())
+            .args(["auth", "login"]),
+    );
+    owner.wait_for_output(Stream::Stdout, "Paste the complete address-bar URL");
+    for arguments in [vec![], vec!["auth", "check"], vec!["auth", "logout"]] {
+        let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+            .arg("--data-dir")
+            .arg(directory.path())
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("Another MiGate process is using this data directory")
+        );
+    }
+    // Even an ungraceful exit releases the OS lock; its file can remain in place.
+    owner.child.kill().unwrap();
+    owner.child.wait().unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+        .arg("--data-dir")
+        .arg(directory.path())
+        .args(["auth", "logout"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(directory.path().join("instance.lock").is_file());
+}
+
+#[test]
+fn sigterm_stops_the_shared_runtime_and_releases_its_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let (process, _) = TestProcess::bridge(directory.path(), false);
+    let (_, errors) = process.stop("-TERM");
+    assert!(errors.contains("Fake source stopped"), "{errors}");
+    let _lock = migate::storage::InstanceLock::acquire(directory.path()).unwrap();
+}
+
+#[test]
+fn log_filter_controls_diagnostics_without_changing_command_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+        .env("RUST_LOG", "off")
+        .arg("--data-dir")
+        .arg(directory.path())
+        .args(["auth", "logout"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(result.stderr.is_empty());
+    assert!(!result.stdout.is_empty());
+}
+
+#[test]
 fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_power() {
     let peer_directory = tempfile::tempdir().unwrap();
     let (mut peer, peer_port) = TestProcess::bridge(peer_directory.path(), false);
@@ -547,13 +612,12 @@ fn bridge_helper_child() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
-            use async_signal::{Signal, Signals};
-            use futures_lite::{StreamExt, future, io::BufReader};
+            use futures_lite::{future, io::BufReader};
             use migate::{
                 device::{
                     Availability, Capability, Category, Device, DeviceDescription, DeviceKey,
                 },
-                runtime::{BridgeOptions, DeviceSetup, run_prepared_bridge},
+                runtime::{BridgeOptions, DeviceSetup, run_prepared_bridge, shutdown_signal},
                 terminal::{self, AuthStatus},
                 xiaomi::{auth::AuthService, cloud::CloudClient},
             };
@@ -562,6 +626,7 @@ fn bridge_helper_child() {
                 .target(env_logger::Target::Stderr)
                 .init();
             let directory = std::path::PathBuf::from(directory);
+            let _instance = migate::storage::InstanceLock::acquire(&directory).unwrap();
             let store = migate::storage::Store::open(&directory).unwrap();
             let identity = store.load_identity().unwrap();
             log::info!("Data directory: {}", directory.display());
@@ -600,9 +665,8 @@ fn bridge_helper_child() {
                 }
                 Ok::<(), migate::RuntimeError>(())
             };
-            let mut signals = Signals::new([Signal::Int]).unwrap();
             let interrupt = async {
-                signals.next().await.ok_or("signal stream ended")??;
+                shutdown_signal().await?;
                 Ok(())
             };
             let result = future::block_on(run_prepared_bridge(
@@ -637,6 +701,7 @@ fn bridge_helper_child() {
 fn production_without_credentials_fails_without_pairing_or_fake_device() {
     let directory = tempfile::tempdir().unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+        .env("RUST_LOG", "off")
         .arg("--data-dir")
         .arg(directory.path())
         .output()

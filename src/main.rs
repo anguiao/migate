@@ -2,14 +2,15 @@
 
 use std::{env, process::ExitCode};
 
-use async_signal::{Signal, Signals};
-use futures_lite::{StreamExt, future, io::BufReader};
+use futures_lite::{future, io::BufReader};
 use migate::{
     RuntimeError,
     config::{AuthCommand, Command, Config},
     device::DeviceKey,
-    runtime::{BridgeOptions, DeviceSetup, default_device_label, run_prepared_bridge},
-    storage::{Store, XiaomiStore},
+    runtime::{
+        BridgeOptions, DeviceSetup, default_device_label, run_prepared_bridge, shutdown_signal,
+    },
+    storage::{InstanceLock, Store, XiaomiStore},
     terminal::{self, AuthStatus},
     xiaomi::{
         auth::{AuthService, AuthenticationState},
@@ -20,8 +21,8 @@ use migate::{
 };
 
 fn main() -> ExitCode {
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Info)
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
         .target(env_logger::Target::Stderr)
         .init();
     match run() {
@@ -41,6 +42,7 @@ fn run() -> Result<(), RuntimeError> {
         env::var_os("HOME"),
         &env::current_dir()?,
     )?;
+    let _instance = InstanceLock::acquire(&config.data_dir)?;
     let store = Store::open(&config.data_dir)?;
     let identity = store.load_identity()?;
     log::info!("Data directory: {}", config.data_dir.display());
@@ -71,16 +73,12 @@ fn run_auth(
         return terminal::auth::logout(&store, std::io::stdout().lock());
     }
     let auth = AuthService::new(store, CloudClient::new()?);
-    let mut signals = Signals::new([Signal::Int])?;
     future::block_on(async {
         let cancelled = async {
-            signals
-                .next()
-                .await
-                .ok_or("Ctrl-C signal stream ended unexpectedly")??;
+            let signal = shutdown_signal().await?;
             let message = match command {
-                AuthCommand::Login => "Login cancelled by Ctrl-C",
-                AuthCommand::Check => "Authentication check cancelled by Ctrl-C",
+                AuthCommand::Login => format!("Login cancelled by {signal}"),
+                AuthCommand::Check => format!("Authentication check cancelled by {signal}"),
                 AuthCommand::Logout => unreachable!(),
             };
             Err::<(), RuntimeError>(message.into())
@@ -119,12 +117,15 @@ fn run_bridge(
     matter_port: u16,
 ) -> Result<(), RuntimeError> {
     let report = auth.local_status()?;
-    let unsigned = matches!(report.authentication, AuthenticationState::NotSignedIn);
+    if matches!(report.authentication, AuthenticationState::NotSignedIn) {
+        return Err(format!(
+            "Xiaomi sign-in is required. Sign in with:\n  {}",
+            terminal::login_command(&executable, &data_dir)
+        )
+        .into());
+    }
     let status = AuthStatus::new(report, executable, data_dir);
     status.log(terminal::current_time());
-    if unsigned {
-        return Err("Xiaomi sign-in is required".into());
-    }
     let (discovery, driver) = Discovery::start()?;
     let (source, ready) = XiaomiSource::new(
         store.clone(),
@@ -132,14 +133,10 @@ fn run_bridge(
         discovery,
         DeviceKey::new("xiaomi", VALIDATION_DEVICE_DID),
     )?;
-    let mut signals = Signals::new([Signal::Int])?;
     future::block_on(async {
         let interrupt = async {
-            signals
-                .next()
-                .await
-                .ok_or("Ctrl-C signal stream ended unexpectedly")??;
-            log::info!("Received Ctrl-C; stopping MiGate");
+            let signal = shutdown_signal().await?;
+            log::info!("Received {signal}; stopping MiGate");
             Ok(())
         };
         let networking = future::or(

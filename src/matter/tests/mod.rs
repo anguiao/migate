@@ -2,7 +2,9 @@ mod handlers;
 mod subscriptions;
 
 use super::{
-    Bridge, NODE, PairingEvent, basic_info, bridged_info, initialize_basic_info, pairing,
+    Bridge, PairingEvent, bridged_info,
+    model::{NODE, basic_info, initialize_basic_info},
+    pairing,
     storage::StoreAdapter,
 };
 use crate::{

@@ -22,6 +22,25 @@ cargo run --locked
 
 后续优先覆盖灯、开关、插座、传感器、窗帘和空调，仅暴露可自然映射为标准 Matter 能力的功能。
 
+## 代码组织
+
+`mod.rs` 声明子模块并导出公共接口，具体实现按职责命名。模块内部实现保持私有，必要的共享成员仅对所在模块开放。
+
+| 目录 | 职责 |
+| --- | --- |
+| `src/device/` | 通用设备模型、共享状态与通知、命令队列及其生命周期。 |
+| `src/runtime/` | 网桥启动与任务生命周期、进程退出信号。 |
+| `src/matter/` | Matter 服务、端点与处理器、配对及协议存储适配。 |
+| `src/storage/` | SQLite 连接与迁移、目录和进程锁、各类持久化记录。 |
+| `src/xiaomi/auth/` | 认证服务、登录、检查与刷新、状态报告。 |
+| `src/xiaomi/cloud/` | HTTP 请求、响应解析、云端目录与 OAuth 协议。 |
+| `src/xiaomi/capability/`、`src/xiaomi/catalog/` | MIoT 能力解析与当前本地家庭的设备描述加载。 |
+| `src/xiaomi/discovery/` | mDNS 浏览、公告解析与合并、网关路由选择。 |
+| `src/xiaomi/central/session/` | 中枢握手、传输驱动、MQTT 处理、请求分派与业务响应。 |
+| `src/xiaomi/source/` | 启动准备、云端恢复、本地会话以及统一设备状态的协调。 |
+
+模块测试随所属模块组织；跨模块、存储和进程集成测试位于 `tests/`。
+
 ## 开发检查
 
 ```sh

@@ -1,5 +1,17 @@
-use super::*;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use event_listener::Event;
 use futures_lite::future::{block_on, poll_once};
+
+use super::{
+    Availability, Capability, Category, Clock, Command, CommandError, CommandReceiver, Device,
+    DeviceDescription, DeviceKey, Power,
+};
 
 fn outlet() -> DeviceDescription {
     DeviceDescription {
@@ -188,7 +200,7 @@ impl Clock for Arc<TestClock> {
 fn five_second_deadline_includes_queue_wait_and_expired_commands_are_never_sent() {
     block_on(async {
         let clock = Arc::new(TestClock::default());
-        let (device, mut receiver) = Device::with_clock(outlet(), Box::new(clock.clone()));
+        let (device, mut receiver) = Device::for_test(outlet(), Box::new(clock.clone()));
         device.observe(false);
         device.set_availability(Availability::Available);
         let first = device.execute(Command::On);
@@ -242,5 +254,38 @@ fn becoming_unavailable_ends_active_and_queued_requests_and_stale_acceptance() {
         assert_eq!(stale.accept(), Err(error));
         assert!(poll_once(receiver.next()).await.is_none());
         assert_eq!(device.snapshot().power, Power::Off);
+    });
+}
+
+#[test]
+fn dropping_a_queued_command_withdraws_it_before_the_adapter_can_send() {
+    block_on(async {
+        let (device, mut receiver) = ready_device();
+        let mut cancelled = Box::pin(device.execute(Command::On));
+        assert!(poll_once(cancelled.as_mut()).await.is_none());
+        drop(cancelled);
+
+        let mut next = Box::pin(device.execute(Command::Off));
+        assert!(poll_once(next.as_mut()).await.is_none());
+        let request = receiver.next().await.unwrap();
+        assert!(!request.target);
+        request.accept().unwrap();
+        assert_eq!(next.await.unwrap().power, Power::Off);
+        assert!(poll_once(receiver.next()).await.is_none());
+    });
+}
+
+#[test]
+fn dropping_a_caller_does_not_discard_an_inflight_adapter_result() {
+    block_on(async {
+        let (device, mut receiver) = ready_device();
+        let mut command = Box::pin(device.execute(Command::On));
+        assert!(poll_once(command.as_mut()).await.is_none());
+        let request = receiver.next().await.unwrap();
+        drop(command);
+
+        assert_eq!(request.accept().unwrap().power, Power::On);
+        assert_eq!(device.snapshot().power, Power::On);
+        assert!(poll_once(receiver.next()).await.is_none());
     });
 }

@@ -1,11 +1,12 @@
 use super::{
     CloudClient, CloudError,
-    client::{nonempty_string, result_object},
+    response::{Identifier, Members, description, null_list},
 };
 use isahc::Request;
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha1::{Digest, Sha1};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use url::Url;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,32 +38,117 @@ pub fn group_id(uid: &str, home_id: &str) -> String {
         .collect()
 }
 
+#[derive(Deserialize)]
+struct HomesResponse {
+    #[serde(deserialize_with = "null_list")]
+    homelist: Vec<HomeRecord>,
+    has_more: Option<bool>,
+    max_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HomeRecord {
+    uid: Identifier,
+    id: Identifier,
+    #[serde(flatten)]
+    members: Members,
+}
+
+#[derive(Deserialize)]
+struct MembersResponse {
+    #[serde(deserialize_with = "null_list")]
+    info: Vec<MemberRecord>,
+    has_more: Option<bool>,
+    max_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MemberRecord {
+    id: Identifier,
+    #[serde(flatten)]
+    members: Members,
+}
+
+#[derive(Deserialize)]
+struct DevicesResponse {
+    #[serde(deserialize_with = "null_list")]
+    list: Vec<DeviceRecord>,
+    has_more: Option<bool>,
+    next_start_did: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeviceRecord {
+    #[serde(deserialize_with = "description")]
+    did: String,
+    #[serde(flatten)]
+    details: Map<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct DeviceDescription {
+    #[serde(deserialize_with = "description")]
+    model: String,
+    #[serde(deserialize_with = "description")]
+    spec_type: String,
+}
+
+#[derive(Default)]
+struct Pagination {
+    cursors: HashSet<String>,
+}
+
+impl Pagination {
+    fn advance(
+        &mut self,
+        has_more: Option<bool>,
+        cursor: Option<String>,
+        progress: usize,
+        operation: &'static str,
+    ) -> Result<Option<String>, CloudError> {
+        if !has_more.unwrap_or(false) {
+            return Ok(None);
+        }
+        let cursor = cursor
+            .filter(|cursor| !cursor.is_empty())
+            .ok_or_else(|| CloudError::protocol(operation))?;
+        if progress == 0 || !self.cursors.insert(cursor.clone()) {
+            return Err(CloudError::protocol(operation));
+        }
+        Ok(Some(cursor))
+    }
+}
+
 impl CloudClient {
     /// Read only owned homes. Other homes can be returned by the API, but no
     /// device details are requested while collecting this directory.
     pub async fn get_owned_homes(&self, access_token: &str) -> Result<OwnedHomes, CloudError> {
         let operation = "read owned Xiaomi homes";
-        let value = self.protected_post(operation, "/app/v2/homeroom/gethome", access_token, json!({
+        let result: HomesResponse = self.protected_post(operation, "/app/v2/homeroom/gethome", access_token, json!({
             "limit":150, "fetch_share":false, "fetch_share_dev":false, "plat_form":0, "app_ver":9
         })).await?;
-        let result = result_object(&value, operation)?;
-        let records = required_list(result, "homelist", operation)?;
         let mut catalog = OwnedHomes {
             uid: None,
             homes: Vec::new(),
         };
-        for record in records {
-            let home = object(record, operation)?;
-            let uid = identifier(home.get("uid"), operation)?;
-            let home_id = identifier(home.get("id"), operation)?;
+        let mut home_indices = HashMap::new();
+        let mut seen_members = HashSet::new();
+        for record in result.homelist {
+            let uid = record.uid.into_string();
+            let home_id = record.id.into_string();
             if catalog.uid.as_ref().is_some_and(|known| *known != uid)
-                || catalog.homes.iter().any(|known| known.home_id == home_id)
+                || home_indices
+                    .insert(home_id.clone(), catalog.homes.len())
+                    .is_some()
             {
                 return Err(CloudError::protocol(operation));
             }
             catalog.uid = Some(uid.clone());
-            let mut dids = Vec::new();
-            merge_dids(home, &mut dids, operation)?;
+            let dids = record
+                .members
+                .into_dids()
+                .filter(|did| seen_members.insert((home_id.clone(), did.clone())))
+                .collect();
             catalog.homes.push(OwnedHome {
                 group_id: group_id(&uid, &home_id),
                 uid,
@@ -70,24 +156,16 @@ impl CloudClient {
                 dids,
             });
         }
-        let mut cursors = HashSet::new();
-        let mut seen_homes: HashSet<String> = catalog
-            .homes
-            .iter()
-            .map(|home| home.home_id.clone())
-            .collect();
-        let mut seen_members: HashSet<(String, String)> = catalog
-            .homes
-            .iter()
-            .flat_map(|home| {
-                home.dids
-                    .iter()
-                    .map(|did| (home.home_id.clone(), did.clone()))
-            })
-            .collect();
-        let mut cursor = next_cursor(result, "max_id", records.len(), &mut cursors, operation)?;
+        let mut seen_homes: HashSet<String> = home_indices.keys().cloned().collect();
+        let mut pages = Pagination::default();
+        let mut cursor = pages.advance(
+            result.has_more,
+            result.max_id,
+            catalog.homes.len(),
+            operation,
+        )?;
         while let Some(start_id) = cursor {
-            let value = self
+            let result: MembersResponse = self
                 .protected_post(
                     operation,
                     "/app/v2/homeroom/get_dev_room_page",
@@ -95,27 +173,20 @@ impl CloudClient {
                     json!({"start_id":start_id,"limit":150}),
                 )
                 .await?;
-            let result = result_object(&value, operation)?;
-            let records = required_list(result, "info", operation)?;
             let mut progress = 0;
-            for record in records {
-                let record = object(record, operation)?;
-                let id = identifier(record.get("id"), operation)?;
+            for record in result.info {
+                let id = record.id.into_string();
                 progress += usize::from(seen_homes.insert(id.clone()));
-                let mut dids = Vec::new();
-                merge_dids(record, &mut dids, operation)?;
-                for did in &dids {
-                    progress += usize::from(seen_members.insert((id.clone(), did.clone())));
-                }
-                if let Some(home) = catalog.homes.iter_mut().find(|home| home.home_id == id) {
-                    for did in dids {
-                        if !home.dids.contains(&did) {
-                            home.dids.push(did);
+                for did in record.members.into_dids() {
+                    if seen_members.insert((id.clone(), did.clone())) {
+                        progress += 1;
+                        if let Some(index) = home_indices.get(&id) {
+                            catalog.homes[*index].dids.push(did);
                         }
                     }
                 }
             }
-            cursor = next_cursor(result, "max_id", progress, &mut cursors, operation)?;
+            cursor = pages.advance(result.has_more, result.max_id, progress, operation)?;
         }
         Ok(catalog)
     }
@@ -133,7 +204,7 @@ impl CloudClient {
         }
         let operation = "read Xiaomi device description";
         let mut cursor = None;
-        let mut cursors = HashSet::new();
+        let mut pages = Pagination::default();
         let mut seen_devices = HashSet::new();
         let mut found = None;
         loop {
@@ -142,7 +213,7 @@ impl CloudClient {
             if let Some(start_did) = &cursor {
                 body["start_did"] = json!(start_did);
             }
-            let value = self
+            let result: DevicesResponse = self
                 .protected_post(
                     operation,
                     "/app/v2/home/device_list_page",
@@ -150,22 +221,21 @@ impl CloudClient {
                     body,
                 )
                 .await?;
-            let result = result_object(&value, operation)?;
-            let records = required_list(result, "list", operation)?;
             let mut progress = 0;
-            for record in records {
-                let record = object(record, operation)?;
-                let returned_did = description_string(record, "did", operation)?;
-                progress += usize::from(seen_devices.insert(returned_did.clone()));
-                if returned_did == did {
+            for record in result.list {
+                progress += usize::from(seen_devices.insert(record.did.clone()));
+                if record.did == did {
+                    let details: DeviceDescription =
+                        serde_json::from_value(Value::Object(record.details))
+                            .map_err(|_| CloudError::protocol(operation))?;
                     found = Some(CloudDevice {
-                        did: returned_did,
-                        model: description_string(record, "model", operation)?,
-                        instance_type: description_string(record, "spec_type", operation)?,
+                        did: record.did,
+                        model: details.model,
+                        instance_type: details.spec_type,
                     });
                 }
             }
-            cursor = next_cursor(result, "next_start_did", progress, &mut cursors, operation)?;
+            cursor = pages.advance(result.has_more, result.next_start_did, progress, operation)?;
             if cursor.is_none() {
                 return Ok(found);
             }
@@ -185,107 +255,10 @@ impl CloudClient {
             .uri(url.as_str())
             .body(String::new())
             .map_err(|_| CloudError::protocol(operation))?;
-        let value = self.send(request, operation).await?;
+        let value: Value = self.send(request, operation).await?;
         if value.get("type").and_then(Value::as_str) != Some(instance_type) {
             return Err(CloudError::protocol(operation));
         }
         Ok(value)
     }
-}
-
-fn description_string(
-    value: &Map<String, Value>,
-    key: &str,
-    operation: &'static str,
-) -> Result<String, CloudError> {
-    let value = nonempty_string(value, key, operation)?;
-    if value.chars().any(char::is_control) {
-        return Err(CloudError::protocol(operation));
-    }
-    Ok(value)
-}
-
-fn list<'a>(value: Option<&'a Value>, operation: &'static str) -> Result<&'a [Value], CloudError> {
-    match value {
-        None | Some(Value::Null) => Ok(&[]),
-        Some(Value::Array(values)) => Ok(values),
-        _ => Err(CloudError::protocol(operation)),
-    }
-}
-
-fn required_list<'a>(
-    result: &'a Map<String, Value>,
-    key: &str,
-    operation: &'static str,
-) -> Result<&'a [Value], CloudError> {
-    let value = result
-        .get(key)
-        .ok_or_else(|| CloudError::protocol(operation))?;
-    list(Some(value), operation)
-}
-
-fn object<'a>(
-    value: &'a Value,
-    operation: &'static str,
-) -> Result<&'a Map<String, Value>, CloudError> {
-    value
-        .as_object()
-        .ok_or_else(|| CloudError::protocol(operation))
-}
-
-fn identifier(value: Option<&Value>, operation: &'static str) -> Result<String, CloudError> {
-    match value {
-        Some(Value::String(value)) if !value.is_empty() && !value.chars().any(char::is_control) => {
-            Ok(value.clone())
-        }
-        Some(Value::Number(value)) if value.is_i64() || value.is_u64() => Ok(value.to_string()),
-        _ => Err(CloudError::protocol(operation)),
-    }
-}
-
-fn merge_dids(
-    home: &Map<String, Value>,
-    dids: &mut Vec<String>,
-    operation: &'static str,
-) -> Result<(), CloudError> {
-    let mut seen: HashSet<String> = dids.iter().cloned().collect();
-    let rooms = list(home.get("roomlist"), operation)?;
-    let mut lists = vec![list(home.get("dids"), operation)?];
-    for room in rooms {
-        lists.push(list(object(room, operation)?.get("dids"), operation)?);
-    }
-    for values in lists {
-        for value in values {
-            let did = value
-                .as_str()
-                .filter(|did| !did.is_empty() && !did.chars().any(char::is_control))
-                .ok_or_else(|| CloudError::protocol(operation))?;
-            if seen.insert(did.to_owned()) {
-                dids.push(did.to_owned());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn next_cursor(
-    result: &Map<String, Value>,
-    key: &str,
-    records: usize,
-    seen: &mut HashSet<String>,
-    operation: &'static str,
-) -> Result<Option<String>, CloudError> {
-    let has_more = match result.get("has_more") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(value)) => *value,
-        _ => return Err(CloudError::protocol(operation)),
-    };
-    if !has_more {
-        return Ok(None);
-    }
-    let cursor = nonempty_string(result, key, operation)?;
-    if records == 0 || !seen.insert(cursor.clone()) {
-        return Err(CloudError::protocol(operation));
-    }
-    Ok(Some(cursor))
 }

@@ -1,7 +1,6 @@
 use super::super::{
-    NODE, basic_info,
     bridged_info::{self, BridgedHandler},
-    model::{self, DEVICE_ENDPOINT},
+    model::{self, DEVICE_ENDPOINT, NODE, basic_info},
     storage::StoreAdapter,
 };
 use crate::{

@@ -106,6 +106,3 @@ pub fn default_device_label(model: &str, id: &str) -> String {
     }
     format!("{} ({suffix})", &model[..end])
 }
-
-#[cfg(test)]
-mod tests;
