@@ -65,10 +65,6 @@ impl XiaomiStore {
         self.store.path()
     }
 
-    pub(crate) fn devices(&self) -> super::DeviceStore {
-        self.store.devices()
-    }
-
     pub fn load(&self) -> Result<Option<XiaomiRecord>, StorageError> {
         let invalid_slot = self
             .store

@@ -67,7 +67,7 @@ async fn refresh_cached_topology(
     store: &Store,
     topology_refreshed: &mut bool,
 ) -> Result<bool, SourceError> {
-    let preparation = auth.prepare_bridge(key).await?;
+    let preparation = auth.prepare_bridge().await?;
     update_auth(context, &preparation);
     let retry_allowed = !matches!(
         preparation.report.authentication,

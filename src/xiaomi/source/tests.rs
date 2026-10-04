@@ -274,11 +274,11 @@ impl Rig {
                     &data.uid
                 };
                 let homes = match case {
-                    CloudCase::Missing => json!([{"id":"local","uid":uid,"dids":[]}]),
+                    CloudCase::Missing => json!([{"id":"local","uid":uid,"roomlist":[],"dids":[]}]),
                     CloudCase::Moved | CloudCase::MovedRecoveringDetail => {
-                        json!([{"id":"local","uid":uid,"dids":[]},{"id":"moved","uid":uid,"dids":["target"]}])
+                        json!([{"id":"local","uid":uid,"roomlist":[],"dids":[]},{"id":"moved","uid":uid,"roomlist":[],"dids":["target"]}])
                     }
-                    _ => json!([{"id":"local","uid":uid,"dids":["target"]}]),
+                    _ => json!([{"id":"local","uid":uid,"roomlist":[],"dids":["target"]}]),
                 };
                 json!({"code":0,"result":{"homelist":homes}})
             } else if request.target.ends_with("/device_list_page") {
@@ -453,7 +453,7 @@ where
             return MockResponse::json(503, "{}").delayed(Duration::from_millis(60));
         }
         if request.target.ends_with("/gethome") {
-            MockResponse::json(200,&json!({"code":0,"result":{"homelist":[{"id":"local","uid":uid,"dids":["target"]}]}}).to_string())
+            MockResponse::json(200,&json!({"code":0,"result":{"homelist":[{"id":"local","uid":uid,"roomlist":[],"dids":["target"]}]}}).to_string())
         } else if request.target.starts_with("/miot-spec-v2/instance?") {
             MockResponse::json(200, &instance.to_string())
         } else if request.target.ends_with("/device_list_page") {
@@ -1523,7 +1523,6 @@ fn unchanged_credentials_auth_diagnostic_does_not_interrupt_an_armed_retry() {
             credentials: context.live.borrow().credentials.clone(),
             report: report.clone(),
             homes: Vec::new(),
-            cached_device: Some(rig.metadata.clone()),
         };
         update_auth(&context, &preparation);
         assert_eq!(context.status.borrow().authentication, report);
@@ -1608,7 +1607,6 @@ fn changed_credentials_and_current_route_still_wake_retry_immediately() {
                         credentials: Some(credentials),
                         report,
                         homes: Vec::new(),
-                        cached_device: Some(rig.metadata.clone()),
                     },
                 );
             }

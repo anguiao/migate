@@ -54,11 +54,9 @@ fn bridge_preparation_reads_homes_once_and_skips_the_independent_device_probe() 
             NOW + 10 * 24 * 60 * 60,
         ))
         .unwrap();
-    let homes =
-        json!({"code":0,"result":{"homelist":[{"uid":"uid","id":"local-home","dids":["target"]}]}});
+    let homes = json!({"code":0,"result":{"homelist":[{"uid":"uid","id":"local-home","roomlist":[],"dids":["target"]}]}});
     let (auth, requests) = service(&store, vec![MockResponse::json(200, &homes.to_string())]);
-    let prepared =
-        block_on(auth.prepare_bridge(&crate::device::DeviceKey::new("xiaomi", "target"))).unwrap();
+    let prepared = block_on(auth.prepare_bridge()).unwrap();
     assert!(prepared.report.is_success());
     assert_eq!(
         prepared.credentials.unwrap().tokens.access_token,
@@ -82,14 +80,18 @@ fn bridge_cloud_or_refresh_failure_preserves_same_account_cache_and_valid_certif
             .save(&cached_bridge_device("other-account"))
             .unwrap();
         let (auth, requests) = service(&store, vec![MockResponse::json(status, "cloud failure")]);
-        let prepared = block_on(auth.prepare_bridge(&cached.outlet.description.key)).unwrap();
+        let prepared = block_on(auth.prepare_bridge()).unwrap();
         assert!(!prepared.report.is_success());
         assert!(prepared.report.certificate.unwrap().currently_valid(NOW));
         assert_eq!(prepared.credentials, Some(original));
-        assert_eq!(prepared.cached_device, Some(cached.clone()));
         assert!(prepared.homes.is_empty());
         assert_eq!(
-            auth.load_bridge_cache(&cached.outlet.description.key)
+            store
+                .devices()
+                .load(
+                    &prepared.credentials.as_ref().unwrap().uid,
+                    &cached.outlet.description.key
+                )
                 .unwrap(),
             Some(cached)
         );
@@ -118,28 +120,33 @@ fn bridge_account_mismatch_does_not_expose_another_accounts_directory_or_cache()
         .unwrap();
     let other = cached_bridge_device("new-account");
     store.devices().save(&other).unwrap();
-    let homes = json!({"code":0,"result":{"homelist":[{"uid":"new-account","id":"local-home","dids":["target"]}]}});
+    let homes = json!({"code":0,"result":{"homelist":[{"uid":"new-account","id":"local-home","roomlist":[],"dids":["target"]}]}});
     let (auth, _) = service(&store, vec![MockResponse::json(200, &homes.to_string())]);
-    let prepared = block_on(auth.prepare_bridge(&other.outlet.description.key)).unwrap();
+    let prepared = block_on(auth.prepare_bridge()).unwrap();
     assert!(matches!(
         prepared.report.authentication,
         AuthenticationState::Unavailable(FailureReason::AccountIdentityMismatch)
     ));
     assert!(prepared.homes.is_empty());
-    assert!(prepared.cached_device.is_none());
+    assert!(
+        store
+            .devices()
+            .load("old-account", &other.outlet.description.key)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(prepared.credentials.unwrap().uid, "old-account");
 }
 
 #[test]
-fn bridge_preparation_renews_with_processed_credentials_and_storage_failure_is_fatal() {
+fn bridge_preparation_renews_with_processed_credentials_without_reading_device_cache() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     store
         .xiaomi()
         .replace(&valid_record("uid", "old-access", NOW - 1, NOW + 60))
         .unwrap();
-    let homes =
-        json!({"code":0,"result":{"homelist":[{"uid":"uid","id":"local-home","dids":["target"]}]}});
+    let homes = json!({"code":0,"result":{"homelist":[{"uid":"uid","id":"local-home","roomlist":[],"dids":["target"]}]}});
     let (base, requests) = dynamic_mock_server(3, move |request| {
         if request.target.contains("get_token") {
             MockResponse::json(200, &token_body("new-access", "new-refresh"))
@@ -154,8 +161,7 @@ fn bridge_preparation_renews_with_processed_credentials_and_storage_failure_is_f
         CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
         now,
     );
-    let key = crate::device::DeviceKey::new("xiaomi", "target");
-    let prepared = block_on(auth.prepare_bridge(&key)).unwrap();
+    let prepared = block_on(auth.prepare_bridge()).unwrap();
     assert!(prepared.report.is_success());
     assert_eq!(
         prepared.report.certificate_update,
@@ -174,10 +180,14 @@ fn bridge_preparation_renews_with_processed_credentials_and_storage_failure_is_f
         .execute("UPDATE device_cache SET capabilities = 'broken'", [])
         .unwrap();
     let (auth, _) = service(&store, vec![MockResponse::json(503, "cloud unavailable")]);
-    assert!(matches!(
-        block_on(auth.prepare_bridge(&key)),
-        Err(AuthError::Storage(_))
-    ));
+    let prepared = block_on(auth.prepare_bridge()).unwrap();
+    assert!(prepared.credentials.is_some());
+    assert!(
+        store
+            .devices()
+            .load("uid", &cached.outlet.description.key)
+            .is_err()
+    );
 }
 
 #[test]

@@ -82,9 +82,9 @@ pub(super) struct Members {
 }
 
 #[derive(Deserialize)]
-struct Room {
+pub(super) struct Room {
     #[serde(default, deserialize_with = "null_list")]
-    dids: Vec<String>,
+    pub(super) dids: Vec<String>,
 }
 
 impl Members {

@@ -1,6 +1,6 @@
 use super::{
     CloudClient, CloudError,
-    response::{Identifier, Members, description, null_list},
+    response::{Identifier, Members, Room, description, null_list, valid_description},
 };
 use isahc::Request;
 use serde::Deserialize;
@@ -50,8 +50,9 @@ struct HomesResponse {
 struct HomeRecord {
     uid: Identifier,
     id: Identifier,
-    #[serde(flatten)]
-    members: Members,
+    #[serde(default, deserialize_with = "null_list")]
+    dids: Vec<String>,
+    roomlist: Vec<Room>,
 }
 
 #[derive(Deserialize)]
@@ -136,7 +137,9 @@ impl CloudClient {
         for record in result.homelist {
             let uid = record.uid.into_string();
             let home_id = record.id.into_string();
-            if catalog.uid.as_ref().is_some_and(|known| *known != uid)
+            if !valid_description(&uid)
+                || !valid_description(&home_id)
+                || catalog.uid.as_ref().is_some_and(|known| *known != uid)
                 || home_indices
                     .insert(home_id.clone(), catalog.homes.len())
                     .is_some()
@@ -144,11 +147,19 @@ impl CloudClient {
                 return Err(CloudError::protocol(operation));
             }
             catalog.uid = Some(uid.clone());
-            let dids = record
-                .members
-                .into_dids()
-                .filter(|did| seen_members.insert((home_id.clone(), did.clone())))
-                .collect();
+            let mut dids = Vec::new();
+            for did in record
+                .dids
+                .into_iter()
+                .chain(record.roomlist.into_iter().flat_map(|room| room.dids))
+            {
+                if !valid_description(&did) {
+                    return Err(CloudError::protocol(operation));
+                }
+                if seen_members.insert((home_id.clone(), did.clone())) {
+                    dids.push(did);
+                }
+            }
             catalog.homes.push(OwnedHome {
                 group_id: group_id(&uid, &home_id),
                 uid,
@@ -156,7 +167,6 @@ impl CloudClient {
                 dids,
             });
         }
-        let mut seen_homes: HashSet<String> = home_indices.keys().cloned().collect();
         let mut pages = Pagination::default();
         let mut cursor = pages.advance(
             result.has_more,
@@ -176,13 +186,16 @@ impl CloudClient {
             let mut progress = 0;
             for record in result.info {
                 let id = record.id.into_string();
-                progress += usize::from(seen_homes.insert(id.clone()));
+                let index = home_indices
+                    .get(&id)
+                    .ok_or_else(|| CloudError::protocol(operation))?;
                 for did in record.members.into_dids() {
+                    if !valid_description(&did) {
+                        return Err(CloudError::protocol(operation));
+                    }
                     if seen_members.insert((id.clone(), did.clone())) {
                         progress += 1;
-                        if let Some(index) = home_indices.get(&id) {
-                            catalog.homes[*index].dids.push(did);
-                        }
+                        catalog.homes[*index].dids.push(did);
                     }
                 }
             }

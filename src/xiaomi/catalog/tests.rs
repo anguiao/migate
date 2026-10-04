@@ -1,7 +1,7 @@
-use super::{CatalogError, load_scoped};
+use super::{CatalogError, current_home, load_device, load_scoped, select_local_home};
 use crate::{
     device::DeviceKey,
-    storage::XiaomiRecord,
+    storage::{CachedScope, Store, XiaomiRecord},
     xiaomi::{
         cloud::{CloudClient, OwnedHome},
         discovery::DiscoverySnapshot,
@@ -67,6 +67,219 @@ fn instance() -> Value {
 
 fn detail(instance: &Value) -> MockResponse {
     MockResponse::json(200, &json!({"code":0,"result":{"list":[{"did":"target","model":"vendor.plug","spec_type":instance["type"],"name":"not retained"}]}}).to_string())
+}
+
+#[test]
+fn local_home_selection_is_stable_and_independent_of_device_membership() {
+    let mut discovery = snapshot();
+    let mut gateway = discovery.gateways[0].clone();
+    gateway.group_id = group_id("account", "a-local");
+    discovery.gateways.push(gateway);
+    let homes = [
+        home("remote", &["remote"]),
+        home("local", &["target"]),
+        home("a-local", &[]),
+    ];
+    let selected = select_local_home(&discovery, &homes, "account").unwrap();
+    assert_eq!(selected.home_id, "a-local");
+    assert!(selected.dids.is_empty());
+    let mut reversed = homes.clone();
+    reversed.reverse();
+    assert_eq!(
+        select_local_home(&discovery, &reversed, "account").unwrap(),
+        selected
+    );
+    assert!(matches!(
+        select_local_home(&discovery, &homes, "another-account"),
+        Err(CatalogError::NoLocalHome)
+    ));
+}
+
+fn scope() -> CachedScope {
+    CachedScope {
+        uid: "account".into(),
+        home_id: "local".into(),
+        group_id: group_id("account", "local"),
+    }
+}
+
+#[test]
+fn current_home_requires_the_selected_account_home_and_group() {
+    for homes in [
+        vec![],
+        vec![home("remote", &["target"])],
+        vec![OwnedHome {
+            uid: "other-account".into(),
+            home_id: "local".into(),
+            group_id: group_id("other-account", "local"),
+            dids: vec!["target".into()],
+        }],
+    ] {
+        assert!(matches!(
+            current_home(&homes, &scope()),
+            Err(CatalogError::NoLocalHome)
+        ));
+    }
+    let empty = home("local", &[]);
+    assert_eq!(
+        current_home(&[home("remote", &["target"]), empty.clone()], &scope()).unwrap(),
+        empty
+    );
+    let mut wrong_group = home("local", &["target"]);
+    wrong_group.group_id = group_id("account", "remote");
+    assert!(matches!(
+        current_home(&[wrong_group], &scope()),
+        Err(CatalogError::InvalidScope)
+    ));
+    assert!(matches!(
+        current_home(&[empty.clone(), empty], &scope()),
+        Err(CatalogError::InvalidScope)
+    ));
+}
+
+#[test]
+fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindings() {
+    let single = instance();
+    let multi: Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/miot/cuco-cp7pd.json")).unwrap();
+    let selected = home("local", &["first", "second", "multi"]);
+    let mut responses = Vec::new();
+    for (did, model, instance) in [
+        ("first", "vendor.plug", &single),
+        ("second", "vendor.plug", &single),
+        ("multi", "cuco.plug.cp7pd", &multi),
+    ] {
+        responses.push(MockResponse::json(200, &json!({"code":0,"result":{"list":[{"did":"remote-only"},{"did":did,"model":model,"spec_type":instance["type"]}]}}).to_string()));
+        responses.push(MockResponse::json(200, &instance.to_string()));
+    }
+    let (base, requests) = mock_server(responses);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let selected = select_local_home(
+        &snapshot(),
+        &[home("remote", &["remote-only"]), selected],
+        "account",
+    )
+    .unwrap();
+    assert_eq!(selected.dids, ["first", "second", "multi"]);
+    let records = block_on(async {
+        let mut records = Vec::new();
+        for did in &selected.dids {
+            records.push(
+                load_device(&cloud, &credentials(), &selected, did)
+                    .await
+                    .unwrap(),
+            );
+        }
+        records
+    });
+    assert_eq!(records[0].model, records[1].model);
+    assert_ne!(
+        records[0].device.description.key,
+        records[1].device.description.key
+    );
+    assert_eq!(records[0].device.functions[0].id, "main");
+    assert_eq!(
+        records[2]
+            .device
+            .functions
+            .iter()
+            .map(|function| (
+                function.id.as_str(),
+                function.power.siid,
+                function.power.piid
+            ))
+            .collect::<Vec<_>>(),
+        [("outlet_1", 3, 1), ("outlet_2", 4, 1), ("usb", 9, 1)]
+    );
+    let captured = requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(captured.len(), 6);
+    for (request, did) in captured.iter().step_by(2).zip(&selected.dids) {
+        assert_eq!(
+            serde_json::from_str::<Value>(&request.body).unwrap()["dids"],
+            json!([did])
+        );
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    store.devices().save_scope(&scope()).unwrap();
+    for record in &records {
+        store.devices().publish_cached(record, "name").unwrap();
+    }
+    let mut moved = records[0].clone();
+    moved.home_id = "remote".into();
+    moved.group_id = group_id("account", "remote");
+    store
+        .devices()
+        .publish_cached(&moved, "changed name")
+        .unwrap();
+    assert_eq!(
+        store.devices().load_scope("account").unwrap(),
+        Some(scope())
+    );
+    assert_eq!(
+        store
+            .devices()
+            .list_parsed("account", "local")
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(
+        current_home(&[home("local", &[]), home("remote", &["first"])], &scope())
+            .unwrap()
+            .dids
+            .is_empty()
+    );
+}
+
+#[test]
+fn scoped_load_rejects_foreign_members_and_malformed_scope_without_network_requests() {
+    let (base, requests) = mock_server(vec![MockResponse::json(500, "unused")]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let local = home("local", &["target"]);
+    assert!(matches!(
+        block_on(load_device(&cloud, &credentials(), &local, "remote-only")),
+        Err(CatalogError::TargetMissing)
+    ));
+    let mut foreign = local.clone();
+    foreign.uid = "foreign".into();
+    foreign.group_id = group_id("foreign", "local");
+    assert!(matches!(
+        block_on(load_device(&cloud, &credentials(), &foreign, "target")),
+        Err(CatalogError::InvalidScope)
+    ));
+    let mut malformed = local;
+    malformed.dids.push("bad\n".into());
+    assert!(matches!(
+        select_local_home(&snapshot(), &[malformed.clone()], "account"),
+        Err(CatalogError::InvalidScope)
+    ));
+    assert!(matches!(
+        block_on(load_device(&cloud, &credentials(), &malformed, "target")),
+        Err(CatalogError::InvalidScope)
+    ));
+    assert_eq!(requests.try_iter().count(), 0);
+}
+
+#[test]
+fn fixed_home_load_reports_incompatible_capability() {
+    let mut unsupported = instance();
+    unsupported["services"][1]["properties"][0]["access"] = json!(["read", "notify"]);
+    let (base, requests) = mock_server(vec![
+        detail(&unsupported),
+        MockResponse::json(200, &unsupported.to_string()),
+    ]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert!(matches!(
+        block_on(load_device(
+            &cloud,
+            &credentials(),
+            &home("local", &["target"]),
+            "target"
+        )),
+        Err(CatalogError::Capability(_))
+    ));
+    assert_eq!(requests.try_iter().count(), 2);
 }
 
 #[test]

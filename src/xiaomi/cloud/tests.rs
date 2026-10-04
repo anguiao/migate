@@ -7,12 +7,163 @@ use std::time::Duration;
 use url::Url;
 
 #[test]
+fn owned_catalog_rejects_incomplete_initial_room_membership() {
+    for home in [
+        json!({"uid":"account","id":"home"}),
+        json!({"uid":"account","id":"home","roomlist":null}),
+        json!({"uid":"account","id":"home","roomlist":{}}),
+    ] {
+        let (base, _) = mock_server(vec![MockResponse::json(
+            200,
+            &json!({"code":0,"result":{"homelist":[home]}}).to_string(),
+        )]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(cloud.get_owned_homes("token"))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+    }
+}
+
+#[test]
+fn owned_catalog_rejects_undeclared_home_on_any_member_page() {
+    for page in [
+        json!({"info":[{"id":"foreign","dids":["foreign-did"]}]}),
+        json!({"info":[{"id":"home","dids":["local-did"]},{"id":"foreign"}]}),
+    ] {
+        let (base, requests) = mock_server(vec![
+            MockResponse::json(200, &json!({"code":0,"result":{"homelist":[{"uid":"account","id":"home","roomlist":[]}],"has_more":true,"max_id":"next"}}).to_string()),
+            MockResponse::json(200, &json!({"code":0,"result":page}).to_string()),
+        ]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(cloud.get_owned_homes("token"))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+        assert_eq!(requests.try_iter().count(), 2);
+    }
+}
+
+#[test]
+fn owned_catalog_validates_identifiers_in_initial_and_paged_membership() {
+    for (initial, page) in [
+        (json!({"uid":"","id":"home","roomlist":[]}), None),
+        (json!({"uid":"account\n","id":"home","roomlist":[]}), None),
+        (json!({"uid":"account","id":"","roomlist":[]}), None),
+        (json!({"uid":"account","id":"home\n","roomlist":[]}), None),
+        (
+            json!({"uid":"account","id":"home","dids":[""],"roomlist":[]}),
+            None,
+        ),
+        (
+            json!({"uid":"account","id":"home","roomlist":[{"dids":["bad\n"]}]}),
+            None,
+        ),
+        (
+            json!({"uid":"account","id":"home","roomlist":[]}),
+            Some(json!({"id":""})),
+        ),
+        (
+            json!({"uid":"account","id":"home","roomlist":[]}),
+            Some(json!({"id":"home","dids":[""]})),
+        ),
+        (
+            json!({"uid":"account","id":"home","roomlist":[]}),
+            Some(json!({"id":"home","roomlist":[{"dids":["bad\n"]}]})),
+        ),
+    ] {
+        let mut result = json!({"homelist":[initial]});
+        let mut responses = Vec::new();
+        if page.is_some() {
+            result["has_more"] = json!(true);
+            result["max_id"] = json!("next");
+        }
+        responses.push(MockResponse::json(
+            200,
+            &json!({"code":0,"result":result}).to_string(),
+        ));
+        if let Some(page) = page {
+            responses.push(MockResponse::json(
+                200,
+                &json!({"code":0,"result":{"info":[page]}}).to_string(),
+            ));
+        }
+        let (base, _) = mock_server(responses);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(cloud.get_owned_homes("token"))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+    }
+}
+
+#[test]
+fn owned_catalog_accepts_legal_empty_membership_and_terminal_page() {
+    for initial in [
+        json!({"uid":123,"id":456,"roomlist":[]}),
+        json!({"uid":"account","id":"home","dids":null,"roomlist":[{}, {"dids":null}]}),
+    ] {
+        let (base, _) = mock_server(vec![MockResponse::json(
+            200,
+            &json!({"code":0,"result":{"homelist":[initial]}}).to_string(),
+        )]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert!(
+            future::block_on(cloud.get_owned_homes("token"))
+                .unwrap()
+                .homes[0]
+                .dids
+                .is_empty()
+        );
+    }
+    for terminal in [
+        json!({"info":[]}),
+        json!({"info":[{"id":"home","dids":null}]}),
+    ] {
+        let (base, _) = mock_server(vec![
+            MockResponse::json(200, &json!({"code":0,"result":{"homelist":[{"uid":"account","id":"home","roomlist":[]}],"has_more":true,"max_id":"next"}}).to_string()),
+            MockResponse::json(200, &json!({"code":0,"result":terminal}).to_string()),
+        ]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert!(
+            future::block_on(cloud.get_owned_homes("token"))
+                .unwrap()
+                .homes[0]
+                .dids
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn owned_catalog_rejects_failed_or_truncated_member_page_without_partial_result() {
+    for page in [
+        MockResponse::json(503, "{}"),
+        MockResponse::json(200, r#"{"code":0,"result":{"info":["#),
+    ] {
+        let (base, requests) = mock_server(vec![
+            MockResponse::json(200, &json!({"code":0,"result":{"homelist":[{"uid":"account","id":"home","roomlist":[],"dids":["first"]}],"has_more":true,"max_id":"next"}}).to_string()),
+            page,
+        ]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert!(future::block_on(cloud.get_owned_homes("token")).is_err());
+        assert_eq!(requests.try_iter().count(), 2);
+    }
+}
+
+#[test]
 fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
     assert_eq!(group_id("account", "local"), "db84f388bb162bf2");
     let responses = [
         json!({"homelist":[
-            {"uid":"account","id":"local","dids":null,"roomlist":null},
-            {"uid":"account","id":"remote","dids":["remote-did"],"name":"private name"}
+            {"uid":"account","id":"local","dids":null,"roomlist":[]},
+            {"uid":"account","id":"remote","dids":["remote-did"],"roomlist":[],"name":"private name"}
         ],"has_more":true,"max_id":"cursor-1"}),
         json!({"info":[{"id":"local","dids":["first"],"roomlist":[{"dids":["target"]}]},{"id":"remote","dids":["remote-extra"]}],"has_more":true,"max_id":"cursor-2"}),
         json!({"info":[{"id":"local","dids":null,"roomlist":null}],"has_more":false}),
@@ -76,10 +227,10 @@ fn catalog_rejects_invalid_or_stalled_pagination_and_accepts_null_lists() {
     for result in [
         json!({}),
         json!({"homelist":{}}),
-        json!({"homelist":[{"uid":"account","id":"home","dids":7}]}),
-        json!({"homelist":[{"uid":"account","id":"home"}],"has_more":true}),
+        json!({"homelist":[{"uid":"account","id":"home","roomlist":[],"dids":7}]}),
+        json!({"homelist":[{"uid":"account","id":"home","roomlist":[]}],"has_more":true}),
         json!({"homelist":[],"has_more":true,"max_id":"next"}),
-        json!({"homelist":[{"uid":"account","id":"home"}],"has_more":"yes"}),
+        json!({"homelist":[{"uid":"account","id":"home","roomlist":[]}],"has_more":"yes"}),
     ] {
         let (base, _) = mock_server(vec![MockResponse::json(
             200,
@@ -93,7 +244,7 @@ fn catalog_rejects_invalid_or_stalled_pagination_and_accepts_null_lists() {
             &CloudErrorKind::Protocol
         );
     }
-    let initial = json!({"code":0,"result":{"homelist":[{"uid":"account","id":"home"}],"has_more":true,"max_id":"same"}});
+    let initial = json!({"code":0,"result":{"homelist":[{"uid":"account","id":"home","roomlist":[]}],"has_more":true,"max_id":"same"}});
     let repeated = json!({"code":0,"result":{"info":[{"id":"home","dids":["new"]}],"has_more":true,"max_id":"same"}});
     let (base, requests) = mock_server(vec![
         MockResponse::json(200, &initial.to_string()),

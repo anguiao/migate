@@ -58,7 +58,11 @@ impl XiaomiSource {
         }
         let auth = AuthService::new(store.xiaomi(), cloud.clone());
         let credentials = auth.saved_bridge_credentials()?;
-        let cached = auth.load_bridge_cache(&key)?;
+        let cached = credentials
+            .as_ref()
+            .map(|record| store.devices().load(&record.uid, &key))
+            .transpose()?
+            .flatten();
         let report = auth.local_status()?;
         let ready = Rc::new(Ready::default());
         let (device, receiver) = if let Some(metadata) = &cached {
@@ -117,7 +121,7 @@ impl XiaomiSource {
         ))
     }
     pub(super) async fn prepare_uncached(&mut self) -> Result<(), SourceError> {
-        let preparation = self.auth.prepare_bridge(&self.key).await?;
+        let preparation = self.auth.prepare_bridge().await?;
         update_auth(&self.context, &preparation);
         let credentials = preparation
             .credentials
