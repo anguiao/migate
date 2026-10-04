@@ -1,38 +1,79 @@
-use super::{CapabilityError, ParsedOutlet, PropertyBinding};
-use crate::device::{Capability, Category, DeviceDescription, DeviceKey};
 use serde_json::Value;
 
-/// Parse the standard outlet switch, excluding indicator and vendor services.
-/// Instance IDs, vendor suffixes, descriptions, and order carry no semantics.
-pub fn parse_outlet(key: DeviceKey, instance: &Value) -> Result<ParsedOutlet, CapabilityError> {
-    let device_type = string(instance, "type")?;
-    if !is_outlet_type(device_type) {
+use super::{
+    CapabilityError, ParsedDevice, ParsedFunction, ParsedOutlet, PropertyBinding,
+    description::{Description, Property, Urn, array, string},
+};
+use crate::device::{Capability, Category, DeviceDescription, DeviceKey};
+
+/// Parse stable outlet functions without treating vendor extensions as standard switches.
+pub fn parse_device(key: DeviceKey, instance: &Value) -> Result<ParsedDevice, CapabilityError> {
+    let instance = Description::parse(instance)?;
+    if !instance.urn.standard("device", "outlet", 0x0000A002) {
         return Err(CapabilityError::UnsupportedDevice);
     }
-    let mut candidates = Vec::new();
-    for service in array(instance, "services")? {
-        let service_type = string(service, "type")?;
-        if !is_standard_type(service_type, "service", "switch", "0000780C") {
-            continue;
-        }
-        let siid = instance_id(service)?;
-        for property in array(service, "properties")? {
-            let property_type = string(property, "type")?;
-            if is_standard_type(property_type, "property", "on", "00000006") {
-                candidates.push((siid, property));
-            }
-        }
+    let description = DeviceDescription {
+        key,
+        category: Category::Outlet,
+        capabilities: vec![Capability::OnOff],
+    };
+    if instance.urn.vendor == "cuco-cp7pd" {
+        parse_cp7pd(description, &instance)
+    } else {
+        Ok(ParsedDevice {
+            description,
+            functions: vec![ParsedFunction {
+                id: "main".into(),
+                label: "主电源".into(),
+                power: standard_main_power(&instance)?,
+            }],
+            refresh_trigger: None,
+        })
     }
+}
+
+/// Retain the single-outlet API without exposing a multi-outlet total switch.
+pub fn parse_outlet(key: DeviceKey, instance: &Value) -> Result<ParsedOutlet, CapabilityError> {
+    let device = parse_device(key, instance)?;
+    let [function] = device.functions.as_slice() else {
+        return Err(CapabilityError::UnsupportedDevice);
+    };
+    Ok(ParsedOutlet {
+        description: device.description,
+        main_power: function.power,
+    })
+}
+
+pub(crate) fn is_outlet_type(value: &str) -> bool {
+    Urn::parse(value).is_ok_and(|urn| urn.standard("device", "outlet", 0x0000A002))
+}
+
+fn standard_main_power(instance: &Description<'_>) -> Result<PropertyBinding, CapabilityError> {
+    let candidates = instance
+        .services
+        .iter()
+        .filter(|service| service.urn.standard("service", "switch", 0x0000780C))
+        .flat_map(|service| {
+            service
+                .properties
+                .iter()
+                .filter(|property| property.urn.standard("property", "on", 0x00000006))
+                .map(|property| (service.iid, property))
+        })
+        .collect::<Vec<_>>();
     let (siid, property) = match candidates.as_slice() {
         [] => return Err(CapabilityError::MissingMainPower),
         [candidate] => *candidate,
         _ => return Err(CapabilityError::AmbiguousMainPower),
     };
-    let piid = instance_id(property)?;
-    if string(property, "format")? != "bool" {
+    power_binding(siid, property)
+}
+
+fn power_binding(siid: u32, property: &Property<'_>) -> Result<PropertyBinding, CapabilityError> {
+    if string(property.value, "format")? != "bool" {
         return Err(CapabilityError::InvalidMainPowerType);
     }
-    let access = array(property, "access")?
+    let access = array(property.value, "access")?
         .iter()
         .map(|value| {
             value
@@ -45,47 +86,69 @@ pub fn parse_outlet(key: DeviceKey, instance: &Value) -> Result<ParsedOutlet, Ca
             return Err(CapabilityError::MissingAccess(permission));
         }
     }
-    Ok(ParsedOutlet {
-        description: DeviceDescription {
-            key,
-            category: Category::Outlet,
-            capabilities: vec![Capability::OnOff],
-        },
-        main_power: PropertyBinding { siid, piid },
+    Ok(PropertyBinding {
+        siid,
+        piid: property.iid,
     })
 }
 
-pub(crate) fn is_outlet_type(value: &str) -> bool {
-    is_standard_type(value, "device", "outlet", "0000A002")
+fn parse_cp7pd(
+    description: DeviceDescription,
+    instance: &Description<'_>,
+) -> Result<ParsedDevice, CapabilityError> {
+    if instance.urn.version != 1 || instance.urn.suffix.is_some() {
+        return Err(CapabilityError::IncompatibleModel("cuco.plug.cp7pd"));
+    }
+    let refresh_trigger = cp7pd_binding(instance, "master", 2, "miot-spec-v2", 0x0000780C)?;
+    let mut functions = Vec::new();
+    for (id, label, siid, namespace, type_id) in [
+        ("outlet_1", "开关 1", 3, "cuco-spec", 0x00007801),
+        ("outlet_2", "开关 2", 4, "cuco-spec", 0x00007802),
+        ("usb", "USB", 9, "miot-spec-v2", 0x0000780C),
+    ] {
+        functions.push(ParsedFunction {
+            id: id.into(),
+            label: label.into(),
+            power: cp7pd_binding(instance, id, siid, namespace, type_id)?,
+        });
+    }
+    Ok(ParsedDevice {
+        description,
+        functions,
+        refresh_trigger: Some(refresh_trigger),
+    })
 }
 
-fn is_standard_type(value: &str, entity: &str, name: &str, type_id: &str) -> bool {
-    let parts = value.split(':').collect::<Vec<_>>();
-    matches!(parts.as_slice(), ["urn", "miot-spec-v2", actual_entity, actual_name, actual_id, vendor, version]
-        if *actual_entity == entity && *actual_name == name && *actual_id == type_id
-            && !vendor.is_empty() && version.parse::<u32>().is_ok_and(|value| value > 0))
+fn cp7pd_binding(
+    instance: &Description<'_>,
+    id: &'static str,
+    siid: u32,
+    namespace: &str,
+    type_id: u32,
+) -> Result<PropertyBinding, CapabilityError> {
+    let service = instance
+        .services
+        .iter()
+        .find(|service| service.iid == siid)
+        .ok_or(CapabilityError::MissingFunction(id))?;
+    if !cp7pd_urn(&service.urn, namespace, "service", "switch", type_id) {
+        return Err(CapabilityError::IncompatibleModel("cuco.plug.cp7pd"));
+    }
+    let property = service
+        .properties
+        .iter()
+        .find(|property| property.iid == 1)
+        .ok_or(CapabilityError::MissingFunction(id))?;
+    let property_id = if namespace == "cuco-spec" { 1 } else { 6 };
+    if !cp7pd_urn(&property.urn, namespace, "property", "on", property_id) {
+        return Err(CapabilityError::IncompatibleModel("cuco.plug.cp7pd"));
+    }
+    power_binding(siid, property)
 }
 
-fn string<'a>(value: &'a Value, field: &'static str) -> Result<&'a str, CapabilityError> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or(CapabilityError::InvalidDescription(field))
-}
-
-fn array<'a>(value: &'a Value, field: &'static str) -> Result<&'a [Value], CapabilityError> {
-    value
-        .get(field)
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .ok_or(CapabilityError::InvalidDescription(field))
-}
-
-fn instance_id(value: &Value) -> Result<u32, CapabilityError> {
-    value
-        .get("iid")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or(CapabilityError::InvalidDescription("iid"))
+fn cp7pd_urn(urn: &Urn<'_>, namespace: &str, entity: &str, name: &str, type_id: u32) -> bool {
+    urn.matches(namespace, entity, name, type_id)
+        && urn.vendor == "cuco-cp7pd"
+        && urn.version == 1
+        && urn.suffix.is_none()
 }
