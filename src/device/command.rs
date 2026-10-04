@@ -17,7 +17,7 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) struct Queue {
     pending: VecDeque<PendingCommand>,
     active: Option<Arc<Completion>>,
-    closed: bool,
+    pub(super) closed: bool,
 }
 
 impl Queue {
@@ -44,7 +44,7 @@ impl Device {
         let completion = Arc::new(Completion::default());
         {
             let mut state = self.0.state.lock().unwrap();
-            state.snapshot.availability.command_result()?;
+            self.snapshot_locked(&state).availability.command_result()?;
             if state.queue.closed {
                 return Err(CommandError::Cancelled);
             }
@@ -137,7 +137,7 @@ impl CommandReceiver {
                         pending.completion.finish(Err(CommandError::Timeout));
                         continue;
                     }
-                    let snapshot = &state.snapshot;
+                    let snapshot = self.device.snapshot_locked(&state);
                     let target =
                         snapshot.availability.command_result().and_then(|()| {
                             match pending.command {
@@ -164,6 +164,8 @@ impl CommandReceiver {
                         deadline: pending.deadline,
                         completion: pending.completion,
                     })
+                } else if state.queue.closed {
+                    return None;
                 } else {
                     None
                 }
@@ -210,12 +212,11 @@ impl CommandRequest {
         let accepted = if self.remaining().is_zero() {
             Err(CommandError::Timeout)
         } else {
-            state.snapshot.availability.command_result().map(|()| {
-                self.device
-                    .update_snapshot(&mut state.snapshot, |snapshot| {
-                        snapshot.power = self.target.into()
-                    })
-            })
+            self.device
+                .snapshot_locked(&state)
+                .availability
+                .command_result()
+                .map(|()| self.device.update_power(&mut state, self.target))
         };
         *result = Some(accepted.clone());
         self.completion.changed.notify(usize::MAX);

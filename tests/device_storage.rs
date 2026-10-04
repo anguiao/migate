@@ -217,7 +217,7 @@ fn version_one_storage_upgrades_without_changing_pairing_or_bridge_identity() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
 }
 

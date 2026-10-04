@@ -112,3 +112,33 @@ impl fmt::Display for CommandError {
 }
 
 impl Error for CommandError {}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct FunctionKey {
+    pub device: DeviceKey,
+    pub id: String,
+}
+
+impl FunctionKey {
+    pub fn new(device: DeviceKey, id: impl Into<String>) -> Self {
+        Self {
+            device,
+            id: id.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionDescription {
+    pub id: String,
+    pub label: String,
+    pub category: Category,
+    pub capabilities: Vec<Capability>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhysicalDeviceDescription {
+    pub key: DeviceKey,
+    pub label: String,
+    pub functions: Vec<FunctionDescription>,
+}

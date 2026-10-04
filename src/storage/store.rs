@@ -1,11 +1,11 @@
 use super::directory::{prepare_directory, private_permissions};
 use super::{
     StorageError,
-    device::{self, DeviceIdentity, DeviceStore},
+    device::{DeviceIdentity, DeviceStore},
     identity::{self, Identity},
     lock,
     matter::MatterStore,
-    migration,
+    migration, registry,
     xiaomi::XiaomiStore,
 };
 use rusqlite::Connection;
@@ -84,7 +84,7 @@ impl Store {
         &self,
         key: &crate::device::DeviceKey,
     ) -> Result<DeviceIdentity, StorageError> {
-        device::load_or_create_identity(self, key)
+        registry::load_or_create_identity(self, key)
     }
 
     pub(super) fn connection(&self) -> &Connection {

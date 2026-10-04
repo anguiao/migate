@@ -31,7 +31,7 @@ fn initializes_and_restores_identity_without_power() {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
@@ -299,7 +299,7 @@ fn migrates_unversioned_storage_without_changing_existing_data() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
 }
 
@@ -307,7 +307,7 @@ fn migrates_unversioned_storage_without_changing_existing_data() {
 fn rejects_unsupported_or_damaged_schemas_without_changing_data() {
     for (setup, expected) in [
         (
-            "PRAGMA user_version = 4; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
+            "PRAGMA user_version = 5; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
             "future",
         ),
         (
