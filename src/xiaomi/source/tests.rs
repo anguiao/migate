@@ -445,6 +445,7 @@ type Binding = (String, u32, u32);
 struct PeerState {
     client_id: String,
     seen: Vec<(String, Value)>,
+    names: BTreeMap<String, String>,
     online: BTreeMap<String, bool>,
     bad: BTreeSet<String>,
     omit: BTreeSet<String>,
@@ -631,7 +632,7 @@ async fn peer_run(mut broker: Broker, peer: Rc<Peer>, data: Vec<CachedPhysicalDe
                                 if state.omit.contains(did) {
                                     continue;
                                 }
-                                let mut info = json!({"name":format!("name {did}"),"model":record.model,"urn":record.instance_type,"online":state.online.get(did).copied().unwrap_or(true),"specV2Access":true,"pushAvailable":true});
+                                let mut info = json!({"name":state.names.get(did).cloned().unwrap_or_else(||format!("name {did}")),"model":record.model,"urn":record.instance_type,"online":state.online.get(did).copied().unwrap_or(true),"specV2Access":true,"pushAvailable":true});
                                 if state.bad.contains(did) {
                                     info.as_object_mut().unwrap().remove("pushAvailable");
                                 }
@@ -1613,9 +1614,20 @@ fn pending_cloud_descriptions_retry_on_a_later_event_without_blocking_cached_con
 }
 #[test]
 fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_command_binding() {
-    block_on(Rig::new(true, &["one"]).run(|c| async move {
+    let rig = Rig::new(true, &["one"]);
+    rig.store
+        .devices()
+        .set_device_label(&DeviceKey::new("xiaomi", "one"), "Controller saved name")
+        .unwrap();
+    block_on(rig.run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());
+        let miot_name = "米家后来修改的厨房插座名称超过三十二字节";
+        assert!(miot_name.len() > 32);
+        peer.state
+            .borrow_mut()
+            .names
+            .insert("one".into(), miot_name.into());
         peer.state
             .borrow_mut()
             .read_timeout
@@ -1639,6 +1651,7 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                 .load_published(&key)
                 .unwrap()
                 .unwrap();
+            assert_eq!(before.label, "Controller saved name");
             let mut changed = control.context.live.borrow().records["one"].cached.clone();
             changed.device.functions[0].power.siid = 7;
             control
