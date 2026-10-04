@@ -1,7 +1,7 @@
 use super::super::{CentralError, wire};
 use super::{
     CentralEvent, LIMIT,
-    driver::{PublicationStage, SessionDriver, Subscription},
+    driver::{PublicationStage, SessionDriver, Subscription, SubscriptionKind},
     request::{
         RequestKind, Response, parse_response, property_topic, valid_identifier, validate_identity,
     },
@@ -24,6 +24,7 @@ impl SessionDriver {
                 request: None,
                 deadline,
                 count: 2,
+                kind: SubscriptionKind::Baseline,
             },
         );
         self.enqueue(Packet::Subscribe(subscribe), deadline, None, None)?;
@@ -42,6 +43,9 @@ impl SessionDriver {
                 let Some(subscription) = self.subscriptions.remove(&ack.pkid) else {
                     return Ok(());
                 };
+                if subscription.kind == SubscriptionKind::Unsubscribe {
+                    return Err(CentralError::Protocol);
+                }
                 let error = if ack.return_codes.len() != subscription.count {
                     Some(CentralError::Protocol)
                 } else {
@@ -64,10 +68,40 @@ impl SessionDriver {
                         }
                         self.finish(request, Ok(Response::Unit));
                     }
-                } else if let Some(error) = error {
-                    return Err(error);
-                } else {
+                } else if subscription.kind == SubscriptionKind::Baseline {
+                    if let Some(error) = error {
+                        return Err(error);
+                    }
                     self.ready = true;
+                }
+            }
+            Packet::UnsubAck(ack) => {
+                if ack.pkid == 0 {
+                    return Err(CentralError::Protocol);
+                }
+                let Some(subscription) = self.subscriptions.remove(&ack.pkid) else {
+                    return Ok(());
+                };
+                if subscription.kind != SubscriptionKind::Unsubscribe {
+                    return Err(CentralError::Protocol);
+                }
+                let error = if ack.reasons.len() != subscription.count {
+                    Some(CentralError::Protocol)
+                } else {
+                    ack.reasons
+                        .iter()
+                        .find(|reason| **reason as u8 >= 128)
+                        .map(|reason| CentralError::Rejected(*reason as i64))
+                };
+                if let Some(request) = subscription.request {
+                    let result = if let Some(error) = error {
+                        Err(error)
+                    } else if Instant::now() >= request.deadline {
+                        Err(CentralError::Timeout)
+                    } else {
+                        Ok(Response::Unit)
+                    };
+                    self.finish(request, result);
                 }
             }
             Packet::PubRec(ack) => {

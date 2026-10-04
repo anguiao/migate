@@ -19,7 +19,7 @@ use event_listener::Event;
 use futures_lite::future;
 use futures_lite::future::{block_on, poll_once};
 use serde_json::Value;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc};
 
 impl XiaomiSource {
@@ -1172,78 +1172,50 @@ fn preparation_superseded_by_offline_reply_cannot_restore_available_from_old_rea
     });
 }
 #[test]
-fn queued_command_budget_is_remaining_time_and_expired_unsent_commands_never_publish() {
+fn queued_commands_are_accepted_after_more_than_five_seconds_in_the_fifo() {
     block_on(async {
-        for expired in [false, true] {
-            let clock = Arc::new(TestClock::default());
-            let rig = Rig::new(true, CloudCase::Failure, clock.clone());
-            rig.announce();
-            rig.run(|mut c| async move {
-                let prepared = c.ready.take().unwrap().wait().await.unwrap();
-                let sending_clock = clock.clone();
-                future::zip(
-                    async {
-                        let mut broker = c.accept().await;
-                        initialize(&mut broker, &c.metadata, false).await;
-                        let Packet::Publish(first) = broker.next().await else {
-                            panic!()
-                        };
-                        broker.acknowledge(&first).await;
-                        // Give both callers a poll to enter the FIFO at time zero.
-                        async_io::Timer::after(Duration::from_millis(10)).await;
-                        sending_clock.advance(Duration::from_secs(if expired { 6 } else { 4 }));
-                        broker
-                            .reply(&first, json!({"result":[{"did":"target","code":0}]}), 110)
-                            .await;
-                        if expired {
-                            assert!(
-                                future::or(
-                                    async {
-                                        broker.next_optional().await;
-                                        false
-                                    },
-                                    async {
-                                        async_io::Timer::after(Duration::from_millis(60)).await;
-                                        true
-                                    }
-                                )
-                                .await,
-                                "expired command was sent"
-                            );
-                        } else {
-                            let Packet::Publish(second) = broker.next().await else {
-                                panic!()
-                            };
-                            assert_eq!(second.topic, "master/proxy/rpcReq");
-                            broker.acknowledge(&second).await;
-                            // The queue consumed four seconds of the five-second budget.
-                            async_io::Timer::after(Duration::from_millis(1150)).await;
-                        }
-                    },
-                    async {
-                        available(&prepared.device).await;
-                        let started = Instant::now();
-                        let (first, second) = future::zip(
-                            prepared.device.execute(Command::On),
-                            prepared.device.execute(Command::Off),
-                        )
+        let clock = Arc::new(TestClock::default());
+        let rig = Rig::new(true, CloudCase::Failure, clock.clone());
+        rig.announce();
+        rig.run(|mut c| async move {
+            let prepared = c.ready.take().unwrap().wait().await.unwrap();
+            future::zip(
+                async {
+                    let mut broker = c.accept().await;
+                    initialize(&mut broker, &c.metadata, false).await;
+                    let Packet::Publish(first) = broker.next().await else {
+                        panic!()
+                    };
+                    broker.acknowledge(&first).await;
+                    async_io::Timer::after(Duration::from_millis(10)).await;
+                    clock.advance(Duration::from_secs(6));
+                    broker
+                        .reply(&first, json!({"result":[{"did":"target","code":0}]}), 110)
                         .await;
-                        if expired {
-                            assert_eq!(first, Err(CommandError::Timeout));
-                            assert_eq!(second, Err(CommandError::Timeout));
-                            assert_eq!(prepared.device.snapshot().power, Power::Off);
-                        } else {
-                            first.unwrap();
-                            assert_eq!(second, Err(CommandError::Timeout));
-                            assert!(started.elapsed() < Duration::from_secs(2));
-                            assert_eq!(prepared.device.snapshot().power, Power::On);
-                        }
-                    },
-                )
-                .await;
-            })
+                    let Packet::Publish(second) = broker.next().await else {
+                        panic!()
+                    };
+                    assert_eq!(second.topic, "master/proxy/rpcReq");
+                    broker.acknowledge(&second).await;
+                    broker
+                        .reply(&second, json!({"result":[{"did":"target","code":0}]}), 111)
+                        .await;
+                },
+                async {
+                    available(&prepared.device).await;
+                    let (first, second) = future::zip(
+                        prepared.device.execute(Command::On),
+                        prepared.device.execute(Command::Off),
+                    )
+                    .await;
+                    first.unwrap();
+                    second.unwrap();
+                    assert_eq!(prepared.device.snapshot().power, Power::Off);
+                },
+            )
             .await;
-        }
+        })
+        .await;
     });
 }
 

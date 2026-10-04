@@ -199,6 +199,8 @@ pub(super) fn encode_packet(packet: &Packet) -> Result<Vec<u8>, CentralError> {
         Packet::PubComp(packet) => packet.write(&mut bytes),
         Packet::Subscribe(packet) => packet.write(&mut bytes),
         Packet::SubAck(packet) => packet.write(&mut bytes),
+        Packet::Unsubscribe(packet) => packet.write(&mut bytes),
+        Packet::UnsubAck(packet) => packet.write(&mut bytes),
         Packet::Disconnect(packet) => packet.write(&mut bytes),
         Packet::PingReq => {
             bytes.extend_from_slice(&[0xc0, 0]);
@@ -208,7 +210,6 @@ pub(super) fn encode_packet(packet: &Packet) -> Result<Vec<u8>, CentralError> {
             bytes.extend_from_slice(&[0xd0, 0]);
             Ok(2)
         }
-        _ => return Err(CentralError::Protocol),
     };
     result.map_err(|_| CentralError::Protocol)?;
     Ok(bytes.to_vec())

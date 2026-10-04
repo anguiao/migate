@@ -11,7 +11,7 @@ use futures_lite::{
 };
 use mqttbytes::v5::{Packet, Publish};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     pin::Pin,
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
@@ -41,6 +41,17 @@ pub(super) struct Subscription {
     pub(super) request: Option<Request>,
     pub(super) deadline: Instant,
     pub(super) count: usize,
+    pub(super) kind: SubscriptionKind,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) enum SubscriptionKind {
+    Baseline,
+    Property {
+        did: String,
+        binding: PropertyBinding,
+    },
+    Unsubscribe,
 }
 
 /// One driver owns all TLS I/O and protocol state. Poll it continuously alongside
@@ -59,6 +70,7 @@ pub struct SessionDriver {
     pub(super) subscriptions: HashMap<u16, Subscription>,
     pub(super) incoming: HashMap<u16, Publish>,
     pub(super) property_topics: HashMap<String, (String, PropertyBinding)>,
+    pub(super) retired_topics: HashMap<String, BTreeSet<String>>,
     pub(super) ready: bool,
     pkid: u16,
     last_sent: Instant,
@@ -83,6 +95,7 @@ impl SessionDriver {
             closed: Default::default(),
             outstanding: Default::default(),
             generation: GENERATION.fetch_add(1, Ordering::Relaxed),
+            cancellations: Default::default(),
         });
         let now = Instant::now();
         let mut driver = SessionDriver {
@@ -99,6 +112,7 @@ impl SessionDriver {
             subscriptions: HashMap::new(),
             incoming: HashMap::new(),
             property_topics: HashMap::new(),
+            retired_topics: HashMap::new(),
             ready: false,
             pkid: 0,
             last_sent: now,
@@ -132,6 +146,7 @@ impl SessionDriver {
     }
     async fn drive(&mut self, on_event: &mut impl FnMut(CentralEvent)) -> Result<(), CentralError> {
         loop {
+            self.drain_cancellations();
             if self.shared.closed.get() {
                 return Ok(());
             }
@@ -211,6 +226,25 @@ impl SessionDriver {
         });
         Ok(())
     }
+    /// Remove complete unsent frames; partial frames and sent QoS exchanges remain owned here.
+    pub(super) fn cancel_unsent_outputs(&mut self, requests: &[u32], subscriptions: &[u16]) {
+        let mut removed = Vec::new();
+        self.output.retain(|output| {
+            let cancel = output.offset == 0
+                && (output.request.is_some_and(|mid| requests.contains(&mid))
+                    || output
+                        .pkid
+                        .is_some_and(|pkid| subscriptions.contains(&pkid)));
+            if cancel && let Some(pkid) = output.pkid {
+                removed.push(pkid);
+            }
+            !cancel
+        });
+        for pkid in removed {
+            self.publications.remove(&pkid);
+            self.subscriptions.remove(&pkid);
+        }
+    }
     fn expire(&mut self) -> Result<(), CentralError> {
         let now = Instant::now();
         if self.ping_deadline.is_some_and(|deadline| now >= deadline) {
@@ -260,13 +294,24 @@ impl SessionDriver {
         let expired: Vec<_> = self
             .subscriptions
             .iter()
-            .filter_map(|(id, subscription)| (now >= subscription.deadline).then_some(*id))
+            .filter_map(|(id, subscription)| {
+                (now >= subscription.deadline
+                    && (subscription.request.is_some()
+                        || subscription.kind == SubscriptionKind::Baseline))
+                    .then_some(*id)
+            })
             .collect();
         for id in expired {
-            let subscription = self.subscriptions.remove(&id).unwrap();
-            if let Some(request) = subscription.request {
+            let subscription = self.subscriptions.get_mut(&id).unwrap();
+            if let SubscriptionKind::Property { did, binding } = &subscription.kind {
+                self.retired_topics
+                    .entry(did.clone())
+                    .or_default()
+                    .insert(super::request::property_topic("master", did, *binding));
+            }
+            if let Some(request) = subscription.request.take() {
                 self.finish(request, Err(CentralError::Timeout));
-            } else {
+            } else if subscription.kind == SubscriptionKind::Baseline {
                 return Err(CentralError::Timeout);
             }
         }
@@ -283,6 +328,7 @@ impl SessionDriver {
             .retain(|output| !(now >= output.deadline && output.offset == 0));
         for pkid in expired {
             self.publications.remove(&pkid);
+            self.subscriptions.remove(&pkid);
         }
         let expired = {
             let mut queue = self.shared.queue.borrow_mut();
@@ -330,7 +376,9 @@ impl SessionDriver {
             deadline = deadline.min(request.deadline)
         }
         for subscription in self.subscriptions.values() {
-            deadline = deadline.min(subscription.deadline)
+            if subscription.request.is_some() || subscription.kind == SubscriptionKind::Baseline {
+                deadline = deadline.min(subscription.deadline)
+            }
         }
         for publication in self.publications.values() {
             deadline = deadline.min(publication.deadline)
@@ -395,3 +443,7 @@ impl Drop for SessionDriver {
         self.finish_all(CentralError::Cancelled);
     }
 }
+
+#[cfg(test)]
+#[path = "packet_id_tests.rs"]
+mod tests;

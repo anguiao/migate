@@ -419,11 +419,6 @@ async fn session_work(
             match wake {
                 Wake::Prepare => break,
                 Wake::Command(Some(request)) => {
-                    let remaining = request.remaining();
-                    if remaining.is_zero() {
-                        request.reject(CommandError::Timeout);
-                        continue;
-                    }
                     let metadata = context.metadata();
                     let current = context.clone();
                     let target = request.target;
@@ -431,7 +426,6 @@ async fn session_work(
                         &metadata.outlet.description.key.id,
                         metadata.outlet.main_power,
                         target,
-                        remaining,
                         move |result| {
                             if !current.current(generation, version) {
                                 request.reject(CommandError::Unavailable(

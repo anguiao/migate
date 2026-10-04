@@ -1,15 +1,12 @@
 use std::{
-    future::Future,
-    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use event_listener::Event;
 use futures_lite::future::{block_on, poll_once};
 
 use super::{
-    Availability, Capability, Category, Clock, Command, CommandError, CommandReceiver, Device,
+    Availability, Capability, Category, Command, CommandError, CommandReceiver, Device,
     DeviceDescription, DeviceKey, Power,
 };
 
@@ -168,39 +165,19 @@ fn unsupported_capabilities_fail_without_sending() {
 #[derive(Default)]
 struct TestClock {
     elapsed: Mutex<Duration>,
-    changed: Event,
 }
 
 impl TestClock {
     fn advance(&self, duration: Duration) {
         *self.elapsed.lock().unwrap() += duration;
-        self.changed.notify(usize::MAX);
-    }
-}
-
-impl Clock for Arc<TestClock> {
-    fn now(&self) -> Duration {
-        *self.elapsed.lock().unwrap()
-    }
-
-    fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            loop {
-                let listener = self.changed.listen();
-                if self.now() >= deadline {
-                    return;
-                }
-                listener.await;
-            }
-        })
     }
 }
 
 #[test]
-fn five_second_deadline_includes_queue_wait_and_expired_commands_are_never_sent() {
+fn command_lifetime_has_no_business_deadline_while_queued_or_active() {
     block_on(async {
         let clock = Arc::new(TestClock::default());
-        let (device, mut receiver) = Device::for_test(outlet(), Box::new(clock.clone()));
+        let (device, mut receiver) = Device::new(outlet());
         device.observe(false);
         device.set_availability(Availability::Available);
         let first = device.execute(Command::On);
@@ -208,13 +185,17 @@ fn five_second_deadline_includes_queue_wait_and_expired_commands_are_never_sent(
         futures_lite::pin!(first, second);
         poll_once(first.as_mut()).await;
         let request = receiver.next().await.unwrap();
-        assert_eq!(request.remaining(), Duration::from_secs(5));
         poll_once(second.as_mut()).await;
-        clock.advance(Duration::from_secs(5));
-        assert_eq!(request.accept(), Err(CommandError::Timeout));
-        assert_eq!(first.await, Err(CommandError::Timeout));
-        assert!(poll_once(receiver.next()).await.is_none());
-        assert_eq!(second.await, Err(CommandError::Timeout));
+        clock.advance(Duration::from_secs(6));
+        assert!(poll_once(first.as_mut()).await.is_none());
+        assert!(poll_once(second.as_mut()).await.is_none());
+        request.accept().unwrap();
+        assert_eq!(first.await.unwrap().power, Power::On);
+        let request = receiver.next().await.unwrap();
+        assert!(!request.target);
+        clock.advance(Duration::from_secs(20));
+        request.accept().unwrap();
+        assert_eq!(second.await.unwrap().power, Power::Off);
         assert_eq!(device.snapshot().power, Power::Off);
     });
 }

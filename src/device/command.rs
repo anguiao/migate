@@ -1,7 +1,6 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use event_listener::Event;
@@ -10,8 +9,6 @@ use super::{
     model::{Capability, Command, CommandError, DeviceSnapshot},
     state::Device,
 };
-
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub(super) struct Queue {
@@ -37,7 +34,6 @@ impl Device {
     /// Dropping the future withdraws a queued command. An adapter that already
     /// received it still owns its result and may update the shared snapshot.
     pub async fn execute(&self, command: Command) -> Result<DeviceSnapshot, CommandError> {
-        let deadline = self.0.clock.now() + COMMAND_TIMEOUT;
         if !self.description().capabilities.contains(&Capability::OnOff) {
             return Err(CommandError::Unsupported);
         }
@@ -50,7 +46,6 @@ impl Device {
             }
             state.queue.pending.push_back(PendingCommand {
                 command,
-                deadline,
                 completion: completion.clone(),
             });
         }
@@ -59,12 +54,7 @@ impl Device {
             completion: completion.clone(),
         };
         self.0.submitted.notify(usize::MAX);
-        futures_lite::future::race(completion.wait(), async {
-            self.0.clock.wait_until(deadline).await;
-            completion.finish(Err(CommandError::Timeout));
-            completion.wait().await
-        })
-        .await
+        completion.wait().await
     }
 }
 
@@ -96,7 +86,6 @@ impl Completion {
 
 struct PendingCommand {
     command: Command,
-    deadline: Duration,
     completion: Arc<Completion>,
 }
 
@@ -133,10 +122,6 @@ impl CommandReceiver {
             let request = {
                 let mut state = self.device.0.state.lock().unwrap();
                 if let Some(pending) = state.queue.pending.pop_front() {
-                    if pending.deadline <= self.device.0.clock.now() {
-                        pending.completion.finish(Err(CommandError::Timeout));
-                        continue;
-                    }
                     let snapshot = self.device.snapshot_locked(&state);
                     let target =
                         snapshot.availability.command_result().and_then(|()| {
@@ -161,7 +146,6 @@ impl CommandReceiver {
                     Some(CommandRequest {
                         target,
                         device: self.device.clone(),
-                        deadline: pending.deadline,
                         completion: pending.completion,
                     })
                 } else if state.queue.closed {
@@ -189,35 +173,26 @@ impl Drop for CommandReceiver {
     }
 }
 
-/// A protocol-independent absolute write. The adapter must use `remaining()`
-/// when bounding its request and must not send once that duration is zero.
+/// A protocol-independent absolute write owned by the adapter until completion.
 pub struct CommandRequest {
     pub target: bool,
     device: Device,
-    deadline: Duration,
     completion: Arc<Completion>,
 }
 
 impl CommandRequest {
-    pub fn remaining(&self) -> Duration {
-        self.deadline.saturating_sub(self.device.0.clock.now())
-    }
-
     pub fn accept(self) -> Result<DeviceSnapshot, CommandError> {
         let mut state = self.device.0.state.lock().unwrap();
         let mut result = self.completion.result.lock().unwrap();
         if let Some(completed) = &*result {
             return completed.clone();
         }
-        let accepted = if self.remaining().is_zero() {
-            Err(CommandError::Timeout)
-        } else {
-            self.device
-                .snapshot_locked(&state)
-                .availability
-                .command_result()
-                .map(|()| self.device.update_power(&mut state, self.target))
-        };
+        let accepted = self
+            .device
+            .snapshot_locked(&state)
+            .availability
+            .command_result()
+            .map(|()| self.device.update_power(&mut state, self.target));
         *result = Some(accepted.clone());
         self.completion.changed.notify(usize::MAX);
         accepted

@@ -41,18 +41,6 @@ impl Clock for SystemClock {
         })
     }
 }
-#[cfg(test)]
-struct SharedClock(Arc<dyn Clock>);
-#[cfg(test)]
-impl Clock for SharedClock {
-    fn now(&self) -> Duration {
-        self.0.now()
-    }
-    fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        self.0.wait_until(deadline)
-    }
-}
-
 impl XiaomiSource {
     pub(super) fn build(
         store: Store,
@@ -74,7 +62,7 @@ impl XiaomiSource {
         let report = auth.local_status()?;
         let ready = Rc::new(Ready::default());
         let (device, receiver) = if let Some(metadata) = &cached {
-            let (device, receiver) = make_device(metadata, clock.clone());
+            let (device, receiver) = make_device(metadata);
             device.set_availability(Availability::Unavailable(
                 "restoring local gateway connection".into(),
             ));
@@ -123,7 +111,7 @@ impl XiaomiSource {
                 #[cfg(test)]
                 test_ca: None,
                 #[cfg(test)]
-                request_timeout: Duration::from_secs(5),
+                request_timeout: Duration::from_secs(10),
             },
             TopologyReady(ready),
         ))
@@ -163,7 +151,7 @@ impl XiaomiSource {
             .await
             {
                 Ok(metadata) => {
-                    let (device, receiver) = make_device(&metadata, self.context.clock.clone());
+                    let (device, receiver) = make_device(&metadata);
                     self.receiver = Some(receiver);
                     let mut live = self.context.live.borrow_mut();
                     live.topology = Some(Topology {
@@ -195,19 +183,8 @@ impl XiaomiSource {
     }
 }
 
-fn make_device(metadata: &CachedDevice, clock: Arc<dyn Clock>) -> (Device, CommandReceiver) {
-    #[cfg(test)]
-    {
-        Device::for_test(
-            metadata.outlet.description.clone(),
-            Box::new(SharedClock(clock)),
-        )
-    }
-    #[cfg(not(test))]
-    {
-        let _ = clock;
-        Device::new(metadata.outlet.description.clone())
-    }
+fn make_device(metadata: &CachedDevice) -> (Device, CommandReceiver) {
+    Device::new(metadata.outlet.description.clone())
 }
 fn authentication_error(report: &AuthReport) -> SourceError {
     match &report.authentication {

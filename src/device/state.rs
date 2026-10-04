@@ -10,25 +10,13 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub(crate) trait Clock: Send + Sync {
     fn now(&self) -> Duration;
     fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
-struct SystemClock(Instant);
-impl Clock for SystemClock {
-    fn now(&self) -> Duration {
-        self.0.elapsed()
-    }
-    fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            async_io::Timer::at(self.0 + deadline).await;
-        })
-    }
-}
-
 pub(super) struct RuntimeState {
     pub(super) power: Power,
     pub(super) revision: u64,
@@ -50,7 +38,6 @@ pub(super) struct Inner {
     pub(super) state: Mutex<RuntimeState>,
     changed: Event,
     pub(super) submitted: Event,
-    pub(super) clock: Box<dyn Clock>,
 }
 
 /// A channel's shared state and command boundary for every protocol adapter.
@@ -79,7 +66,6 @@ impl PhysicalDevice {
                 },
                 function.id.clone(),
                 inner.clone(),
-                Box::new(SystemClock(Instant::now())),
             );
             functions.push(device);
             receivers.push(receiver);
@@ -155,25 +141,12 @@ fn set_availability(physical: &PhysicalInner, availability: Availability) {
 }
 impl Device {
     pub fn new(description: DeviceDescription) -> (Self, CommandReceiver) {
-        Self::with_physical(
-            description,
-            "main".into(),
-            new_physical(),
-            Box::new(SystemClock(Instant::now())),
-        )
-    }
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        description: DeviceDescription,
-        clock: Box<dyn Clock>,
-    ) -> (Self, CommandReceiver) {
-        Self::with_physical(description, "main".into(), new_physical(), clock)
+        Self::with_physical(description, "main".into(), new_physical())
     }
     fn with_physical(
         description: DeviceDescription,
         id: String,
         physical: Arc<PhysicalInner>,
-        clock: Box<dyn Clock>,
     ) -> (Self, CommandReceiver) {
         let key = FunctionKey::new(description.key.clone(), id);
         let device = Self(Arc::new(Inner {
@@ -187,7 +160,6 @@ impl Device {
             }),
             changed: Event::new(),
             submitted: Event::new(),
-            clock,
         }));
         physical
             .functions

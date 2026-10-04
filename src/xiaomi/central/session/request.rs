@@ -19,6 +19,7 @@ use std::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceAccess {
     pub did: String,
+    pub name: Option<String>,
     pub model: String,
     pub instance_type: String,
     pub online: bool,
@@ -29,6 +30,7 @@ pub struct DeviceAccess {
 #[derive(Clone)]
 pub(super) enum Response {
     Device(Option<DeviceAccess>),
+    Devices(Vec<DeviceAccess>),
     Power(bool),
     Unit,
 }
@@ -47,12 +49,16 @@ pub(super) struct Request {
 }
 #[derive(Clone)]
 pub(super) enum RequestKind {
+    ListAll,
     List {
         did: String,
     },
     Subscribe {
         did: String,
         binding: PropertyBinding,
+    },
+    Unsubscribe {
+        did: String,
     },
     Read {
         did: String,
@@ -67,9 +73,13 @@ pub(super) enum RequestKind {
 impl RequestKind {
     pub(super) fn publication(&self, id: u32, reply_topic: &str) -> Result<Publish, CentralError> {
         let (topic, payload) = match self {
+            Self::ListAll => (
+                "master/proxy/getDevList",
+                json!({"info":["name","model","urn","online","specV2Access","pushAvailable"]}),
+            ),
             Self::List { did } => (
                 "master/proxy/getDevList",
-                json!({"filter":{"did":[did]},"info":["model","urn","online","specV2Access","pushAvailable"]}),
+                json!({"filter":{"did":[did]},"info":["name","model","urn","online","specV2Access","pushAvailable"]}),
             ),
             Self::Read { did, binding } => (
                 "master/proxy/get",
@@ -83,7 +93,9 @@ impl RequestKind {
                 "master/proxy/rpcReq",
                 json!({"did":did,"rpc":{"id":next_mips_id()?,"method":"set_properties","params":[{"did":did,"siid":binding.siid,"piid":binding.piid,"value":value}]}}),
             ),
-            Self::Subscribe { .. } => unreachable!("subscriptions do not publish MIPS requests"),
+            Self::Subscribe { .. } | Self::Unsubscribe { .. } => {
+                unreachable!("subscriptions do not publish MIPS requests")
+            }
         };
         Ok(Publish::new(
             topic,
@@ -94,19 +106,26 @@ impl RequestKind {
 
     pub(super) fn operation(&self) -> &'static str {
         match self {
-            Self::List { .. } => "getDevList",
+            Self::List { .. } | Self::ListAll => "getDevList",
             Self::Subscribe { .. } => "subscribe",
+            Self::Unsubscribe { .. } => "unsubscribe",
             Self::Read { .. } => "get",
             Self::Write { .. } => "set",
         }
     }
     pub(super) fn did(&self) -> &str {
         match self {
+            Self::ListAll => "*",
             Self::List { did }
             | Self::Subscribe { did, .. }
+            | Self::Unsubscribe { did }
             | Self::Read { did, .. }
             | Self::Write { did, .. } => did,
         }
+    }
+
+    pub(super) fn cancelled_for(&self, did: &str) -> bool {
+        !matches!(self, Self::ListAll | Self::Unsubscribe { .. }) && self.did() == did
     }
 }
 impl Request {
@@ -124,6 +143,12 @@ pub(super) struct Shared {
     pub(super) closed: Cell<bool>,
     pub(super) outstanding: Cell<usize>,
     pub(super) generation: u64,
+    pub(super) cancellations: RefCell<VecDeque<Cancellation>>,
+}
+
+pub(super) struct Cancellation {
+    pub(super) did: String,
+    pub(super) queued: Vec<Request>,
 }
 
 /// Requests are enqueued when these methods are called. Dropping the returned
@@ -140,6 +165,60 @@ impl SessionHandle {
     pub fn close(&self) {
         self.shared.closed.set(true);
         self.shared.event.notify(usize::MAX);
+    }
+    pub fn get_devices<F: FnOnce(Result<Vec<DeviceAccess>, CentralError>) + 'static>(
+        &self,
+        on_result: F,
+    ) -> impl Future<Output = Result<Vec<DeviceAccess>, CentralError>> + use<F> {
+        let callback: Callback =
+            Box::new(move |result| on_result(result.and_then(devices_response)));
+        let result = self.submit(RequestKind::ListAll, self.timing.request, Some(callback));
+        async move { devices_response(result.await?) }
+    }
+
+    /// Cancel this device's existing work before the driver processes another frame.
+    pub fn cancel_device(&self, did: &str) -> Result<(), CentralError> {
+        if !valid_identifier(did) {
+            return Err(CentralError::InvalidInput);
+        }
+        if self.shared.closed.get() {
+            return Err(CentralError::Cancelled);
+        }
+        let mut queue = self.shared.queue.borrow_mut();
+        let mut queued = Vec::new();
+        let mut retained = VecDeque::new();
+        while let Some(request) = queue.pop_front() {
+            if request.kind.cancelled_for(did) {
+                queued.push(request);
+            } else {
+                retained.push_back(request);
+            }
+        }
+        *queue = retained;
+        self.shared
+            .cancellations
+            .borrow_mut()
+            .push_back(Cancellation {
+                did: did.into(),
+                queued,
+            });
+        self.shared.event.notify(usize::MAX);
+        Ok(())
+    }
+
+    /// Also cancel pending subscriptions so a late SUBACK cannot restore routing.
+    pub fn unsubscribe_device(
+        &self,
+        did: &str,
+    ) -> impl Future<Output = Result<(), CentralError>> + use<> {
+        let result = self.cancel_device(did).map(|()| {
+            self.submit(
+                RequestKind::Unsubscribe { did: did.into() },
+                self.timing.request,
+                None,
+            )
+        });
+        async move { result?.await.map(|_| ()) }
     }
     pub fn get_device_list<F: FnOnce(Result<Option<DeviceAccess>, CentralError>) + 'static>(
         &self,
@@ -211,7 +290,6 @@ impl SessionHandle {
         did: &str,
         binding: PropertyBinding,
         value: bool,
-        remaining: Duration,
         on_result: F,
     ) -> impl Future<Output = Result<(), CentralError>> + use<F> {
         let callback: Callback = Box::new(move |result| on_result(result.map(|_| ())));
@@ -221,7 +299,7 @@ impl SessionHandle {
                 binding,
                 value,
             },
-            remaining,
+            self.timing.request,
             Some(callback),
         );
         async move { result.await.map(|_| ()) }
@@ -285,13 +363,25 @@ pub(super) fn valid_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 fn valid_request(kind: &RequestKind) -> bool {
+    if matches!(kind, RequestKind::ListAll) {
+        return true;
+    }
     let (did, binding) = match kind {
         RequestKind::List { did } => (did, None),
+        RequestKind::Unsubscribe { did } => (did, None),
         RequestKind::Subscribe { did, binding }
         | RequestKind::Read { did, binding }
         | RequestKind::Write { did, binding, .. } => (did, Some(binding)),
+        RequestKind::ListAll => unreachable!(),
     };
     valid_identifier(did) && binding.is_none_or(|binding| binding.siid > 0 && binding.piid > 0)
+}
+
+fn devices_response(response: Response) -> Result<Vec<DeviceAccess>, CentralError> {
+    match response {
+        Response::Devices(devices) => Ok(devices),
+        _ => Err(CentralError::Protocol),
+    }
 }
 pub(super) fn next_mips_id() -> Result<u32, CentralError> {
     static IDS: OnceLock<AtomicU64> = OnceLock::new();
@@ -366,6 +456,17 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
                 code => Err(CentralError::Rejected(code)),
             }
         }
+        RequestKind::ListAll => {
+            let list = value
+                .get("devList")
+                .and_then(Value::as_object)
+                .ok_or(CentralError::Protocol)?;
+            Ok(Response::Devices(
+                list.iter()
+                    .map(|(did, info)| device_access(did, info))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
         RequestKind::List { did } => {
             let list = value
                 .get("devList")
@@ -374,27 +475,47 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
             let Some(info) = list.get(did) else {
                 return Ok(Response::Device(None));
             };
-            let text = |key| {
-                info.get(key)
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .ok_or(CentralError::Protocol)
-            };
-            let flag = |key| {
-                info.get(key)
-                    .and_then(Value::as_bool)
-                    .ok_or(CentralError::Protocol)
-            };
-            Ok(Response::Device(Some(DeviceAccess {
-                did: did.clone(),
-                model: text("model")?,
-                instance_type: text("urn")?,
-                online: flag("online")?,
-                spec_v2_access: flag("specV2Access")?,
-                push_available: flag("pushAvailable")?,
-            })))
+            Ok(Response::Device(Some(device_access(did, info)?)))
         }
-        RequestKind::Subscribe { .. } => Err(CentralError::Protocol),
+        RequestKind::Subscribe { .. } | RequestKind::Unsubscribe { .. } => {
+            Err(CentralError::Protocol)
+        }
     }
+}
+
+fn device_access(did: &str, info: &Value) -> Result<DeviceAccess, CentralError> {
+    if !valid_identifier(did) {
+        return Err(CentralError::Protocol);
+    }
+    let text = |key| {
+        info.get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or(CentralError::Protocol)
+    };
+    let flag = |key| {
+        info.get(key)
+            .and_then(Value::as_bool)
+            .ok_or(CentralError::Protocol)
+    };
+    let name = match info.get("name") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name))
+            if name.trim().is_empty() || name.chars().any(char::is_control) =>
+        {
+            None
+        }
+        Some(Value::String(name)) => Some(name.clone()),
+        _ => return Err(CentralError::Protocol),
+    };
+    Ok(DeviceAccess {
+        did: did.into(),
+        name,
+        model: text("model")?,
+        instance_type: text("urn")?,
+        online: flag("online")?,
+        spec_v2_access: flag("specV2Access")?,
+        push_available: flag("pushAvailable")?,
+    })
 }

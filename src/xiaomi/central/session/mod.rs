@@ -36,7 +36,7 @@ pub(super) struct Timing {
 impl Default for Timing {
     fn default() -> Self {
         Self {
-            request: Duration::from_secs(5),
+            request: Duration::from_secs(10),
             keepalive: Some(Duration::from_secs(60)),
         }
     }

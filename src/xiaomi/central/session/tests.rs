@@ -31,6 +31,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "lifecycle_tests.rs"]
+mod lifecycle;
+
+#[test]
+fn default_request_timeout_is_ten_seconds() {
+    assert_eq!(Timing::default().request, Duration::from_secs(10));
+}
+
 pub(crate) struct Broker {
     stream: TlsStream<Async<TcpStream>>,
     frames: wire::Frames,
@@ -314,7 +322,6 @@ fn business_acceptance_precedes_pubcomp_and_callbacks_preserve_notification_orde
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
                         true,
-                        Duration::from_millis(150),
                         move |result| {
                             result.unwrap();
                             accepted.set(true);
@@ -488,7 +495,7 @@ fn coalesced_read_and_access_callbacks_run_before_later_notifications() {
             assert_eq!(list.topic, "master/proxy/getDevList");
             assert_eq!(
                 request.payload,
-                json!({"filter":{"did":["target"]},"info":["model","urn","online","specV2Access","pushAvailable"]})
+                json!({"filter":{"did":["target"]},"info":["name","model","urn","online","specV2Access","pushAvailable"]})
             );
             broker.acknowledge(&list).await;
             let list_reply=broker.business(&list,json!({"devList":{"unrequested":{"name":"private name"},"target":{"model":"cuco.plug.v3","urn":"urn:miot-spec-v2:device:outlet:0000A002:cuco-v3:1","online":false,"specV2Access":true,"pushAvailable":true}}}));
@@ -761,7 +768,6 @@ fn rejected_acknowledgements_and_wrong_packet_ids_never_accept_writes() {
                                 "target",
                                 PropertyBinding { siid: 2, piid: 1 },
                                 true,
-                                Duration::from_millis(100),
                                 move |result| results.borrow_mut().push(result)
                             )
                             .await,
@@ -858,7 +864,6 @@ fn disconnect_and_access_denial_finish_every_pending_callback() {
                     "target",
                     PropertyBinding { siid: 2, piid: 1 },
                     true,
-                    Duration::from_millis(100),
                     move |result| second.borrow_mut().push(result),
                 );
                 let (result, (read, write)) =
@@ -1023,14 +1028,12 @@ fn short_writes_preserve_offsets_and_partial_timeout_closes_without_replay() {
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
                         true,
-                        Duration::from_millis(50),
                         move |result| first.borrow_mut().push(result),
                     );
                     let second_write = handle.set_property(
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
                         false,
-                        Duration::from_millis(100),
                         move |result| second.borrow_mut().push(result),
                     );
                     let (first, second) = future::zip(first_write, second_write).await;
@@ -1084,7 +1087,7 @@ fn short_writes_preserve_offsets_and_partial_timeout_closes_without_replay() {
 }
 
 #[test]
-fn queued_deadlines_drop_callbacks_and_invalid_budgets_finish_explicitly() {
+fn queued_requests_use_the_network_timeout_and_reject_invalid_bindings() {
     let callbacks = Rc::new(RefCell::new(Vec::new()));
     let results = callbacks.clone();
     block_on(pair(
@@ -1119,11 +1122,12 @@ fn queued_deadlines_drop_callbacks_and_invalid_budgets_finish_explicitly() {
         },
         |handle, driver| async move {
             let callback = results.clone();
-            let expired = handle.set_property(
+            let mut fast = handle.clone();
+            fast.timing.request = Duration::from_millis(10);
+            let expired = fast.set_property(
                 "target",
                 PropertyBinding { siid: 2, piid: 1 },
                 true,
-                Duration::from_millis(10),
                 move |result| callback.borrow_mut().push(result),
             );
             let work = async {
@@ -1132,9 +1136,8 @@ fn queued_deadlines_drop_callbacks_and_invalid_budgets_finish_explicitly() {
                     handle
                         .set_property(
                             "target",
-                            PropertyBinding { siid: 2, piid: 1 },
+                            PropertyBinding { siid: 0, piid: 1 },
                             true,
-                            Duration::MAX,
                             |result| assert_eq!(result, Err(CentralError::InvalidInput))
                         )
                         .await,
@@ -1294,13 +1297,14 @@ fn write_gate_opening_at_deadline_does_not_send_expired_request() {
                     .await
                     .unwrap();
                 gate.set(Some(Instant::now() + Duration::from_millis(30)));
+                let mut timed = handle.clone();
+                timed.timing.request = Duration::from_millis(30);
                 assert_eq!(
-                    handle
+                    timed
                         .set_property(
                             "target",
                             PropertyBinding { siid: 2, piid: 1 },
                             true,
-                            Duration::from_millis(30),
                             |result| assert_eq!(result, Err(CentralError::Timeout))
                         )
                         .await,
@@ -1407,7 +1411,6 @@ fn dropping_unpolled_driver_completes_queued_callback_and_closes_handle() {
                 "target",
                 PropertyBinding { siid: 2, piid: 1 },
                 true,
-                Duration::from_secs(1),
                 move |result| results.borrow_mut().push(result),
             );
             drop(driver);
