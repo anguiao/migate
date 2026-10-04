@@ -1,115 +1,421 @@
-use super::{
-    GatewayStatus, SourceError, SourceStatus, TopologyReady, XiaomiSource, bootstrap,
-    local::wait_retry,
-    state::{Backoff, Context, update_auth},
-};
+use super::*;
 use crate::{
-    device::{Availability, Clock, CommandError, Device, DeviceKey, Power},
-    storage::{CachedDevice, Store},
+    device::{Availability, Clock, DeviceKey, Power},
+    storage::{CachedPhysicalDevice, CachedScope, Store},
     xiaomi::{
-        auth::{AuthenticationState, FailureReason},
-        capability::parse_outlet,
+        capability::parse_device,
         central::test_support::TlsFixture,
-        cloud::{CloudClient, CloudError, group_id},
+        cloud::{CloudClient, group_id},
         discovery::Discovery,
-        test_support::{MockResponse, mock_server},
+        test_support::{MockResponse, dynamic_mock_server},
     },
 };
 use event_listener::Event;
-use futures_lite::future;
 use futures_lite::future::{block_on, poll_once};
 use serde_json::Value;
-use std::time::Duration;
-use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc};
-
-impl XiaomiSource {
-    fn for_test(
-        store: Store,
-        cloud: CloudClient,
-        discovery: Discovery,
-        key: DeviceKey,
-        ca: String,
-        clock: Arc<dyn Clock>,
-    ) -> Result<(Self, TopologyReady), SourceError> {
-        let (mut source, ready) = Self::build(store, cloud, discovery, key, clock)?;
-        source.test_ca = Some(ca);
-        source.request_timeout = Duration::from_millis(200);
-        Ok((source, ready))
-    }
-}
-
-fn cached(uid: &str) -> CachedDevice {
-    let instance: Value =
-        serde_json::from_str(include_str!("../../../tests/fixtures/miot/outlet.json")).unwrap();
-    CachedDevice {
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+fn cached(uid: &str, did: &str, multi: bool) -> CachedPhysicalDevice {
+    let instance: Value = serde_json::from_str(if multi {
+        include_str!("../../../tests/fixtures/miot/cuco-cp7pd.json")
+    } else {
+        include_str!("../../../tests/fixtures/miot/outlet.json")
+    })
+    .unwrap();
+    CachedPhysicalDevice {
         uid: uid.into(),
         home_id: "local".into(),
         group_id: group_id(uid, "local"),
-        model: "vendor.plug".into(),
+        model: if multi {
+            "cuco.plug.cp7pd"
+        } else {
+            "cuco.plug.v3"
+        }
+        .into(),
         instance_type: instance["type"].as_str().unwrap().into(),
-        outlet: parse_outlet(DeviceKey::new("xiaomi", "target"), &instance).unwrap(),
+        device: parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap(),
     }
 }
-
+fn scope(uid: &str) -> CachedScope {
+    CachedScope {
+        uid: uid.into(),
+        home_id: "local".into(),
+        group_id: group_id(uid, "local"),
+    }
+}
 #[test]
-fn cached_topology_is_ready_before_network_and_unknown_unreachable() {
+fn restored_topology_is_the_selected_scope_and_published_intersection() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let tls = TlsFixture::new(false);
     store.xiaomi().replace(&tls.credentials).unwrap();
-    let metadata = cached(&tls.credentials.uid);
-    store.devices().save(&metadata).unwrap();
-    let (base, requests) = mock_server(vec![MockResponse::json(503, "{}")]);
+    store
+        .devices()
+        .save_scope(&scope(&tls.credentials.uid))
+        .unwrap();
+    let kept = cached(&tls.credentials.uid, "kept", true);
+    store.devices().publish_cached(&kept, "saved name").unwrap();
+    let deleted = cached(&tls.credentials.uid, "deleted", false);
+    store.devices().publish_cached(&deleted, "deleted").unwrap();
+    store
+        .devices()
+        .remove(&deleted.device.description.key)
+        .unwrap();
+    let mut other = cached(&tls.credentials.uid, "other-home", false);
+    other.home_id = "other".into();
+    other.group_id = group_id(&other.uid, &other.home_id);
+    store.devices().publish_cached(&other, "other").unwrap();
+    store
+        .devices()
+        .publish_cached(&cached("foreign", "foreign", false), "foreign")
+        .unwrap();
+    let (base, requests) = dynamic_mock_server(1, |_| MockResponse::json(503, "{}"));
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     let (_events, receiver) = flume::unbounded();
     let (discovery, _driver) = Discovery::with_events(receiver);
-    let (source, ready) =
-        XiaomiSource::new(store, cloud, discovery, DeviceKey::new("xiaomi", "target")).unwrap();
-    let prepared = block_on(poll_once(ready.wait()))
-        .expect("cache must not wait for networking")
+    let (source, ready) = XiaomiSource::new(store, cloud, discovery).unwrap();
+    let registry = block_on(poll_once(ready.wait()))
+        .expect("cache readiness is synchronous")
         .unwrap();
-    assert_eq!(prepared.metadata, metadata);
-    assert_eq!(prepared.device.snapshot().power, Power::Unknown);
-    assert!(!matches!(
-        prepared.device.snapshot().availability,
-        Availability::Available
-    ));
+    assert_eq!(registry.list().len(), 1);
+    let physical = registry.get(&DeviceKey::new("xiaomi", "kept")).unwrap();
+    assert_eq!(physical.functions().len(), 3);
+    assert_eq!(physical.description().label, "saved name");
+    for function in physical.functions() {
+        assert_eq!(function.snapshot().power, Power::Unknown);
+        assert!(matches!(
+            function.snapshot().availability,
+            Availability::Unavailable(_)
+        ));
+    }
     assert_eq!(requests.try_iter().count(), 0);
     drop(source);
 }
+#[derive(Default)]
+struct TestClock {
+    elapsed: Mutex<Duration>,
+    deadlines: Mutex<Vec<Duration>>,
+    changed: Event,
+}
+impl TestClock {
+    fn advance(&self, by: Duration) {
+        *self.elapsed.lock().unwrap() += by;
+        self.changed.notify(usize::MAX);
+    }
+}
+impl Clock for TestClock {
+    fn now(&self) -> Duration {
+        *self.elapsed.lock().unwrap()
+    }
+    fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.deadlines.lock().unwrap().push(deadline);
+        Box::pin(async move {
+            loop {
+                let listener = self.changed.listen();
+                if self.now() >= deadline {
+                    return;
+                }
+                listener.await;
+            }
+        })
+    }
+}
 
-use crate::{
-    device::Command,
-    xiaomi::{
-        central::{encode_mips, test_support::Broker},
-        discovery::SERVICE_TYPE,
-        test_support::dynamic_mock_server,
-    },
+use crate::device::{Command, DeviceRegistry};
+use crate::xiaomi::{
+    central::{decode_mips, encode_mips, test_support::Broker},
+    discovery::SERVICE_TYPE,
 };
 use async_io::Async;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures_lite::future;
 use futures_rustls::TlsAcceptor;
 use mqttbytes::{QoS, v5::*};
 use serde_json::json;
 use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
     net::{SocketAddr, TcpListener},
-    sync::Arc,
+    rc::Rc,
 };
-
-fn announcement(address: SocketAddr, uid: &str, name: &str, hub: u64) -> mdns_sd::ServiceEvent {
-    home_announcement(address, uid, "local", name, hub)
+#[derive(Default)]
+struct CloudState {
+    members: Vec<String>,
+    status: u16,
+    home_delay: Duration,
+    home_gate: Option<flume::Receiver<()>>,
+    foreign: bool,
+    partial: bool,
+    unsupported: BTreeSet<String>,
+    detail_status: u16,
+    detail_delay: Duration,
+    detail_gate: Option<flume::Receiver<()>>,
+    details: usize,
+    detail_done: usize,
+    cert_status: u16,
+    certs: usize,
+    token_status: u16,
+    token_access: Option<String>,
+    token_delay: Duration,
+    token_gate: Option<flume::Receiver<()>>,
+    tokens: usize,
+    token_done: usize,
+    homes: usize,
 }
-fn home_announcement(
-    address: SocketAddr,
-    uid: &str,
-    home: &str,
-    name: &str,
-    hub: u64,
-) -> mdns_sd::ServiceEvent {
+struct Rig {
+    _directory: tempfile::TempDir,
+    source: XiaomiSource,
+    ready: TopologyReady,
+    store: Store,
+    discovery: Discovery,
+    driver: crate::xiaomi::discovery::DiscoveryDriver,
+    events: flume::Sender<mdns_sd::ServiceEvent>,
+    listener: Async<TcpListener>,
+    acceptor: TlsAcceptor,
+    data: Vec<CachedPhysicalDevice>,
+    cloud: Arc<Mutex<CloudState>>,
+    clock: Arc<TestClock>,
+}
+struct Control {
+    ready: Option<TopologyReady>,
+    store: Store,
+    context: Rc<super::state::Context>,
+    discovery: Discovery,
+    events: flume::Sender<mdns_sd::ServiceEvent>,
+    listener: Async<TcpListener>,
+    acceptor: TlsAcceptor,
+    data: Vec<CachedPhysicalDevice>,
+    cloud: Arc<Mutex<CloudState>>,
+    clock: Arc<TestClock>,
+}
+impl Rig {
+    fn new(restore: bool, members: &[&str]) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let tls = TlsFixture::new(false);
+        store.xiaomi().replace(&tls.credentials).unwrap();
+        let data = vec![
+            cached(&tls.credentials.uid, "one", false),
+            cached(&tls.credentials.uid, "multi", true),
+            cached(&tls.credentials.uid, "two", false),
+        ];
+        if restore {
+            store
+                .devices()
+                .save_scope(&scope(&tls.credentials.uid))
+                .unwrap();
+            for record in &data {
+                if members.contains(&record.device.description.key.id.as_str()) {
+                    store
+                        .devices()
+                        .publish_cached(
+                            record,
+                            &format!("name {}", record.device.description.key.id),
+                        )
+                        .unwrap();
+                }
+            }
+        }
+        let cloud = Arc::new(Mutex::new(CloudState {
+            members: members.iter().map(|v| v.to_string()).collect(),
+            status: 200,
+            detail_status: 200,
+            cert_status: 200,
+            token_status: 200,
+            ..Default::default()
+        }));
+        let responses = cloud.clone();
+        let records = data.clone();
+        let certificate = tls.credentials.certificate_pem.clone();
+        let (base, _requests) = dynamic_mock_server(200, move |request| {
+            let detail_finished = responses.clone();
+            let token_finished = responses.clone();
+            let mut state = responses.lock().unwrap();
+            if state.status != 200 {
+                return MockResponse::json(state.status, "{}");
+            }
+            let value = if request.target.contains("get_token") {
+                state.tokens += 1;
+                if state.token_status != 200 {
+                    return MockResponse::json(state.token_status, "{}");
+                }
+                json!({"code":0,"result":{"access_token":state.token_access.as_deref().unwrap_or("fresh-access"),"refresh_token":"fresh-refresh","expires_in":1000}})
+            } else if request.target.ends_with("/get_central_crt") {
+                state.certs += 1;
+                if state.cert_status != 200 {
+                    return MockResponse::json(state.cert_status, "{}");
+                }
+                json!({"code":0,"result":{"cert":certificate}})
+            } else if request.target.ends_with("/gethome") {
+                state.homes += 1;
+                if state.partial {
+                    json!({"code":0,"result":{"homelist":[],"has_more":true}})
+                } else {
+                    json!({"code":0,"result":{"homelist":[{"id":"local","uid":if state.foreign {"foreign"}else {&records[0].uid},"roomlist":[],"dids":state.members}]}})
+                }
+            } else if request.target.ends_with("/device_list_page") {
+                state.details += 1;
+                if state.detail_status != 200 {
+                    let mut response = MockResponse::json(state.detail_status, "{}")
+                        .delayed(state.detail_delay)
+                        .on_sent(move || detail_finished.lock().unwrap().detail_done += 1);
+                    if let Some(gate) = state.detail_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    return response;
+                }
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.description.key.id)).map(|record|json!({"did":record.device.description.key.id,"model":record.model,"spec_type":record.instance_type})).collect::<Vec<_>>()}})
+            } else if request.target.starts_with("/miot-spec-v2/instance?") {
+                let multi = request.target.contains("cuco-cp7pd");
+                let mut value: Value = serde_json::from_str(if multi {
+                    include_str!("../../../tests/fixtures/miot/cuco-cp7pd.json")
+                } else {
+                    include_str!("../../../tests/fixtures/miot/outlet.json")
+                })
+                .unwrap();
+                if state
+                    .unsupported
+                    .contains(if multi { "multi" } else { "one" })
+                {
+                    value["services"] = json!([]);
+                }
+                value
+            } else {
+                return MockResponse::json(503, "{}");
+            };
+            let response = MockResponse::json(200, &value.to_string());
+            if request.target.ends_with("/gethome") {
+                {
+                    let mut response = response.delayed(state.home_delay);
+                    if let Some(gate) = state.home_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    response
+                }
+            } else if request.target.contains("get_token") {
+                let mut response = response
+                    .delayed(state.token_delay)
+                    .on_sent(move || token_finished.lock().unwrap().token_done += 1);
+                if let Some(gate) = state.token_gate.clone() {
+                    response = response.gated(gate);
+                }
+                response
+            } else if request.target.ends_with("/device_list_page") {
+                response.delayed(state.detail_delay)
+            } else {
+                response
+            }
+        });
+        let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
+        let (events, receiver) = flume::unbounded();
+        let (discovery, driver) = Discovery::with_events(receiver);
+        let clock = Arc::new(TestClock::default());
+        let (mut source, ready) =
+            XiaomiSource::build(store.clone(), client, discovery.clone(), clock.clone()).unwrap();
+        source.test_ca = Some(tls.ca_pem.clone());
+        source.request_timeout = Duration::from_millis(150);
+        Self {
+            _directory: directory,
+            source,
+            ready,
+            store,
+            discovery,
+            driver,
+            events,
+            listener,
+            acceptor: TlsAcceptor::from(tls.server_config()),
+            data,
+            cloud,
+            clock,
+        }
+    }
+    async fn run<F, Fut>(self, test: F)
+    where
+        F: FnOnce(Control) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        self.run_result(test).await.unwrap();
+    }
+    async fn run_result<F, Fut>(self, test: F) -> Result<(), SourceError>
+    where
+        F: FnOnce(Control) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let keep_events = self.events.clone();
+        let context = self.source.context.clone();
+        let running = self.source.run(|_| {});
+        let discovering = async {
+            self.driver.run().await?;
+            future::pending::<Result<(), SourceError>>().await
+        };
+        let testing = test(Control {
+            ready: Some(self.ready),
+            store: self.store,
+            context,
+            discovery: self.discovery,
+            events: self.events,
+            listener: self.listener,
+            acceptor: self.acceptor,
+            data: self.data,
+            cloud: self.cloud,
+            clock: self.clock,
+        });
+        let result = future::or(
+            future::or(future::or(running, discovering), async {
+                testing.await;
+                Ok(())
+            }),
+            async {
+                async_io::Timer::after(Duration::from_secs(5)).await;
+                panic!("source scenario stalled");
+            },
+        )
+        .await;
+        drop(keep_events);
+        result
+    }
+}
+impl Control {
+    fn announce(&self) {
+        self.events
+            .send(announcement(
+                self.listener.get_ref().local_addr().unwrap(),
+                &self.data[0].uid,
+                "hub",
+                123,
+            ))
+            .unwrap();
+    }
+    async fn accept(&self) -> Broker {
+        let (socket, _) = self.listener.accept().await.unwrap();
+        Broker::new(self.acceptor.accept(socket).await.unwrap())
+    }
+    async fn peer<F, Fut>(&self, peer: Rc<Peer>, test: F)
+    where
+        F: FnOnce(Rc<Peer>) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let mut broker = self.accept().await;
+        broker.setup().await;
+        peer.state.borrow_mut().client_id = broker.client_id.clone();
+        // The peer remains alive until every scenario assertion has completed.
+        future::or(
+            peer_run(broker, peer.clone(), self.data.clone()),
+            test(peer),
+        )
+        .await;
+    }
+}
+fn announcement(address: SocketAddr, uid: &str, name: &str, hub: u64) -> mdns_sd::ServiceEvent {
     let mut profile = [0; 23];
     profile[1..9].copy_from_slice(&hub.to_be_bytes());
     profile[9..17].copy_from_slice(
-        &u64::from_str_radix(&group_id(uid, home), 16)
+        &u64::from_str_radix(&group_id(uid, "local"), 16)
             .unwrap()
             .to_le_bytes(),
     );
@@ -129,1689 +435,1858 @@ fn home_announcement(
         .as_resolved_service(),
     ))
 }
-
-#[derive(Default)]
-struct TestClock {
-    elapsed: std::sync::Mutex<Duration>,
-    deadlines: std::sync::Mutex<Vec<Duration>>,
-    polls: std::sync::Mutex<Vec<Duration>>,
-    changed: Event,
-}
-impl TestClock {
-    fn advance(&self, by: Duration) {
-        *self.elapsed.lock().unwrap() += by;
-        self.changed.notify(usize::MAX);
-    }
-}
-impl Clock for TestClock {
-    fn now(&self) -> Duration {
-        *self.elapsed.lock().unwrap()
-    }
-    fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        self.deadlines.lock().unwrap().push(deadline);
-        Box::pin(async move {
-            loop {
-                self.polls.lock().unwrap().push(deadline);
-                let listener = self.changed.listen();
-                if self.now() >= deadline {
-                    return;
-                }
-                listener.await;
-            }
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum CloudCase {
-    Normal,
-    Failure,
-    RefreshRejected,
-    Missing,
-    Moved,
-    Unsupported,
-    DetailUnauthorized,
-    RecoveringAuth,
-    RecoveringDetail,
-    RecoveringCertificate,
-    MovedRecoveringDetail,
-    ForeignAccount,
-    Slow,
-}
-struct Rig {
-    _directory: tempfile::TempDir,
-    cloud_requests: std::sync::mpsc::Receiver<super::super::test_support::ReceivedRequest>,
-    store: Store,
-    source: XiaomiSource,
-    ready: TopologyReady,
-    discovery: Discovery,
-    discovery_driver: super::super::discovery::DiscoveryDriver,
-    events: flume::Sender<mdns_sd::ServiceEvent>,
-    listener: Async<TcpListener>,
-    acceptor: TlsAcceptor,
-    metadata: CachedDevice,
-}
-struct Control {
-    ready: Option<TopologyReady>,
-    cloud_requests: std::sync::mpsc::Receiver<super::super::test_support::ReceivedRequest>,
-    store: Store,
-    discovery: Discovery,
-    events: flume::Sender<mdns_sd::ServiceEvent>,
-    listener: Async<TcpListener>,
-    acceptor: TlsAcceptor,
-    metadata: CachedDevice,
-    context: Rc<Context>,
-    statuses: Rc<RefCell<Vec<SourceStatus>>>,
-    exited: Rc<RefCell<Option<Result<(), SourceError>>>>,
-}
-impl Control {
-    async fn accept(&self) -> Broker {
-        let (socket, _) = self.listener.accept().await.unwrap();
-        Broker::new(self.acceptor.accept(socket).await.unwrap())
-    }
-    async fn exited(&self) -> SourceError {
-        loop {
-            if let Some(Err(error)) = &*self.exited.borrow() {
-                return error.clone();
-            }
-            future::yield_now().await;
-        }
-    }
-}
-impl Rig {
-    fn new(has_cache: bool, case: CloudCase, clock: Arc<dyn Clock>) -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let mut tls = TlsFixture::new(false);
-        let renewed_certificate = tls.credentials.certificate_pem.clone();
-        if matches!(case, CloudCase::RecoveringCertificate) {
-            let identity = crate::xiaomi::certificate::ClientIdentity::from_private_key(
-                &tls.credentials.uid,
-                &tls.credentials.virtual_did,
-                &tls.credentials.private_key_pem,
-            )
-            .unwrap();
-            let now = time::OffsetDateTime::now_utc().unix_timestamp();
-            tls.credentials.certificate_pem =
-                crate::xiaomi::test_support::sign_csr(&identity.csr_pem, now - 3600, now - 60)
-                    .unwrap();
-        }
-        if matches!(case, CloudCase::RefreshRejected) {
-            tls.credentials.tokens.refresh_at = 1;
-        }
-        store.xiaomi().replace(&tls.credentials).unwrap();
-        let metadata = cached(&tls.credentials.uid);
-        if has_cache {
-            store.devices().save(&metadata).unwrap();
-        }
-        let data = metadata.clone();
-        let mut failed = false;
-        let (base, cloud_requests) = dynamic_mock_server(12, move |request| {
-            if !failed
-                && (matches!(case, CloudCase::RecoveringAuth)
-                    || matches!(
-                        case,
-                        CloudCase::RecoveringDetail | CloudCase::MovedRecoveringDetail
-                    ) && request.target.ends_with("/device_list_page")
-                    || matches!(case, CloudCase::RecoveringCertificate)
-                        && request.target.ends_with("/get_central_crt"))
-            {
-                failed = true;
-                return MockResponse::json(503, "{}");
-            }
-            if matches!(case, CloudCase::Failure) {
-                return MockResponse::json(503, "{}");
-            }
-            if matches!(case, CloudCase::RefreshRejected) {
-                return MockResponse::json(401, "{}");
-            }
-            let body = if request.target.ends_with("/get_central_crt") {
-                json!({"code":0,"result":{"cert":renewed_certificate}})
-            } else if request.target.ends_with("/gethome") {
-                let uid = if matches!(case, CloudCase::ForeignAccount) {
-                    "foreign-account"
-                } else {
-                    &data.uid
-                };
-                let homes = match case {
-                    CloudCase::Missing => json!([{"id":"local","uid":uid,"roomlist":[],"dids":[]}]),
-                    CloudCase::Moved | CloudCase::MovedRecoveringDetail => {
-                        json!([{"id":"local","uid":uid,"roomlist":[],"dids":[]},{"id":"moved","uid":uid,"roomlist":[],"dids":["target"]}])
-                    }
-                    _ => json!([{"id":"local","uid":uid,"roomlist":[],"dids":["target"]}]),
-                };
-                json!({"code":0,"result":{"homelist":homes}})
-            } else if request.target.ends_with("/device_list_page") {
-                if matches!(case, CloudCase::DetailUnauthorized) {
-                    return MockResponse::json(401, "{}");
-                }
-                json!({"code":0,"result":{"list":[{"did":"target","model":data.model,"spec_type":data.instance_type}]}})
-            } else if request.target.starts_with("/miot-spec-v2/instance?") {
-                let mut instance: Value =
-                    serde_json::from_str(include_str!("../../../tests/fixtures/miot/outlet.json"))
-                        .unwrap();
-                if matches!(case, CloudCase::Unsupported) {
-                    instance["services"] = json!([]);
-                }
-                instance
-            } else {
-                return MockResponse::json(503, "{}");
-            };
-            let response = MockResponse::json(200, &body.to_string());
-            if matches!(case, CloudCase::Slow) && request.target.ends_with("/gethome") {
-                response.delayed(Duration::from_millis(80))
-            } else {
-                response
-            }
-        });
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-        let (events, receiver) = flume::unbounded();
-        let (discovery, discovery_driver) = Discovery::with_events(receiver);
-        let (source, ready) = XiaomiSource::for_test(
-            store.clone(),
-            cloud,
-            discovery.clone(),
-            DeviceKey::new("xiaomi", "target"),
-            tls.ca_pem.clone(),
-            clock,
-        )
-        .unwrap();
-        Self {
-            _directory: directory,
-            cloud_requests,
-            store,
-            source,
-            ready,
-            discovery,
-            discovery_driver,
-            events,
-            listener,
-            acceptor: TlsAcceptor::from(tls.server_config()),
-            metadata,
-        }
-    }
-    fn announce(&self) {
-        self.events
-            .send(announcement(
-                self.listener.get_ref().local_addr().unwrap(),
-                &self.metadata.uid,
-                "hub",
-                123,
-            ))
-            .unwrap();
-    }
-    async fn run<F, Fut>(self, test: F)
-    where
-        F: FnOnce(Control) -> Fut,
-        Fut: Future<Output = ()>,
-    {
-        let statuses = Rc::new(RefCell::new(Vec::new()));
-        let reports = statuses.clone();
-        let exited = Rc::new(RefCell::new(None));
-        let outcome = exited.clone();
-        let context = self.source.context.clone();
-        let keep_events = self.events.clone();
-        let running = async {
-            *outcome.borrow_mut() = Some(
-                self.source
-                    .run(move |status| reports.borrow_mut().push(status))
-                    .await,
-            );
-            future::pending::<()>().await;
-        };
-        let discovering = async {
-            self.discovery_driver.run().await.unwrap();
-            panic!("discovery stopped");
-        };
-        let testing = test(Control {
-            ready: Some(self.ready),
-            cloud_requests: self.cloud_requests,
-            store: self.store,
-            discovery: self.discovery,
-            events: self.events,
-            listener: self.listener,
-            acceptor: self.acceptor,
-            metadata: self.metadata,
-            context,
-            statuses,
-            exited,
-        });
-        future::or(
-            future::or(future::or(running, discovering), testing),
-            async {
-                async_io::Timer::after(Duration::from_secs(3)).await;
-                panic!("isolated source case timed out");
-            },
-        )
-        .await;
-        drop(keep_events);
-    }
-}
-fn info(metadata: &CachedDevice, online: bool) -> Value {
-    json!({"devList":{"target":{"model":metadata.model,"urn":metadata.instance_type,"online":online,"specV2Access":true,"pushAvailable":true}}})
-}
-async fn available(device: &Device) {
-    let mut changes = device.subscribe();
-    while !matches!(device.snapshot().availability, Availability::Available) {
-        changes.changed().await;
-    }
-}
-async fn initialize(broker: &mut Broker, metadata: &CachedDevice, value: bool) {
-    broker.setup().await;
-    initialize_application(broker, metadata, value).await;
-}
-async fn initialize_application(broker: &mut Broker, metadata: &CachedDevice, value: bool) {
-    let Packet::Publish(list) = broker.next().await else {
-        panic!("getDevList expected")
-    };
-    assert_eq!(list.topic, "master/proxy/getDevList");
-    broker.acknowledge(&list).await;
-    broker.reply(&list, info(metadata, true), 10).await;
-    broker.subscription().await;
-    let Packet::Publish(read) = broker.next().await else {
-        panic!("get expected")
-    };
-    assert_eq!(read.topic, "master/proxy/get");
-    broker.acknowledge(&read).await;
-    broker.reply(&read, json!({"value":value}), 11).await;
-}
-fn notification(broker: &Broker, value: bool) -> Packet {
-    Packet::Publish(Publish::new(
-        format!("{}/appMsg/notify/iot/target/property/2.1", broker.client_id),
-        QoS::AtMostOnce,
-        encode_mips(
-            700,
-            None,
-            &json!({"did":"target","siid":2,"piid":1,"value":value}),
-        ),
-    ))
-}
-
-async fn scenario<S, W, SF, WF>(has_cache: bool, cloud_failure: bool, server: S, work: W)
-where
-    S: FnOnce(Broker, CachedDevice) -> SF,
-    W: FnOnce(TopologyReady, Store, Rc<RefCell<Vec<SourceStatus>>>) -> WF,
-    SF: Future<Output = ()>,
-    WF: Future<Output = ()>,
-{
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    let tls = TlsFixture::new(false);
-    store.xiaomi().replace(&tls.credentials).unwrap();
-    let metadata = cached(&tls.credentials.uid);
-    if has_cache {
-        store.devices().save(&metadata).unwrap();
-    }
-    let instance: Value =
-        serde_json::from_str(include_str!("../../../tests/fixtures/miot/outlet.json")).unwrap();
-    let uid = tls.credentials.uid.clone();
-    let model = metadata.model.clone();
-    let urn = metadata.instance_type.clone();
-    let (base, _requests) = dynamic_mock_server(8, move |request| {
-        if cloud_failure {
-            return MockResponse::json(503, "{}").delayed(Duration::from_millis(60));
-        }
-        if request.target.ends_with("/gethome") {
-            MockResponse::json(200,&json!({"code":0,"result":{"homelist":[{"id":"local","uid":uid,"roomlist":[],"dids":["target"]}]}}).to_string())
-        } else if request.target.starts_with("/miot-spec-v2/instance?") {
-            MockResponse::json(200, &instance.to_string())
-        } else if request.target.ends_with("/device_list_page") {
-            MockResponse::json(200,&json!({"code":0,"result":{"list":[{"did":"target","model":model,"spec_type":urn}]}}).to_string())
-        } else {
-            MockResponse::json(503, "{}")
-        }
-    });
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    let address = listener.get_ref().local_addr().unwrap();
-    let (events, receiver) = flume::unbounded();
-    let (discovery, discovery_driver) = Discovery::with_events(receiver);
-    events
-        .send(announcement(address, &tls.credentials.uid, "hub", 123))
-        .unwrap();
-    let (source, ready) = XiaomiSource::for_test(
-        store.clone(),
-        cloud,
-        discovery,
-        DeviceKey::new("xiaomi", "target"),
-        tls.ca_pem.clone(),
-        bootstrap::system_clock(),
-    )
-    .unwrap();
-    let acceptor = TlsAcceptor::from(tls.server_config());
-    let accepting = async {
-        let (socket, _) = listener.accept().await.unwrap();
-        let stream = acceptor.accept(socket).await.unwrap();
-        server(Broker::new(stream), metadata).await;
-    };
-    let statuses = Rc::new(RefCell::new(Vec::new()));
-    let reports = statuses.clone();
-    let serving = future::or(
-        source.run(move |status| reports.borrow_mut().push(status)),
-        async { discovery_driver.run().await.map_err(Into::into) },
-    );
-    let testing = async {
-        future::zip(accepting, work(ready, store, statuses)).await;
-    };
-    future::or(
-        async {
-            future::or(
-                async {
-                    serving.await.unwrap();
-                    panic!("source stopped")
-                },
-                testing,
-            )
-            .await;
-        },
-        async {
-            async_io::Timer::after(Duration::from_secs(3)).await;
-            panic!("isolated source timed out")
-        },
-    )
-    .await;
-    drop(events);
-}
-
-#[test]
-fn uncached_ready_follows_actual_local_preparation_and_static_save() {
-    block_on(scenario(
-        false,
-        false,
-        |mut broker, metadata| async move {
-            initialize(&mut broker, &metadata, false).await;
-            async_io::Timer::after(Duration::from_millis(20)).await;
-        },
-        |ready, store, _| async move {
-            assert!(
-                store
-                    .devices()
-                    .load("isolated-account", &DeviceKey::new("xiaomi", "target"))
-                    .unwrap()
-                    .is_none()
-            );
-            let prepared = ready.wait().await.unwrap();
-            assert_eq!(prepared.device.snapshot().power, Power::Off);
-            assert_eq!(
-                prepared.device.snapshot().availability,
-                Availability::Available
-            );
-            assert_eq!(
-                store
-                    .devices()
-                    .load(
-                        &prepared.metadata.uid,
-                        &prepared.metadata.outlet.description.key
-                    )
-                    .unwrap(),
-                Some(prepared.metadata)
-            );
-        },
-    ));
-}
-
-#[test]
-fn cached_cloud_failure_keeps_actual_local_control_and_diagnostic() {
-    block_on(scenario(
-        true,
-        true,
-        |mut broker, metadata| async move {
-            initialize(&mut broker, &metadata, false).await;
-            let Packet::Publish(write) = broker.next().await else {
-                panic!("write expected")
-            };
-            broker.acknowledge(&write).await;
-            broker
-                .reply(&write, json!({"result":[{"did":"target","code":1}]}), 12)
-                .await;
-            async_io::Timer::after(Duration::from_millis(100)).await;
-        },
-        |ready, _, statuses| async move {
-            let prepared = ready.wait().await.unwrap();
-            available(&prepared.device).await;
-            assert_eq!(
-                prepared.device.execute(Command::On).await.unwrap().power,
-                Power::On
-            );
-            async_io::Timer::after(Duration::from_millis(80)).await;
-            assert!(statuses.borrow().iter().any(|status| matches!(
-                status.authentication.authentication,
-                AuthenticationState::Unavailable(_)
-            )));
-            assert_eq!(
-                prepared.device.snapshot().availability,
-                Availability::Available
-            );
-        },
-    ));
-}
-
-#[test]
-fn offline_list_then_write_success_cannot_accept_or_panic_and_notify_still_applies() {
-    block_on(scenario(
-        true,
-        true,
-        |mut broker, metadata| async move {
-            initialize(&mut broker, &metadata, false).await;
-            let Packet::Publish(write) = broker.next().await else {
-                panic!("write expected")
-            };
-            broker.acknowledge(&write).await;
-            broker
-                .send(Packet::Publish(Publish::new(
-                    format!("{}/appMsg/devListChange", broker.client_id),
-                    QoS::AtMostOnce,
-                    encode_mips(701, None, &json!({"devList":["target"]})),
-                )))
-                .await;
-            let Packet::Publish(refresh) = broker.next().await else {
-                panic!("refresh expected")
-            };
-            broker.acknowledge(&refresh).await;
-            broker
-                .batch(vec![
-                    broker.business(&refresh, info(&metadata, false)),
-                    broker.business(&write, json!({"result":[{"did":"target","code":0}]})),
-                    notification(&broker, true),
-                ])
-                .await;
-            let Packet::Publish(recovery) = broker.next().await else {
-                panic!("recovery list expected")
-            };
-            broker.acknowledge(&recovery).await;
-            broker.reply(&recovery, info(&metadata, true), 13).await;
-            broker.subscription().await;
-            let Packet::Publish(read) = broker.next().await else {
-                panic!("recovery read expected")
-            };
-            broker.acknowledge(&read).await;
-            broker
-                .batch(vec![
-                    broker.business(&read, json!({"value":false})),
-                    notification(&broker, true),
-                ])
-                .await;
-            async_io::Timer::after(Duration::from_millis(20)).await;
-        },
-        |ready, _, _| async move {
-            let prepared = ready.wait().await.unwrap();
-            available(&prepared.device).await;
-            assert!(matches!(
-                prepared.device.execute(Command::On).await,
-                Err(CommandError::Unavailable(_))
-            ));
-            available(&prepared.device).await;
-            assert_eq!(prepared.device.snapshot().power, Power::On);
-        },
-    ));
-}
-
-fn system_clock() -> Arc<dyn Clock> {
-    bootstrap::system_clock()
-}
-async fn wait_for(mut predicate: impl FnMut() -> bool) {
+async fn until(mut predicate: impl FnMut() -> bool) {
     while !predicate() {
         future::yield_now().await;
     }
 }
-#[test]
-fn uncached_cloud_failure_and_missing_target_fail_without_waiting_for_discovery() {
-    block_on(async {
-        for case in [
-            CloudCase::Failure,
-            CloudCase::RefreshRejected,
-            CloudCase::Missing,
-        ] {
-            Rig::new(false, case, Arc::new(TestClock::default()))
-                .run(|mut c| async move {
-                    let error = c.ready.take().unwrap().wait().await.err().unwrap();
-                    assert!(!matches!(error, SourceError::NoLocalGateway));
-                    assert!(
-                        c.store
-                            .devices()
-                            .load(&c.metadata.uid, &c.metadata.outlet.description.key)
-                            .unwrap()
-                            .is_none()
-                    );
-                    assert!(!matches!(c.exited().await, SourceError::NoLocalGateway));
-                    let statuses = c.statuses.borrow();
-                    assert!(matches!(
-                        statuses.last().unwrap().gateway,
-                        GatewayStatus::Unavailable(_)
+type Binding = (String, u32, u32);
+#[derive(Default)]
+struct PeerState {
+    client_id: String,
+    seen: Vec<(String, Value)>,
+    online: BTreeMap<String, bool>,
+    bad: BTreeSet<String>,
+    omit: BTreeSet<String>,
+    values: BTreeMap<Binding, bool>,
+    sub_reject: BTreeSet<Binding>,
+    sub_timeout: BTreeSet<Binding>,
+    held_subs: Vec<Subscribe>,
+    read_fail: BTreeSet<Binding>,
+    read_timeout: BTreeSet<Binding>,
+    list_error: bool,
+    list_timeout: bool,
+    hold_reads: bool,
+    hold_writes: bool,
+    held: Vec<(Publish, Value)>,
+    send: Vec<Packet>,
+    unsubscribes: Vec<String>,
+}
+#[derive(Default)]
+struct Peer {
+    state: RefCell<PeerState>,
+    changed: Event,
+}
+impl Peer {
+    fn notify(&self, did: &str, siid: u32, value: bool) {
+        let client = self.state.borrow().client_id.clone();
+        self.send(Packet::Publish(Publish::new(
+            format!("{client}/appMsg/notify/iot/{did}/property/{siid}.1"),
+            QoS::AtMostOnce,
+            encode_mips(
+                700,
+                None,
+                &json!({"did":did,"siid":siid,"piid":1,"value":value}),
+            ),
+        )));
+    }
+    fn list_changed(&self, dids: &[&str]) {
+        let client = self.state.borrow().client_id.clone();
+        self.send(Packet::Publish(Publish::new(
+            format!("{client}/appMsg/devListChange"),
+            QoS::AtMostOnce,
+            encode_mips(701, None, &json!({"devList":dids})),
+        )));
+    }
+    fn send(&self, packet: Packet) {
+        self.state.borrow_mut().send.push(packet);
+        self.changed.notify(usize::MAX);
+    }
+    async fn release(&self, did: &str, siid: u32, value: Value) {
+        until(|| {
+            self.state.borrow().held.iter().any(|(publish, _)| {
+                let payload = decode_mips(&publish.payload).unwrap().payload;
+                payload["did"] == did
+                    && (payload["siid"] == siid || payload["rpc"]["params"][0]["siid"] == siid)
+            })
+        })
+        .await;
+        let index = self
+            .state
+            .borrow()
+            .held
+            .iter()
+            .position(|(publish, _)| {
+                let payload = decode_mips(&publish.payload).unwrap().payload;
+                payload["did"] == did
+                    && (payload["siid"] == siid || payload["rpc"]["params"][0]["siid"] == siid)
+            })
+            .unwrap();
+        let (publish, _) = self.state.borrow_mut().held.remove(index);
+        let client = self.state.borrow().client_id.clone();
+        self.send(response(&client, &publish, value));
+    }
+    fn count(&self, operation: &str, did: &str, siid: u32) -> usize {
+        self.state
+            .borrow()
+            .seen
+            .iter()
+            .filter(|(op, value)| {
+                op == operation
+                    && value["did"] == did
+                    && (siid == 0
+                        || value["siid"] == siid
+                        || value["rpc"]["params"][0]["siid"] == siid)
+            })
+            .count()
+    }
+}
+fn response(client: &str, publish: &Publish, value: Value) -> Packet {
+    Packet::Publish(Publish::new(
+        format!("{client}/reply"),
+        QoS::AtMostOnce,
+        encode_mips(decode_mips(&publish.payload).unwrap().id, None, &value),
+    ))
+}
+fn key(value: &Value) -> Binding {
+    (
+        value["did"].as_str().unwrap().into(),
+        value["siid"].as_u64().unwrap() as u32,
+        value["piid"].as_u64().unwrap() as u32,
+    )
+}
+fn topic_key(topic: &str) -> Binding {
+    let parts = topic.split('/').collect::<Vec<_>>();
+    let binding = parts.last().unwrap().split('.').collect::<Vec<_>>();
+    (
+        parts[parts.len() - 3].into(),
+        binding[0].parse().unwrap(),
+        binding[1].parse().unwrap(),
+    )
+}
+async fn peer_run(mut broker: Broker, peer: Rc<Peer>, data: Vec<CachedPhysicalDevice>) {
+    loop {
+        let listener = peer.changed.listen();
+        let queued = std::mem::take(&mut peer.state.borrow_mut().send);
+        if !queued.is_empty() {
+            broker.batch(queued).await;
+            continue;
+        }
+        let packet = future::or(async { Some(broker.next().await) }, async {
+            listener.await;
+            None
+        })
+        .await;
+        let Some(packet) = packet else {
+            continue;
+        };
+        match packet {
+            Packet::Subscribe(sub) => {
+                let binding = topic_key(&sub.filters[0].path);
+                let (timeout, rejected) = {
+                    let mut state = peer.state.borrow_mut();
+                    state.seen.push((
+                        "subscribe".into(),
+                        json!({"did":binding.0,"siid":binding.1,"piid":binding.2}),
                     ));
-                    assert!(statuses.windows(2).all(|pair| pair[0] != pair[1]));
-                })
-                .await;
-        }
-    });
-}
-#[test]
-fn uncached_list_subscribe_and_read_failure_never_save_topology() {
-    block_on(async {
-        for stage in [0, 1, 2, 3] {
-            let rig = Rig::new(false, CloudCase::Normal, system_clock());
-            rig.announce();
-            rig.run(|mut c| async move {
-                let ready = c.ready.take().unwrap();
-                future::zip(
-                    async {
-                        let mut broker = c.accept().await;
-                        broker.setup().await;
-                        let Packet::Publish(list) = broker.next().await else {
-                            panic!()
-                        };
-                        broker.acknowledge(&list).await;
-                        if stage == 0 {
-                            broker
-                                .send(broker.business(&list, info(&c.metadata, false)))
-                                .await;
-                        } else {
-                            broker.reply(&list, info(&c.metadata, true), 80).await;
-                            if stage == 1 {
-                                let Packet::Subscribe(sub) = broker.next().await else {
-                                    panic!()
-                                };
-                                broker
-                                    .send(Packet::SubAck(SubAck::new(
-                                        sub.pkid,
-                                        vec![SubscribeReasonCode::NotAuthorized],
-                                    )))
-                                    .await;
-                            } else {
-                                broker.subscription().await;
-                                let Packet::Publish(read) = broker.next().await else {
-                                    panic!()
-                                };
-                                broker.acknowledge(&read).await;
-                                if stage == 2 {
-                                    broker
-                                        .send(broker.business(&read, json!({"value":"false"})))
-                                        .await;
-                                } else {
-                                    async_io::Timer::after(Duration::from_millis(250)).await;
-                                }
-                            }
-                        }
-                        async_io::Timer::after(Duration::from_millis(10)).await;
-                    },
-                    async {
-                        assert!(ready.wait().await.is_err());
-                        assert!(
-                            c.store
-                                .devices()
-                                .load(&c.metadata.uid, &c.metadata.outlet.description.key)
-                                .unwrap()
-                                .is_none()
-                        );
-                        assert!(matches!(
-                            c.exited().await,
-                            SourceError::Central(_) | SourceError::Unavailable(_)
-                        ));
-                    },
-                )
-                .await;
-            })
-            .await;
-        }
-    });
-}
-#[test]
-fn cached_removed_or_unsupported_is_unavailable_and_preserves_static_cache() {
-    block_on(async {
-        for case in [CloudCase::Missing, CloudCase::Unsupported] {
-            let rig = Rig::new(true, case, system_clock());
-            rig.announce();
-            rig.run(|mut c| async move {
-                let prepared = c.ready.take().unwrap().wait().await.unwrap();
-                wait_for(|| c.context.live.borrow().blocked.is_some()).await;
-                assert!(matches!(
-                    prepared.device.snapshot().availability,
-                    Availability::Unavailable(_)
-                ));
-                assert_eq!(
-                    c.store
-                        .devices()
-                        .load(&c.metadata.uid, &c.metadata.outlet.description.key)
-                        .unwrap(),
-                    Some(c.metadata)
-                );
-                assert!(c.exited.borrow().is_none());
-            })
-            .await;
-        }
-    });
-}
-#[test]
-fn cached_refresh_rejection_and_account_mismatch_keep_same_account_local_access() {
-    block_on(async {
-        for case in [
-            CloudCase::RefreshRejected,
-            CloudCase::ForeignAccount,
-            CloudCase::DetailUnauthorized,
-        ] {
-            let rig = Rig::new(true, case, system_clock());
-            rig.announce();
-            rig.run(|mut c| async move {
-                let ready = c.ready.take().unwrap();
-                future::zip(
-                    async {
-                        let mut broker = c.accept().await;
-                        initialize(&mut broker, &c.metadata, false).await;
-                        let Packet::Publish(write) = broker.next().await else {
-                            panic!("write expected")
-                        };
-                        broker.acknowledge(&write).await;
-                        broker
-                            .reply(&write, json!({"result":[{"did":"target","code":0}]}), 90)
-                            .await;
-                        async_io::Timer::after(Duration::from_millis(20)).await;
-                    },
-                    async {
-                        let prepared = ready.wait().await.unwrap();
-                        available(&prepared.device).await;
-                        prepared.device.execute(Command::On).await.unwrap();
-                        wait_for(|| {
-                            c.statuses.borrow().iter().any(|s| {
-                                matches!(
-                                    s.authentication.authentication,
-                                    AuthenticationState::SignInRequired(_)
-                                        | AuthenticationState::Unavailable(
-                                            FailureReason::AccountIdentityMismatch
-                                        )
-                                )
-                            })
-                        })
-                        .await;
-                        assert_eq!(
-                            prepared.device.snapshot().availability,
-                            Availability::Available
-                        );
-                        assert_eq!(
-                            c.store.xiaomi().load().unwrap().unwrap().uid,
-                            c.metadata.uid
-                        );
-                    },
-                )
-                .await;
-            })
-            .await;
-        }
-    });
-}
-#[test]
-fn slow_authentication_does_not_consume_the_initial_discovery_wait() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let rig = Rig::new(false, CloudCase::Slow, clock.clone());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let ready = c.ready.take().unwrap();
-            future::zip(
-                async {
-                    let mut broker = c.accept().await;
-                    initialize(&mut broker, &c.metadata, true).await;
-                    async_io::Timer::after(Duration::from_millis(10)).await;
-                },
-                async {
-                    async_io::Timer::after(Duration::from_millis(20)).await;
-                    clock.advance(Duration::from_secs(60));
-                    assert_eq!(
-                        ready.wait().await.unwrap().device.snapshot().availability,
-                        Availability::Available
-                    );
-                },
-            )
-            .await;
-        })
-        .await;
-    });
-}
-#[test]
-fn actual_discovery_wait_expires_even_if_a_late_announcement_is_ready() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        Rig::new(false, CloudCase::Normal, clock.clone())
-            .run(|mut c| async move {
-                wait_for(|| {
-                    clock
-                        .deadlines
-                        .lock()
-                        .unwrap()
-                        .contains(&Duration::from_secs(30))
-                })
-                .await;
-                clock.advance(Duration::from_secs(31));
-                c.events
-                    .send(announcement(
-                        c.listener.get_ref().local_addr().unwrap(),
-                        &c.metadata.uid,
-                        "late",
-                        123,
-                    ))
-                    .unwrap();
-                assert!(matches!(
-                    c.ready.take().unwrap().wait().await,
-                    Err(SourceError::NoLocalGateway)
-                ));
-                assert!(
-                    c.store
-                        .devices()
-                        .load(&c.metadata.uid, &c.metadata.outlet.description.key)
-                        .unwrap()
-                        .is_none()
-                );
-            })
-            .await;
-    });
-}
-#[test]
-fn moved_target_waits_for_its_new_owned_home_and_updates_cache_without_replacing_device() {
-    block_on(async {
-        let rig = Rig::new(true, CloudCase::Moved, system_clock());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            wait_for(|| c.context.live.borrow().blocked.is_some()).await;
-            assert!(!matches!(
-                prepared.device.snapshot().availability,
-                Availability::Available
-            ));
-            c.events
-                .send(home_announcement(
-                    c.listener.get_ref().local_addr().unwrap(),
-                    &c.metadata.uid,
-                    "moved",
-                    "new-home",
-                    999,
-                ))
-                .unwrap();
-            let mut updated = c.metadata.clone();
-            updated.home_id = "moved".into();
-            updated.group_id = group_id(&updated.uid, "moved");
-            // An old attempted TLS connection can precede the directory result.
-            // Complete handshakes until the current route starts MQTT.
-            future::zip(
-                async {
-                    loop {
-                        let mut broker = c.accept().await;
-                        if broker.setup_if_connected().await {
-                            initialize_application(&mut broker, &updated, true).await;
-                            break;
-                        }
+                    let timeout = state.sub_timeout.contains(&binding);
+                    let rejected = state.sub_reject.contains(&binding);
+                    if timeout {
+                        state.held_subs.push(sub.clone());
                     }
-                    async_io::Timer::after(Duration::from_millis(20)).await;
-                },
-                async {
-                    available(&prepared.device).await;
-                    wait_for(|| {
-                        c.store
-                            .devices()
-                            .load(&updated.uid, &updated.outlet.description.key)
-                            .unwrap()
-                            == Some(updated.clone())
-                    })
-                    .await;
-                    assert_eq!(prepared.device.snapshot().power, Power::On);
-                },
-            )
-            .await;
-        })
-        .await;
-    });
-}
-#[test]
-fn unavailable_clears_stable_history_and_retry_delays_cap_at_thirty_seconds() {
-    let clock = Arc::new(TestClock::default());
-    let rig = Rig::new(true, CloudCase::Failure, clock.clone());
-    let context = rig.source.context.clone();
-    context.live.borrow_mut().preparation.available_since = Some(clock.now());
-    clock.advance(Duration::from_secs(30));
-    assert!(context.live.borrow().preparation.available_since.is_some());
-    context.unavailable("offline".into());
-    assert!(context.live.borrow().preparation.available_since.is_none());
-    assert!(context.live.borrow().reset_backoff);
-    context.live.borrow_mut().reset_backoff = false;
-    context.live.borrow_mut().preparation.available_since = Some(clock.now());
-    clock.advance(Duration::from_secs(1));
-    context.unavailable("short availability".into());
-    assert!(!context.live.borrow().reset_backoff);
-    let mut retry = Backoff::new();
-    let delays = (0..7)
-        .map(|_| retry.failed(false).as_secs())
-        .collect::<Vec<_>>();
-    assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30]);
-    assert_eq!(retry.failed(true), Duration::from_secs(1));
-}
-#[test]
-fn static_cache_save_error_is_fatal_after_local_success_and_before_ready() {
-    block_on(async {
-        let rig = Rig::new(false, CloudCase::Normal, system_clock());
-        rig.announce();
-        rusqlite::Connection::open(rig.store.path()).unwrap().execute_batch("CREATE TRIGGER fail_cache BEFORE INSERT ON device_cache BEGIN SELECT RAISE(ABORT, 'isolated disk failure'); END;").unwrap();
-        rig.run(|mut c| async move {
-            let ready = c.ready.take().unwrap();
-            future::zip(
-                async {
-                    let mut broker = c.accept().await;
-                    // A QoS0 final reply allows the runner to terminate at its save boundary.
-                    broker.setup().await;
-                    let Packet::Publish(list) = broker.next().await else {
-                        panic!()
-                    };
-                    broker.acknowledge(&list).await;
-                    broker.reply(&list, info(&c.metadata, true), 95).await;
-                    broker.subscription().await;
-                    let Packet::Publish(read) = broker.next().await else {
-                        panic!()
-                    };
-                    broker.acknowledge(&read).await;
+                    (timeout, rejected)
+                };
+                if !timeout {
                     broker
-                        .send(broker.business(&read, json!({"value":true})))
+                        .send(Packet::SubAck(SubAck::new(
+                            sub.pkid,
+                            vec![if rejected {
+                                SubscribeReasonCode::Unspecified
+                            } else {
+                                SubscribeReasonCode::QoS2
+                            }],
+                        )))
                         .await;
-                    async_io::Timer::after(Duration::from_millis(20)).await;
-                },
-                async {
-                    assert!(matches!(ready.wait().await, Err(SourceError::Storage(_))));
-                    assert!(matches!(c.exited().await, SourceError::Storage(_)));
-                    assert!(
-                        c.store
-                            .devices()
-                            .load(&c.metadata.uid, &c.metadata.outlet.description.key)
-                            .unwrap()
-                            .is_none()
-                    );
-                },
-            )
+                }
+            }
+            Packet::Unsubscribe(unsub) => {
+                peer.state
+                    .borrow_mut()
+                    .unsubscribes
+                    .extend(unsub.filters.clone());
+                broker
+                    .send(Packet::UnsubAck(UnsubAck {
+                        pkid: unsub.pkid,
+                        reasons: vec![UnsubAckReason::Success; unsub.filters.len()],
+                        properties: None,
+                    }))
+                    .await;
+            }
+            Packet::Publish(publish) => {
+                let payload = decode_mips(&publish.payload).unwrap().payload;
+                let operation = publish.topic.rsplit('/').next().unwrap().to_owned();
+                peer.state
+                    .borrow_mut()
+                    .seen
+                    .push((operation.clone(), payload.clone()));
+                broker.acknowledge(&publish).await;
+                let (reply, hold, timeout) = {
+                    let state = peer.state.borrow();
+                    match operation.as_str() {
+                        "getDevList" => {
+                            assert!(payload.get("filter").is_none());
+                            let mut list = serde_json::Map::new();
+                            for record in &data {
+                                let did = &record.device.description.key.id;
+                                if state.omit.contains(did) {
+                                    continue;
+                                }
+                                let mut info = json!({"name":format!("name {did}"),"model":record.model,"urn":record.instance_type,"online":state.online.get(did).copied().unwrap_or(true),"specV2Access":true,"pushAvailable":true});
+                                if state.bad.contains(did) {
+                                    info.as_object_mut().unwrap().remove("pushAvailable");
+                                }
+                                list.insert(did.clone(), info);
+                            }
+                            (
+                                if state.list_error {
+                                    json!({"invalid":list})
+                                } else {
+                                    json!({"devList":list})
+                                },
+                                false,
+                                state.list_timeout,
+                            )
+                        }
+                        "get" => {
+                            let binding = key(&payload);
+                            (
+                                if state.read_fail.contains(&binding) {
+                                    json!({"code":-7})
+                                } else {
+                                    json!({"value":state.values.get(&binding).copied().unwrap_or(false)})
+                                },
+                                state.hold_reads,
+                                state.read_timeout.contains(&binding),
+                            )
+                        }
+                        "rpcReq" => {
+                            let property = &payload["rpc"]["params"][0];
+                            (
+                                json!({"result":[{"did":property["did"],"siid":property["siid"],"piid":property["piid"],"code":0}]}),
+                                state.hold_writes,
+                                false,
+                            )
+                        }
+                        _ => panic!("unexpected operation {operation}"),
+                    }
+                };
+                if hold || timeout {
+                    peer.state.borrow_mut().held.push((publish, reply));
+                } else {
+                    broker
+                        .send(response(&broker.client_id, &publish, reply))
+                        .await;
+                }
+            }
+            other => panic!("unexpected source packet {other:?}"),
+        }
+    }
+}
+fn function(registry: &DeviceRegistry, did: &str, id: &str) -> crate::device::Function {
+    registry
+        .get(&DeviceKey::new("xiaomi", did))
+        .unwrap()
+        .function(id)
+        .unwrap()
+}
+async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
+    until(|| {
+        dids.iter().all(|did| {
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", *did))
+                .is_some_and(|physical| {
+                    physical.availability() == Availability::Available
+                        && physical
+                            .functions()
+                            .iter()
+                            .all(|function| function.snapshot().power != Power::Unknown)
+                        && c.context
+                            .live
+                            .borrow()
+                            .session
+                            .as_ref()
+                            .and_then(|session| session.devices.get(*did))
+                            .is_some_and(|work| {
+                                work.subscribed.borrow().len()
+                                    == physical.functions().len()
+                                        + usize::from(
+                                            work.cached.borrow().device.refresh_trigger.is_some(),
+                                        )
+                            })
+                })
+        }) && peer
+            .state
+            .borrow()
+            .seen
+            .iter()
+            .filter(|(op, _)| op == "getDevList")
+            .count()
+            >= 1
+    })
+    .await;
+}
+#[test]
+fn prepared_accounts_can_deliver_an_empty_registry() {
+    block_on(Rig::new(false, &[]).run(|mut c| async move {
+        let registry = c.ready.take().unwrap().wait().await.unwrap();
+        assert!(registry.list().is_empty());
+    }));
+}
+#[test]
+fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_work() {
+    block_on(
+        Rig::new(false, &["one", "multi", "two"]).run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            peer.state.borrow_mut().hold_reads = true;
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                until(|| {
+                    control.context.registry.list().len() == 3
+                        && control
+                            .context
+                            .registry
+                            .list()
+                            .iter()
+                            .all(|physical| physical.availability() == Availability::Available)
+                })
+                .await;
+                let registry = &control.context.registry;
+                assert_eq!(
+                    registry
+                        .get(&DeviceKey::new("xiaomi", "multi"))
+                        .unwrap()
+                        .functions()
+                        .len(),
+                    3
+                );
+                let one = function(registry, "one", "main");
+                assert_eq!(one.snapshot().power, Power::Unknown);
+                assert_eq!(
+                    one.execute(Command::Toggle).await,
+                    Err(crate::device::CommandError::UnknownState)
+                );
+                assert_eq!(one.execute(Command::On).await.unwrap().power, Power::On);
+                peer.notify("two", 2, true);
+                peer.notify("multi", 4, true);
+                until(|| {
+                    function(registry, "two", "main").snapshot().power == Power::On
+                        && function(registry, "multi", "outlet_2").snapshot().power == Power::On
+                })
+                .await;
+                assert_eq!(
+                    function(registry, "multi", "outlet_1").snapshot().power,
+                    Power::Unknown
+                );
+                assert_eq!(
+                    function(registry, "multi", "usb").snapshot().power,
+                    Power::Unknown
+                );
+            })
             .await;
-        })
-        .await;
-    });
+        }),
+    );
 }
 
-fn removed(name: &str) -> mdns_sd::ServiceEvent {
-    mdns_sd::ServiceEvent::ServiceRemoved(SERVICE_TYPE.into(), format!("{name}.{SERVICE_TYPE}"))
-}
 #[test]
-fn withdrawn_route_during_connect_never_subscribes_or_sends_application_requests() {
-    block_on(async {
-        let rig = Rig::new(true, CloudCase::Failure, system_clock());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            let mut broker = c.accept().await;
-            assert!(matches!(broker.next().await, Packet::Connect(_)));
-            c.events.send(removed("hub")).unwrap();
-            wait_for(|| c.discovery.snapshot().gateways.is_empty()).await;
-            broker
-                .send(Packet::ConnAck(ConnAck::new(
-                    ConnectReturnCode::Success,
-                    false,
-                )))
-                .await;
-            assert!(broker.next_optional().await.is_none());
-            assert!(c.context.live.borrow().generation().is_none());
-            assert_eq!(prepared.device.snapshot().power, Power::Unknown);
-            assert!(matches!(
-                prepared.device.snapshot().availability,
-                Availability::Unavailable(_)
-            ));
-        })
-        .await;
-    });
-}
-#[test]
-fn route_change_cancels_pending_write_and_recovers_with_the_same_device() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let rig = Rig::new(true, CloudCase::Failure, clock.clone());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            let old_generation = Rc::new(std::cell::Cell::new(None));
-            let generation = old_generation.clone();
-            future::zip(
-                async {
-                    let mut broker = c.accept().await;
-                    initialize(&mut broker, &c.metadata, false).await;
-                    generation.set(c.context.live.borrow().generation());
-                    // A backup cannot interrupt the current master.
-                    c.events
-                        .send(announcement(
-                            c.listener.get_ref().local_addr().unwrap(),
-                            &c.metadata.uid,
-                            "backup",
-                            999,
-                        ))
-                        .unwrap();
-                    let Packet::Publish(write) = broker.next().await else {
-                        panic!("write expected")
-                    };
-                    broker.acknowledge(&write).await;
-                    assert_eq!(c.context.live.borrow().generation(), generation.get());
-                    c.events.send(removed("hub")).unwrap();
-                    wait_for(|| c.context.live.borrow().generation().is_none()).await;
-                    assert!(broker.next_optional().await.is_none());
-                    clock.advance(Duration::from_secs(1));
-                    let mut replacement = c.accept().await;
-                    initialize(&mut replacement, &c.metadata, true).await;
-                    async_io::Timer::after(Duration::from_millis(20)).await;
-                },
-                async {
-                    available(&prepared.device).await;
-                    assert!(matches!(
-                        prepared.device.execute(Command::On).await,
-                        Err(CommandError::Unavailable(_))
-                    ));
-                    available(&prepared.device).await;
-                    assert_eq!(prepared.device.snapshot().power, Power::On);
-                    assert_ne!(c.context.live.borrow().generation(), old_generation.get());
-                    assert_eq!(
-                        prepared.device.description().key,
-                        c.metadata.outlet.description.key
-                    );
-                },
-            )
+fn cached_local_control_survives_temporary_cloud_detail_failures() {
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.cloud.lock().unwrap().detail_status = 503;
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                control.context.live.borrow().loading.is_empty()
+                    && matches!(
+                        control
+                            .context
+                            .status
+                            .borrow()
+                            .authentication
+                            .authentication,
+                        crate::xiaomi::auth::AuthenticationState::Authenticated
+                    )
+                    && function(&control.context.registry, "one", "main")
+                        .snapshot()
+                        .power
+                        != Power::Unknown
+            })
             .await;
+            assert_eq!(
+                function(&control.context.registry, "one", "main")
+                    .snapshot()
+                    .availability,
+                Availability::Available
+            );
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert!(peer.count("rpcReq", "one", 2) > 0);
         })
         .await;
-    });
+    }));
+}
+
+async fn advance_to(clock: &TestClock, deadline: Duration) {
+    until(|| clock.deadlines.lock().unwrap().contains(&deadline)).await;
+    clock.advance(deadline - clock.now());
+}
+fn accepted(did: &str, siid: u32, code: i32) -> Value {
+    json!({"result":[{"did":did,"siid":siid,"piid":1,"code":code}]})
 }
 #[test]
-fn preparation_superseded_by_offline_reply_cannot_restore_available_from_old_read() {
-    block_on(async {
-        let rig = Rig::new(true, CloudCase::Failure, system_clock());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            let mut broker = c.accept().await;
-            broker.setup().await;
-            let Packet::Publish(list) = broker.next().await else {
-                panic!()
-            };
-            broker.acknowledge(&list).await;
-            broker.reply(&list, info(&c.metadata, true), 100).await;
-            broker.subscription().await;
-            let Packet::Publish(read) = broker.next().await else {
-                panic!()
-            };
-            broker.acknowledge(&read).await;
-            broker
-                .send(Packet::Publish(Publish::new(
-                    format!("{}/appMsg/devListChange", broker.client_id),
-                    QoS::AtMostOnce,
-                    encode_mips(701, None, &json!({"devList":["target"]})),
-                )))
-                .await;
-            let Packet::Publish(refresh) = broker.next().await else {
-                panic!()
-            };
-            broker.acknowledge(&refresh).await;
-            broker
-                .batch(vec![
-                    broker.business(&refresh, info(&c.metadata, false)),
-                    broker.business(&read, json!({"value":false})),
-                    notification(&broker, true),
-                ])
-                .await;
-            wait_for(|| prepared.device.snapshot().power == Power::On).await;
-            assert!(matches!(
-                prepared.device.snapshot().availability,
-                Availability::Unavailable(_)
-            ));
-            assert!(
-                c.context
-                    .live
+fn a_bad_candidate_remains_pending_without_blocking_good_devices() {
+    block_on(Rig::new(false, &["one", "multi"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.state.borrow_mut().bad.insert("multi".into());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| {
+                control
+                    .context
+                    .status
                     .borrow()
-                    .preparation
-                    .available_since
+                    .pending
+                    .iter()
+                    .any(|pending| pending.did == "multi")
+            })
+            .await;
+            assert_eq!(control.context.registry.list().len(), 1);
+            assert!(
+                control
+                    .store
+                    .devices()
+                    .load_published(&DeviceKey::new("xiaomi", "multi"))
+                    .unwrap()
                     .is_none()
+            );
+            peer.state.borrow_mut().bad.clear();
+            peer.list_changed(&["multi"]);
+            initialized(control, &peer, &["one", "multi"]).await;
+        })
+        .await;
+    }));
+}
+#[test]
+fn total_control_refresh_reads_mixed_values_without_inference_and_coalesces() {
+    block_on(Rig::new(true, &["multi"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["multi"]).await;
+            let registry = &control.context.registry;
+            peer.notify("multi", 4, true);
+            until(|| function(registry, "multi", "outlet_2").snapshot().power == Power::On).await;
+            let before = peer.count("get", "multi", 3);
+            peer.state.borrow_mut().hold_reads = true;
+            peer.notify("multi", 2, true);
+            until(|| {
+                peer.count("get", "multi", 3) == before + 1
+                    && peer
+                        .state
+                        .borrow()
+                        .held
+                        .iter()
+                        .any(|(p, _)| decode_mips(&p.payload).unwrap().payload["siid"] == 3)
+            })
+            .await;
+            assert_eq!(
+                function(registry, "multi", "outlet_1").snapshot().power,
+                Power::Off
+            );
+            assert_eq!(
+                function(registry, "multi", "outlet_2").snapshot().power,
+                Power::On
+            );
+            assert_eq!(
+                function(registry, "multi", "usb").snapshot().power,
+                Power::Off
+            );
+            peer.notify("multi", 2, false);
+            peer.notify("multi", 2, true);
+            peer.notify("multi", 2, false);
+            peer.release("multi", 3, json!({"value":true})).await;
+            until(|| {
+                peer.state
+                    .borrow()
+                    .held
+                    .iter()
+                    .any(|(p, _)| decode_mips(&p.payload).unwrap().payload["siid"] == 4)
+            })
+            .await;
+            peer.release("multi", 4, json!({"value":false})).await;
+            until(|| {
+                peer.state
+                    .borrow()
+                    .held
+                    .iter()
+                    .any(|(p, _)| decode_mips(&p.payload).unwrap().payload["siid"] == 9)
+            })
+            .await;
+            peer.release("multi", 9, json!({"value":true})).await;
+            until(|| {
+                peer.count("get", "multi", 3) == before + 2
+                    && peer
+                        .state
+                        .borrow()
+                        .held
+                        .iter()
+                        .any(|(p, _)| decode_mips(&p.payload).unwrap().payload["siid"] == 3)
+            })
+            .await;
+            peer.state.borrow_mut().hold_reads = false;
+            peer.release("multi", 3, json!({"value":true})).await;
+            until(|| {
+                function(registry, "multi", "usb").snapshot().power == Power::Off
+                    && peer.count("get", "multi", 9) == before + 2
+            })
+            .await;
+            assert_eq!(
+                function(registry, "multi", "outlet_1").snapshot().power,
+                Power::On
+            );
+            assert_eq!(
+                function(registry, "multi", "outlet_2").snapshot().power,
+                Power::Off
+            );
+            assert_eq!(
+                registry
+                    .get(&DeviceKey::new("xiaomi", "multi"))
+                    .unwrap()
+                    .functions()
+                    .len(),
+                3
             );
         })
         .await;
-    });
+    }));
 }
 #[test]
-fn queued_commands_are_accepted_after_more_than_five_seconds_in_the_fifo() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let rig = Rig::new(true, CloudCase::Failure, clock.clone());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            future::zip(
-                async {
-                    let mut broker = c.accept().await;
-                    initialize(&mut broker, &c.metadata, false).await;
-                    let Packet::Publish(first) = broker.next().await else {
-                        panic!()
-                    };
-                    broker.acknowledge(&first).await;
-                    async_io::Timer::after(Duration::from_millis(10)).await;
-                    clock.advance(Duration::from_secs(6));
-                    broker
-                        .reply(&first, json!({"result":[{"did":"target","code":0}]}), 110)
-                        .await;
-                    let Packet::Publish(second) = broker.next().await else {
-                        panic!()
-                    };
-                    assert_eq!(second.topic, "master/proxy/rpcReq");
-                    broker.acknowledge(&second).await;
-                    broker
-                        .reply(&second, json!({"result":[{"did":"target","code":0}]}), 111)
-                        .await;
-                },
-                async {
-                    available(&prepared.device).await;
-                    let (first, second) = future::zip(
-                        prepared.device.execute(Command::On),
-                        prepared.device.execute(Command::Off),
-                    )
-                    .await;
-                    first.unwrap();
-                    second.unwrap();
-                    assert_eq!(prepared.device.snapshot().power, Power::Off);
-                },
-            )
+fn commands_are_concurrent_across_channels_and_fifo_with_execution_time_toggle() {
+    block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one", "multi"]).await;
+            peer.state.borrow_mut().hold_writes = true;
+            let a = function(&control.context.registry, "one", "main");
+            let b = function(&control.context.registry, "multi", "outlet_1");
+            let d = function(&control.context.registry, "multi", "outlet_2");
+            let mut first = Box::pin(a.execute(Command::On));
+            let mut second = Box::pin(a.execute(Command::Toggle));
+            let mut third = Box::pin(a.execute(Command::Off));
+            let mut other = Box::pin(b.execute(Command::On));
+            let mut channel = Box::pin(d.execute(Command::On));
+            for command in [
+                &mut first,
+                &mut second,
+                &mut third,
+                &mut other,
+                &mut channel,
+            ] {
+                assert!(poll_once(command.as_mut()).await.is_none());
+            }
+            until(|| {
+                peer.count("rpcReq", "one", 2) == 1
+                    && peer.count("rpcReq", "multi", 3) == 1
+                    && peer.count("rpcReq", "multi", 4) == 1
+            })
             .await;
+            control.clock.advance(Duration::from_secs(6));
+            assert!(poll_once(second.as_mut()).await.is_none());
+            peer.release("multi", 4, accepted("multi", 4, 1)).await;
+            assert_eq!(channel.await.unwrap().power, Power::On);
+            peer.release("multi", 3, accepted("multi", 3, 0)).await;
+            other.await.unwrap();
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            first.await.unwrap();
+            until(|| peer.count("rpcReq", "one", 2) == 2).await;
+            assert_eq!(
+                peer.state
+                    .borrow()
+                    .seen
+                    .iter()
+                    .filter(|(op, value)| op == "rpcReq" && value["did"] == "one")
+                    .nth(1)
+                    .unwrap()
+                    .1["rpc"]["params"][0]["value"],
+                false
+            );
+            peer.release("one", 2, accepted("one", 2, 1)).await;
+            second.await.unwrap();
+            until(|| peer.count("rpcReq", "one", 2) == 3).await;
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            third.await.unwrap();
+            assert_eq!(a.snapshot().power, Power::Off);
         })
         .await;
-    });
+    }));
 }
-
 #[test]
-fn disconnected_sent_write_is_not_replayed_and_new_session_recovers_the_same_receiver() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let rig = Rig::new(true, CloudCase::Failure, clock.clone());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            future::zip(
-                async {
-                    let mut old = c.accept().await;
-                    initialize(&mut old, &c.metadata, false).await;
-                    let Packet::Publish(write) = old.next().await else {
-                        panic!("old write expected")
-                    };
-                    old.acknowledge(&write).await;
-                    drop(old);
-                    wait_for(|| c.context.live.borrow().generation().is_none()).await;
-                    clock.advance(Duration::from_secs(1));
-                    let mut new = c.accept().await;
-                    initialize(&mut new, &c.metadata, true).await;
-                    let Packet::Publish(write) = new.next().await else {
-                        panic!("new write expected")
-                    };
-                    let payload = crate::xiaomi::central::decode_mips(&write.payload)
+fn an_offline_event_before_an_active_success_reply_preserves_acceptance() {
+    block_on(Rig::new(true, &["one", "two"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one", "two"]).await;
+            peer.state.borrow_mut().hold_writes = true;
+            let one = function(&control.context.registry, "one", "main");
+            let mut command = Box::pin(one.execute(Command::On));
+            assert!(poll_once(command.as_mut()).await.is_none());
+            until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            peer.state.borrow_mut().online.insert("one".into(), false);
+            peer.list_changed(&["one"]);
+            until(|| matches!(one.snapshot().availability, Availability::Unavailable(_))).await;
+            assert!(poll_once(command.as_mut()).await.is_none());
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            let accepted = command.await.unwrap();
+            assert_eq!(accepted.power, Power::On);
+            assert!(matches!(
+                accepted.availability,
+                Availability::Unavailable(_)
+            ));
+            assert_eq!(
+                function(&control.context.registry, "two", "main")
+                    .snapshot()
+                    .availability,
+                Availability::Available
+            );
+        })
+        .await;
+    }));
+}
+#[test]
+fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
+    for timeout in [false, true] {
+        block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            let sub = ("multi".into(), 9, 1);
+            let read = ("one".into(), 2, 1);
+            if timeout {
+                peer.state.borrow_mut().sub_timeout.insert(sub.clone());
+                peer.state.borrow_mut().read_timeout.insert(read.clone());
+            } else {
+                peer.state.borrow_mut().sub_reject.insert(sub.clone());
+                peer.state.borrow_mut().read_fail.insert(read.clone());
+            }
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                until(|| {
+                    peer.count("subscribe", "multi", 9) == 1 && peer.count("get", "one", 2) == 1
+                })
+                .await;
+                for attempt in 2..=4 {
+                    let deadline = control.clock.now() + Duration::from_millis(100);
+                    advance_to(&control.clock, deadline).await;
+                    until(|| peer.count("subscribe", "multi", 9) == attempt).await;
+                }
+                // Read retries retain their own three-second schedule despite subscription attempts.
+                for attempt in 2..=4 {
+                    let deadline = Duration::from_secs((attempt as u64 - 1) * 3);
+                    advance_to(&control.clock, deadline).await;
+                    until(|| peer.count("get", "one", 2) == attempt).await;
+                }
+                until(|| {
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .pending
+                        .iter()
+                        .any(|pending| pending.did == "one" && pending.reason.contains("read"))
+                        && control
+                            .context
+                            .status
+                            .borrow()
+                            .pending
+                            .iter()
+                            .any(|pending| {
+                                pending.did == "multi" && pending.reason.contains("subscribe")
+                            })
+                })
+                .await;
+                assert!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .pending
+                        .iter()
+                        .any(|pending| pending.did == "one" && pending.reason.contains("read"))
+                );
+                assert!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .pending
+                        .iter()
+                        .any(|pending| pending.did == "multi"
+                            && pending.reason.contains("subscribe"))
+                );
+                assert_eq!(
+                    function(&control.context.registry, "one", "main")
+                        .snapshot()
+                        .power,
+                    Power::Unknown
+                );
+                assert_eq!(
+                    function(&control.context.registry, "one", "main")
+                        .snapshot()
+                        .availability,
+                    Availability::Available
+                );
+                control.clock.advance(Duration::from_secs(10));
+                for _ in 0..10 {
+                    future::yield_now().await;
+                }
+                assert_eq!(peer.count("get", "one", 2), 4);
+                assert_eq!(peer.count("subscribe", "multi", 9), 4);
+                assert_eq!(peer.count("subscribe", "multi", 3), 1);
+                {
+                    let mut state = peer.state.borrow_mut();
+                    state.sub_reject.clear();
+                    state.sub_timeout.clear();
+                    state.read_fail.clear();
+                    state.read_timeout.clear();
+                    state.values.insert(read.clone(), true);
+                }
+                peer.list_changed(&["multi"]);
+                until(|| {
+                    control
+                        .context
+                        .live
+                        .borrow()
+                        .session
+                        .as_ref()
                         .unwrap()
-                        .payload;
-                    assert_eq!(
-                        payload["rpc"]["params"][0]["value"], false,
-                        "old On write was replayed"
-                    );
-                    new.acknowledge(&write).await;
-                    new.reply(&write, json!({"result":[{"did":"target","code":0}]}), 125)
-                        .await;
-                    assert!(
-                        future::or(
-                            async {
-                                new.next_optional().await;
-                                false
-                            },
-                            async {
-                                async_io::Timer::after(Duration::from_millis(70)).await;
-                                true
-                            }
-                        )
-                        .await,
-                        "unexpected property polling or replay"
-                    );
-                },
-                async {
-                    available(&prepared.device).await;
-                    assert!(matches!(
-                        prepared.device.execute(Command::On).await,
-                        Err(CommandError::SendFailed(_) | CommandError::Unavailable(_))
-                    ));
-                    available(&prepared.device).await;
-                    assert_eq!(prepared.device.snapshot().power, Power::On);
-                    assert_eq!(
-                        prepared.device.execute(Command::Off).await.unwrap().power,
-                        Power::Off
-                    );
-                },
-            )
-            .await;
-        })
-        .await;
-    });
-}
-
-#[test]
-fn device_list_hints_during_refresh_preserve_a_followup_and_cancel_pending_commands() {
-    block_on(async {
-        let rig = Rig::new(true, CloudCase::Failure, system_clock());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            future::zip(
-                async {
-                    let mut broker = c.accept().await;
-                    initialize(&mut broker, &c.metadata, false).await;
-                    let Packet::Publish(write) = broker.next().await else {
-                        panic!()
-                    };
-                    broker.acknowledge(&write).await;
-                    let hint = |b: &Broker, id| {
-                        Packet::Publish(Publish::new(
-                            format!("{}/appMsg/devListChange", b.client_id),
-                            QoS::AtMostOnce,
-                            encode_mips(id, None, &json!({"devList":["target"]})),
-                        ))
-                    };
-                    broker.send(hint(&broker, 801)).await;
-                    let Packet::Publish(refresh) = broker.next().await else {
-                        panic!()
-                    };
-                    broker.acknowledge(&refresh).await;
-                    broker.send(hint(&broker, 802)).await;
-                    broker.reply(&refresh, info(&c.metadata, true), 140).await;
-                    let Packet::Publish(followup) = broker.next().await else {
-                        panic!("followup refresh expected")
-                    };
-                    assert_eq!(followup.topic, "master/proxy/getDevList");
-                    broker.acknowledge(&followup).await;
-                    broker
-                        .batch(vec![
-                            broker.business(&followup, info(&c.metadata, false)),
-                            broker.business(&write, json!({"result":[{"did":"target","code":0}]})),
-                        ])
-                        .await;
-                    async_io::Timer::after(Duration::from_millis(20)).await;
-                },
-                async {
-                    available(&prepared.device).await;
-                    assert!(matches!(
-                        prepared.device.execute(Command::On).await,
-                        Err(CommandError::Unavailable(_))
-                    ));
-                    assert_eq!(prepared.device.snapshot().power, Power::Off);
-                    assert!(matches!(
-                        prepared.device.snapshot().availability,
+                        .devices["multi"]
+                        .subscribed
+                        .borrow()
+                        .contains(&(9, 1))
+                })
+                .await;
+                assert_eq!(peer.count("get", "one", 2), 4);
+                peer.state.borrow_mut().online.insert("one".into(), false);
+                peer.list_changed(&["one"]);
+                until(|| {
+                    matches!(
+                        function(&control.context.registry, "one", "main")
+                            .snapshot()
+                            .availability,
                         Availability::Unavailable(_)
-                    ));
-                },
-            )
+                    )
+                })
+                .await;
+                peer.state.borrow_mut().online.insert("one".into(), true);
+                peer.list_changed(&["one"]);
+                until(|| {
+                    function(&control.context.registry, "one", "main")
+                        .snapshot()
+                        .power
+                        == Power::On
+                })
+                .await;
+                assert_eq!(peer.count("get", "one", 2), 5);
+            })
             .await;
+        }));
+    }
+}
+#[test]
+fn five_minute_member_sync_does_not_poll_healthy_channel_power() {
+    block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one", "multi"]).await;
+            until(|| {
+                control.context.live.borrow().loading.is_empty()
+                    && control
+                        .clock
+                        .deadlines
+                        .lock()
+                        .unwrap()
+                        .contains(&Duration::from_secs(300))
+            })
+            .await;
+            let reads = peer
+                .state
+                .borrow()
+                .seen
+                .iter()
+                .filter(|(op, _)| op == "get")
+                .count();
+            let homes = control.cloud.lock().unwrap().homes;
+            let lists = peer
+                .state
+                .borrow()
+                .seen
+                .iter()
+                .filter(|(op, _)| op == "getDevList")
+                .count();
+            advance_to(&control.clock, Duration::from_secs(300)).await;
+            until(|| {
+                control.cloud.lock().unwrap().homes > homes
+                    && peer
+                        .state
+                        .borrow()
+                        .seen
+                        .iter()
+                        .filter(|(op, _)| op == "getDevList")
+                        .count()
+                        > lists
+            })
+            .await;
+            peer.notify("one", 2, true);
+            until(|| {
+                function(&control.context.registry, "one", "main")
+                    .snapshot()
+                    .power
+                    == Power::On
+                    && matches!(
+                        control
+                            .context
+                            .live
+                            .borrow()
+                            .session
+                            .as_ref()
+                            .unwrap()
+                            .access,
+                        super::state::AccessRefresh::Idle
+                    )
+            })
+            .await;
+            for _ in 0..10 {
+                future::yield_now().await;
+            }
+            assert_eq!(
+                peer.state
+                    .borrow()
+                    .seen
+                    .iter()
+                    .filter(|(op, _)| op == "get")
+                    .count(),
+                reads
+            );
         })
         .await;
-    });
+    }));
 }
 #[test]
-fn local_model_and_instance_type_must_match_the_static_description() {
-    block_on(async {
-        for field in ["model", "urn"] {
-            let rig = Rig::new(true, CloudCase::Failure, system_clock());
-            rig.announce();
-            rig.run(|mut c|async move {
-                let prepared=c.ready.take().unwrap().wait().await.unwrap();
-                future::zip(async {
-                    let mut broker=c.accept().await;broker.setup().await;
-                    let Packet::Publish(list)=broker.next().await else {panic!()};broker.acknowledge(&list).await;
-                    let mut value=info(&c.metadata,true);value["devList"]["target"][field]=json!("wrong-static-description");
-                    broker.send(broker.business(&list,value)).await;
-                    async_io::Timer::after(Duration::from_millis(30)).await;
-                },async {
-                    wait_for(||matches!(prepared.device.snapshot().availability,Availability::Unavailable(ref why) if why.contains("differs"))).await;
-                    assert_eq!(prepared.device.snapshot().power,Power::Unknown);
-                    assert!(c.exited.borrow().is_none());
-                    assert_eq!(c.store.devices().load(&c.metadata.uid,&c.metadata.outlet.description.key).unwrap(),Some(c.metadata.clone()));
-                }).await;
-            }).await;
-        }
-    });
+fn cached_build_dropped_before_run_releases_its_context_and_closes_commands() {
+    let rig = Rig::new(true, &["one"]);
+    let weak = Rc::downgrade(&rig.source.context);
+    let function = function(&rig.source.context.registry, "one", "main");
+    drop(rig);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(
+        block_on(function.execute(Command::On)),
+        Err(crate::device::CommandError::Cancelled)
+    );
 }
 #[test]
-fn corrupt_static_cache_is_fatal_at_the_system_boundary_without_overwriting_data() {
-    let rig = Rig::new(true, CloudCase::Failure, system_clock());
+fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
+    block_on(Rig::new(false, &[]).run(|mut c| async move {
+        let registry = c.ready.take().unwrap().wait().await.unwrap();
+        assert!(registry.list().is_empty());
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| control.context.live.borrow().scope.is_some()).await;
+            control.cloud.lock().unwrap().members = vec!["multi".into()];
+            peer.list_changed(&["multi"]);
+            initialized(control, &peer, &["multi"]).await;
+            let key = DeviceKey::new("xiaomi", "multi");
+            control
+                .store
+                .devices()
+                .set_device_label(&key, "Kitchen saved")
+                .unwrap();
+            let before = control
+                .store
+                .devices()
+                .load_published(&key)
+                .unwrap()
+                .unwrap();
+            let old = function(&registry, "multi", "outlet_1");
+            control.cloud.lock().unwrap().members.clear();
+            peer.list_changed(&["multi"]);
+            until(|| registry.list().is_empty() && peer.state.borrow().unsubscribes.len() == 4)
+                .await;
+            assert!(
+                control
+                    .store
+                    .devices()
+                    .load_published(&key)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                old.execute(Command::On).await,
+                Err(crate::device::CommandError::Cancelled)
+            );
+            peer.notify("multi", 3, true);
+            control.cloud.lock().unwrap().members = vec!["multi".into()];
+            peer.list_changed(&["multi"]);
+            initialized(control, &peer, &["multi"]).await;
+            let after = control
+                .store
+                .devices()
+                .load_published(&key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.unique_id, before.unique_id);
+            assert_eq!(after.endpoint, before.endpoint);
+            assert_eq!(after.functions, before.functions);
+            assert_eq!(after.label, "Kitchen saved");
+            assert_eq!(
+                function(&registry, "multi", "outlet_1").snapshot().power,
+                Power::Off
+            );
+        })
+        .await;
+    }));
+}
+#[test]
+fn incomplete_foreign_or_failed_cloud_sync_cannot_remove_published_devices() {
+    for failure in 0..4 {
+        block_on(Rig::new(true, &["one"]).run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                initialized(control, &peer, &["one"]).await;
+                {
+                    let mut cloud = control.cloud.lock().unwrap();
+                    cloud.members.clear();
+                    match failure {
+                        0 => cloud.partial = true,
+                        1 => cloud.foreign = true,
+                        2 => cloud.status = 503,
+                        _ => cloud.members = vec!["one".into()],
+                    };
+                }
+                if failure == 3 {
+                    let mut scope = control.context.live.borrow().scope.clone().unwrap();
+                    scope.home_id = "missing".into();
+                    control.context.live.borrow_mut().scope = Some(scope);
+                }
+                peer.list_changed(&["one"]);
+                until(|| {
+                    control.context.status.borrow().catalog_problem.is_some()
+                        || matches!(
+                            control
+                                .context
+                                .status
+                                .borrow()
+                                .authentication
+                                .authentication,
+                            crate::xiaomi::auth::AuthenticationState::Unavailable(_)
+                        )
+                })
+                .await;
+                assert!(
+                    control
+                        .context
+                        .registry
+                        .get(&DeviceKey::new("xiaomi", "one"))
+                        .is_some()
+                );
+                assert!(
+                    control
+                        .store
+                        .devices()
+                        .load_published(&DeviceKey::new("xiaomi", "one"))
+                        .unwrap()
+                        .is_some()
+                );
+                assert_eq!(
+                    function(&control.context.registry, "one", "main")
+                        .snapshot()
+                        .availability,
+                    Availability::Available
+                );
+                assert!(peer.state.borrow().unsubscribes.is_empty());
+            })
+            .await;
+        }));
+    }
+}
+#[test]
+fn cached_local_access_recovers_while_cloud_member_sync_is_stalled() {
+    let rig = Rig::new(true, &["one"]);
+    let (_release, gate) = flume::bounded(1);
+    rig.cloud.lock().unwrap().home_gate = Some(gate);
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| control.cloud.lock().unwrap().homes == 1).await;
+            assert_eq!(control.cloud.lock().unwrap().homes, 1);
+            assert_eq!(
+                function(&control.context.registry, "one", "main")
+                    .snapshot()
+                    .availability,
+                Availability::Available
+            );
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 2), 1);
+        })
+        .await;
+    }));
+}
+#[test]
+fn discovery_timeout_keeps_its_reason_and_diagnostic_wakes_do_not_skip_retry() {
+    block_on(Rig::new(true,&[]).run(|c|async move {
+    advance_to(&c.clock,Duration::from_secs(30)).await;until(||matches!(c.context.status.borrow().gateway,GatewayStatus::Unavailable(_))).await;
+    c.context.set_catalog_problem(Some("cloud diagnostic".into()));c.context.changed.notify(usize::MAX);for _ in 0..10 {future::yield_now().await;}
+    assert!(matches!(c.context.status.borrow().gateway,GatewayStatus::Unavailable(ref reason) if reason.contains("gateway")));
+    let mut changes=c.discovery.subscribe();let mut retry=Box::pin(super::local::wait_retry(&c.context,&c.discovery,&mut changes,None,Duration::from_secs(5)));assert!(poll_once(retry.as_mut()).await.is_none());
+    c.context.changed.notify(usize::MAX);assert!(poll_once(retry.as_mut()).await.is_none());c.clock.advance(Duration::from_secs(5));retry.await.unwrap();
+}));
+}
+#[test]
+fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
+    block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.state
+            .borrow_mut()
+            .read_timeout
+            .insert(("one".into(), 2, 1));
+        peer.state
+            .borrow_mut()
+            .sub_timeout
+            .insert(("one".into(), 2, 1));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["multi"]).await;
+            until(|| peer.count("get", "one", 2) == 1 && peer.count("subscribe", "one", 2) == 1)
+                .await;
+            let one = function(&control.context.registry, "one", "main");
+            peer.state.borrow_mut().hold_writes = true;
+            let mut command = Box::pin(one.execute(Command::On));
+            assert!(poll_once(command.as_mut()).await.is_none());
+            until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            control.cloud.lock().unwrap().members = vec!["multi".into()];
+            peer.list_changed(&["one"]);
+            until(|| {
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .is_none()
+                    && !peer.state.borrow().unsubscribes.is_empty()
+            })
+            .await;
+            assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
+            let subs = std::mem::take(&mut peer.state.borrow_mut().held_subs);
+            for sub in subs {
+                peer.send(Packet::SubAck(SubAck::new(
+                    sub.pkid,
+                    vec![SubscribeReasonCode::QoS2],
+                )));
+            }
+            peer.release("one", 2, json!({"value":true})).await;
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            peer.notify("one", 2, true);
+            peer.notify("multi", 4, true);
+            until(|| {
+                function(&control.context.registry, "multi", "outlet_2")
+                    .snapshot()
+                    .power
+                    == Power::On
+            })
+            .await;
+            control.clock.advance(Duration::from_secs(10));
+            for _ in 0..10 {
+                future::yield_now().await;
+            }
+            assert!(
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .is_none()
+            );
+            assert_eq!(peer.count("get", "one", 2), 1);
+            assert_eq!(peer.count("subscribe", "one", 2), 1);
+        })
+        .await;
+    }));
+}
+#[test]
+fn whole_gateway_list_failures_preserve_confirmed_access_and_availability() {
+    for timeout in [false, true] {
+        block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                initialized(control, &peer, &["one", "multi"]).await;
+                if timeout {
+                    peer.state.borrow_mut().list_timeout = true;
+                } else {
+                    peer.state.borrow_mut().list_error = true;
+                }
+                peer.list_changed(&["one"]);
+                until(|| control.context.status.borrow().catalog_problem.is_some()).await;
+                peer.notify("one", 2, true);
+                until(|| {
+                    function(&control.context.registry, "one", "main")
+                        .snapshot()
+                        .power
+                        == Power::On
+                })
+                .await;
+                for physical in control.context.registry.list() {
+                    assert_eq!(physical.availability(), Availability::Available);
+                }
+                function(&control.context.registry, "multi", "usb")
+                    .execute(Command::On)
+                    .await
+                    .unwrap();
+            })
+            .await;
+        }));
+    }
+}
+#[test]
+fn pending_cloud_descriptions_retry_on_a_later_event_without_blocking_cached_control() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().members = vec!["one".into(), "multi".into()];
+    rig.cloud.lock().unwrap().detail_status = 503;
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| {
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .pending
+                    .iter()
+                    .any(|pending| pending.did == "multi" && pending.reason.contains("503"))
+            })
+            .await;
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert_eq!(control.context.registry.list().len(), 1);
+            assert_eq!(control.cloud.lock().unwrap().details, 1);
+            control.cloud.lock().unwrap().detail_status = 200;
+            peer.list_changed(&["multi"]);
+            initialized(control, &peer, &["one", "multi"]).await;
+            assert!(
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .pending
+                    .iter()
+                    .all(|pending| pending.did != "multi")
+            );
+        })
+        .await;
+    }));
+}
+#[test]
+fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_command_binding() {
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.state
+            .borrow_mut()
+            .read_timeout
+            .insert(("one".into(), 2, 1));
+        peer.state
+            .borrow_mut()
+            .sub_timeout
+            .insert(("one".into(), 2, 1));
+        peer.state
+            .borrow_mut()
+            .values
+            .insert(("one".into(), 7, 1), true);
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| peer.count("get", "one", 2) == 1 && peer.count("subscribe", "one", 2) == 1)
+                .await;
+            let key = DeviceKey::new("xiaomi", "one");
+            let before = control
+                .store
+                .devices()
+                .load_published(&key)
+                .unwrap()
+                .unwrap();
+            let mut changed = control.context.live.borrow().records["one"].cached.clone();
+            changed.device.functions[0].power.siid = 7;
+            control
+                .context
+                .live
+                .borrow_mut()
+                .descriptions
+                .insert("one".into(), changed);
+            control.context.reconcile("one");
+            until(|| {
+                peer.count("subscribe", "one", 7) == 1
+                    && function(&control.context.registry, "one", "main")
+                        .snapshot()
+                        .power
+                        == Power::On
+            })
+            .await;
+            let old = std::mem::take(&mut peer.state.borrow_mut().held_subs);
+            for sub in old {
+                peer.send(Packet::SubAck(SubAck::new(
+                    sub.pkid,
+                    vec![SubscribeReasonCode::QoS2],
+                )));
+            }
+            peer.release("one", 2, json!({"value":false})).await;
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 7), 1);
+            assert_eq!(
+                function(&control.context.registry, "one", "main")
+                    .snapshot()
+                    .power,
+                Power::On
+            );
+            assert_eq!(
+                control
+                    .store
+                    .devices()
+                    .load_published(&key)
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+            assert_eq!(
+                control
+                    .store
+                    .devices()
+                    .load_parsed(&control.data[0].uid, "local", &key)
+                    .unwrap()
+                    .unwrap()
+                    .device
+                    .functions[0]
+                    .power
+                    .siid,
+                7
+            );
+        })
+        .await;
+    }));
+}
+#[test]
+fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_description_returns() {
+    block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one", "multi"]).await;
+            let original = control.context.live.borrow().records["multi"]
+                .cached
+                .clone();
+            let mut incompatible = original.clone();
+            incompatible.device.functions.pop();
+            control
+                .context
+                .live
+                .borrow_mut()
+                .descriptions
+                .insert("multi".into(), incompatible);
+            control.context.reconcile("multi");
+            let physical = control
+                .context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "multi"))
+                .unwrap();
+            assert_eq!(physical.functions().len(), 3);
+            assert!(matches!(
+                physical.availability(),
+                Availability::Unavailable(_)
+            ));
+            assert!(
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .pending
+                    .iter()
+                    .any(
+                        |pending| pending.did == "multi" && pending.reason.contains("incompatible")
+                    )
+            );
+            assert_eq!(
+                control
+                    .store
+                    .devices()
+                    .load_parsed(&original.uid, "local", &physical.description().key)
+                    .unwrap()
+                    .unwrap(),
+                original
+            );
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            control
+                .context
+                .live
+                .borrow_mut()
+                .records
+                .get_mut("multi")
+                .unwrap()
+                .blocked = None;
+            control
+                .context
+                .live
+                .borrow_mut()
+                .descriptions
+                .insert("multi".into(), original);
+            control.context.reconcile("multi");
+            initialized(control, &peer, &["one", "multi"]).await;
+        })
+        .await;
+    }));
+}
+#[test]
+fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().members = vec!["one".into(), "multi".into()];
     rusqlite::Connection::open(rig.store.path())
         .unwrap()
-        .execute("UPDATE device_cache SET instance_type='invalid'", [])
+        .execute(
+            "INSERT INTO endpoint_allocation VALUES (65533,'test','history','main')",
+            [],
+        )
         .unwrap();
-    let (base, _) = mock_server(vec![MockResponse::json(503, "{}")]);
-    let result = XiaomiSource::new(
-        rig.store.clone(),
-        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-        rig.discovery.clone(),
-        DeviceKey::new("xiaomi", "target"),
-    );
-    assert!(matches!(result, Err(SourceError::Storage(_))));
-    let value: String = rusqlite::Connection::open(rig.store.path())
-        .unwrap()
-        .query_row("SELECT instance_type FROM device_cache", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(value, "invalid");
-}
-
-#[test]
-fn thirty_seconds_available_resets_connection_backoff_before_later_offline() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let rig = Rig::new(true, CloudCase::Failure, clock.clone());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            for delay in [1, 2] {
-                let mut broker = c.accept().await;
-                assert!(matches!(broker.next().await, Packet::Connect(_)));
-                let before = clock.deadlines.lock().unwrap().len();
-                let deadline = clock.now() + Duration::from_secs(delay);
-                broker
-                    .send(Packet::ConnAck(ConnAck::new(
-                        ConnectReturnCode::NotAuthorized,
-                        false,
-                    )))
-                    .await;
-                assert!(broker.next_optional().await.is_none());
-                wait_for(|| clock.deadlines.lock().unwrap()[before..].contains(&deadline)).await;
-                clock.advance(Duration::from_secs(delay));
-            }
-            let mut stable = c.accept().await;
-            initialize(&mut stable, &c.metadata, false).await;
-            clock.advance(Duration::from_secs(30));
-            available(&prepared.device).await;
-            stable
-                .send(Packet::Publish(Publish::new(
-                    format!("{}/appMsg/devListChange", stable.client_id),
-                    QoS::AtMostOnce,
-                    encode_mips(820, None, &json!({"devList":["target"]})),
-                )))
-                .await;
-            let Packet::Publish(refresh) = stable.next().await else {
-                panic!()
-            };
-            stable.acknowledge(&refresh).await;
-            stable
-                .send(stable.business(&refresh, info(&c.metadata, false)))
-                .await;
-            wait_for(|| {
-                c.context
-                    .live
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| {
+                control
+                    .context
+                    .status
                     .borrow()
-                    .preparation
-                    .available_since
-                    .is_none()
-            })
-            .await;
-            let before = clock.deadlines.lock().unwrap().len();
-            let deadline = clock.now() + Duration::from_secs(1);
-            drop(stable);
-            wait_for(|| c.context.live.borrow().generation().is_none()).await;
-            wait_for(|| clock.deadlines.lock().unwrap()[before..].contains(&deadline)).await;
-            clock.advance(Duration::from_secs(1));
-            let mut recovered = c.accept().await;
-            initialize(&mut recovered, &c.metadata, true).await;
-            available(&prepared.device).await;
-            assert_eq!(prepared.device.snapshot().power, Power::On);
-            let before = clock.deadlines.lock().unwrap().len();
-            let deadline = clock.now() + Duration::from_secs(2);
-            drop(recovered);
-            wait_for(|| c.context.live.borrow().generation().is_none()).await;
-            wait_for(|| clock.deadlines.lock().unwrap()[before..].contains(&deadline)).await;
-            let polls = clock
-                .polls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|value| **value == deadline)
-                .count();
-            clock.advance(Duration::from_secs(1));
-            wait_for(|| {
-                clock
-                    .polls
-                    .lock()
-                    .unwrap()
+                    .pending
                     .iter()
-                    .filter(|value| **value == deadline)
-                    .count()
-                    > polls
+                    .any(|pending| pending.did == "multi" && pending.reason.contains("exhausted"))
             })
             .await;
+            assert_eq!(control.context.registry.list().len(), 1);
             assert!(
-                poll_once(c.listener.accept()).await.is_none(),
-                "short recovery reused the previous stable reset"
-            );
-            clock.advance(Duration::from_secs(1));
-            let mut final_session = c.accept().await;
-            initialize(&mut final_session, &c.metadata, false).await;
-            available(&prepared.device).await;
-            assert_eq!(prepared.device.snapshot().power, Power::Off);
-        })
-        .await;
-    });
-}
-
-#[test]
-fn unchanged_credentials_auth_diagnostic_does_not_interrupt_an_armed_retry() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let rig = Rig::new(true, CloudCase::Failure, clock.clone());
-        let context = rig.source.context.clone();
-        let mut changes = rig.discovery.subscribe();
-        let retry = wait_retry(
-            &context,
-            &rig.discovery,
-            &mut changes,
-            None,
-            Duration::from_secs(2),
-        );
-        futures_lite::pin!(retry);
-        assert!(poll_once(retry.as_mut()).await.is_none());
-        assert_eq!(
-            clock.deadlines.lock().unwrap().as_slice(),
-            [Duration::from_secs(2)]
-        );
-        let mut report = context.status.borrow().authentication.clone();
-        report.authentication = AuthenticationState::Unavailable(FailureReason::Cloud(
-            CloudError::protocol("read owned homes"),
-        ));
-        let status_change = context.status_changed.listen();
-        let preparation = super::super::auth::BridgePreparation {
-            credentials: context.live.borrow().credentials.clone(),
-            report: report.clone(),
-            homes: Vec::new(),
-        };
-        update_auth(&context, &preparation);
-        assert_eq!(context.status.borrow().authentication, report);
-        assert!(poll_once(status_change).await.is_some());
-        assert!(
-            poll_once(retry.as_mut()).await.is_none(),
-            "a diagnostic-only auth completion bypassed retry backoff"
-        );
-        clock.advance(Duration::from_secs(2));
-        retry.await.unwrap();
-    });
-}
-
-#[test]
-fn stale_discovery_revision_does_not_bypass_retry_backoff() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let rig = Rig::new(true, CloudCase::Failure, clock.clone());
-        let context = rig.source.context.clone();
-        let mut changes = rig.discovery.subscribe();
-        rig.announce();
-        let driver = rig.discovery_driver.run();
-        futures_lite::pin!(driver);
-        assert!(poll_once(driver.as_mut()).await.is_none());
-        assert_eq!(rig.discovery.snapshot().gateways.len(), 1);
-        let retry = wait_retry(
-            &context,
-            &rig.discovery,
-            &mut changes,
-            None,
-            Duration::from_secs(2),
-        );
-        futures_lite::pin!(retry);
-        assert!(
-            poll_once(retry.as_mut()).await.is_none(),
-            "an already processed discovery revision bypassed retry backoff"
-        );
-        clock.advance(Duration::from_secs(2));
-        retry.await.unwrap();
-    });
-}
-
-#[test]
-fn changed_credentials_and_current_route_still_wake_retry_immediately() {
-    block_on(async {
-        for change_route in [false, true] {
-            let clock = Arc::new(TestClock::default());
-            let rig = Rig::new(true, CloudCase::Failure, clock);
-            let context = rig.source.context.clone();
-            rig.announce();
-            let driver = rig.discovery_driver.run();
-            futures_lite::pin!(driver);
-            assert!(poll_once(driver.as_mut()).await.is_none());
-            let mut changes = rig.discovery.subscribe();
-            let retry = wait_retry(
-                &context,
-                &rig.discovery,
-                &mut changes,
-                None,
-                Duration::from_secs(2),
-            );
-            futures_lite::pin!(retry);
-            assert!(poll_once(retry.as_mut()).await.is_none());
-            if change_route {
-                let replacement = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-                rig.events
-                    .send(announcement(
-                        replacement.get_ref().local_addr().unwrap(),
-                        &rig.metadata.uid,
-                        "hub",
-                        123,
-                    ))
-                    .unwrap();
-                assert!(poll_once(driver.as_mut()).await.is_none());
-            } else {
-                let mut credentials = context.live.borrow().credentials.clone().unwrap();
-                credentials.tokens.access_token = "processed-token".into();
-                let report = context.status.borrow().authentication.clone();
-                update_auth(
-                    &context,
-                    &super::super::auth::BridgePreparation {
-                        credentials: Some(credentials),
-                        report,
-                        homes: Vec::new(),
-                    },
-                );
-            }
-            assert!(matches!(poll_once(retry.as_mut()).await, Some(Ok(()))));
-        }
-    });
-}
-
-#[test]
-fn startup_cloud_retry_recovers_diagnostics_without_interrupting_local_control() {
-    block_on(async {
-        for case in [CloudCase::RecoveringAuth, CloudCase::RecoveringDetail] {
-            let clock = Arc::new(TestClock::default());
-            let rig = Rig::new(true, case, clock.clone());
-            rig.announce();
-            rig.run(|mut c| async move {
-                let prepared = c.ready.take().unwrap().wait().await.unwrap();
-                let mut broker = c.accept().await;
-                initialize(&mut broker, &c.metadata, false).await;
-                available(&prepared.device).await;
-                let generation = c.context.live.borrow().generation();
-                wait_for(|| {
-                    clock
-                        .deadlines
-                        .lock()
-                        .unwrap()
-                        .contains(&Duration::from_secs(1))
-                })
-                .await;
-                assert!(
-                    matches!(
-                        c.context.status.borrow().authentication.authentication,
-                        AuthenticationState::Unavailable(_)
-                    ) || c.context.status.borrow().catalog_problem.is_some()
-                );
-                assert_eq!(
-                    prepared.device.snapshot().availability,
-                    Availability::Available
-                );
-                clock.advance(Duration::from_secs(1));
-                let mut requests = Vec::new();
-                wait_for(|| {
-                    requests.extend(c.cloud_requests.try_iter().map(|request| request.target));
-                    requests.iter().any(|target| target.starts_with("/miot-spec-v2/instance?"))
-                })
-                .await;
-                wait_for(|| {
-                    matches!(
-                        c.context.status.borrow().authentication.authentication,
-                        AuthenticationState::Authenticated
-                    ) && c.context.status.borrow().catalog_problem.is_none()
-                })
-                .await;
-                assert_eq!(c.context.live.borrow().generation(), generation);
-                assert_eq!(
-                    prepared.device.snapshot().availability,
-                    Availability::Available
-                );
-                clock.advance(Duration::from_secs(300));
-                async_io::Timer::after(Duration::from_millis(20)).await;
-                let later = c.cloud_requests.try_iter().map(|request| request.target).collect::<Vec<_>>();
-                assert!(later.is_empty(), "successful {case:?} startup must stop retrying: initial={requests:?}, later={later:?}");
-                assert_eq!(c.context.live.borrow().generation(), generation);
-            })
-            .await;
-        }
-    });
-}
-
-#[test]
-fn moved_device_recovers_after_transient_static_description_failure() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let rig = Rig::new(true, CloudCase::MovedRecoveringDetail, clock.clone());
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            wait_for(|| c.context.live.borrow().blocked.is_some()).await;
-            c.events
-                .send(home_announcement(
-                    c.listener.get_ref().local_addr().unwrap(),
-                    &c.metadata.uid,
-                    "moved",
-                    "new-home",
-                    999,
-                ))
-                .unwrap();
-            wait_for(|| {
-                clock
-                    .deadlines
-                    .lock()
+                control
+                    .store
+                    .devices()
+                    .load_published(&DeviceKey::new("xiaomi", "multi"))
                     .unwrap()
-                    .contains(&Duration::from_secs(1))
+                    .is_none()
+            );
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+        })
+        .await;
+    }));
+}
+#[test]
+fn publication_database_failures_are_fatal_and_do_not_publish_partial_topology() {
+    let rig = Rig::new(true, &["one"]);
+    let store = rig.store.clone();
+    rig.cloud.lock().unwrap().members = vec!["one".into(), "multi".into()];
+    rusqlite::Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER fail_multi BEFORE INSERT ON device_function WHEN NEW.device_id='multi' BEGIN SELECT RAISE(ABORT,'publication failed'); END;").unwrap();
+    let error = block_on(rig.run_result(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        c.peer(peer, |_| future::pending()).await;
+    }))
+    .unwrap_err();
+    assert!(matches!(error, SourceError::Storage(_)));
+    assert!(
+        store
+            .devices()
+            .load_published(&DeviceKey::new("xiaomi", "multi"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .devices()
+            .load_parsed(
+                &store.xiaomi().load().unwrap().unwrap().uid,
+                "local",
+                &DeviceKey::new("xiaomi", "multi")
+            )
+            .unwrap()
+            .is_none()
+    );
+}
+#[test]
+fn temporary_certificate_renewal_failures_retry_without_interrupting_local_control() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().cert_status = 503;
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| {
+                matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .certificate_update,
+                    crate::xiaomi::auth::CertificateUpdate::Failed(_)
+                )
             })
             .await;
-            assert!(c.context.status.borrow().catalog_problem.is_some());
-            assert!(c.context.live.borrow().blocked.is_some());
+            let before = control.cloud.lock().unwrap().certs;
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            control.cloud.lock().unwrap().cert_status = 200;
+            advance_to(&control.clock, Duration::from_secs(1)).await;
+            until(|| {
+                control.cloud.lock().unwrap().certs > before
+                    && matches!(
+                        control
+                            .context
+                            .status
+                            .borrow()
+                            .authentication
+                            .certificate_update,
+                        crate::xiaomi::auth::CertificateUpdate::Updated
+                    )
+            })
+            .await;
             assert_eq!(
-                c.store
-                    .devices()
-                    .load(&c.metadata.uid, &c.metadata.outlet.description.key)
-                    .unwrap(),
-                Some(c.metadata.clone())
-            );
-            clock.advance(Duration::from_secs(1));
-            let mut updated = c.metadata.clone();
-            updated.home_id = "moved".into();
-            updated.group_id = group_id(&updated.uid, "moved");
-            let mut broker = c.accept().await;
-            initialize(&mut broker, &updated, true).await;
-            available(&prepared.device).await;
-            assert_eq!(prepared.device.snapshot().power, Power::On);
-            assert_eq!(c.context.metadata(), updated);
-            assert!(c.context.live.borrow().blocked.is_none());
-            assert!(c.context.status.borrow().catalog_problem.is_none());
-            assert_eq!(
-                c.store
-                    .devices()
-                    .load(&updated.uid, &updated.outlet.description.key)
-                    .unwrap(),
-                Some(updated)
+                function(&control.context.registry, "one", "main")
+                    .snapshot()
+                    .availability,
+                Availability::Available
             );
         })
         .await;
-    });
+    }));
 }
-
 #[test]
-fn rejected_authentication_does_not_schedule_startup_retries() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        Rig::new(true, CloudCase::RefreshRejected, clock.clone())
-            .run(|c| async move {
-                wait_for(|| {
-                    matches!(
-                        c.context.status.borrow().authentication.authentication,
-                        AuthenticationState::SignInRequired(_)
-                    )
+fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().status = 401;
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| control.context.cloud_paused.get()).await;
+            let before = control.cloud.lock().unwrap().homes;
+            control.cloud.lock().unwrap().status = 200;
+            control.clock.advance(Duration::from_secs(600));
+            peer.list_changed(&["one"]);
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            for _ in 0..10 {
+                future::yield_now().await;
+            }
+            assert_eq!(control.cloud.lock().unwrap().homes, before);
+            assert!(matches!(
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .authentication
+                    .authentication,
+                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+            ));
+        })
+        .await;
+    }));
+}
+#[test]
+fn candidate_unauthorized_requests_coalesce_into_one_token_refresh_and_resume_preparation() {
+    let rig = Rig::new(true, &["one"]);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.members = vec!["one".into(), "multi".into(), "two".into()];
+        cloud.detail_status = 401;
+        cloud.token_delay = Duration::from_millis(100);
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| control.cloud.lock().unwrap().tokens == 1).await;
+            control.cloud.lock().unwrap().detail_status = 200;
+            initialized(control, &peer, &["one", "multi", "two"]).await;
+            assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+            assert!(!control.context.cloud_paused.get());
+            assert_eq!(
+                control
+                    .store
+                    .xiaomi()
+                    .load()
+                    .unwrap()
+                    .unwrap()
+                    .tokens
+                    .access_token,
+                "fresh-access"
+            );
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+        })
+        .await;
+    }));
+}
+#[test]
+fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_value() {
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            peer.state.borrow_mut().hold_writes = true;
+            let one = function(&control.context.registry, "one", "main");
+            let mut command = Box::pin(one.execute(Command::On));
+            assert!(poll_once(command.as_mut()).await.is_none());
+            until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            let mut changed = control.context.live.borrow().records["one"].cached.clone();
+            changed.device.functions[0].power.siid = 7;
+            control
+                .context
+                .live
+                .borrow_mut()
+                .descriptions
+                .insert("one".into(), changed);
+            control.context.reconcile("one");
+            until(|| peer.count("get", "one", 7) == 1).await;
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
+            assert_eq!(one.snapshot().power, Power::Off);
+            assert_eq!(one.snapshot().availability, Availability::Available);
+        })
+        .await;
+    }));
+}
+#[test]
+fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials() {
+    for late in [false, true] {
+        let rig = Rig::new(true, &["one"]);
+        let (detail_release, detail_gate) = flume::bounded(1);
+        let (token_release, token_gate) = flume::bounded(1);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.members = vec!["one".into(), "multi".into()];
+            cloud.detail_status = 401;
+            cloud.detail_gate = Some(detail_gate);
+            if !late {
+                cloud.token_gate = Some(token_gate);
+            }
+        }
+        block_on(rig.run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                initialized(control, &peer, &["one"]).await;
+                until(|| control.cloud.lock().unwrap().details > 0).await;
+                let mut record = control.store.xiaomi().load().unwrap().unwrap();
+                record.tokens.refresh_at = time::OffsetDateTime::now_utc().unix_timestamp() - 1;
+                control.store.xiaomi().replace(&record).unwrap();
+                control.context.request_sync();
+                until(|| control.cloud.lock().unwrap().tokens == 1).await;
+                {
+                    let mut cloud = control.cloud.lock().unwrap();
+                    cloud.detail_status = 200;
+                    cloud.detail_gate = None;
+                }
+                if late {
+                    until(|| {
+                        control
+                            .store
+                            .xiaomi()
+                            .load()
+                            .unwrap()
+                            .unwrap()
+                            .tokens
+                            .access_token
+                            == "fresh-access"
+                    })
+                    .await;
+                    assert_eq!(control.cloud.lock().unwrap().detail_done, 0);
+                    detail_release.send(()).unwrap();
+                } else {
+                    detail_release.send(()).unwrap();
+                    until(|| control.context.rejected_token.borrow().is_some()).await;
+                    assert_eq!(control.cloud.lock().unwrap().token_done, 0);
+                    assert_eq!(
+                        control
+                            .store
+                            .xiaomi()
+                            .load()
+                            .unwrap()
+                            .unwrap()
+                            .tokens
+                            .access_token,
+                        "unused"
+                    );
+                    token_release.send(()).unwrap();
+                }
+                until(|| {
+                    control
+                        .store
+                        .xiaomi()
+                        .load()
+                        .unwrap()
+                        .unwrap()
+                        .tokens
+                        .access_token
+                        == "fresh-access"
+                        && control.context.live.borrow().loading.is_empty()
                 })
                 .await;
-                assert_eq!(c.cloud_requests.try_iter().count(), 1);
-                assert!(clock.deadlines.lock().unwrap().is_empty());
-                clock.advance(Duration::from_secs(300));
-                async_io::Timer::after(Duration::from_millis(20)).await;
-                assert_eq!(c.cloud_requests.try_iter().count(), 0);
+                assert_eq!(control.cloud.lock().unwrap().detail_done, 1);
+                control.context.request_sync();
+                initialized(control, &peer, &["one", "multi"]).await;
+                assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+                assert!(!control.context.cloud_paused.get());
+                assert!(matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::Authenticated
+                ));
             })
             .await;
-    });
+        }));
+    }
 }
-
 #[test]
-fn expired_certificate_recovers_after_transient_renewal_failure_without_reloading_topology() {
-    block_on(async {
-        let clock = Arc::new(TestClock::default());
-        let rig = Rig::new(true, CloudCase::RecoveringCertificate, clock.clone());
-        rig.announce();
-        rig.run(|mut c| async move {
-            let prepared = c.ready.take().unwrap().wait().await.unwrap();
-            wait_for(|| c.context.live.borrow().topology.as_ref().unwrap().dirty).await;
-            assert!(matches!(
-                c.context.status.borrow().authentication.certificate_update,
-                super::super::auth::CertificateUpdate::Failed(FailureReason::Cloud(_))
-            ));
-            assert!(matches!(
-                prepared.device.snapshot().availability,
-                Availability::Unavailable(_)
-            ));
-            assert!(c.context.live.borrow().generation().is_none());
-            clock.advance(Duration::from_secs(1));
-            let mut broker = c.accept().await;
-            initialize(&mut broker, &c.metadata, true).await;
-            available(&prepared.device).await;
-            assert_eq!(prepared.device.snapshot().power, Power::On);
-            assert!(c.context.status.borrow().authentication.is_success());
-            let requests = c
-                .cloud_requests
-                .try_iter()
-                .map(|request| request.target)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                requests
-                    .iter()
-                    .filter(|target| target.ends_with("/get_central_crt"))
-                    .count(),
-                2
-            );
-            assert_eq!(
-                requests
-                    .iter()
-                    .filter(|target| target.ends_with("/device_list_page"))
-                    .count(),
-                1
-            );
-            assert_eq!(
-                requests
-                    .iter()
-                    .filter(|target| target.starts_with("/miot-spec-v2/instance?"))
-                    .count(),
-                1
-            );
-            let generation = c.context.live.borrow().generation();
-            clock.advance(Duration::from_secs(300));
-            async_io::Timer::after(Duration::from_millis(20)).await;
-            assert_eq!(c.cloud_requests.try_iter().count(), 0);
-            assert_eq!(c.context.live.borrow().generation(), generation);
+fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopping_local_access() {
+    for refresh_rejected in 0..3 {
+        let rig = Rig::new(true, &["one"]);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.members = vec!["one".into(), "multi".into()];
+            cloud.detail_status = 401;
+            if refresh_rejected == 1 {
+                cloud.token_status = 401;
+            } else if refresh_rejected == 2 {
+                cloud.token_access = Some("unused".into());
+            }
+        }
+        block_on(rig.run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                initialized(control, &peer, &["one"]).await;
+                until(|| control.context.cloud_paused.get()).await;
+                assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+                control.clock.advance(Duration::from_secs(600));
+                control.context.request_sync();
+                function(&control.context.registry, "one", "main")
+                    .execute(Command::On)
+                    .await
+                    .unwrap();
+                for _ in 0..10 {
+                    future::yield_now().await;
+                }
+                assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+                assert!(matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+                ));
+            })
+            .await;
+        }));
+    }
+}
+#[test]
+fn reconnect_keeps_command_consumers_cancels_old_writes_and_rebuilds_only_registered_devices() {
+    block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+        c.announce();
+        let one = function(&c.context.registry, "one", "main");
+        let mut command = Box::pin(one.execute(Command::On));
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        let pending = &mut command;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one", "multi"]).await;
+            peer.state.borrow_mut().hold_writes = true;
+            assert!(poll_once(pending.as_mut()).await.is_none());
+            until(|| {
+                peer.state.borrow().held.iter().any(|(publish, _)| {
+                    decode_mips(&publish.payload).unwrap().payload["rpc"].is_object()
+                })
+            })
+            .await;
         })
         .await;
-    });
+        assert!(command.await.is_err());
+        until(|| {
+            matches!(
+                c.context.status.borrow().gateway,
+                GatewayStatus::Unavailable(_)
+            )
+        })
+        .await;
+        c.cloud.lock().unwrap().members = vec!["multi".into()];
+        c.context.request_sync();
+        until(|| {
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "one"))
+                .is_none()
+        })
+        .await;
+        assert_eq!(
+            one.execute(Command::Off).await,
+            Err(crate::device::CommandError::Cancelled)
+        );
+        advance_to(&c.clock, Duration::from_secs(1)).await;
+        let next = Rc::new(Peer::default());
+        c.peer(next, |peer| async move {
+            initialized(control, &peer, &["multi"]).await;
+            assert_eq!(peer.count("subscribe", "one", 2), 0);
+            assert_eq!(peer.count("rpcReq", "one", 2), 0);
+            let usb = function(&control.context.registry, "multi", "usb");
+            usb.execute(Command::On).await.unwrap();
+            usb.execute(Command::Toggle).await.unwrap();
+            assert_eq!(usb.snapshot().power, Power::Off);
+            assert_eq!(peer.count("rpcReq", "multi", 9), 2);
+        })
+        .await;
+    }));
+}
+#[test]
+fn corrupt_saved_credentials_or_cached_topology_fail_before_network_requests() {
+    for corrupt_credentials in [false, true] {
+        let rig = Rig::new(true, &["one"]);
+        let database = rusqlite::Connection::open(rig.store.path()).unwrap();
+        if corrupt_credentials {
+            database
+                .execute("UPDATE xiaomi_auth SET certificate_pem='broken'", [])
+                .unwrap();
+        } else {
+            database
+                .execute("UPDATE device_cache SET functions='broken'", [])
+                .unwrap();
+        }
+        let result = XiaomiSource::build(
+            rig.store.clone(),
+            rig.source.cloud.clone(),
+            rig.discovery.clone(),
+            rig.clock.clone(),
+        );
+        assert!(matches!(result, Err(SourceError::Storage(_))));
+        assert_eq!(rig.cloud.lock().unwrap().homes, 0);
+    }
+}
+#[test]
+fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
+    let rig = Rig::new(true, &["one"]);
+    let (release, gate) = flume::bounded(1);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.members = vec!["one".into(), "multi".into(), "two".into()];
+        cloud.detail_status = 401;
+        cloud.token_status = 503;
+        cloud.token_gate = Some(gate);
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| {
+                control.cloud.lock().unwrap().tokens == 1
+                    && control.context.live.borrow().loading.is_empty()
+            })
+            .await;
+            assert_eq!(control.cloud.lock().unwrap().details, 2);
+            release.send(()).unwrap();
+            until(|| {
+                matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::Unavailable(_)
+                )
+            })
+            .await;
+            {
+                let mut cloud = control.cloud.lock().unwrap();
+                cloud.token_status = 200;
+                cloud.token_gate = None;
+                cloud.detail_status = 200;
+            }
+            for _ in 0..10 {
+                future::yield_now().await;
+            }
+            assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+            assert!(!control.context.cloud_paused.get());
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            advance_to(&control.clock, Duration::from_secs(1)).await;
+            initialized(control, &peer, &["one", "multi", "two"]).await;
+            assert_eq!(control.cloud.lock().unwrap().tokens, 2);
+        })
+        .await;
+    }));
 }

@@ -9,6 +9,37 @@ use crate::device::{Capability, Category, DeviceKey, FunctionKey, PhysicalDevice
 use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
 
+#[derive(Clone, Debug)]
+pub enum AdmissionError {
+    EndpointExhausted,
+    IncompatibleFunctions,
+    Storage(StorageError),
+}
+impl From<StorageError> for AdmissionError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+impl std::fmt::Display for AdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EndpointExhausted => f.write_str("Device endpoint numbers are exhausted"),
+            Self::IncompatibleFunctions => {
+                f.write_str("Device function set is incompatible with its stored identity")
+            }
+            Self::Storage(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for AdmissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredFunction {
     pub key: FunctionKey,
@@ -50,7 +81,7 @@ impl DeviceStore {
     pub fn publish(
         &self,
         description: &PhysicalDeviceDescription,
-    ) -> Result<StoredDevice, StorageError> {
+    ) -> Result<StoredDevice, AdmissionError> {
         let operation = "publish device identity";
         validate_description(description).map_err(|error| self.invalid(operation, error))?;
         let transaction = self
@@ -69,7 +100,7 @@ impl DeviceStore {
         &self,
         cached: &CachedPhysicalDevice,
         label: &str,
-    ) -> Result<StoredDevice, StorageError> {
+    ) -> Result<StoredDevice, AdmissionError> {
         let operation = "publish Xiaomi device";
         validate_cached(cached).map_err(|error| self.invalid(operation, error))?;
         let description = cached.physical_description(label);
@@ -92,11 +123,11 @@ impl DeviceStore {
         connection: &Connection,
         required: usize,
         operation: &'static str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<(), AdmissionError> {
         if !has_capacity(connection, required)
             .map_err(|error| self.store.database_error(operation, error))?
         {
-            return Err(self.invalid(operation, "Device endpoint numbers are exhausted"));
+            return Err(AdmissionError::EndpointExhausted);
         }
         Ok(())
     }
@@ -105,7 +136,7 @@ impl DeviceStore {
         connection: &Connection,
         description: &PhysicalDeviceDescription,
         operation: &'static str,
-    ) -> Result<StoredDevice, StorageError> {
+    ) -> Result<StoredDevice, AdmissionError> {
         let record = load_record(connection, &description.key)
             .map_err(|error| self.store.database_error(operation, error))?;
         match record {
@@ -119,10 +150,7 @@ impl DeviceStore {
                         })
                     });
                 if !matches {
-                    return Err(self.invalid(
-                        operation,
-                        "Device function set is incompatible with its stored identity",
-                    ));
+                    return Err(AdmissionError::IncompatibleFunctions);
                 }
                 if !record.named {
                     connection

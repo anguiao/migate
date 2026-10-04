@@ -23,20 +23,25 @@ use std::{
 const NOW: i64 = 2_000_000_000;
 const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
-fn cached_bridge_device(uid: &str) -> crate::storage::CachedDevice {
-    crate::storage::CachedDevice {
+fn cached_bridge_device(uid: &str) -> crate::storage::CachedPhysicalDevice {
+    crate::storage::CachedPhysicalDevice {
         uid: uid.into(),
         home_id: "local-home".into(),
         group_id: crate::xiaomi::cloud::group_id(uid, "local-home"),
         model: "vendor.plug".into(),
         instance_type: "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1".into(),
-        outlet: crate::xiaomi::capability::ParsedOutlet {
+        device: crate::xiaomi::capability::ParsedDevice {
             description: crate::device::DeviceDescription {
                 key: crate::device::DeviceKey::new("xiaomi", "target"),
                 category: crate::device::Category::Outlet,
                 capabilities: vec![crate::device::Capability::OnOff],
             },
-            main_power: crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+            functions: vec![crate::xiaomi::capability::ParsedFunction {
+                id: "main".into(),
+                label: "主电源".into(),
+                power: crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+            }],
+            refresh_trigger: None,
         },
     }
 }
@@ -74,10 +79,10 @@ fn bridge_cloud_or_refresh_failure_preserves_same_account_cache_and_valid_certif
         let original = valid_record("uid", "old-access", refresh_at, NOW + 10 * 24 * 60 * 60);
         store.xiaomi().replace(&original).unwrap();
         let cached = cached_bridge_device("uid");
-        store.devices().save(&cached).unwrap();
+        store.devices().save_parsed(&cached).unwrap();
         store
             .devices()
-            .save(&cached_bridge_device("other-account"))
+            .save_parsed(&cached_bridge_device("other-account"))
             .unwrap();
         let (auth, requests) = service(&store, vec![MockResponse::json(status, "cloud failure")]);
         let prepared = block_on(auth.prepare_bridge()).unwrap();
@@ -88,9 +93,10 @@ fn bridge_cloud_or_refresh_failure_preserves_same_account_cache_and_valid_certif
         assert_eq!(
             store
                 .devices()
-                .load(
+                .load_parsed(
                     &prepared.credentials.as_ref().unwrap().uid,
-                    &cached.outlet.description.key
+                    "local-home",
+                    &cached.device.description.key
                 )
                 .unwrap(),
             Some(cached)
@@ -119,7 +125,7 @@ fn bridge_account_mismatch_does_not_expose_another_accounts_directory_or_cache()
         ))
         .unwrap();
     let other = cached_bridge_device("new-account");
-    store.devices().save(&other).unwrap();
+    store.devices().save_parsed(&other).unwrap();
     let homes = json!({"code":0,"result":{"homelist":[{"uid":"new-account","id":"local-home","roomlist":[],"dids":["target"]}]}});
     let (auth, _) = service(&store, vec![MockResponse::json(200, &homes.to_string())]);
     let prepared = block_on(auth.prepare_bridge()).unwrap();
@@ -131,7 +137,7 @@ fn bridge_account_mismatch_does_not_expose_another_accounts_directory_or_cache()
     assert!(
         store
             .devices()
-            .load("old-account", &other.outlet.description.key)
+            .load_parsed("old-account", "local-home", &other.device.description.key)
             .unwrap()
             .is_none()
     );
@@ -174,7 +180,7 @@ fn bridge_preparation_renews_with_processed_credentials_without_reading_device_c
     assert_eq!(requests.try_iter().count(), 3);
 
     let cached = cached_bridge_device("uid");
-    store.devices().save(&cached).unwrap();
+    store.devices().save_parsed(&cached).unwrap();
     Connection::open(store.path())
         .unwrap()
         .execute("UPDATE device_cache SET capabilities = 'broken'", [])
@@ -185,7 +191,7 @@ fn bridge_preparation_renews_with_processed_credentials_without_reading_device_c
     assert!(
         store
             .devices()
-            .load("uid", &cached.outlet.description.key)
+            .load_parsed("uid", "local-home", &cached.device.description.key)
             .is_err()
     );
 }

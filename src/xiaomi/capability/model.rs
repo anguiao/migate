@@ -9,12 +9,6 @@ pub struct PropertyBinding {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParsedOutlet {
-    pub description: DeviceDescription,
-    pub main_power: PropertyBinding,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedFunction {
     pub id: String,
     pub label: String,

@@ -6,6 +6,43 @@ fn access(name: Value) -> Value {
 }
 
 #[test]
+fn incomplete_candidates_do_not_reject_the_complete_device_list() {
+    let mut bad = access(json!("pending"));
+    bad.as_object_mut().unwrap().remove("pushAvailable");
+    let response = parse_response(
+        &RequestKind::ListAll,
+        &json!({"devList":{"good":access(json!("ready")),"bad":bad}}),
+    );
+    assert!(
+        response.is_ok(),
+        "a candidate error must not reject the container"
+    );
+    let Response::Devices(entries) = response.unwrap() else {
+        panic!()
+    };
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.did == "good")
+            .unwrap()
+            .access
+            .is_ok()
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry.did == "bad")
+            .unwrap()
+            .access,
+        Err(CentralError::Protocol)
+    );
+    assert!(matches!(
+        parse_response(&RequestKind::ListAll, &json!({"devList":{"bad did":{}}})),
+        Err(CentralError::Protocol)
+    ));
+}
+
+#[test]
 fn full_device_lists_preserve_names_validate_flags_and_single_did_scope() {
     let value = json!({"devList":{"one":access(json!("插座 一")),"two":access(json!("")),"three":access(Value::Null)}});
     let Response::Devices(devices) = parse_response(&RequestKind::ListAll, &value).unwrap() else {
@@ -17,6 +54,9 @@ fn full_device_lists_preserve_names_validate_flags_and_single_did_scope() {
             .iter()
             .find(|device| device.did == "one")
             .unwrap()
+            .access
+            .as_ref()
+            .unwrap()
             .name
             .as_deref(),
         Some("插座 一")
@@ -25,14 +65,22 @@ fn full_device_lists_preserve_names_validate_flags_and_single_did_scope() {
         devices
             .iter()
             .filter(|device| device.did != "one")
-            .all(|device| device.name.is_none())
+            .all(|device| device.access.as_ref().unwrap().name.is_none())
     );
     let mut invalid = value.clone();
     invalid["devList"]["two"]["pushAvailable"] = Value::Null;
-    assert!(matches!(
-        parse_response(&RequestKind::ListAll, &invalid),
-        Err(CentralError::Protocol)
-    ));
+    let Response::Devices(entries) = parse_response(&RequestKind::ListAll, &invalid).unwrap()
+    else {
+        panic!()
+    };
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.did == "two")
+            .unwrap()
+            .access
+            .is_err()
+    );
     assert!(matches!(
         parse_response(&RequestKind::List { did: "one".into() }, &invalid),
         Ok(Response::Device(Some(_)))
@@ -97,7 +145,10 @@ fn full_and_single_device_requests_share_the_session_and_keep_their_response_sco
                 assert_eq!(single.await.unwrap(), None);
                 let devices = all.await.unwrap();
                 assert_eq!(devices[0].did, "one");
-                assert_eq!(devices[0].name.as_deref(), Some("插座 一"));
+                assert_eq!(
+                    devices[0].access.as_ref().unwrap().name.as_deref(),
+                    Some("插座 一")
+                );
                 assert_eq!(devices[1].did, "two");
                 handle.close();
             };

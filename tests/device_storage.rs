@@ -1,27 +1,32 @@
 use migate::{
     device::{Capability, Category, DeviceDescription, DeviceKey},
-    storage::{CachedDevice, Store},
+    storage::{CachedPhysicalDevice, Store},
     xiaomi::{
-        capability::{ParsedOutlet, PropertyBinding},
+        capability::{ParsedDevice, ParsedFunction, PropertyBinding},
         cloud::group_id,
     },
 };
 use rusqlite::Connection;
 
-fn cached(uid: &str) -> CachedDevice {
-    CachedDevice {
+fn cached(uid: &str) -> CachedPhysicalDevice {
+    CachedPhysicalDevice {
         uid: uid.into(),
         home_id: "home".into(),
         group_id: group_id(uid, "home"),
         model: "vendor.plug".into(),
         instance_type: "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1".into(),
-        outlet: ParsedOutlet {
+        device: ParsedDevice {
             description: DeviceDescription {
                 key: DeviceKey::new("xiaomi", "did"),
                 category: Category::Outlet,
                 capabilities: vec![Capability::OnOff],
             },
-            main_power: PropertyBinding { siid: 12, piid: 9 },
+            functions: vec![ParsedFunction {
+                id: "main".into(),
+                label: "主电源".into(),
+                power: PropertyBinding { siid: 12, piid: 9 },
+            }],
+            refresh_trigger: None,
         },
     }
 }
@@ -31,27 +36,42 @@ fn caches_are_account_scoped_and_identity_is_stable_across_restart_and_routing_c
     let dir = tempfile::tempdir().unwrap();
     let first = cached("account-one");
     let second = cached("account-two");
-    let key = &first.outlet.description.key;
+    let key = &first.device.description.key;
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_or_create_device_identity(key).unwrap();
     assert_eq!(identity.endpoint, 2);
     assert_eq!(identity.unique_id.len(), 32);
     assert_ne!(identity.unique_id, store.load_identity().unwrap().bridge_id);
-    store.devices().save(&first).unwrap();
+    store.devices().save_parsed(&first).unwrap();
     assert_eq!(
-        store.devices().load("account-one", key).unwrap(),
+        store
+            .devices()
+            .load_parsed("account-one", "home", key)
+            .unwrap(),
         Some(first.clone())
     );
-    assert!(store.devices().load("account-two", key).unwrap().is_none());
-    store.devices().save(&second).unwrap();
+    assert!(
+        store
+            .devices()
+            .load_parsed("account-two", "home", key)
+            .unwrap()
+            .is_none()
+    );
+    store.devices().save_parsed(&second).unwrap();
     drop(store);
     let reopened = Store::open(dir.path()).unwrap();
     assert_eq!(
-        reopened.devices().load("account-one", key).unwrap(),
+        reopened
+            .devices()
+            .load_parsed("account-one", "home", key)
+            .unwrap(),
         Some(first.clone())
     );
     assert_eq!(
-        reopened.devices().load("account-two", key).unwrap(),
+        reopened
+            .devices()
+            .load_parsed("account-two", "home", key)
+            .unwrap(),
         Some(second.clone())
     );
     assert_eq!(
@@ -61,7 +81,7 @@ fn caches_are_account_scoped_and_identity_is_stable_across_restart_and_routing_c
     let mut moved = second;
     moved.home_id = "different-home".into();
     moved.group_id = group_id(&moved.uid, &moved.home_id);
-    reopened.devices().save(&moved).unwrap();
+    reopened.devices().save_parsed(&moved).unwrap();
     assert_eq!(
         reopened.load_or_create_device_identity(key).unwrap(),
         identity
@@ -91,13 +111,13 @@ fn damaged_cache_and_identity_fail_without_replacing_stored_data() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let first = cached("account");
-    let key = &first.outlet.description.key;
-    store.devices().save(&first).unwrap();
+    let key = &first.device.description.key;
+    store.devices().save_parsed(&first).unwrap();
     store.load_or_create_device_identity(key).unwrap();
     let db = Connection::open(store.path()).unwrap();
     db.execute("UPDATE device_cache SET category = 'unknown'", [])
         .unwrap();
-    assert!(store.devices().load("account", key).is_err());
+    assert!(store.devices().load_parsed("account", "home", key).is_err());
     assert_eq!(
         db.query_row("SELECT category FROM device_cache", [], |row| row
             .get::<_, String>(0))
@@ -115,7 +135,7 @@ fn damaged_cache_and_identity_fail_without_replacing_stored_data() {
     );
     let mut invalid = first.clone();
     invalid.group_id = "wrong-family".into();
-    assert!(store.devices().save(&invalid).is_err());
+    assert!(store.devices().save_parsed(&invalid).is_err());
     assert_eq!(
         db.query_row("SELECT group_id FROM device_cache", [], |row| row
             .get::<_, String>(0))
@@ -129,16 +149,16 @@ fn cache_write_failures_preserve_the_previous_description() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let first = cached("account");
-    store.devices().save(&first).unwrap();
+    store.devices().save_parsed(&first).unwrap();
     Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER reject_cache AFTER UPDATE ON device_cache BEGIN SELECT RAISE(ABORT, 'private details'); END;").unwrap();
     let mut changed = first.clone();
     changed.model = "changed.model".into();
-    let error = store.devices().save(&changed).unwrap_err();
+    let error = store.devices().save_parsed(&changed).unwrap_err();
     assert!(!format!("{error:?} {error}").contains("private details"));
     assert_eq!(
         store
             .devices()
-            .load("account", &first.outlet.description.key)
+            .load_parsed("account", "home", &first.device.description.key)
             .unwrap(),
         Some(first)
     );
@@ -149,14 +169,14 @@ fn corrupted_cached_instance_type_cannot_restore_an_outlet_or_overwrite_valid_da
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let first = cached("account");
-    store.devices().save(&first).unwrap();
+    store.devices().save_parsed(&first).unwrap();
     let mut invalid = first.clone();
     invalid.instance_type = "urn:miot-spec-v2:device:light:0000A001:vendor-v1:1".into();
-    assert!(store.devices().save(&invalid).is_err());
+    assert!(store.devices().save_parsed(&invalid).is_err());
     assert_eq!(
         store
             .devices()
-            .load("account", &first.outlet.description.key)
+            .load_parsed("account", "home", &first.device.description.key)
             .unwrap(),
         Some(first.clone())
     );
@@ -169,7 +189,7 @@ fn corrupted_cached_instance_type_cannot_restore_an_outlet_or_overwrite_valid_da
     assert!(
         store
             .devices()
-            .load("account", &first.outlet.description.key)
+            .load_parsed("account", "home", &first.device.description.key)
             .is_err()
     );
     assert_eq!(
@@ -211,7 +231,7 @@ fn version_one_storage_upgrades_without_changing_pairing_or_bridge_identity() {
     );
     assert_eq!(upgraded.matter().get(7).unwrap(), Some(b"paired".to_vec()));
     assert!(upgraded.xiaomi().load().unwrap().is_none());
-    upgraded.devices().save(&cached("account")).unwrap();
+    upgraded.devices().save_parsed(&cached("account")).unwrap();
     assert_eq!(
         Connection::open(&path)
             .unwrap()

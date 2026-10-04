@@ -1,7 +1,7 @@
 mod session;
 mod tls;
 mod wire;
-pub use session::{CentralEvent, DeviceAccess, SessionDriver, SessionHandle, connect};
+pub use session::{CentralEvent, DeviceAccess, DeviceEntry, SessionDriver, SessionHandle, connect};
 pub use tls::connect_tls;
 pub use wire::{Frames as MqttFrames, MipsMessage, decode_mips, encode_mips};
 

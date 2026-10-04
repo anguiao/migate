@@ -23,6 +23,8 @@ pub(crate) struct MockResponse {
     wire: String,
     delay: Duration,
     split_at: Option<usize>,
+    gate: Option<flume::Receiver<()>>,
+    finished: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl MockResponse {
@@ -34,6 +36,8 @@ impl MockResponse {
             ),
             delay: Duration::ZERO,
             split_at: None,
+            gate: None,
+            finished: None,
         }
     }
 
@@ -42,7 +46,19 @@ impl MockResponse {
             wire: wire.into(),
             delay: Duration::ZERO,
             split_at: None,
+            gate: None,
+            finished: None,
         }
+    }
+
+    pub fn gated(mut self, gate: flume::Receiver<()>) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
+    pub fn on_sent(mut self, finished: impl FnOnce() + Send + 'static) -> Self {
+        self.finished = Some(Box::new(finished));
+        self
     }
 
     pub fn delayed(mut self, delay: Duration) -> Self {
@@ -106,17 +122,30 @@ pub(crate) fn dynamic_mock_server(
             };
             let response = respond(&request);
             let _ = sender.send(request);
-            if let Some(split_at) = response.split_at {
-                let _ = stream.write_all(&response.wire.as_bytes()[..split_at]);
-                thread::sleep(response.delay);
-                let _ = stream.write_all(&response.wire.as_bytes()[split_at..]);
-            } else {
-                thread::sleep(response.delay);
-                let _ = stream.write_all(response.wire.as_bytes());
-            }
+            // Generate responses in request order, but allow each connection to finish independently.
+            thread::spawn(move || write_response(stream, response));
         }
     });
     (format!("http://{address}"), receiver)
+}
+
+fn write_response(mut stream: TcpStream, response: MockResponse) {
+    if let Some(gate) = response.gate
+        && gate.recv().is_err()
+    {
+        return;
+    }
+    if let Some(split_at) = response.split_at {
+        let _ = stream.write_all(&response.wire.as_bytes()[..split_at]);
+        thread::sleep(response.delay);
+        let _ = stream.write_all(&response.wire.as_bytes()[split_at..]);
+    } else {
+        thread::sleep(response.delay);
+        let _ = stream.write_all(response.wire.as_bytes());
+    }
+    if let Some(finished) = response.finished {
+        finished();
+    }
 }
 
 fn accept_until(listener: &TcpListener, deadline: Instant) -> Option<TcpStream> {

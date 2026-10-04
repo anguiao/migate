@@ -9,11 +9,17 @@ use std::{
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+type BridgeDiagnostics = (
+    crate::xiaomi::source::GatewayStatus,
+    Option<String>,
+    Vec<crate::xiaomi::source::PendingDevice>,
+);
+
 pub struct AuthStatus {
     report: RefCell<AuthReport>,
     executable: PathBuf,
     data_dir: PathBuf,
-    source: RefCell<Option<(crate::xiaomi::source::GatewayStatus, Option<String>)>>,
+    source: RefCell<Option<BridgeDiagnostics>>,
 }
 
 impl AuthStatus {
@@ -38,11 +44,21 @@ impl AuthStatus {
     pub fn render(&self, now: i64) -> String {
         let mut report =
             format_report(&self.report.borrow(), now, &self.executable, &self.data_dir);
-        if let Some((gateway, problem)) = &*self.source.borrow() {
+        if let Some((gateway, problem, _)) = &*self.source.borrow() {
             let _ = write!(report, "\n{}", format_gateway(gateway));
             if let Some(problem) = problem {
                 let _ = write!(report, "\nDevice description: {problem}.");
             }
+        }
+        if self.source.borrow().is_some()
+            && matches!(
+                self.report.borrow().authentication,
+                AuthenticationState::SignInRequired(_)
+            )
+        {
+            report.push_str(
+                "\nSign in independently, then restart MiGate to load the updated credentials.",
+            );
         }
         report
     }
@@ -51,7 +67,7 @@ impl AuthStatus {
         if self.replace(status.authentication) {
             self.log(current_time());
         }
-        let next = (status.gateway, status.catalog_problem);
+        let next = (status.gateway, status.catalog_problem, status.pending);
         let mut source = self.source.borrow_mut();
         if source.as_ref() != Some(&next) {
             log::info!("{}", format_gateway(&next.0));
@@ -60,6 +76,14 @@ impl AuthStatus {
             }
             *source = Some(next);
         }
+    }
+
+    pub fn pending(&self) -> Vec<crate::xiaomi::source::PendingDevice> {
+        self.source
+            .borrow()
+            .as_ref()
+            .map(|source| source.2.clone())
+            .unwrap_or_default()
     }
 
     pub fn log(&self, now: i64) {
@@ -195,7 +219,7 @@ pub fn current_time() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matter::tests::test_device;
+
     use crate::terminal::bridge;
     use crate::xiaomi::auth::AuthReport;
 
@@ -239,6 +263,7 @@ mod tests {
             ),
             gateway: GatewayStatus::Connected("gateway".into()),
             catalog_problem: Some("refresh failed".into()),
+            pending: Vec::new(),
         });
         let report = status.render(0);
         assert!(report.contains("Xiaomi: sign-in required"));
@@ -280,6 +305,9 @@ mod tests {
 
     #[test]
     fn bridge_help_reads_the_latest_report() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::storage::Store::open(directory.path()).unwrap();
+        let registry = crate::device::DeviceRegistry::new();
         let checking = AuthReport::for_test(
             AuthenticationState::Checking,
             None,
@@ -289,11 +317,13 @@ mod tests {
         let status = AuthStatus::new(checking, "/bin/migate".into(), "/data".into());
         assert!(
             futures_lite::future::block_on(bridge::handle_line(
-                &test_device().0,
+                &registry,
+                &store.devices(),
                 &status,
                 "help",
                 1_700_000_000
             ))
+            .unwrap()
             .unwrap()
             .contains("Xiaomi: checking authentication (cn)...")
         );
@@ -309,11 +339,13 @@ mod tests {
         );
         assert!(status.replace(authenticated));
         let help = futures_lite::future::block_on(bridge::handle_line(
-            &test_device().0,
+            &registry,
+            &store.devices(),
             &status,
             "help",
             1_700_000_000,
         ))
+        .unwrap()
         .unwrap();
         assert!(help.contains("Xiaomi: authenticated (cn)."), "{help}");
         assert!(!help.contains("checking authentication"), "{help}");

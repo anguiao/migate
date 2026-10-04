@@ -5,32 +5,13 @@ use crate::{
         PhysicalDeviceDescription,
     },
     xiaomi::{
-        capability::{ParsedDevice, ParsedFunction, ParsedOutlet, PropertyBinding, is_outlet_type},
+        capability::{ParsedDevice, ParsedFunction, PropertyBinding, is_outlet_type},
         cloud::{OwnedHome, group_id},
     },
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CachedDevice {
-    pub uid: String,
-    pub home_id: String,
-    pub group_id: String,
-    pub model: String,
-    pub instance_type: String,
-    pub outlet: ParsedOutlet,
-}
-impl CachedDevice {
-    pub fn home(&self) -> OwnedHome {
-        OwnedHome {
-            uid: self.uid.clone(),
-            home_id: self.home_id.clone(),
-            group_id: self.group_id.clone(),
-            dids: vec![self.outlet.description.key.id.clone()],
-        }
-    }
-}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedPhysicalDevice {
     pub uid: String,
@@ -93,83 +74,6 @@ impl DeviceStore {
     pub(super) fn new(store: Store) -> Self {
         Self { store }
     }
-    /// Compatibility view of a single main function. New callers must specify a home.
-    pub fn load(&self, uid: &str, key: &DeviceKey) -> Result<Option<CachedDevice>, StorageError> {
-        let operation = "load static Xiaomi device description";
-        validate_text(uid)
-            .and_then(|()| validate_key(key))
-            .map_err(|error| self.invalid(operation, error))?;
-        let homes=self.store.connection().prepare("SELECT home_id FROM device_cache WHERE uid=?1 AND source=?2 AND device_id=?3 ORDER BY home_id").and_then(|mut statement|statement.query_map(params![uid,key.source,key.id], |row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()).map_err(|error|self.store.database_error(operation,error))?;
-        let home = if let Some(scope) = self.load_scope(uid)? {
-            Some(scope.home_id)
-        } else {
-            match homes.as_slice() {
-                [] => None,
-                [home] => Some(home.clone()),
-                _ => return Err(self.invalid(operation, "Cached device home is ambiguous")),
-            }
-        };
-        let Some(home) = home else { return Ok(None) };
-        let Some(cached) = self.load_parsed(uid, &home, key)? else {
-            return Ok(None);
-        };
-        if cached.device.functions.len() != 1 || cached.device.functions[0].id != "main" {
-            return Err(self.invalid(operation, "Cached device is not a single main function"));
-        }
-        Ok(Some(CachedDevice {
-            uid: cached.uid,
-            home_id: cached.home_id,
-            group_id: cached.group_id,
-            model: cached.model,
-            instance_type: cached.instance_type,
-            outlet: ParsedOutlet {
-                description: cached.device.description,
-                main_power: cached.device.functions[0].power,
-            },
-        }))
-    }
-    /// Legacy single-device callers selected their current home when saving a description.
-    /// The scoped canonical cache API keeps selection separate.
-    pub fn save(&self, cached: &CachedDevice) -> Result<(), StorageError> {
-        let canonical = CachedPhysicalDevice {
-            uid: cached.uid.clone(),
-            home_id: cached.home_id.clone(),
-            group_id: cached.group_id.clone(),
-            model: cached.model.clone(),
-            instance_type: cached.instance_type.clone(),
-            device: ParsedDevice {
-                description: cached.outlet.description.clone(),
-                functions: vec![ParsedFunction {
-                    id: "main".into(),
-                    label: "主电源".into(),
-                    power: cached.outlet.main_power,
-                }],
-                refresh_trigger: None,
-            },
-        };
-        let operation = "save static Xiaomi device description";
-        validate_cached(&canonical).map_err(|error| self.invalid(operation, error))?;
-        let transaction = self
-            .store
-            .connection()
-            .unchecked_transaction()
-            .map_err(|error| self.store.database_error(operation, error))?;
-        save_cached(&transaction, &canonical)
-            .map_err(|error| self.store.database_error(operation, error))?;
-        save_scope(
-            &transaction,
-            &CachedScope {
-                uid: cached.uid.clone(),
-                home_id: cached.home_id.clone(),
-                group_id: cached.group_id.clone(),
-            },
-        )
-        .map_err(|error| self.store.database_error(operation, error))?;
-        transaction
-            .commit()
-            .map_err(|error| self.store.database_error(operation, error))
-    }
-
     pub fn load_parsed(
         &self,
         uid: &str,
@@ -238,7 +142,7 @@ impl DeviceStore {
         }
         Ok(scope)
     }
-    pub(super) fn invalid(&self, operation: &'static str, error: &'static str) -> StorageError {
+    pub(crate) fn invalid(&self, operation: &'static str, error: &'static str) -> StorageError {
         StorageError::new(self.store.path(), operation, error)
     }
 }

@@ -113,10 +113,14 @@ fn every_legacy_version_preserves_all_real_data_and_only_removes_light_identity(
         }
         if version >= 2 {
             let key = DeviceKey::new("xiaomi", "did");
-            let cached = store.devices().load("account", &key).unwrap().unwrap();
+            let cached = store
+                .devices()
+                .load_parsed("account", "home", &key)
+                .unwrap()
+                .unwrap();
             assert_eq!(cached.model, "vendor.plug");
-            assert_eq!(cached.outlet.main_power.siid, 12);
-            assert_eq!(cached.outlet.main_power.piid, 9);
+            assert_eq!(cached.device.functions[0].power.siid, 12);
+            assert_eq!(cached.device.functions[0].power.piid, 9);
             let identity = store.load_or_create_device_identity(&key).unwrap();
             assert_eq!(identity.unique_id, DEVICE_ID);
             assert_eq!(identity.endpoint, 2);

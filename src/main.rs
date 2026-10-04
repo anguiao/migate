@@ -6,10 +6,7 @@ use futures_lite::{future, io::BufReader};
 use migate::{
     RuntimeError,
     config::{AuthCommand, Command, Config},
-    device::DeviceKey,
-    runtime::{
-        BridgeOptions, DeviceSetup, default_device_label, run_prepared_bridge, shutdown_signal,
-    },
+    runtime::{BridgeOptions, run_prepared_bridge, shutdown_signal},
     storage::{InstanceLock, Store, XiaomiStore},
     terminal::{self, AuthStatus},
     xiaomi::{
@@ -105,9 +102,6 @@ fn run_auth(
     })
 }
 
-// Temporary selection for this validation round; protocols receive an ordinary DeviceKey.
-const VALIDATION_DEVICE_DID: &str = "571329355";
-
 fn run_bridge(
     store: Store,
     identity: migate::storage::Identity,
@@ -127,12 +121,7 @@ fn run_bridge(
     let status = AuthStatus::new(report, executable, data_dir);
     status.log(terminal::current_time());
     let (discovery, driver) = Discovery::start()?;
-    let (source, ready) = XiaomiSource::new(
-        store.clone(),
-        CloudClient::new()?,
-        discovery,
-        DeviceKey::new("xiaomi", VALIDATION_DEVICE_DID),
-    )?;
+    let (source, ready) = XiaomiSource::new(store.clone(), CloudClient::new()?, discovery)?;
     future::block_on(async {
         let interrupt = async {
             let signal = shutdown_signal().await?;
@@ -156,17 +145,7 @@ fn run_bridge(
                 status: &status,
                 port: matter_port,
             },
-            async {
-                let prepared = ready.wait().await?;
-                let default_label = default_device_label(
-                    &prepared.metadata.model,
-                    &prepared.device.description().key.id,
-                );
-                Ok(DeviceSetup {
-                    device: prepared.device,
-                    default_label,
-                })
-            },
+            async { Ok(ready.wait().await?) },
             networking,
             BufReader::new(blocking::Unblock::new(std::io::stdin())),
             blocking::Unblock::new(std::io::stdout()),

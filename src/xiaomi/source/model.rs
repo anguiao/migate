@@ -1,6 +1,6 @@
 use crate::{
-    device::Device,
-    storage::{CachedDevice, StorageError},
+    device::DeviceRegistry,
+    storage::StorageError,
     xiaomi::{
         auth::{AuthError, AuthReport},
         catalog::CatalogError,
@@ -11,7 +11,6 @@ use crate::{
 };
 use event_listener::Event;
 use std::{cell::RefCell, error::Error, fmt, rc::Rc};
-
 #[derive(Clone, Debug)]
 pub enum SourceError {
     Storage(StorageError),
@@ -20,7 +19,6 @@ pub enum SourceError {
     Central(CentralError),
     Unavailable(String),
     NoLocalGateway,
-    StalePreparation,
     Cancelled,
 }
 impl fmt::Display for SourceError {
@@ -31,55 +29,53 @@ impl fmt::Display for SourceError {
             Self::Discovery(e) => e.fmt(f),
             Self::Central(e) => e.fmt(f),
             Self::Unavailable(e) => f.write_str(e),
-            Self::NoLocalGateway => f.write_str("no current local gateway for the device home"),
-            Self::StalePreparation => f.write_str("gateway preparation was superseded"),
-            Self::Cancelled => f.write_str("Xiaomi device source stopped"),
+            Self::NoLocalGateway => f.write_str("no current local gateway for the selected home"),
+            Self::Cancelled => f.write_str("Xiaomi source stopped"),
         }
     }
 }
 impl Error for SourceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Storage(error) => Some(error),
-            Self::Cloud(error) => Some(error),
-            Self::Discovery(error) => Some(error),
-            Self::Central(error) => Some(error),
+            Self::Storage(e) => Some(e),
+            Self::Cloud(e) => Some(e),
+            Self::Discovery(e) => Some(e),
+            Self::Central(e) => Some(e),
             _ => None,
         }
     }
 }
 impl From<StorageError> for SourceError {
-    fn from(error: StorageError) -> Self {
-        Self::Storage(error)
+    fn from(e: StorageError) -> Self {
+        Self::Storage(e)
     }
 }
 impl From<CentralError> for SourceError {
-    fn from(error: CentralError) -> Self {
-        Self::Central(error)
+    fn from(e: CentralError) -> Self {
+        Self::Central(e)
     }
 }
 impl From<DiscoveryError> for SourceError {
-    fn from(error: DiscoveryError) -> Self {
-        Self::Discovery(error)
+    fn from(e: DiscoveryError) -> Self {
+        Self::Discovery(e)
     }
 }
 impl From<AuthError> for SourceError {
-    fn from(error: AuthError) -> Self {
-        match error {
+    fn from(e: AuthError) -> Self {
+        match e {
             AuthError::Storage(e) => Self::Storage(e),
             AuthError::Cloud(e) => Self::Cloud(e),
         }
     }
 }
 impl From<CatalogError> for SourceError {
-    fn from(error: CatalogError) -> Self {
-        match error {
+    fn from(e: CatalogError) -> Self {
+        match e {
             CatalogError::Cloud(e) => Self::Cloud(e),
-            error => Self::Unavailable(error.to_string()),
+            e => Self::Unavailable(e.to_string()),
         }
     }
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GatewayStatus {
     Discovering,
@@ -88,38 +84,36 @@ pub enum GatewayStatus {
     Unavailable(String),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingDevice {
+    pub did: String,
+    pub name: String,
+    pub reason: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceStatus {
     pub authentication: AuthReport,
     pub gateway: GatewayStatus,
     pub catalog_problem: Option<String>,
-}
-#[derive(Clone)]
-pub struct PreparedDevice {
-    pub device: Device,
-    pub metadata: CachedDevice,
+    pub pending: Vec<PendingDevice>,
 }
 #[derive(Default)]
 pub(super) struct Ready {
-    result: RefCell<Option<Result<PreparedDevice, SourceError>>>,
+    result: RefCell<Option<Result<DeviceRegistry, SourceError>>>,
     completed: std::cell::Cell<bool>,
     changed: Event,
 }
 impl Ready {
-    pub(super) fn completed(&self) -> bool {
-        self.completed.get()
-    }
-    pub(super) fn finish(&self, result: Result<PreparedDevice, SourceError>) {
+    pub(super) fn finish(&self, result: Result<DeviceRegistry, SourceError>) {
         if !self.completed.replace(true) {
             *self.result.borrow_mut() = Some(result);
             self.changed.notify(usize::MAX);
         }
     }
 }
-/// Poll the source runner alongside this one-shot topology wait. The runner
-/// continues owning the live session after the topology has been delivered.
+/// Poll the source alongside this one-shot topology wait; the registry remains shared.
 pub struct TopologyReady(pub(super) Rc<Ready>);
 impl TopologyReady {
-    pub async fn wait(self) -> Result<PreparedDevice, SourceError> {
+    pub async fn wait(self) -> Result<DeviceRegistry, SourceError> {
         loop {
             let listener = self.0.changed.listen();
             if let Some(result) = self.0.result.borrow_mut().take() {

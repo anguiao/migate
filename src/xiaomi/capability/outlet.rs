@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::{
-    CapabilityError, ParsedDevice, ParsedFunction, ParsedOutlet, PropertyBinding,
+    CapabilityError, ParsedDevice, ParsedFunction, PropertyBinding,
     description::{Description, Property, Urn, array, string},
 };
 use crate::device::{Capability, Category, DeviceDescription, DeviceKey};
@@ -30,18 +30,6 @@ pub fn parse_device(key: DeviceKey, instance: &Value) -> Result<ParsedDevice, Ca
             refresh_trigger: None,
         })
     }
-}
-
-/// Retain the single-outlet API without exposing a multi-outlet total switch.
-pub fn parse_outlet(key: DeviceKey, instance: &Value) -> Result<ParsedOutlet, CapabilityError> {
-    let device = parse_device(key, instance)?;
-    let [function] = device.functions.as_slice() else {
-        return Err(CapabilityError::UnsupportedDevice);
-    };
-    Ok(ParsedOutlet {
-        description: device.description,
-        main_power: function.power,
-    })
 }
 
 pub(crate) fn is_outlet_type(value: &str) -> bool {

@@ -1,65 +1,65 @@
 use super::{
-    model::{GatewayStatus, PreparedDevice, SourceError},
-    state::{Backoff, Context, MAX_BACKOFF, Session},
+    model::{GatewayStatus, SourceError},
+    state::{Backoff, Context, MAX_BACKOFF, Session, Task},
 };
-use crate::{
-    device::{Availability, CommandError, CommandReceiver, CommandRequest},
-    storage::{CachedDevice, Store},
-    xiaomi::{
-        central::{self, CentralError, CentralEvent, DeviceAccess, SessionHandle},
-        discovery::{Discovery, DiscoveryChanges, GatewayRoute},
-    },
+use crate::xiaomi::{
+    central::{self, CentralEvent},
+    discovery::{Discovery, DiscoveryChanges, GatewayRoute},
 };
 use futures_lite::future;
-use std::{cell::RefCell, rc::Rc, time::Duration};
-
-pub(super) async fn local_run(
-    receiver: &mut CommandReceiver,
+use std::{rc::Rc, task::Poll, time::Duration};
+pub(super) async fn run(
     context: Rc<Context>,
-    store: Store,
     discovery: Discovery,
-    cached: bool,
     #[cfg(test)] test: (Option<String>, Duration),
 ) -> Result<(), SourceError> {
-    let mut backoff = Backoff::new();
-    let mut route: Option<GatewayRoute> = None;
     let mut changes = discovery.subscribe();
+    let mut route = None;
+    let mut backoff = Backoff::new();
+    let mut first_deadline = Some(context.clock.now() + Duration::from_secs(30));
     loop {
-        if context.live.borrow().blocked.is_some() {
-            let listener = context.changed.listen();
-            listener.await;
-            continue;
-        }
-        let metadata = context.metadata();
-        let snapshot = discovery.snapshot();
-        let selected = snapshot.route(&metadata.group_id, route.as_ref());
+        let scope = context.live.borrow().scope.clone();
+        let selected = scope
+            .as_ref()
+            .and_then(|scope| discovery.snapshot().route(&scope.group_id, route.as_ref()));
         let Some(selected) = selected else {
-            context.disconnect(SourceError::NoLocalGateway.to_string());
-            if !cached && !context.ready.completed() {
-                return Err(SourceError::NoLocalGateway);
+            if first_deadline.is_some() {
+                context.set_gateway(GatewayStatus::Discovering);
             }
             let listener = context.changed.listen();
+            let deadline =
+                first_deadline.unwrap_or_else(|| context.clock.now() + backoff.failed(false));
             future::or(
                 async {
-                    changes
-                        .changed()
-                        .await
-                        .map(|_| ())
-                        .map_err(SourceError::Discovery)
+                    changes.changed().await?;
+                    context.request_sync();
+                    Ok::<(), SourceError>(())
                 },
-                async {
-                    listener.await;
-                    Ok(())
-                },
+                future::or(
+                    async {
+                        listener.await;
+                        Ok(())
+                    },
+                    async {
+                        context.clock.wait_until(deadline).await;
+                        context.set_gateway(GatewayStatus::Unavailable(
+                            SourceError::NoLocalGateway.to_string(),
+                        ));
+                        first_deadline = None;
+                        Ok(())
+                    },
+                ),
             )
             .await?;
             continue;
         };
-        let credentials = context.live.borrow().credentials.clone();
-        let Some(credentials) = credentials else {
-            context.block("Xiaomi sign-in is required".into());
+        let Some(credentials) = context.live.borrow().credentials.clone() else {
+            let listener = context.changed.listen();
+            listener.await;
             continue;
         };
+        context.set_gateway(GatewayStatus::Connecting(selected.did.clone()));
+        let snapshot = discovery.snapshot();
         let addresses = snapshot
             .gateways
             .iter()
@@ -67,7 +67,6 @@ pub(super) async fn local_run(
             .unwrap()
             .addresses
             .clone();
-        context.set_gateway(GatewayStatus::Connecting(selected.did.clone()));
         let mut connected = None;
         let mut failure = SourceError::NoLocalGateway;
         for address in std::iter::once(selected.address).chain(
@@ -75,13 +74,6 @@ pub(super) async fn local_run(
                 .into_iter()
                 .filter(|address| *address != selected.address),
         ) {
-            if !discovery.snapshot().gateways.iter().any(|gateway| {
-                gateway.did == selected.did
-                    && gateway.group_id == selected.group_id
-                    && gateway.addresses.contains(&address)
-            }) {
-                continue;
-            }
             #[cfg(test)]
             let result = if let Some(ca) = &test.0 {
                 central::test_support::connect(address, &credentials, ca, test.1).await
@@ -92,129 +84,167 @@ pub(super) async fn local_run(
             let result = central::connect(address, &credentials).await;
             match result {
                 Ok(session) => {
-                    let live = context.live.borrow();
-                    let valid = live.blocked.is_none()
-                        && live.topology.as_ref().map(|topology| &topology.metadata)
-                            == Some(&metadata)
-                        && credentials.uid == metadata.uid
-                        && discovery.snapshot().gateways.iter().any(|gateway| {
-                            gateway.did == selected.did
-                                && gateway.group_id == selected.group_id
-                                && gateway.addresses.contains(&address)
-                        });
-                    drop(live);
-                    if !valid {
-                        session.0.close();
-                        failure = SourceError::StalePreparation;
+                    if discovery.snapshot().gateways.iter().any(|gateway| {
+                        gateway.did == selected.did
+                            && gateway.group_id == selected.group_id
+                            && gateway.addresses.contains(&address)
+                    }) && context.live.borrow().scope == scope
+                    {
+                        let mut selected = selected.clone();
+                        selected.address = address;
+                        connected = Some((selected, session));
                         break;
                     }
-                    let mut selected = selected.clone();
-                    selected.address = address;
-                    connected = Some((selected, session));
-                    break;
+                    session.0.close();
                 }
                 Err(error) => failure = error.into(),
             }
         }
+        let connected_since = context.clock.now();
         let result = if let Some((selected, (handle, driver))) = connected {
             route = Some(selected.clone());
+            first_deadline = None;
             let generation = handle.generation();
-            {
-                let mut live = context.live.borrow_mut();
-                live.session = Some(Session::new(handle.clone()));
-                live.preparation.invalidate(context.clock.now());
-            }
+            context.live.borrow_mut().session = Some(Session::new(handle));
+
             context.set_gateway(GatewayStatus::Connected(selected.did.clone()));
+            refresh_access(&context);
+            context.request_sync();
+            context.changed.notify(usize::MAX);
             let events = context.clone();
-            let event_handle = handle.clone();
             let driving = async {
                 driver
-                    .run(move |event| match event {
-                        CentralEvent::Property {
-                            did,
-                            binding,
-                            value,
-                        } => {
-                            if events.session_current(generation) {
-                                let metadata = events.metadata();
-                                if did == metadata.outlet.description.key.id
-                                    && binding == metadata.outlet.main_power
-                                {
-                                    events.device().observe(value);
+                    .run(move |event| {
+                        if !events.session_current(generation) {
+                            return;
+                        }
+                        match event {
+                            CentralEvent::Property {
+                                did,
+                                binding,
+                                value,
+                            } => {
+                                let work = events
+                                    .live
+                                    .borrow()
+                                    .session
+                                    .as_ref()
+                                    .and_then(|session| session.devices.get(&did).cloned());
+                                if let Some(work) = work {
+                                    let cached = work.cached.borrow();
+                                    if cached.device.refresh_trigger == Some(binding) {
+                                        work.refresh();
+                                    } else if let Some(function) = cached
+                                        .device
+                                        .functions
+                                        .iter()
+                                        .find(|function| function.power == binding)
+                                    {
+                                        work.physical
+                                            .function(&function.id)
+                                            .unwrap()
+                                            .observe(value);
+                                    }
                                 }
                             }
-                        }
-                        CentralEvent::DeviceListChanged { dids } => {
-                            if dids.contains(&events.metadata().outlet.description.key.id) {
-                                refresh_access(&event_handle, &events, generation);
+                            CentralEvent::DeviceListChanged { .. } => {
+                                refresh_access(&events);
+                                events.request_sync();
                             }
                         }
                     })
                     .await
                     .map_err(SourceError::Central)
             };
-            let working = session_work(receiver, &handle, &context, &store, generation);
-            let routing = route_watch(&discovery, &mut changes, &context, &selected, generation);
-            // Invalidate a removed route before polling any old session reply.
-            future::or(routing, future::or(driving, working)).await
+            future::or(
+                route_watch(&discovery, &mut changes, &context, &selected, generation),
+                future::or(driving, session_tasks(context.clone(), generation)),
+            )
+            .await
         } else {
             Err(failure)
         };
         let error = result.err().unwrap_or(SourceError::Cancelled);
-        let reason = context
-            .live
-            .borrow()
-            .blocked
-            .clone()
-            .unwrap_or_else(|| error.to_string());
-        context.disconnect(reason);
-        let stable = std::mem::take(&mut context.live.borrow_mut().reset_backoff);
-        if matches!(error, SourceError::Storage(_) | SourceError::Discovery(_))
-            || !cached && !context.ready.completed()
-        {
+        context.disconnect(error.to_string());
+        context.set_gateway(GatewayStatus::Unavailable(error.to_string()));
+        if matches!(error, SourceError::Storage(_) | SourceError::Discovery(_)) {
             return Err(error);
         }
-        wait_retry(
-            &context,
-            &discovery,
-            &mut changes,
-            route.as_ref(),
-            backoff.failed(stable),
-        )
-        .await?;
+        let delay =
+            backoff.failed(context.clock.now().saturating_sub(connected_since) >= MAX_BACKOFF);
+        wait_retry(&context, &discovery, &mut changes, route.as_ref(), delay).await?;
     }
 }
-pub(super) async fn wait_retry(
-    context: &Context,
-    discovery: &Discovery,
-    changes: &mut DiscoveryChanges,
-    previous_route: Option<&GatewayRoute>,
-    delay: Duration,
-) -> Result<(), SourceError> {
-    let listener = context.changed.listen();
-    let group_id = context.metadata().group_id;
-    let route = discovery.snapshot().route(&group_id, previous_route);
-    future::or(
-        async {
-            context.clock.wait_until(context.clock.now() + delay).await;
-            Ok(())
-        },
+pub(super) fn refresh_access(context: &Rc<Context>) {
+    let Some(handle) = ({
+        let mut live = context.live.borrow_mut();
+        live.session
+            .as_mut()
+            .and_then(|session| session.access.request().then(|| session.handle.clone()))
+    }) else {
+        return;
+    };
+    let generation = handle.generation();
+    let current = context.clone();
+    drop(handle.get_devices(move |result| {
+        if !current.session_current(generation) {
+            return;
+        }
+        let again = current
+            .live
+            .borrow_mut()
+            .session
+            .as_mut()
+            .unwrap()
+            .access
+            .finish();
+        match result {
+            Ok(entries) => current.apply_access(entries),
+            Err(error) => current.set_catalog_problem(Some(error.to_string())),
+        }
+        if again {
+            refresh_access(&current);
+        }
+    }));
+}
+async fn session_tasks(context: Rc<Context>, generation: u64) -> Result<(), SourceError> {
+    let mut tasks = Vec::<Task>::new();
+    loop {
+        let changed = {
+            let mut live = context.live.borrow_mut();
+            let Some(session) = live.session.as_mut() else {
+                return Ok(());
+            };
+            if session.handle.generation() != generation {
+                return Ok(());
+            }
+            tasks.append(&mut session.tasks);
+            session.changed.clone()
+        };
+        let listener = changed.listen();
         future::or(
-            async {
-                loop {
-                    changes.changed().await?;
-                    if discovery.snapshot().route(&group_id, route.as_ref()) != route {
-                        return Ok(());
+            future::poll_fn(|cx| {
+                let mut i = 0;
+                while i < tasks.len() {
+                    match tasks[i].as_mut().poll(cx) {
+                        Poll::Ready(result) => {
+                            drop(tasks.swap_remove(i));
+                            if let Err(error) = result {
+                                return Poll::Ready(Err(error));
+                            }
+                        }
+                        Poll::Pending => i += 1,
                     }
                 }
-            },
+                Poll::Pending
+            }),
             async {
                 listener.await;
                 Ok(())
             },
-        ),
-    )
-    .await
+        )
+        .await?;
+    }
 }
 async fn route_watch(
     discovery: &Discovery,
@@ -226,7 +256,7 @@ async fn route_watch(
     loop {
         let listener = context.changed.listen();
         if !context.session_current(generation) {
-            return Err(SourceError::StalePreparation);
+            return Err(SourceError::Cancelled);
         }
         if discovery
             .snapshot()
@@ -235,225 +265,85 @@ async fn route_watch(
             != Some(route)
         {
             context.disconnect("current gateway route changed".into());
-            return Err(SourceError::StalePreparation);
+            return Err(SourceError::NoLocalGateway);
         }
         future::or(
-            async { changes.changed().await.map(|_| ()).map_err(Into::into) },
+            async {
+                changes
+                    .changed()
+                    .await
+                    .map(|_| ())
+                    .map_err(SourceError::Discovery)
+            },
             async {
                 listener.await;
-                Ok::<(), SourceError>(())
+                Ok(())
             },
         )
         .await?;
     }
 }
-fn access(
-    result: Result<Option<DeviceAccess>, CentralError>,
-    metadata: &CachedDevice,
+pub(super) async fn wait_retry(
+    context: &Context,
+    discovery: &Discovery,
+    changes: &mut DiscoveryChanges,
+    previous: Option<&GatewayRoute>,
+    delay: Duration,
 ) -> Result<(), SourceError> {
-    let access = result?.ok_or_else(|| {
-        SourceError::Unavailable("target is absent from the local gateway".into())
-    })?;
-    if access.model != metadata.model || access.instance_type != metadata.instance_type {
-        return Err(SourceError::Unavailable(
-            "local device description differs from the current static description".into(),
-        ));
-    }
-    if !access.online || !access.spec_v2_access || !access.push_available {
-        return Err(SourceError::Unavailable(
-            "local device is offline or lacks property/push access".into(),
-        ));
-    }
-    Ok(())
-}
-fn refresh_access(handle: &SessionHandle, context: &Rc<Context>, generation: u64) {
-    if !context.session_current(generation) {
-        return;
-    }
-    {
-        let mut live = context.live.borrow_mut();
-        if !live.session.as_mut().unwrap().refresh.request() {
-            return;
-        }
-    }
-    let metadata = context.metadata();
-    let did = metadata.outlet.description.key.id.clone();
-    let updated = context.clone();
-    let next_handle = handle.clone();
-    drop(handle.get_device_list(&did, move |result| {
-        if !updated.session_current(generation) {
-            return;
-        }
-        let outcome = access(result, &metadata);
-        let again = {
-            let mut live = updated.live.borrow_mut();
-            live.session.as_mut().unwrap().refresh.finish()
-        };
-        match outcome {
-            Err(error) => updated.unavailable(error.to_string()),
-            Ok(()) => {
-                if !matches!(
-                    updated.device().snapshot().availability,
-                    Availability::Available
-                ) {
-                    updated.changed.notify(usize::MAX);
-                }
-            }
-        }
-        if again {
-            refresh_access(&next_handle, &updated, generation);
-        }
-    }));
-}
-async fn prepare(
-    handle: &SessionHandle,
-    context: &Rc<Context>,
-    generation: u64,
-) -> Result<(), SourceError> {
-    let (version, metadata) = {
-        let live = context.live.borrow();
+    let group = context
+        .live
+        .borrow()
+        .scope
+        .as_ref()
+        .map(|scope| scope.group_id.clone());
+    let route = group
+        .as_ref()
+        .and_then(|group| discovery.snapshot().route(group, previous));
+    let credentials = context.live.borrow().credentials.as_ref().map(|record| {
         (
-            live.preparation.version,
-            live.topology.as_ref().unwrap().metadata.clone(),
+            record.uid.clone(),
+            record.virtual_did.clone(),
+            record.private_key_pem.clone(),
+            record.certificate_pem.clone(),
         )
-    };
-    let did = metadata.outlet.description.key.id.clone();
-    let binding = metadata.outlet.main_power;
-    let checked = Rc::new(RefCell::new(None));
-    let outcome = checked.clone();
-    let current = context.clone();
-    let _ = handle
-        .get_device_list(&did, move |result| {
-            let result = access(result, &metadata);
-            if current.current(generation, version)
-                && let Err(error) = &result
-            {
-                current.unavailable(error.to_string());
-            }
-            *outcome.borrow_mut() = Some(result);
-        })
-        .await;
-    checked.borrow_mut().take().unwrap()?;
-    if !context.current(generation, version) {
-        return Err(SourceError::StalePreparation);
-    }
-    handle.subscribe_property(&did, binding).await?;
-    if !context.current(generation, version) {
-        return Err(SourceError::StalePreparation);
-    }
-    let current = context.clone();
-    handle
-        .read_property(&did, binding, move |result| {
-            if current.current(generation, version) {
-                match result {
-                    Ok(value) => current.prepared(generation, version, value),
-                    Err(error) => current.unavailable(error.to_string()),
+    });
+    let deadline = context.clock.now() + delay;
+    future::or(
+        async {
+            context.clock.wait_until(deadline).await;
+            Ok(())
+        },
+        future::or(
+            async {
+                loop {
+                    changes.changed().await?;
+                    if group
+                        .as_ref()
+                        .and_then(|group| discovery.snapshot().route(group, route.as_ref()))
+                        != route
+                    {
+                        return Ok(());
+                    }
                 }
-            }
-        })
-        .await?;
-    if !context.current(generation, version)
-        || !matches!(
-            context.device().snapshot().availability,
-            Availability::Available
-        )
-    {
-        return Err(SourceError::StalePreparation);
-    }
-    Ok(())
-}
-fn command_error(error: CentralError) -> CommandError {
-    match error {
-        CentralError::Timeout => CommandError::Timeout,
-        CentralError::Rejected(code) => CommandError::Rejected(format!("gateway code {code}")),
-        CentralError::Cancelled => CommandError::Cancelled,
-        error => CommandError::SendFailed(error.to_string()),
-    }
-}
-async fn session_work(
-    receiver: &mut CommandReceiver,
-    handle: &SessionHandle,
-    context: &Rc<Context>,
-    store: &Store,
-    generation: u64,
-) -> Result<(), SourceError> {
-    let mut backoff = Backoff::new();
-    loop {
-        if let Err(error) = prepare(handle, context, generation).await {
-            if !context.ready.completed() {
-                return Err(error);
-            }
-            context.unavailable(error.to_string());
-            let listener = context.changed.listen();
-            future::or(
-                context
-                    .clock
-                    .wait_until(context.clock.now() + backoff.failed(false)),
-                async {
+            },
+            async {
+                loop {
+                    let listener = context.changed.listen();
+                    let current = context.live.borrow().credentials.as_ref().map(|record| {
+                        (
+                            record.uid.clone(),
+                            record.virtual_did.clone(),
+                            record.private_key_pem.clone(),
+                            record.certificate_pem.clone(),
+                        )
+                    });
+                    if current != credentials {
+                        return Ok(());
+                    }
                     listener.await;
-                },
-            )
-            .await;
-            continue;
-        }
-        context.persist_topology(store)?;
-        context.ready.finish(Ok(PreparedDevice {
-            device: context.device(),
-            metadata: context.metadata(),
-        }));
-        let version = context.live.borrow().preparation.version;
-        let since = context.live.borrow().preparation.available_since.unwrap();
-        loop {
-            if !context.current(generation, version) {
-                break;
-            }
-            enum Wake {
-                Command(Option<CommandRequest>),
-                Prepare,
-            }
-            let wake = future::or(async { Wake::Command(receiver.next().await) }, async {
-                context.wait_reprepare(generation, version).await;
-                Wake::Prepare
-            })
-            .await;
-            match wake {
-                Wake::Prepare => break,
-                Wake::Command(Some(request)) => {
-                    let metadata = context.metadata();
-                    let current = context.clone();
-                    let target = request.target;
-                    let writing = handle.set_property(
-                        &metadata.outlet.description.key.id,
-                        metadata.outlet.main_power,
-                        target,
-                        move |result| {
-                            if !current.current(generation, version) {
-                                request.reject(CommandError::Unavailable(
-                                    "gateway preparation changed".into(),
-                                ));
-                            } else {
-                                match result {
-                                    Ok(()) => {
-                                        let _ = request.accept();
-                                    }
-                                    Err(error) => request.reject(command_error(error)),
-                                }
-                            }
-                        },
-                    );
-                    future::or(
-                        async {
-                            let _ = writing.await;
-                        },
-                        context.wait_reprepare(generation, version),
-                    )
-                    .await;
                 }
-                Wake::Command(None) => return Err(SourceError::Cancelled),
-            }
-        }
-        if context.clock.now().saturating_sub(since) >= MAX_BACKOFF {
-            backoff = Backoff::new();
-        }
-    }
+            },
+        ),
+    )
+    .await
 }

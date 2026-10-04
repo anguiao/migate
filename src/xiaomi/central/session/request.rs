@@ -27,10 +27,16 @@ pub struct DeviceAccess {
     pub push_available: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceEntry {
+    pub did: String,
+    pub access: Result<DeviceAccess, CentralError>,
+}
+
 #[derive(Clone)]
 pub(super) enum Response {
     Device(Option<DeviceAccess>),
-    Devices(Vec<DeviceAccess>),
+    Devices(Vec<DeviceEntry>),
     Power(bool),
     Unit,
 }
@@ -166,10 +172,10 @@ impl SessionHandle {
         self.shared.closed.set(true);
         self.shared.event.notify(usize::MAX);
     }
-    pub fn get_devices<F: FnOnce(Result<Vec<DeviceAccess>, CentralError>) + 'static>(
+    pub fn get_devices<F: FnOnce(Result<Vec<DeviceEntry>, CentralError>) + 'static>(
         &self,
         on_result: F,
-    ) -> impl Future<Output = Result<Vec<DeviceAccess>, CentralError>> + use<F> {
+    ) -> impl Future<Output = Result<Vec<DeviceEntry>, CentralError>> + use<F> {
         let callback: Callback =
             Box::new(move |result| on_result(result.and_then(devices_response)));
         let result = self.submit(RequestKind::ListAll, self.timing.request, Some(callback));
@@ -377,7 +383,7 @@ fn valid_request(kind: &RequestKind) -> bool {
     valid_identifier(did) && binding.is_none_or(|binding| binding.siid > 0 && binding.piid > 0)
 }
 
-fn devices_response(response: Response) -> Result<Vec<DeviceAccess>, CentralError> {
+fn devices_response(response: Response) -> Result<Vec<DeviceEntry>, CentralError> {
     match response {
         Response::Devices(devices) => Ok(devices),
         _ => Err(CentralError::Protocol),
@@ -461,10 +467,16 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
                 .get("devList")
                 .and_then(Value::as_object)
                 .ok_or(CentralError::Protocol)?;
+            if list.keys().any(|did| !valid_identifier(did)) {
+                return Err(CentralError::Protocol);
+            }
             Ok(Response::Devices(
                 list.iter()
-                    .map(|(did, info)| device_access(did, info))
-                    .collect::<Result<Vec<_>, _>>()?,
+                    .map(|(did, info)| DeviceEntry {
+                        did: did.clone(),
+                        access: device_access(did, info),
+                    })
+                    .collect(),
             ))
         }
         RequestKind::List { did } => {

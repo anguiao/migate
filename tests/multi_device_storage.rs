@@ -138,11 +138,10 @@ fn allocation_is_atomic_on_failure_and_exhaustion_and_never_uses_wildcard_endpoi
         .devices()
         .publish(&description("exhausted"))
         .unwrap_err();
-    assert!(
-        exhausted
-            .to_string()
-            .contains("endpoint numbers are exhausted")
-    );
+    assert!(matches!(
+        exhausted,
+        migate::storage::AdmissionError::EndpointExhausted
+    ));
     assert_eq!(
         db.query_row("SELECT count(*) FROM device_identity", [], |r| r
             .get::<_, u32>(0))

@@ -1,4 +1,4 @@
-use super::{CapabilityError, PropertyBinding, parse_device, parse_outlet};
+use super::{CapabilityError, PropertyBinding, parse_device};
 use crate::device::{Capability, Category, DeviceKey};
 use serde_json::{Value, json};
 
@@ -32,13 +32,16 @@ fn four_single_outlet_models_accept_their_public_instance_urns() {
         "zimi.plug.zncz01",
         "qmi.plug.psv3",
     ] {
-        let outlet = parse_outlet(key(), &model_description(model))
+        let outlet = parse_device(key(), &model_description(model))
             .unwrap_or_else(|error| panic!("{model}: {error}"));
-        assert_eq!(outlet.main_power, PropertyBinding { siid: 2, piid: 1 });
+        assert_eq!(
+            outlet.functions[0].power,
+            PropertyBinding { siid: 2, piid: 1 }
+        );
         let device = parse_device(key(), &model_description(model)).unwrap();
         assert_eq!(device.functions.len(), 1);
         assert_eq!(device.functions[0].id, "main");
-        assert_eq!(device.functions[0].power, outlet.main_power);
+        assert_eq!(device.functions[0].power, outlet.functions[0].power);
         assert_eq!(device.refresh_trigger, None);
     }
 }
@@ -75,10 +78,6 @@ fn cp7pd_exposes_three_independent_channels_and_observes_total_control_internall
             .functions
             .iter()
             .all(|function| function.power.siid != 2)
-    );
-    assert_eq!(
-        parse_outlet(key(), &description),
-        Err(CapabilityError::UnsupportedDevice)
     );
 }
 
@@ -324,17 +323,23 @@ fn minimal_description() -> Value {
 
 #[test]
 fn public_spec_selects_main_switch_and_ignores_indicator_and_vendor_switches() {
-    let outlet = parse_outlet(key(), &public_description()).unwrap();
+    let outlet = parse_device(key(), &public_description()).unwrap();
     assert_eq!(outlet.description.key, key());
     assert_eq!(outlet.description.category, Category::Outlet);
     assert_eq!(outlet.description.capabilities, [Capability::OnOff]);
-    assert_eq!(outlet.main_power, PropertyBinding { siid: 2, piid: 1 });
+    assert_eq!(
+        outlet.functions[0].power,
+        PropertyBinding { siid: 2, piid: 1 }
+    );
 }
 
 #[test]
 fn standard_semantics_work_with_other_vendor_and_instance_ids() {
-    let outlet = parse_outlet(key(), &minimal_description()).unwrap();
-    assert_eq!(outlet.main_power, PropertyBinding { siid: 42, piid: 19 });
+    let outlet = parse_device(key(), &minimal_description()).unwrap();
+    assert_eq!(
+        outlet.functions[0].power,
+        PropertyBinding { siid: 42, piid: 19 }
+    );
 }
 
 #[test]
@@ -345,7 +350,7 @@ fn descriptions_and_instance_order_do_not_determine_the_main_power() {
         service["description"] = json!("Switch");
     }
     assert_eq!(
-        parse_outlet(key(), &description).unwrap().main_power,
+        parse_device(key(), &description).unwrap().functions[0].power,
         PropertyBinding { siid: 2, piid: 1 }
     );
 }
@@ -356,7 +361,7 @@ fn indicator_light_without_a_functional_switch_is_unsupported() {
     description["services"][0]["type"] =
         json!("urn:miot-spec-v2:service:indicator-light:00007803:other-vendor:1");
     assert_eq!(
-        parse_outlet(key(), &description),
+        parse_device(key(), &description),
         Err(CapabilityError::MissingMainPower)
     );
 }
@@ -366,7 +371,7 @@ fn non_boolean_main_power_and_each_missing_permission_are_rejected() {
     let mut description = minimal_description();
     description["services"][0]["properties"][0]["format"] = json!("uint8");
     assert_eq!(
-        parse_outlet(key(), &description),
+        parse_device(key(), &description),
         Err(CapabilityError::InvalidMainPowerType)
     );
     for permission in ["read", "write", "notify"] {
@@ -378,7 +383,7 @@ fn non_boolean_main_power_and_each_missing_permission_are_rejected() {
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            parse_outlet(key(), &description),
+            parse_device(key(), &description),
             Err(CapabilityError::MissingAccess(permission))
         );
     }
@@ -394,7 +399,7 @@ fn multiple_functional_power_properties_are_ambiguous() {
         .unwrap()
         .push(second);
     assert_eq!(
-        parse_outlet(key(), &description),
+        parse_device(key(), &description),
         Err(CapabilityError::AmbiguousMainPower)
     );
 
@@ -403,7 +408,7 @@ fn multiple_functional_power_properties_are_ambiguous() {
     second["iid"] = json!(43);
     description["services"].as_array_mut().unwrap().push(second);
     assert_eq!(
-        parse_outlet(key(), &description),
+        parse_device(key(), &description),
         Err(CapabilityError::AmbiguousMainPower)
     );
 }
@@ -418,14 +423,14 @@ fn private_or_inconsistent_urns_cannot_masquerade_as_standard_power() {
         let mut description = minimal_description();
         description["services"][0]["properties"][0]["type"] = json!(urn);
         assert_eq!(
-            parse_outlet(key(), &description),
+            parse_device(key(), &description),
             Err(CapabilityError::MissingMainPower)
         );
     }
     let mut description = minimal_description();
     description["services"][0]["properties"][0]["type"] = json!("on");
     assert_eq!(
-        parse_outlet(key(), &description),
+        parse_device(key(), &description),
         Err(CapabilityError::InvalidDescription("type"))
     );
 }
@@ -435,7 +440,7 @@ fn unsupported_devices_and_malformed_protocol_fields_fail_at_the_boundary() {
     let mut description = minimal_description();
     description["type"] = json!("urn:miot-spec-v2:device:light:0000A001:other-vendor:1");
     assert_eq!(
-        parse_outlet(key(), &description),
+        parse_device(key(), &description),
         Err(CapabilityError::UnsupportedDevice)
     );
     for value in [
@@ -443,7 +448,7 @@ fn unsupported_devices_and_malformed_protocol_fields_fail_at_the_boundary() {
         json!({"type": "urn:miot-spec-v2:device:outlet:0000A002:other-vendor:1", "services": null}),
     ] {
         assert!(matches!(
-            parse_outlet(key(), &value),
+            parse_device(key(), &value),
             Err(CapabilityError::InvalidDescription(_))
         ));
     }
@@ -451,14 +456,14 @@ fn unsupported_devices_and_malformed_protocol_fields_fail_at_the_boundary() {
         let mut description = minimal_description();
         description["services"][0]["iid"] = iid;
         assert!(matches!(
-            parse_outlet(key(), &description),
+            parse_device(key(), &description),
             Err(CapabilityError::InvalidDescription(_))
         ));
     }
     let mut description = minimal_description();
     description["services"][0]["properties"][0]["access"] = json!(["read", 1, "write", "notify"]);
     assert!(matches!(
-        parse_outlet(key(), &description),
+        parse_device(key(), &description),
         Err(CapabilityError::InvalidDescription(_))
     ));
 }

@@ -73,7 +73,7 @@ impl TestProcess {
         process.send("status\n");
         process.wait_for_output(
             Stream::Stdout,
-            "test-outlet: unknown\nDevice: initializing.",
+            "test-outlet (Test Outlet): initializing\n  main (Main power): unknown",
         );
         fs::write(&gate, b"ready").unwrap();
         process.wait_for_output(
@@ -525,7 +525,7 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
     for (close_input, initial) in [(false, false), (true, true)] {
         let (mut process, port) = TestProcess::bridge(directory.path(), initial);
         assert_ne!(port, peer_port);
-        process.send("status\non\nstatus\n");
+        process.send("status\non test-outlet\nstatus\n");
         if close_input {
             process.close_input();
         }
@@ -545,12 +545,12 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
         assert!(output.contains("Manual pairing code: "), "{output}");
         assert!(
             output.contains(&format!(
-                "test-outlet: {}",
+                "main (Main power): {}",
                 if initial { "on" } else { "off" }
             )),
             "{output}"
         );
-        assert!(output.contains("test-outlet: on"), "{output}");
+        assert!(output.contains("main (Main power): on"), "{output}");
         assert!(errors.contains("Fake source stopped"), "{errors}");
         assert!(errors.contains(directory.path().to_str().unwrap()));
         let reopened = migate::storage::Store::open(directory.path()).unwrap();
@@ -570,7 +570,7 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
         }
     }
     peer.send("status\n");
-    peer.wait_for_output(Stream::Stdout, "test-outlet: off\n");
+    peer.wait_for_output(Stream::Stdout, "main (Main power): off\n");
     peer.interrupt();
 }
 
@@ -615,9 +615,10 @@ fn bridge_helper_child() {
             use futures_lite::{future, io::BufReader};
             use migate::{
                 device::{
-                    Availability, Capability, Category, Device, DeviceDescription, DeviceKey,
+                    Availability, Capability, Category, DeviceKey, DeviceRegistry,
+                    FunctionDescription, PhysicalDevice, PhysicalDeviceDescription,
                 },
-                runtime::{BridgeOptions, DeviceSetup, run_prepared_bridge, shutdown_signal},
+                runtime::{BridgeOptions, run_prepared_bridge, shutdown_signal},
                 terminal::{self, AuthStatus},
                 xiaomi::{auth::AuthService, cloud::CloudClient},
             };
@@ -634,11 +635,21 @@ fn bridge_helper_child() {
                 .local_status()
                 .unwrap();
             let status = AuthStatus::new(report, "/bin/migate".into(), directory.clone());
-            let (device, mut receiver) = Device::new(DeviceDescription {
+            let (physical, mut receivers) = PhysicalDevice::new(PhysicalDeviceDescription {
                 key: DeviceKey::new("xiaomi", "test-outlet"),
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
+                label: "Test Outlet".into(),
+                functions: vec![FunctionDescription {
+                    id: "main".into(),
+                    label: "Main power".into(),
+                    category: Category::Outlet,
+                    capabilities: vec![Capability::OnOff],
+                }],
             });
+            store.devices().publish(physical.description()).unwrap();
+            let device = physical.functions()[0].clone();
+            let mut receiver = receivers.remove(0);
+            let registry = DeviceRegistry::new();
+            registry.insert(physical);
             let source_device = device.clone();
             let gate = directory.join("source-ready");
             let initial =
@@ -676,12 +687,7 @@ fn bridge_helper_child() {
                     status: &status,
                     port: 0,
                 },
-                async {
-                    Ok(DeviceSetup {
-                        device,
-                        default_label: "Test Outlet".into(),
-                    })
-                },
+                async { Ok(registry) },
                 source,
                 BufReader::new(blocking::Unblock::new(std::io::stdin())),
                 blocking::Unblock::new(std::io::stdout()),

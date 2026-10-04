@@ -2,9 +2,9 @@ use std::{error::Error, fmt};
 
 use crate::{
     device::DeviceKey,
-    storage::{CachedDevice, CachedPhysicalDevice, CachedScope, XiaomiRecord},
+    storage::{CachedPhysicalDevice, CachedScope, XiaomiRecord},
     xiaomi::{
-        capability::{CapabilityError, parse_device, parse_outlet},
+        capability::{CapabilityError, parse_device},
         cloud::{CloudClient, CloudError, OwnedHome, group_id},
         discovery::DiscoverySnapshot,
     },
@@ -140,51 +140,4 @@ fn validate_home(home: &OwnedHome) -> Result<(), CatalogError> {
         return Err(CatalogError::InvalidScope);
     }
     Ok(())
-}
-
-/// Temporary single-device compatibility for source until its lifecycle migration.
-/// This legacy entry still chooses a local home containing the requested DID.
-pub async fn load_scoped(
-    snapshot: &DiscoverySnapshot,
-    homes: &[OwnedHome],
-    credentials: &XiaomiRecord,
-    key: &DeviceKey,
-    cloud: &CloudClient,
-) -> Result<CachedDevice, CatalogError> {
-    let local_homes = homes
-        .iter()
-        .filter(|home| {
-            home.uid == credentials.uid
-                && snapshot
-                    .gateways
-                    .iter()
-                    .any(|gateway| gateway.group_id == home.group_id)
-        })
-        .collect::<Vec<_>>();
-    if local_homes.is_empty() {
-        return Err(CatalogError::NoLocalHome);
-    }
-    let home = local_homes
-        .into_iter()
-        .filter(|home| home.dids.contains(&key.id))
-        .min_by(|left, right| left.home_id.cmp(&right.home_id))
-        .ok_or(CatalogError::TargetMissing)?;
-    let device = cloud
-        .get_device(&credentials.tokens.access_token, home, &key.id)
-        .await
-        .map_err(CatalogError::Cloud)?
-        .ok_or(CatalogError::TargetMissing)?;
-    let instance = cloud
-        .get_instance(&device.instance_type)
-        .await
-        .map_err(CatalogError::Cloud)?;
-    let outlet = parse_outlet(key.clone(), &instance).map_err(CatalogError::Capability)?;
-    Ok(CachedDevice {
-        uid: credentials.uid.clone(),
-        home_id: home.home_id.clone(),
-        group_id: home.group_id.clone(),
-        model: device.model,
-        instance_type: device.instance_type,
-        outlet,
-    })
 }

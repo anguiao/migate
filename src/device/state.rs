@@ -82,6 +82,7 @@ impl PhysicalDevice {
     pub fn description(&self) -> &PhysicalDeviceDescription {
         &self.description
     }
+    #[cfg(test)]
     pub(crate) fn from_single(function: Device, label: String) -> Self {
         let description = function.description();
         Self {
@@ -152,7 +153,7 @@ fn set_availability(physical: &PhysicalInner, availability: Availability) {
             .iter()
             .filter_map(Weak::upgrade)
         {
-            let completions = function.state.lock().unwrap().queue.drain_completions();
+            let completions = function.state.lock().unwrap().queue.drain_pending();
             for completion in completions {
                 completion.finish(Err(error.clone()));
             }

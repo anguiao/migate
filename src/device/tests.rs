@@ -217,7 +217,30 @@ fn receiver_shutdown_cancels_pending_commands_and_future_submissions() {
 }
 
 #[test]
-fn becoming_unavailable_ends_active_and_queued_requests_and_stale_acceptance() {
+fn active_acceptance_survives_an_offline_observation() {
+    block_on(async {
+        let (device, mut receiver) = ready_device();
+        let mut command = Box::pin(device.execute(Command::On));
+        assert!(poll_once(command.as_mut()).await.is_none());
+        let request = receiver.next().await.unwrap();
+        device.set_availability(Availability::Unavailable("offline".into()));
+        assert!(poll_once(command.as_mut()).await.is_none());
+        let accepted = request.accept().unwrap();
+        assert_eq!(accepted.power, Power::On);
+        assert_eq!(
+            accepted.availability,
+            Availability::Unavailable("offline".into())
+        );
+        assert_eq!(command.await.unwrap(), accepted);
+        assert!(matches!(
+            device.execute(Command::Off).await,
+            Err(CommandError::Unavailable(_))
+        ));
+    });
+}
+
+#[test]
+fn becoming_unavailable_ends_queued_requests_but_preserves_active_acceptance() {
     block_on(async {
         let (device, mut receiver) = ready_device();
         let first = device.execute(Command::On);
@@ -228,13 +251,14 @@ fn becoming_unavailable_ends_active_and_queued_requests_and_stale_acceptance() {
         let stale = receiver.next().await.unwrap();
         device.set_availability(Availability::Unavailable("connection lost".into()));
         let error = CommandError::Unavailable("connection lost".into());
-        assert_eq!(poll_once(first.as_mut()).await, Some(Err(error.clone())));
+        assert!(poll_once(first.as_mut()).await.is_none());
         assert_eq!(poll_once(second.as_mut()).await, Some(Err(error.clone())));
         device.observe(false);
         device.set_availability(Availability::Available);
-        assert_eq!(stale.accept(), Err(error));
+        assert_eq!(stale.accept().unwrap().power, Power::On);
+        assert_eq!(first.await.unwrap().power, Power::On);
         assert!(poll_once(receiver.next()).await.is_none());
-        assert_eq!(device.snapshot().power, Power::Off);
+        assert_eq!(device.snapshot().power, Power::On);
     });
 }
 

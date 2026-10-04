@@ -1,6 +1,6 @@
 use crate::{
     RuntimeError,
-    device::{Device, DeviceRegistry, PhysicalDevice},
+    device::DeviceRegistry,
     matter::{Bridge, PairingEvent},
     storage::{Identity, Store},
     terminal::{self, AuthStatus},
@@ -10,11 +10,6 @@ use futures_lite::{
     io::{AsyncBufRead, AsyncWrite},
 };
 use std::future::Future;
-
-pub struct DeviceSetup {
-    pub device: Device,
-    pub default_label: String,
-}
 
 pub struct BridgeOptions<'a> {
     pub store: &'a Store,
@@ -26,7 +21,7 @@ pub struct BridgeOptions<'a> {
 /// Production and isolated tests assemble the same bridge and lifetime boundary.
 pub async fn run_prepared_bridge(
     options: BridgeOptions<'_>,
-    ready: impl Future<Output = Result<DeviceSetup, RuntimeError>>,
+    ready: impl Future<Output = Result<DeviceRegistry, RuntimeError>>,
     source: impl Future<Output = Result<(), RuntimeError>>,
     input: impl AsyncBufRead + Unpin,
     output: impl AsyncWrite + Unpin,
@@ -51,23 +46,20 @@ pub async fn run_prepared_bridge(
     let Some(prepared) = prepared else {
         return Ok(());
     };
-    let physical = PhysicalDevice::from_single(prepared.device.clone(), prepared.default_label);
-    let stored = options.store.devices().publish(physical.description())?;
-    let registry = DeviceRegistry::new();
-    registry.insert(physical);
-    log::info!(
-        "MiGate bridge_id={} device_id={} did={} endpoint={}",
-        options.identity.bridge_id,
-        stored.unique_id,
-        stored.key.id,
-        stored.endpoint
-    );
+    let registry = prepared;
+    log::info!("MiGate bridge_id={}", options.identity.bridge_id);
     let bridge = Bridge::new(&registry, options.store, options.identity);
     let result = {
         let input = async {
-            terminal::bridge::run_input(&prepared.device, options.status, input, output)
-                .await
-                .map_err(|error| format!("Terminal I/O failed: {error}"))?;
+            terminal::bridge::run_input(
+                &registry,
+                &options.store.devices(),
+                options.status,
+                input,
+                output,
+            )
+            .await
+            .map_err(|error| format!("Terminal I/O failed: {error}"))?;
             log::info!("Terminal input ended; bridge is still running");
             future::pending::<Result<(), RuntimeError>>().await
         };

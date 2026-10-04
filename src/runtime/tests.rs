@@ -1,4 +1,4 @@
-use super::{BridgeOptions, DeviceSetup, default_device_label, run_prepared_bridge};
+use super::{BridgeOptions, default_device_label, run_prepared_bridge};
 use crate::{
     matter::tests::test_device,
     xiaomi::{auth::AuthService, cloud::CloudClient},
@@ -158,12 +158,7 @@ fn source_completion_after_matter_startup_stops_serving_and_drops_commands() {
                             status: &status,
                             port: 0,
                         },
-                        async {
-                            Ok(DeviceSetup {
-                                device: device.clone(),
-                                default_label: "Test Outlet".into(),
-                            })
-                        },
+                        async { Ok(crate::matter::tests::test_registry(&store, &device)) },
                         source,
                         Cursor::new([]),
                         Vec::new(),
@@ -238,10 +233,7 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                     },
                     async {
                         ready_seen.set(true);
-                        Ok(DeviceSetup {
-                            device: device.clone(),
-                            default_label: "Test Outlet".into(),
-                        })
+                        Ok(crate::matter::tests::test_registry(&store, &device))
                     },
                     source,
                     Cursor::new([]),
@@ -296,12 +288,7 @@ fn serving_terminal_io_failure_drops_the_source() {
                             status: &status,
                             port: 0,
                         },
-                        async {
-                            Ok(DeviceSetup {
-                                device,
-                                default_label: "Test Outlet".into(),
-                            })
-                        },
+                        async { Ok(crate::matter::tests::test_registry(&store, &device)) },
                         source,
                         Cursor::new(input),
                         Cursor::new(&mut [0u8; 0][..]),
@@ -313,6 +300,50 @@ fn serving_terminal_io_failure_drops_the_source() {
                     assert!(error.to_string().starts_with("Terminal I/O failed:"));
                     assert!(dropped.get());
                 }
+            })
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn empty_registry_starts_the_bridge_and_eof_keeps_the_source_running() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let store = Store::open(directory.path()).unwrap();
+                let identity = store.load_identity().unwrap();
+                let status = status(&store);
+                let started = event_listener::Event::new();
+                let listener = started.listen();
+                let paired = Cell::new(false);
+                run_prepared_bridge(
+                    BridgeOptions {
+                        store: &store,
+                        identity: &identity,
+                        status: &status,
+                        port: 0,
+                    },
+                    async { Ok(crate::device::DeviceRegistry::new()) },
+                    future::pending(),
+                    Cursor::new(b"list\nstatus\n"),
+                    Vec::new(),
+                    async {
+                        listener.await;
+                        Ok(())
+                    },
+                    |_| {
+                        paired.set(true);
+                        started.notify(usize::MAX);
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(paired.get());
             })
         })
         .unwrap()

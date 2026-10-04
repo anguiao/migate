@@ -31,7 +31,15 @@ impl AuthService {
 
     pub(super) async fn check_mode(
         &self,
+        bridge_homes: Option<&mut Vec<OwnedHome>>,
+    ) -> Result<AuthReport, AuthError> {
+        self.check_mode_with_token(bridge_homes, None).await
+    }
+
+    pub(super) async fn check_mode_with_token(
+        &self,
         mut bridge_homes: Option<&mut Vec<OwnedHome>>,
+        rejected_token: Option<&str>,
     ) -> Result<AuthReport, AuthError> {
         let Some(stored) = self.load_validated()? else {
             return Ok(AuthReport {
@@ -46,7 +54,8 @@ impl AuthService {
         let mut tokens = record.tokens.clone();
         let mut refreshed = false;
 
-        if (self.now)() >= tokens.refresh_at
+        if ((self.now)() >= tokens.refresh_at
+            || rejected_token == Some(tokens.access_token.as_str()))
             && let Err(failure) = self
                 .refresh_once(&record, &mut tokens, &mut refreshed)
                 .await

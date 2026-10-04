@@ -1,4 +1,4 @@
-use super::{CatalogError, current_home, load_device, load_scoped, select_local_home};
+use super::{CatalogError, current_home, load_device, select_local_home};
 use crate::{
     device::DeviceKey,
     storage::{CachedScope, Store, XiaomiRecord},
@@ -296,7 +296,7 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
         home("local", &["target"]),
         home("local-other", &["different"]),
     ];
-    let cached = block_on(load_scoped(
+    let cached = block_on(load_local(
         &snapshot(),
         &homes,
         &credentials(),
@@ -306,8 +306,8 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
     .unwrap();
     assert_eq!(cached.home_id, "local");
     assert_eq!(cached.group_id, group_id("account", "local"));
-    assert_eq!(cached.outlet.main_power.siid, 2);
-    assert_eq!(cached.outlet.main_power.piid, 1);
+    assert_eq!(cached.device.functions[0].power.siid, 2);
+    assert_eq!(cached.device.functions[0].power.piid, 1);
     assert!(!format!("{cached:?}").contains("not retained"));
     let captured = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(captured.len(), 3);
@@ -343,11 +343,11 @@ fn no_local_home_remote_target_or_different_account_makes_no_request() {
         revision: 0,
     };
     assert!(matches!(
-        block_on(load_scoped(&absent, &homes, &credentials, &key(), &cloud)),
+        block_on(load_local(&absent, &homes, &credentials, &key(), &cloud)),
         Err(CatalogError::NoLocalHome)
     ));
     assert!(matches!(
-        block_on(load_scoped(
+        block_on(load_local(
             &snapshot(),
             &homes,
             &credentials,
@@ -359,14 +359,14 @@ fn no_local_home_remote_target_or_different_account_makes_no_request() {
     let mut other_account = home("local", &["target"]);
     other_account.uid = "another-account".into();
     assert!(matches!(
-        block_on(load_scoped(
+        block_on(load_local(
             &snapshot(),
             &[other_account],
             &credentials,
             &key(),
             &cloud
         )),
-        Err(CatalogError::NoLocalHome)
+        Err(CatalogError::InvalidScope)
     ));
     assert_eq!(requests.try_iter().count(), 0);
 }
@@ -389,7 +389,7 @@ fn missing_target_and_cloud_failure_are_returned_without_cache_fallback() {
     ] {
         let (base, requests) = mock_server(vec![response]);
         let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        let result = block_on(load_scoped(
+        let result = block_on(load_local(
             &snapshot(),
             &[home("local", &["target"])],
             &credentials(),
@@ -417,7 +417,7 @@ fn unsupported_new_description_is_reported_as_capability_failure() {
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     assert!(matches!(
-        block_on(load_scoped(
+        block_on(load_local(
             &snapshot(),
             &[home("local", &["target"])],
             &credentials(),
@@ -440,7 +440,7 @@ fn damaged_cloud_description_fails_before_requesting_an_instance() {
             &json!({"code":0,"result":{"list":[device]}}).to_string(),
         )]);
         let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        let result = block_on(load_scoped(
+        let result = block_on(load_local(
             &snapshot(),
             &[home("local", &["target"])],
             &credentials(),
@@ -452,4 +452,15 @@ fn damaged_cloud_description_fails_before_requesting_an_instance() {
         );
         assert_eq!(requests.try_iter().count(), 1);
     }
+}
+
+async fn load_local(
+    snapshot: &DiscoverySnapshot,
+    homes: &[OwnedHome],
+    credentials: &XiaomiRecord,
+    key: &DeviceKey,
+    cloud: &CloudClient,
+) -> Result<crate::storage::CachedPhysicalDevice, CatalogError> {
+    let home = select_local_home(snapshot, homes, &credentials.uid)?;
+    load_device(cloud, credentials, &home, &key.id).await
 }

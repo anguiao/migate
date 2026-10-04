@@ -18,13 +18,15 @@ pub(super) struct Queue {
 }
 
 impl Queue {
-    pub(super) fn drain_completions(&mut self) -> Vec<Arc<Completion>> {
-        let active = self.active.take();
+    pub(super) fn drain_pending(&mut self) -> Vec<Arc<Completion>> {
         self.pending
             .drain(..)
             .map(|pending| pending.completion)
-            .chain(active)
             .collect()
+    }
+    pub(super) fn drain_completions(&mut self) -> Vec<Arc<Completion>> {
+        let active = self.active.take();
+        self.drain_pending().into_iter().chain(active).collect()
     }
 }
 
@@ -40,10 +42,10 @@ impl Device {
         let completion = Arc::new(Completion::default());
         {
             let mut state = self.0.state.lock().unwrap();
-            self.snapshot_locked(&state).availability.command_result()?;
             if state.queue.closed {
                 return Err(CommandError::Cancelled);
             }
+            self.snapshot_locked(&state).availability.command_result()?;
             state.queue.pending.push_back(PendingCommand {
                 command,
                 completion: completion.clone(),
@@ -187,12 +189,11 @@ impl CommandRequest {
         if let Some(completed) = &*result {
             return completed.clone();
         }
-        let accepted = self
-            .device
-            .snapshot_locked(&state)
-            .availability
-            .command_result()
-            .map(|()| self.device.update_power(&mut state, self.target));
+        let accepted = if state.queue.closed {
+            Err(CommandError::Cancelled)
+        } else {
+            Ok(self.device.update_power(&mut state, self.target))
+        };
         *result = Some(accepted.clone());
         self.completion.changed.notify(usize::MAX);
         accepted

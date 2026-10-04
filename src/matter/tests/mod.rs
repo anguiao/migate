@@ -50,7 +50,7 @@ pub(super) fn physical(
             .collect(),
     })
 }
-pub(super) fn test_registry(store: &Store, device: &Device) -> crate::device::DeviceRegistry {
+pub(crate) fn test_registry(store: &Store, device: &Device) -> crate::device::DeviceRegistry {
     let physical = crate::device::PhysicalDevice::from_single(device.clone(), "Test Outlet".into());
     store.devices().publish(physical.description()).unwrap();
     let registry = crate::device::DeviceRegistry::new();
@@ -76,7 +76,17 @@ pub(super) async fn terminal_command(device: &Device, line: &str) -> Option<Stri
         0,
     );
     let status = AuthStatus::new(report, "/bin/migate".into(), "/data".into());
-    terminal::handle_line(device, &status, line, 0).await
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let registry = test_registry(&store, device);
+    let line = if matches!(line, "on" | "off") {
+        format!("{line} {}", device.description().key.id)
+    } else {
+        line.into()
+    };
+    terminal::handle_line(&registry, &store.devices(), &status, &line, 0)
+        .await
+        .unwrap()
 }
 
 fn startup_error(store: &Store) -> RuntimeError {

@@ -62,8 +62,24 @@ impl AuthService {
     /// A cloud failure remains diagnostic; local authorization is determined
     /// by the gateway using these saved credentials. Source owns static cache restoration.
     pub async fn prepare_bridge(&self) -> Result<BridgePreparation, AuthError> {
+        self.prepare_bridge_mode(None).await
+    }
+
+    pub(crate) async fn prepare_bridge_after_unauthorized(
+        &self,
+        rejected_token: &str,
+    ) -> Result<BridgePreparation, AuthError> {
+        self.prepare_bridge_mode(Some(rejected_token)).await
+    }
+
+    async fn prepare_bridge_mode(
+        &self,
+        rejected_token: Option<&str>,
+    ) -> Result<BridgePreparation, AuthError> {
         let mut homes = Vec::new();
-        let report = self.check_mode(Some(&mut homes)).await?;
+        let report = self
+            .check_mode_with_token(Some(&mut homes), rejected_token)
+            .await?;
         if matches!(
             report.authentication,
             AuthenticationState::Unavailable(
