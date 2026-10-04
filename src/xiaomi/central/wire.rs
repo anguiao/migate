@@ -62,7 +62,8 @@ pub fn decode_mips(mut bytes: &[u8]) -> Result<MipsMessage, CentralError> {
                 value.try_into().map_err(|_| CentralError::Protocol)?,
             ));
         } else {
-            let value = value.strip_suffix(&[0]).ok_or(CentralError::Protocol)?;
+            // The TLV length bounds the string; gateways may omit its terminator.
+            let value = value.strip_suffix(&[0]).unwrap_or(value);
             if value.contains(&0) {
                 return Err(CentralError::Protocol);
             }
