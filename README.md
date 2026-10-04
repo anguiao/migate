@@ -2,9 +2,11 @@
 
 MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（Xiaomi/MIoT）设备映射为标准 Matter 设备，接入 Apple Home 等生态。
 
-当前在 macOS / Apple Silicon 本机前台运行，通过局域网小米中枢桥接本轮选定的一个真实插座，支持标准能力解析、基础开关、主动通知、断线恢复、终端控制和 Matter 身份与配对存储，以及中国大陆服务区的 OAuth 登录、令牌管理和客户端证书准备。产品不再提供虚拟灯或替代设备。
+当前在 macOS / Apple Silicon 本机前台运行，通过一个局域网小米主中枢接入当前米家自有家庭的受支持插座，WiFi 与 BLE Mesh 设备共享连接。支持 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3` 的单路主电源，以及 `cuco.plug.cp7pd` 的开关 1、开关 2、USB 三路独立控制，不设置当前样本数量上限。
 
-子设备声明 On/Off Plug-in Unit（`0x010A`，revision 3），当前仅实现基础 On/Off 和 Reachable，保留 Identify/Groups，省略标准插座要求的 Lighting/Scenes 功能，存在已知符合性限制。Apple Home 基础链路的兼容性仍须真机验证。
+提供基础开关、主动通知、断线恢复、运行中自动加入和删除、定向终端控制，以及持久化身份、名称和配对。中国大陆服务区的 OAuth 登录、令牌管理与客户端证书准备沿用现有流程；云端成员同步与本地控制独立。已准备账号可以先运行空网桥，再等待设备接入。
+
+单路设备在同一端点承载 Bridged Node 与 On/Off Plug-in Unit（`0x010A`，revision 3）；多路设备使用一个物理父节点和三个独立开关子节点，总控只触发内部状态刷新。当前保留基础 On/Off、Reachable 与 Identify/Groups，缺少 Lighting、计时关闭、全局场景及 Scenes Management，存在已知符合性限制。Apple Home 的实际呈现与基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
 
 ```sh
 cargo run --locked -- auth login
@@ -17,6 +19,7 @@ cargo run --locked
 - [起步方案](docs/specs/2026-09-08-virtual-light-bootstrap/spec.md)
 - [米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md)
 - [最小设备模型方案](docs/specs/2026-10-03-minimal-device-model/spec.md)
+- [多设备与生命周期方案](docs/specs/2026-10-04-multi-device-channel-bridge/spec.md)
 
 米家认证协议参考[小米官方 Home Assistant 集成](https://github.com/XiaoMi/ha_xiaomi_home)，使用该集成的 OAuth 应用配置。MiGate 是个人爱好项目，该授权归属于 HA 应用，不代表小米为 MiGate 提供独立授权或官方支持。参考来源与使用前提见[米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md#认证方案与云端依赖)；注明来源不会扩大[上游许可证](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/LICENSE.md)的授权范围。
 
