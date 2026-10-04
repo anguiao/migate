@@ -1,6 +1,6 @@
 use crate::{
-    device::{Availability, Device, DeviceSnapshot},
-    storage::{MatterStore, StorageError},
+    device::{Availability, PhysicalDevice},
+    storage::{DeviceStore, StoredDevice},
 };
 use rs_matter::{
     dm::{
@@ -8,13 +8,11 @@ use rs_matter::{
         clusters::decl::bridged_device_basic_information as bridged,
     },
     error::{Error, ErrorCode},
-    persist::Persist,
-    tlv::{TLVBuilderParent, TLVElement, Utf8Str, Utf8StrBuilder},
+    tlv::{TLVBuilderParent, Utf8Str, Utf8StrBuilder},
     with,
 };
 use std::cell::RefCell;
 
-pub(super) const LABEL_KEY: u16 = rs_matter::persist::VENDOR_KEYS_START;
 const MAX_LABEL_BYTES: usize = 32;
 
 fn validate_label(label: &str) -> Result<(), Error> {
@@ -24,57 +22,41 @@ fn validate_label(label: &str) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn load_label(store: &MatterStore, default: &str) -> Result<String, StorageError> {
-    let Some(data) = store.get(LABEL_KEY)? else {
-        return Ok(default.into());
-    };
-    TLVElement::new(&data)
-        .utf8()
-        .and_then(|label| {
-            validate_label(label)?;
-            Ok(label.to_owned())
-        })
-        .map_err(|error| {
-            StorageError::new(
-                store.path(),
-                format!("restore bridged device label for key {LABEL_KEY}"),
-                error,
-            )
-        })
-}
-
-pub(super) struct BridgedHandler<'a> {
-    device: &'a Device,
+pub(super) struct BridgedHandler {
+    device: PhysicalDevice,
+    endpoint: u16,
+    store: DeviceStore,
+    protocol: super::storage::StoreAdapter,
     dataver: Dataver,
-    identity: &'a str,
+    identity: String,
     label: RefCell<String>,
     changes: RefCell<Option<crate::device::Changes>>,
     reported: std::cell::Cell<bool>,
 }
 
-fn reachable(snapshot: &DeviceSnapshot) -> bool {
-    snapshot.availability == Availability::Available && snapshot.power.value().is_some()
-}
-
-impl<'a> BridgedHandler<'a> {
+impl BridgedHandler {
     pub(super) fn new(
-        device: &'a Device,
+        device: PhysicalDevice,
         dataver: Dataver,
-        identity: &'a str,
-        label: String,
+        stored: &StoredDevice,
+        store: DeviceStore,
+        protocol: super::storage::StoreAdapter,
     ) -> Self {
         Self {
-            device,
+            device: device.clone(),
+            endpoint: stored.endpoint,
+            store,
+            protocol,
             dataver,
-            identity,
-            label: RefCell::new(label),
-            changes: RefCell::new(Some(device.subscribe())),
-            reported: std::cell::Cell::new(reachable(&device.snapshot())),
+            identity: stored.unique_id.clone(),
+            label: RefCell::new(stored.label.clone()),
+            changes: RefCell::new(Some(device.functions()[0].subscribe())),
+            reported: std::cell::Cell::new(device.availability() == Availability::Available),
         }
     }
 }
 
-impl bridged::ClusterHandler for BridgedHandler<'_> {
+impl bridged::ClusterHandler for BridgedHandler {
     const CLUSTER: Cluster<'static> = bridged::FULL_CLUSTER
         .with_features(0)
         .with_attrs(
@@ -92,21 +74,19 @@ impl bridged::ClusterHandler for BridgedHandler<'_> {
     }
 
     fn reachable(&self, _ctx: impl ReadContext) -> Result<bool, Error> {
-        Ok(reachable(&self.device.snapshot()))
+        Ok(self.device.availability() == Availability::Available)
     }
 
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         let mut changes = self.changes.borrow_mut().take().expect("handler runs once");
         loop {
-            let value = reachable(&changes.changed().await);
+            let value = changes.changed().await.availability == Availability::Available;
             if self.reported.replace(value) != value {
-                bridged::ReachableChanged::emit_for(
-                    &ctx,
-                    super::model::DEVICE_ENDPOINT,
-                    |builder| builder.reachable_new_value(value)?.end(),
-                )?;
+                bridged::ReachableChanged::emit_for(&ctx, self.endpoint, |builder| {
+                    builder.reachable_new_value(value)?.end()
+                })?;
                 ctx.notify_attr_changed(
-                    super::model::DEVICE_ENDPOINT,
+                    self.endpoint,
                     Self::CLUSTER.id,
                     bridged::AttributeId::Reachable as _,
                 );
@@ -119,7 +99,7 @@ impl bridged::ClusterHandler for BridgedHandler<'_> {
         _ctx: impl ReadContext,
         builder: Utf8StrBuilder<P>,
     ) -> Result<P, Error> {
-        builder.set(self.identity)
+        builder.set(&self.identity)
     }
 
     fn node_label<P: TLVBuilderParent>(
@@ -133,7 +113,13 @@ impl bridged::ClusterHandler for BridgedHandler<'_> {
     fn set_node_label(&self, ctx: impl WriteContext, value: Utf8Str<'_>) -> Result<(), Error> {
         validate_label(value)?;
         if *self.label.borrow() != value {
-            Persist::new(ctx.kv()).store_tlv(LABEL_KEY, value)?;
+            self.protocol
+                .check_failure()
+                .map_err(|_| ErrorCode::StdIoError)?;
+            self.protocol.record(
+                self.store
+                    .set_device_label(&self.device.description().key, value),
+            )?;
             *self.label.borrow_mut() = value.to_owned();
             ctx.notify_changed();
         }
@@ -146,20 +132,5 @@ impl bridged::ClusterHandler for BridgedHandler<'_> {
         _request: bridged::KeepActiveRequest<'_>,
     ) -> Result<(), Error> {
         Err(ErrorCode::CommandNotFound.into())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::storage::Store;
-
-    #[test]
-    fn bridged_label_defaults_and_detects_corruption() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap().matter();
-        assert_eq!(load_label(&store, "Test Outlet").unwrap(), "Test Outlet");
-        store.put(LABEL_KEY, &[0x15]).unwrap();
-        assert!(load_label(&store, "Test Outlet").is_err());
     }
 }

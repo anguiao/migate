@@ -82,6 +82,26 @@ impl PhysicalDevice {
     pub fn description(&self) -> &PhysicalDeviceDescription {
         &self.description
     }
+    pub(crate) fn from_single(function: Device, label: String) -> Self {
+        let description = function.description();
+        Self {
+            description: Arc::new(PhysicalDeviceDescription {
+                key: description.key.clone(),
+                label,
+                functions: vec![super::FunctionDescription {
+                    id: function.function_key().id.clone(),
+                    label: "主电源".into(),
+                    category: description.category,
+                    capabilities: description.capabilities.clone(),
+                }],
+            }),
+            inner: function.0.physical.clone(),
+            functions: vec![function],
+        }
+    }
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
     pub fn functions(&self) -> &[Function] {
         &self.functions
     }

@@ -1,4 +1,3 @@
-use super::model::DEVICE_ENDPOINT;
 use crate::device::{Command, CommandError, Device};
 use rs_matter::{
     dm::{Cluster, Dataver, HandlerContext, InvokeContext, ReadContext, clusters::app::on_off},
@@ -7,16 +6,18 @@ use rs_matter::{
 };
 
 /// The shared Device is the only power state and command boundary.
-pub(super) struct OnOffHandler<'a> {
-    device: &'a Device,
+pub(super) struct OnOffHandler {
+    device: Device,
+    endpoint: u16,
     dataver: Dataver,
     changes: std::cell::RefCell<Option<crate::device::Changes>>,
     reported: std::cell::Cell<Option<bool>>,
 }
-impl<'a> OnOffHandler<'a> {
-    pub(super) fn new(device: &'a Device, dataver: Dataver) -> Self {
+impl OnOffHandler {
+    pub(super) fn new(device: Device, endpoint: u16, dataver: Dataver) -> Self {
         Self {
-            device,
+            device: device.clone(),
+            endpoint,
             dataver,
             changes: std::cell::RefCell::new(Some(device.subscribe())),
             reported: std::cell::Cell::new(device.snapshot().power.value()),
@@ -45,7 +46,7 @@ impl<'a> OnOffHandler<'a> {
         Ok(())
     }
 }
-impl on_off::ClusterAsyncHandler for OnOffHandler<'_> {
+impl on_off::ClusterAsyncHandler for OnOffHandler {
     const CLUSTER: Cluster<'static> = on_off::FULL_CLUSTER
         .with_features(0)
         .with_attrs(with!(required))
@@ -100,7 +101,7 @@ impl on_off::ClusterAsyncHandler for OnOffHandler<'_> {
             let value = changes.changed().await.power.value();
             if self.reported.replace(value) != value {
                 ctx.notify_attr_changed(
-                    DEVICE_ENDPOINT,
+                    self.endpoint,
                     Self::CLUSTER.id,
                     on_off::AttributeId::OnOff as _,
                 );

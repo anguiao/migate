@@ -1,6 +1,6 @@
 use crate::{
     RuntimeError,
-    device::Device,
+    device::{Device, DeviceRegistry, PhysicalDevice},
     matter::{Bridge, PairingEvent},
     storage::{Identity, Store},
     terminal::{self, AuthStatus},
@@ -51,26 +51,18 @@ pub async fn run_prepared_bridge(
     let Some(prepared) = prepared else {
         return Ok(());
     };
-    let child = options
-        .store
-        .load_or_create_device_identity(&prepared.device.description().key)?;
+    let physical = PhysicalDevice::from_single(prepared.device.clone(), prepared.default_label);
+    let stored = options.store.devices().publish(physical.description())?;
+    let registry = DeviceRegistry::new();
+    registry.insert(physical);
     log::info!(
-        "MiGate bridge_id={} device_id={} did={}",
+        "MiGate bridge_id={} device_id={} did={} endpoint={}",
         options.identity.bridge_id,
-        child.unique_id,
-        prepared.device.description().key.id
+        stored.unique_id,
+        stored.key.id,
+        stored.endpoint
     );
-    log::info!(
-        "endpoint 0=root, 1=Aggregator, 2=On/Off Plug-in Unit ({})",
-        prepared.device.description().key.id
-    );
-    let bridge = Bridge::new(
-        &prepared.device,
-        options.identity,
-        &child.unique_id,
-        &prepared.default_label,
-        options.store.matter(),
-    );
+    let bridge = Bridge::new(&registry, options.store, options.identity);
     let result = {
         let input = async {
             terminal::bridge::run_input(&prepared.device, options.status, input, output)

@@ -1,6 +1,6 @@
 use super::super::{
-    bridged_info::{self, BridgedHandler},
-    model::{self, DEVICE_ENDPOINT, NODE, basic_info},
+    bridged_info::BridgedHandler,
+    model::{self, basic_info},
     storage::StoreAdapter,
 };
 use crate::{
@@ -12,13 +12,12 @@ use rs_matter::{
     MATTER_PORT, Matter,
     crypto::{Crypto, default_crypto},
     dm::{
-        Async, AsyncHandler, AttrChangeNotifier, AttrDetails, CmdDetails, Dataver, EventEmitter,
+        AsyncHandler, AttrChangeNotifier, AttrDetails, CmdDetails, Dataver, EventEmitter,
         EventNumber, HandlerContext, InvokeContext, InvokeReplyInstance, MatchContext, Metadata,
         OperationContext, OwnAttrChangeNotifier, OwnEventEmitter, ReadContext, ReadReplyInstance,
         WriteContext,
         clusters::{
             decl::bridged_device_basic_information::{self as bridged, ClusterHandler as _},
-            identify,
             net_comm::NetworksAccess,
         },
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
@@ -31,7 +30,7 @@ use rs_matter::{
         events::EventTLVWrite,
     },
     persist::KvBlobStoreAccess,
-    tlv::{TLVElement, TLVTag, TLVWriteParent, Utf8StrBuilder},
+    tlv::{TLVElement, TLVTag, TLVWrite, TLVWriteParent, Utf8StrBuilder},
     transport::exchange::{Exchange, MatterBuffers},
     utils::storage::{WriteBuf, pooled::Buffers},
 };
@@ -40,6 +39,8 @@ use std::{
     num::NonZeroU8,
     pin::pin,
 };
+
+const DEVICE_ENDPOINT: u16 = 2;
 
 struct Context<'a, H> {
     base: &'a H,
@@ -63,6 +64,14 @@ impl<'a, H> Context<'a, H> {
     }
 }
 
+impl<'a, H> Context<'a, H> {
+    fn at(base: &'a H, endpoint: u16, cluster: u32, attribute: u32) -> Self {
+        let mut context = Self::new(base, cluster, attribute);
+        context.attribute.endpoint_id = endpoint;
+        context.command.endpoint_id = endpoint;
+        context
+    }
+}
 impl<H: HandlerContext> HandlerContext for Context<'_, H> {
     fn matter(&self) -> &Matter<'_> {
         self.base.matter()
@@ -97,11 +106,13 @@ impl<H: HandlerContext> AttrChangeNotifier for Context<'_, H> {
         self.changes.borrow_mut().push((e, c, a));
         self.base.notify_attr_changed(e, c, a);
     }
-    fn notify_cluster_changed(&self, _e: u16, _c: u32) {
-        panic!("unexpected cluster notification")
+    fn notify_cluster_changed(&self, e: u16, c: u32) {
+        self.changes.borrow_mut().push((e, c, u32::MAX));
+        self.base.notify_cluster_changed(e, c);
     }
-    fn notify_endpoint_changed(&self, _e: u16) {
-        panic!("unexpected endpoint notification")
+    fn notify_endpoint_changed(&self, e: u16) {
+        self.changes.borrow_mut().push((e, u32::MAX, u32::MAX));
+        self.base.notify_endpoint_changed(e);
     }
     fn notify_all_changed(&self) {
         panic!("unexpected global notification")
@@ -126,7 +137,7 @@ impl<H: HandlerContext> EventEmitter for Context<'_, H> {
 }
 impl<H> MatchContext for Context<'_, H> {
     fn endpt(&self) -> Option<u16> {
-        Some(DEVICE_ENDPOINT)
+        Some(self.attribute.endpoint_id)
     }
     fn cluster(&self) -> Option<u32> {
         Some(self.attribute.cluster_id)
@@ -134,13 +145,13 @@ impl<H> MatchContext for Context<'_, H> {
 }
 impl<H: HandlerContext> OwnAttrChangeNotifier for Context<'_, H> {
     fn notify_own_attr_changed(&self, a: u32) {
-        self.notify_attr_changed(DEVICE_ENDPOINT, self.attribute.cluster_id, a);
+        self.notify_attr_changed(self.attribute.endpoint_id, self.attribute.cluster_id, a);
     }
     fn notify_own_cluster_changed(&self) {
-        self.notify_cluster_changed(DEVICE_ENDPOINT, self.attribute.cluster_id);
+        self.notify_cluster_changed(self.attribute.endpoint_id, self.attribute.cluster_id);
     }
     fn notify_own_endpoint_changed(&self) {
-        self.notify_endpoint_changed(DEVICE_ENDPOINT);
+        self.notify_endpoint_changed(self.attribute.endpoint_id);
     }
 }
 impl<H: HandlerContext> OwnEventEmitter for Context<'_, H> {
@@ -154,7 +165,7 @@ impl<H: HandlerContext> OwnEventEmitter for Context<'_, H> {
         F: FnOnce(EventTLVWrite<'_>) -> Result<(), Error>,
     {
         self.emit_event(
-            DEVICE_ENDPOINT,
+            self.attribute.endpoint_id,
             self.attribute.cluster_id,
             event,
             priority,
@@ -209,26 +220,21 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
     let (device, mut receiver) = super::test_device();
-    let child = store
-        .load_or_create_device_identity(&device.description().key)
-        .unwrap();
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let identify = identify::IdentifyHandler::new(Dataver::new(1));
-    let inner = model::on_off(&device, Dataver::new(1));
+    let registry = super::test_registry(&store, &device);
     let handler = model::handler(
-        &device,
-        &child.unique_id,
-        "Test Outlet".into(),
-        &identify,
-        &inner,
+        &registry,
+        &store,
+        StoreAdapter::new(store.matter()),
         rand::rng(),
-    );
-    let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
+    )
+    .unwrap();
+    let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let mut ctx = Context::new(&im, 6, 0);
     block_on(async {
         let mut out = [0; 128];
@@ -336,25 +342,47 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
     let (device, _receiver) = super::test_device();
-    let child = store
-        .load_or_create_device_identity(&device.description().key)
-        .unwrap();
     let info = basic_info(&identity);
-    let label = bridged_info::load_label(&store.matter(), "Test Outlet").unwrap();
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let bridged = BridgedHandler::new(&device, Dataver::new(1), &child.unique_id, label);
-    let handler = Async(bridged::HandlerAdaptor(&bridged));
-    let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
+    let registry = super::test_registry(&store, &device);
+    let physical = registry.get(&device.description().key).unwrap();
+    let stored = store
+        .devices()
+        .load_published(&device.description().key)
+        .unwrap()
+        .unwrap();
+    let bridged = BridgedHandler::new(
+        physical,
+        Dataver::new(1),
+        &stored,
+        store.devices(),
+        StoreAdapter::new(store.matter()),
+    );
+    let handler = model::handler(
+        &registry,
+        &store,
+        StoreAdapter::new(store.matter()),
+        rand::rng(),
+    )
+    .unwrap();
+    let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let ctx = Context::new(&im, 57, bridged::AttributeId::NodeLabel as _);
     assert!(!bridged.reachable(&ctx).unwrap());
+    device.set_availability(Availability::Available);
+    assert!(bridged.reachable(&ctx).unwrap());
     bridged.set_node_label(&ctx, "Study Outlet").unwrap();
     assert_eq!(
-        bridged_info::load_label(&Store::open(dir.path()).unwrap().matter(), "Test Outlet")
-            .unwrap(),
+        Store::open(dir.path())
+            .unwrap()
+            .devices()
+            .load_published(&device.description().key)
+            .unwrap()
+            .unwrap()
+            .label,
         "Study Outlet"
     );
     let count = ctx.changes.borrow().len();
@@ -377,6 +405,429 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         store
             .load_or_create_device_identity(&device.description().key)
             .unwrap(),
-        child
+        crate::storage::DeviceIdentity {
+            unique_id: stored.unique_id,
+            endpoint: stored.endpoint
+        }
     );
+}
+
+async fn read_bytes(
+    handler: &impl AsyncHandler,
+    ctx: &Context<'_, impl HandlerContext>,
+) -> Result<Vec<u8>, Error> {
+    let mut buffer = [0; 4096];
+    let mut write = WriteBuf::new(&mut buffer);
+    handler
+        .read(ctx, ReadReplyInstance::new(&ctx.attribute, &mut write))
+        .await?;
+    Ok(write.as_slice().to_vec())
+}
+fn report_value(bytes: &[u8]) -> TLVElement<'_> {
+    TLVElement::new(bytes)
+        .structure()
+        .unwrap()
+        .find_ctx(1)
+        .unwrap()
+        .structure()
+        .unwrap()
+        .find_ctx(2)
+        .unwrap()
+}
+fn report_dataver(bytes: &[u8]) -> u32 {
+    TLVElement::new(bytes)
+        .structure()
+        .unwrap()
+        .find_ctx(1)
+        .unwrap()
+        .structure()
+        .unwrap()
+        .find_ctx(0)
+        .unwrap()
+        .u32()
+        .unwrap()
+}
+
+#[test]
+fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let info = basic_info(&identity);
+        let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
+        let protocol = StoreAdapter::new(store.matter());
+        let kv = matter.kv(protocol.clone());
+        let registry = crate::device::DeviceRegistry::new();
+        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+        let ctx = Context::new(&im, 6, 0);
+        let mut run = pin!(handler.run(&ctx));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(
+            handler.access(|node| node
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.id)
+                .collect::<Vec<_>>()),
+            [0, 1]
+        );
+        let root = Context::at(&im, 0, 0x1d, 3);
+        let root_before = report_dataver(&read_bytes(&handler, &root).await.unwrap());
+        let (single, mut single_receivers) = super::physical("single", false);
+        let single_stored = store.devices().publish(single.description()).unwrap();
+        assert_eq!(single_stored.endpoint, 2);
+        registry.insert(single.clone());
+        let (multi, mut receivers) = super::physical("multi", true);
+        let stored = store.devices().publish(multi.description()).unwrap();
+        registry.insert(multi.clone());
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(
+            handler.access(|node| node
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.id)
+                .collect::<Vec<_>>()),
+            [0, 1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(
+            report_dataver(&read_bytes(&handler, &root).await.unwrap()),
+            root_before.wrapping_add(1)
+        );
+        for (endpoint, expected) in [
+            (0, vec![1, 2, 3, 4, 5, 6]),
+            (1, vec![2, 3, 4, 5, 6]),
+            (3, vec![4, 5, 6]),
+            (4, vec![]),
+        ] {
+            let bytes = read_bytes(&handler, &Context::at(&im, endpoint, 0x1d, 3))
+                .await
+                .unwrap();
+            let parts = report_value(&bytes)
+                .array()
+                .unwrap()
+                .iter()
+                .map(|part| part.unwrap().u16().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(parts, expected);
+        }
+        for (index, function) in stored.functions.iter().enumerate() {
+            let bytes = read_bytes(&handler, &Context::at(&im, function.endpoint, 0x1d, 4))
+                .await
+                .unwrap();
+            let list = report_value(&bytes);
+            let tag = list.array().unwrap().iter().next().unwrap().unwrap();
+            let tag = tag.structure().unwrap();
+            assert_eq!(tag.find_ctx(1).unwrap().u8().unwrap(), 7);
+            assert_eq!(tag.find_ctx(2).unwrap().u8().unwrap(), index as u8 + 1);
+            assert_eq!(tag.find_ctx(3).unwrap().utf8().unwrap(), function.label);
+        }
+        handler.access(|node| {
+            assert!(node.endpoint(3).unwrap().cluster(6).is_none());
+            for (index, function) in stored.functions.iter().enumerate() {
+                let endpoint = node.endpoint(function.endpoint).unwrap();
+                assert_eq!(endpoint.device_types.len(), 1);
+                assert_eq!(endpoint.device_types[0].dtype, 0x010a);
+                assert!(endpoint.cluster(0x39).is_none());
+                assert_eq!(endpoint.semantic_tags[0].namespace_id, 7);
+                assert_eq!(endpoint.semantic_tags[0].tag, index as u8 + 1);
+                assert_eq!(
+                    endpoint.semantic_tags[0].label,
+                    Some(function.label.as_str())
+                );
+                let descriptor = endpoint.cluster(0x1d).unwrap();
+                assert_ne!(
+                    descriptor.feature_map
+                        & rs_matter::dm::clusters::desc::Feature::TAG_LIST.bits(),
+                    0
+                );
+                assert!(descriptor.attribute(4).is_some());
+            }
+        });
+        multi.set_availability(Availability::Available);
+        single.set_availability(Availability::Available);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(
+            report_value(
+                &read_bytes(&handler, &Context::at(&im, 3, 0x39, 17))
+                    .await
+                    .unwrap()
+            )
+            .bool()
+            .unwrap()
+        );
+        for (index, function) in stored.functions.iter().enumerate() {
+            let mut command = Context::at(&im, function.endpoint, 6, 0);
+            command.command.cmd_id = 1;
+            assert_eq!(
+                read_bytes(&handler, &command).await.unwrap_err().code(),
+                ErrorCode::Failure
+            );
+            let mut out = [0; 128];
+            let mut invoke = pin!(handler.invoke(
+                &command,
+                InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
+            ));
+            assert!(poll_once(invoke.as_mut()).await.is_none());
+            receivers[index].next().await.unwrap().accept().unwrap();
+            invoke.await.unwrap();
+            assert!(
+                report_value(&read_bytes(&handler, &command).await.unwrap())
+                    .bool()
+                    .unwrap()
+            );
+            for other in index + 1..3 {
+                assert_eq!(multi.functions()[other].snapshot().power, Power::Unknown);
+            }
+            assert_eq!(single.functions()[0].snapshot().power, Power::Unknown);
+        }
+        let single_context = Context::at(&im, 2, 6, 0);
+        let before = read_bytes(&handler, &single_context).await.unwrap_err();
+        assert_eq!(before.code(), ErrorCode::Failure);
+        single.functions()[0].observe(false);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        let before = report_dataver(&read_bytes(&handler, &single_context).await.unwrap());
+        single.functions()[0].observe(true);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(
+            report_dataver(&read_bytes(&handler, &single_context).await.unwrap()),
+            before.wrapping_add(1)
+        );
+        store
+            .devices()
+            .set_device_label(&single_stored.key, "Retained name")
+            .unwrap();
+        store.devices().remove(&single_stored.key).unwrap();
+        registry.remove(&single_stored.key);
+        let (rejoined, mut replacement_receivers) = super::physical("single", false);
+        let restored = store.devices().publish(rejoined.description()).unwrap();
+        assert_eq!(restored.unique_id, single_stored.unique_id);
+        assert_eq!(restored.endpoint, 2);
+        assert_eq!(restored.label, "Retained name");
+        rejoined.set_availability(Availability::Available);
+        rejoined.functions()[0].observe(false);
+        registry.insert(rejoined.clone());
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(
+            !report_value(&read_bytes(&handler, &single_context).await.unwrap())
+                .bool()
+                .unwrap()
+        );
+        assert!(
+            poll_once(single_receivers[0].next())
+                .await
+                .flatten()
+                .is_none()
+        );
+        ctx.changes.borrow_mut().clear();
+        let rebound_version = report_dataver(&read_bytes(&handler, &single_context).await.unwrap());
+        let mut command = Context::at(&im, 2, 6, 0);
+        command.command.cmd_id = 1;
+        let mut out = [0; 128];
+        let mut invoke = pin!(handler.invoke(
+            &command,
+            InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
+        ));
+        assert!(poll_once(invoke.as_mut()).await.is_none());
+        replacement_receivers[0]
+            .next()
+            .await
+            .unwrap()
+            .accept()
+            .unwrap();
+        invoke.await.unwrap();
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
+        assert_eq!(
+            report_dataver(&read_bytes(&handler, &single_context).await.unwrap()),
+            rebound_version.wrapping_add(1)
+        );
+        store.devices().remove(&stored.key).unwrap();
+        registry.remove(&stored.key);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(
+            read_bytes(&handler, &Context::at(&im, 4, 6, 0))
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::EndpointNotFound
+        );
+        assert_eq!(
+            handler.access(|node| node
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.id)
+                .collect::<Vec<_>>()),
+            [0, 1, 2]
+        );
+        for index in 0..20 {
+            let (device, _receivers) = super::physical(&format!("extra-{index}"), false);
+            store.devices().publish(device.description()).unwrap();
+            registry.insert(device);
+        }
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(handler.access(|node| node.endpoints.len()), 23);
+        protocol.check_failure().unwrap();
+    });
+}
+
+async fn write_label(
+    handler: &impl AsyncHandler,
+    base: &impl HandlerContext,
+    endpoint: u16,
+    label: &str,
+) -> Result<(), Error> {
+    let mut buffer = [0; 128];
+    let mut write = WriteBuf::new(&mut buffer);
+    write.utf8(&TLVTag::Anonymous, label)?;
+    let mut ctx = Context::at(base, endpoint, 0x39, 5);
+    ctx.data = TLVElement::new(write.as_slice());
+    handler.write(&ctx).await
+}
+#[test]
+fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        let info = basic_info(&identity);
+        let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let buffers: MatterBuffers = MatterBuffers::new();
+        let state: EthInteractionModelState =
+            EthInteractionModelState::new(EthNetwork::new_default());
+        let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
+        let protocol = StoreAdapter::new(store.matter());
+        let kv = matter.kv(protocol.clone());
+        let registry = crate::device::DeviceRegistry::new();
+        let (first, _first) = super::physical("first-name", false);
+        let (second, _second) = super::physical("second-name", true);
+        let first_stored = store.devices().publish(first.description()).unwrap();
+        let second_stored = store.devices().publish(second.description()).unwrap();
+        registry.insert(first.clone());
+        registry.insert(second.clone());
+        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+        write_label(&handler, &im, first_stored.endpoint, "Renamed first")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .devices()
+                .load_published(&first_stored.key)
+                .unwrap()
+                .unwrap()
+                .label,
+            "Renamed first"
+        );
+        assert_eq!(
+            store
+                .devices()
+                .load_published(&second_stored.key)
+                .unwrap()
+                .unwrap()
+                .label,
+            second_stored.label
+        );
+        let bytes = read_bytes(&handler, &Context::at(&im, first_stored.endpoint, 0x39, 5))
+            .await
+            .unwrap();
+        assert_eq!(report_value(&bytes).utf8().unwrap(), "Renamed first");
+        assert_eq!(
+            write_label(&handler, &im, first_stored.endpoint, &"界".repeat(11))
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::ConstraintError
+        );
+        assert_eq!(
+            store
+                .devices()
+                .load_published(&first_stored.key)
+                .unwrap()
+                .unwrap()
+                .label,
+            "Renamed first"
+        );
+        write_label(&handler, &im, second_stored.endpoint, "Renamed multi")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .devices()
+                .load_published(&second_stored.key)
+                .unwrap()
+                .unwrap()
+                .label,
+            "Renamed multi"
+        );
+        assert_eq!(
+            store
+                .devices()
+                .load_published(&first_stored.key)
+                .unwrap()
+                .unwrap()
+                .label,
+            "Renamed first"
+        );
+        let db = rusqlite::Connection::open(store.path()).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_name_write BEFORE UPDATE OF label ON device_identity BEGIN SELECT RAISE(ABORT, 'name write rejected'); END;").unwrap();
+        assert_eq!(
+            write_label(&handler, &im, first_stored.endpoint, "Failed name")
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::StdIoError
+        );
+        let failure = protocol.check_failure().unwrap_err();
+        assert_eq!(failure.operation(), "write device label");
+        assert_eq!(failure.path(), store.path());
+        assert!(
+            std::error::Error::source(&failure)
+                .unwrap()
+                .is::<rusqlite::Error>()
+        );
+        assert_eq!(
+            protocol.wait_failure().await.operation(),
+            "write device label"
+        );
+        db.execute_batch("DROP TRIGGER fail_name_write;").unwrap();
+        assert_eq!(
+            write_label(
+                &handler,
+                &im,
+                second_stored.endpoint,
+                "Blocked after failure"
+            )
+            .await
+            .unwrap_err()
+            .code(),
+            ErrorCode::StdIoError
+        );
+        let bytes = read_bytes(&handler, &Context::at(&im, first_stored.endpoint, 0x39, 5))
+            .await
+            .unwrap();
+        assert_eq!(report_value(&bytes).utf8().unwrap(), "Renamed first");
+        assert_eq!(
+            store
+                .devices()
+                .load_published(&first_stored.key)
+                .unwrap()
+                .unwrap()
+                .label,
+            "Renamed first"
+        );
+        assert_eq!(
+            store
+                .devices()
+                .load_published(&second_stored.key)
+                .unwrap()
+                .unwrap()
+                .label,
+            "Renamed multi"
+        );
+    });
 }

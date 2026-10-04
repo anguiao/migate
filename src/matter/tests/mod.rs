@@ -2,8 +2,8 @@ mod handlers;
 mod subscriptions;
 
 use super::{
-    Bridge, PairingEvent, bridged_info,
-    model::{NODE, basic_info, initialize_basic_info},
+    Bridge, PairingEvent,
+    model::{self, basic_info, initialize_basic_info},
     pairing,
     storage::StoreAdapter,
 };
@@ -15,11 +15,48 @@ use crate::{
 use futures_lite::future::{block_on, or};
 use rs_matter::{
     MATTER_PORT, Matter,
-    dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM},
+    dm::{
+        Metadata,
+        devices::test::{TEST_DEV_ATT, TEST_DEV_COMM},
+    },
     persist::{BASIC_INFO_KEY, KvBlobStore},
     tlv::{FromTLV, TLVElement},
 };
 
+pub(super) fn physical(
+    id: &str,
+    multi: bool,
+) -> (crate::device::PhysicalDevice, Vec<CommandReceiver>) {
+    let functions = if multi {
+        vec![
+            ("outlet_1", "开关 1"),
+            ("outlet_2", "开关 2"),
+            ("usb", "USB"),
+        ]
+    } else {
+        vec![("main", "主电源")]
+    };
+    crate::device::PhysicalDevice::new(crate::device::PhysicalDeviceDescription {
+        key: DeviceKey::new("xiaomi", id),
+        label: format!("Outlet {id}"),
+        functions: functions
+            .into_iter()
+            .map(|(id, label)| crate::device::FunctionDescription {
+                id: id.into(),
+                label: label.into(),
+                category: Category::Outlet,
+                capabilities: vec![Capability::OnOff],
+            })
+            .collect(),
+    })
+}
+pub(super) fn test_registry(store: &Store, device: &Device) -> crate::device::DeviceRegistry {
+    let physical = crate::device::PhysicalDevice::from_single(device.clone(), "Test Outlet".into());
+    store.devices().publish(physical.description()).unwrap();
+    let registry = crate::device::DeviceRegistry::new();
+    registry.insert(physical);
+    registry
+}
 pub(crate) fn test_device() -> (Device, CommandReceiver) {
     Device::new(DeviceDescription {
         key: DeviceKey::new("xiaomi", "test-outlet"),
@@ -45,16 +82,8 @@ pub(super) async fn terminal_command(device: &Device, line: &str) -> Option<Stri
 fn startup_error(store: &Store) -> RuntimeError {
     let identity = store.load_identity().unwrap();
     let (device, _receiver) = test_device();
-    let child = store
-        .load_or_create_device_identity(&device.description().key)
-        .unwrap();
-    let bridge = Bridge::new(
-        &device,
-        &identity,
-        &child.unique_id,
-        "Test Outlet",
-        store.matter(),
-    );
+    let registry = test_registry(store, &device);
+    let bridge = Bridge::new(&registry, store, &identity);
     block_on(or(bridge.run(0, |_| Ok(())), async {
         async_io::Timer::after(std::time::Duration::from_secs(5)).await;
         panic!("startup did not report invalid storage");
@@ -72,60 +101,78 @@ fn topology_and_identity_are_fixed() {
     assert_eq!(info.unique_id, identity.bridge_id);
     assert_eq!(info.product_name, "MiGate");
     assert_eq!(
-        NODE.endpoints.iter().map(|e| e.id).collect::<Vec<_>>(),
+        model::handler(
+            &test_registry(&store, &test_device().0),
+            &store,
+            StoreAdapter::new(store.matter()),
+            rand::rng()
+        )
+        .unwrap()
+        .access(|node| node.endpoints.iter().map(|e| e.id).collect::<Vec<_>>()),
         [0, 1, 2]
     );
 }
 
 #[test]
 fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
-    let endpoint = &NODE.endpoints[2];
-    assert!(
-        endpoint
-            .device_types
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let model = model::handler(
+        &test_registry(&store, &test_device().0),
+        &store,
+        StoreAdapter::new(store.matter()),
+        rand::rng(),
+    )
+    .unwrap();
+    model.access(|node| {
+        let endpoint = &node.endpoints[2];
+        assert!(
+            endpoint
+                .device_types
+                .iter()
+                .any(|kind| kind.dtype == 0x010a && kind.drev == 3)
+        );
+        assert!(!endpoint.clusters.iter().any(|cluster| cluster.id == 0x62));
+        let on_off = endpoint
+            .clusters
             .iter()
-            .any(|kind| kind.dtype == 0x010a && kind.drev == 3)
-    );
-    assert!(!endpoint.clusters.iter().any(|cluster| cluster.id == 0x62));
-    let on_off = endpoint
-        .clusters
-        .iter()
-        .find(|cluster| cluster.id == 6)
-        .unwrap();
-    assert_eq!(on_off.feature_map, 0);
-    assert!(on_off.attribute(0).is_some());
-    for id in 0x4000..=0x4003 {
-        assert!(on_off.attribute(id).is_none());
-    }
-    for id in 0..=2 {
-        assert!(on_off.command(id).is_some());
-    }
-    for id in 0x40..=0x42 {
-        assert!(on_off.command(id).is_none());
-    }
-    let bridged = endpoint
-        .clusters
-        .iter()
-        .find(|cluster| cluster.id == 0x39)
-        .unwrap();
-    assert!(bridged.event(3).is_some());
-    for id in [0, 1, 2, 0x80] {
-        assert!(bridged.event(id).is_none());
-    }
-    let identify = endpoint
-        .clusters
-        .iter()
-        .find(|cluster| cluster.id == 3)
-        .unwrap();
-    assert!(identify.command(0x40).is_some());
-    let groups = endpoint
-        .clusters
-        .iter()
-        .find(|cluster| cluster.id == 4)
-        .unwrap();
-    for id in 0..=5 {
-        assert!(groups.command(id).is_some());
-    }
+            .find(|cluster| cluster.id == 6)
+            .unwrap();
+        assert_eq!(on_off.feature_map, 0);
+        assert!(on_off.attribute(0).is_some());
+        for id in 0x4000..=0x4003 {
+            assert!(on_off.attribute(id).is_none());
+        }
+        for id in 0..=2 {
+            assert!(on_off.command(id).is_some());
+        }
+        for id in 0x40..=0x42 {
+            assert!(on_off.command(id).is_none());
+        }
+        let bridged = endpoint
+            .clusters
+            .iter()
+            .find(|cluster| cluster.id == 0x39)
+            .unwrap();
+        assert!(bridged.event(3).is_some());
+        for id in [0, 1, 2, 0x80] {
+            assert!(bridged.event(id).is_none());
+        }
+        let identify = endpoint
+            .clusters
+            .iter()
+            .find(|cluster| cluster.id == 3)
+            .unwrap();
+        assert!(identify.command(0x40).is_some());
+        let groups = endpoint
+            .clusters
+            .iter()
+            .find(|cluster| cluster.id == 4)
+            .unwrap();
+        for id in 0..=5 {
+            assert!(groups.command(id).is_some());
+        }
+    });
 }
 
 #[test]
@@ -139,16 +186,8 @@ fn unused_legacy_scenes_blob_is_preserved_without_loading() {
             store.matter().put(key, &[0xff, 0x11]).unwrap();
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
-            let child = store
-                .load_or_create_device_identity(&device.description().key)
-                .unwrap();
-            let bridge = Bridge::new(
-                &device,
-                &identity,
-                &child.unique_id,
-                "Test Outlet",
-                store.matter(),
-            );
+            let registry = test_registry(&store, &device);
+            let bridge = Bridge::new(&registry, &store, &identity);
             let error =
                 block_on(bridge.run(0, |_| Err(std::io::Error::other("startup completed"))))
                     .unwrap_err();
@@ -192,7 +231,6 @@ fn protocol_corruption_exits_with_path_without_overwriting() {
             for key in [
                 rs_matter::persist::BASIC_INFO_KEY,
                 rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START,
-                bridged_info::LABEL_KEY,
             ] {
                 let dir = tempfile::tempdir().unwrap();
                 let store = Store::open(dir.path()).unwrap();
@@ -277,16 +315,8 @@ fn cancelled_run_keeps_a_recorded_storage_failure() {
             let store = Store::open(dir.path()).unwrap();
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
-            let child = store
-                .load_or_create_device_identity(&device.description().key)
-                .unwrap();
-            let bridge = Bridge::new(
-                &device,
-                &identity,
-                &child.unique_id,
-                "Test Outlet",
-                store.matter(),
-            );
+            let registry = test_registry(&store, &device);
+            let bridge = Bridge::new(&registry, &store, &identity);
             let running = bridge.run(0, |_| Ok(()));
             let mut callback_store = bridge.store.clone();
             let db = rusqlite::Connection::open(store.path()).unwrap();

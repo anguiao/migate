@@ -1,6 +1,5 @@
 use super::super::{
-    bridged_info,
-    model::{self, NODE, basic_info},
+    model::{self, basic_info},
     storage::StoreAdapter,
 };
 use crate::{
@@ -14,8 +13,8 @@ use rs_matter::{
     acl::{AclEntry, AuthMode},
     crypto::test_only_crypto,
     dm::{
-        Dataver, Privilege,
-        clusters::{decl::bridged_device_basic_information as bridged, groups, identify},
+        Privilege,
+        clusters::{decl::bridged_device_basic_information as bridged, groups},
         devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET},
         networks::eth::EthNetwork,
     },
@@ -262,23 +261,12 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let (device, mut receiver) = super::test_device();
-    let child = store
-        .load_or_create_device_identity(&device.description().key)
-        .unwrap();
     let initial = boot == 3;
     let rejection = RefCell::new(None::<CommandError>);
     let accepted = Cell::new(0);
-    let identify = identify::IdentifyHandler::new(Dataver::new(boot.into()));
-    let inner = model::on_off(&device, Dataver::new(boot.into()));
-    let handler = model::handler(
-        &device,
-        &child.unique_id,
-        bridged_info::load_label(&store.matter(), "Test Outlet").unwrap(),
-        &identify,
-        &inner,
-        rand::rng(),
-    );
-    let im = InteractionModel::new(&matter, &crypto, &buffers, (NODE, &handler), &kv, &state);
+    let registry = super::test_registry(&store, &device);
+    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
     let responder = DefaultResponder::new(&im);
@@ -333,7 +321,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
                 assert_eq!(accepted.get(), 0);
                 device.set_availability(Availability::Available);
                 invoke_status(&client, 2, true, IMStatusCode::Failure).await;
-                read_state(&client, None, false, &[]).await;
+                read_state(&client, None, true, &[true]).await;
                 device.observe(false);
                 *rejection.borrow_mut() = Some(CommandError::Rejected("denied".into()));
                 invoke_status(&client, 1, true, IMStatusCode::Failure).await;
@@ -676,4 +664,297 @@ async fn group_request(client: &Matter<'_>, add: bool) {
         }
     }
     assert!(chunk.complete().await.unwrap().is_none());
+}
+
+#[derive(Default, Debug)]
+struct Observed {
+    powers: std::collections::BTreeMap<u16, (u32, bool)>,
+    parts: std::collections::BTreeMap<u16, Vec<u16>>,
+    versions: std::collections::BTreeMap<u16, u32>,
+    unsupported: Vec<u16>,
+}
+impl Observed {
+    fn add(&mut self, report: &ReportDataResp<'_>) {
+        if let Some(attributes) = &report.attr_reports {
+            for response in attributes.iter() {
+                match response.unwrap() {
+                    AttrResp::Data(data) => {
+                        let endpoint = data.path.endpoint.unwrap();
+                        match (data.path.cluster, data.path.attr) {
+                            (Some(6), Some(0)) => {
+                                self.powers.insert(
+                                    endpoint,
+                                    (data.data_ver.unwrap(), data.data.bool().unwrap()),
+                                );
+                            }
+                            (Some(0x1d), Some(3)) => {
+                                self.parts.insert(
+                                    endpoint,
+                                    data.data
+                                        .array()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|value| value.unwrap().u16().unwrap())
+                                        .collect(),
+                                );
+                                self.versions.insert(endpoint, data.data_ver.unwrap());
+                            }
+                            _ => panic!("unexpected dynamic attribute {data:?}"),
+                        }
+                    }
+                    AttrResp::Status(status) => {
+                        assert_eq!(status.status.status, IMStatusCode::UnsupportedEndpoint);
+                        self.unsupported.push(status.path.endpoint.unwrap());
+                    }
+                }
+            }
+        }
+    }
+}
+async fn subscribe_paths(
+    client: &Matter<'_>,
+    paths: &[AttrPath],
+) -> Result<(u32, Observed), Error> {
+    let exchange = Exchange::initiate(
+        client,
+        test_only_crypto(),
+        NonZeroU8::new(1).unwrap(),
+        SERVER_ID,
+    )
+    .await?;
+    let mut sender = exchange.subscribe_sender().await?;
+    let mut chunk = loop {
+        match sender.tx().await? {
+            TxOutcome::BuildRequest(builder) => {
+                sender = builder
+                    .keep_subs(false)?
+                    .min_int_floor(0)?
+                    .max_int_ceil(60)?
+                    .attr_requests_from(paths)?
+                    .fabric_filtered(false)?
+                    .end()?;
+            }
+            TxOutcome::GotResponse(chunk) => break chunk,
+        }
+    };
+    let mut observed = Observed::default();
+    loop {
+        observed.add(&chunk.response()?);
+        match chunk.complete().await? {
+            SubscribeOutcome::NextChunk(next) => chunk = next,
+            SubscribeOutcome::Established(subscription) => {
+                return Ok((subscription.subscription_id, observed));
+            }
+        }
+    }
+}
+async fn receive_observed(client: &Matter<'_>, id: u32) -> Result<Observed, Error> {
+    let mut exchange = Exchange::accept(client).await?;
+    let mut observed = Observed::default();
+    loop {
+        exchange.recv_fetch().await?;
+        let more = {
+            let rx = exchange.rx()?;
+            assert_eq!(rx.meta().proto_opcode, OpCode::ReportData as u8);
+            let report = ReportDataResp::from_tlv(&TLVElement::new(rx.payload()))?;
+            assert_eq!(report.subscription_id, Some(id));
+            observed.add(&report);
+            report.more_chunks.unwrap_or(false)
+        };
+        exchange
+            .send_with(|_, buffer| {
+                StatusResp::write(buffer, IMStatusCode::Success)?;
+                Ok(Some(OpCode::StatusResponse.into()))
+            })
+            .await?;
+        if !more {
+            break;
+        }
+    }
+    exchange.acknowledge().await?;
+    Ok(observed)
+}
+
+fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
+    let store = Store::open(directory).unwrap();
+    let identity = store.load_identity().unwrap();
+    let info = basic_info(&identity);
+    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    let protocol = StoreAdapter::new(store.matter());
+    let kv = matter.kv(protocol.clone());
+    matter.startup(&kv).unwrap();
+    let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    connect(&matter, SERVER_ID, CLIENT_ID, boot + 20);
+    connect(&client, CLIENT_ID, SERVER_ID, boot + 20);
+    let crypto = test_only_crypto();
+    let buffers: MatterBuffers = MatterBuffers::new();
+    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let registry = crate::device::DeviceRegistry::new();
+    let (single, _receivers) = super::physical("dynamic-single", false);
+    let (multi, _multi_receivers) = super::physical("dynamic-multi", true);
+    for device in [&single, &multi] {
+        device.set_availability(Availability::Available);
+        for function in device.functions() {
+            function.observe(false);
+        }
+    }
+    if boot > 1 {
+        registry.insert(single.clone());
+    }
+    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+    let incoming = Pipe::default();
+    let outgoing = Pipe::default();
+    let responder = DefaultResponder::new(&im);
+    let id = block_on(async {
+        im.startup().await.unwrap();
+        let services = async {
+            or(
+                matter.run(
+                    &crypto,
+                    SendPipe(&outgoing),
+                    ReceivePipe(&incoming),
+                    NoNetwork,
+                ),
+                or(
+                    client.run(
+                        &crypto,
+                        SendPipe(&incoming),
+                        ReceivePipe(&outgoing),
+                        NoNetwork,
+                    ),
+                    or(responder.run::<4, 4>(), im.run()),
+                ),
+            )
+            .await
+            .unwrap();
+            panic!("dynamic Matter services exited");
+        };
+        let controller = async {
+            let mut paths = vec![
+                AttrPath::from_gp(&GenericPath::new(Some(0), Some(0x1d), Some(3))),
+                AttrPath::from_gp(&GenericPath::new(Some(1), Some(0x1d), Some(3))),
+            ];
+            let id = if boot == 1 {
+                let (initial, empty) = subscribe_paths(&client, &paths).await.unwrap();
+                wait_committed(&state).await;
+                assert!(empty.powers.is_empty());
+                assert_eq!(empty.parts[&0], [1]);
+                let before = empty.versions[&0];
+                store.devices().publish(single.description()).unwrap();
+                registry.insert(single.clone());
+                let stored = store.devices().publish(multi.description()).unwrap();
+                assert_eq!(stored.endpoint, 3);
+                registry.insert(multi.clone());
+                let added = receive_observed(&client, initial).await.unwrap();
+                assert_eq!(added.parts[&0], [1, 2, 3, 4, 5, 6]);
+                assert_eq!(added.parts[&1], [2, 3, 4, 5, 6]);
+                assert_eq!(added.versions[&0], before.wrapping_add(1));
+                assert!(added.powers.is_empty());
+                paths.insert(
+                    0,
+                    AttrPath::from_gp(&GenericPath::new(None, Some(6), Some(0))),
+                );
+                paths.push(AttrPath::from_gp(&GenericPath::new(
+                    Some(4),
+                    Some(6),
+                    Some(0),
+                )));
+                let (id, baseline) = subscribe_paths(&client, &paths).await.unwrap();
+                wait_committed(&state).await;
+                assert_eq!(
+                    baseline.powers.keys().copied().collect::<Vec<_>>(),
+                    [2, 4, 5, 6]
+                );
+                assert!(baseline.powers.values().all(|(_, power)| !power));
+                multi.function("usb").unwrap().observe(true);
+                let changed = receive_observed(&client, id).await.unwrap();
+                assert_eq!(
+                    changed.powers[&6],
+                    (baseline.powers[&6].0.wrapping_add(1), true)
+                );
+                assert!(!changed.powers.contains_key(&2));
+                wait_committed(&state).await;
+                store
+                    .devices()
+                    .set_device_label(&stored.key, "Named multi")
+                    .unwrap();
+                store.devices().remove(&stored.key).unwrap();
+                registry.remove(&stored.key);
+                let removed = receive_observed(&client, id).await.unwrap();
+                assert_eq!(removed.parts[&0], [1, 2]);
+                assert_eq!(removed.parts[&1], [2]);
+                assert_eq!(removed.unsupported, [4]);
+                assert!(
+                    !removed
+                        .powers
+                        .keys()
+                        .any(|endpoint| [4, 5, 6].contains(endpoint))
+                );
+                wait_committed(&state).await;
+                id
+            } else {
+                let id = previous.unwrap();
+                let restored = receive_observed(&client, id).await.unwrap();
+                assert_eq!(restored.unsupported, [4]);
+                assert_eq!(restored.parts[&0], [1, 2]);
+                assert_eq!(restored.powers.keys().copied().collect::<Vec<_>>(), [2]);
+                wait_committed(&state).await;
+                let old = store
+                    .load_or_create_device_identity(&multi.description().key)
+                    .unwrap();
+                let readded = store.devices().publish(multi.description()).unwrap();
+                assert_eq!(readded.unique_id, old.unique_id);
+                assert_eq!(readded.endpoint, old.endpoint);
+                assert_eq!(readded.label, "Named multi");
+                registry.insert(multi.clone());
+                let added = receive_observed(&client, id).await.unwrap();
+                assert_eq!(added.parts[&0], [1, 2, 3, 4, 5, 6]);
+                assert_eq!(added.powers.keys().copied().collect::<Vec<_>>(), [4, 5, 6]);
+                wait_committed(&state).await;
+                multi.function("outlet_1").unwrap().observe(true);
+                let changed = receive_observed(&client, id).await.unwrap();
+                assert_eq!(
+                    changed.powers[&4],
+                    (added.powers[&4].0.wrapping_add(1), true)
+                );
+                wait_committed(&state).await;
+                id
+            };
+            single.functions()[0].observe(true);
+            let changed = receive_observed(&client, id).await.unwrap();
+            assert!(changed.powers[&2].1);
+            wait_committed(&state).await;
+            id
+        };
+        or(
+            services,
+            or(controller, async {
+                async_io::Timer::after(Duration::from_secs(5)).await;
+                panic!("dynamic subscription boot {boot} timed out");
+            }),
+        )
+        .await
+    });
+    protocol.check_failure().unwrap();
+    assert!(
+        store
+            .matter()
+            .contains(PERSISTENT_SUBSCRIPTIONS_START)
+            .unwrap()
+    );
+    id
+}
+#[test]
+fn dynamic_subscription_reports_add_delete_and_restores_deleted_paths_after_restart() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let id = dynamic_boot(directory.path(), 1, None);
+            assert_eq!(dynamic_boot(directory.path(), 2, Some(id)), id);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

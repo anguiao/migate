@@ -1,20 +1,18 @@
 use super::{
-    PairingEvent, bridged_info,
-    model::{self, NODE, basic_info, initialize_basic_info},
+    PairingEvent,
+    model::{self, basic_info, initialize_basic_info},
     pairing,
     storage::StoreAdapter,
 };
 use crate::{
     RuntimeError,
-    device::Device,
-    storage::{Identity, MatterStore, StorageError},
+    device::DeviceRegistry,
+    storage::{Identity, StorageError, Store},
 };
 use rs_matter::{
     Matter,
     crypto::{Crypto, default_crypto},
     dm::{
-        Dataver,
-        clusters::identify,
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
         networks::eth::EthNetwork,
     },
@@ -28,29 +26,20 @@ use std::{net::UdpSocket, time::Duration};
 
 const WINDOW_SECONDS: u16 = 900;
 
-/// The fixed device bridge and storage failures that outlive its run future.
+/// Dynamic device bridge and storage failures that outlive its run future.
 pub struct Bridge<'a> {
-    device: &'a Device,
-    device_id: &'a str,
-    default_label: &'a str,
+    registry: DeviceRegistry,
+    storage: Store,
     identity: &'a Identity,
     pub(super) store: StoreAdapter,
 }
-
 impl<'a> Bridge<'a> {
-    pub fn new(
-        device: &'a Device,
-        identity: &'a Identity,
-        device_id: &'a str,
-        default_label: &'a str,
-        store: MatterStore,
-    ) -> Self {
+    pub fn new(registry: &DeviceRegistry, store: &Store, identity: &'a Identity) -> Self {
         Self {
-            device,
-            device_id,
-            default_label,
+            registry: registry.clone(),
+            storage: store.clone(),
             identity,
-            store: StoreAdapter::new(store),
+            store: StoreAdapter::new(store.matter()),
         }
     }
 
@@ -70,7 +59,6 @@ impl<'a> Bridge<'a> {
     ) -> Result<(), RuntimeError> {
         self.check_failure()?;
         let store = &self.store;
-        let label = bridged_info::load_label(store.storage(), self.default_label)?;
         let missing_basic_info = !store
             .storage()
             .contains(rs_matter::persist::BASIC_INFO_KEY)?;
@@ -87,19 +75,8 @@ impl<'a> Bridge<'a> {
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let mut random = crypto.rand()?;
-        let identify = identify::IdentifyHandler::new(Dataver::new_rand(&mut random));
-        let on_off = model::on_off(self.device, Dataver::new_rand(&mut random));
-        let handler = model::handler(
-            self.device,
-            self.device_id,
-            label,
-            &identify,
-            &on_off,
-            random,
-        );
-        let model = (NODE, handler);
-        let im = InteractionModel::new(&matter, &crypto, &buffers, model, &kv, &state);
+        let handler = model::handler(&self.registry, &self.storage, store.clone(), crypto.rand()?)?;
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         store.with_context("restore Matter model", im.startup().await)?;
         // Initialize only after every existing blob has been restored successfully.
         store.with_context(
