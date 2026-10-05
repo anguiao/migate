@@ -14,14 +14,14 @@ use crate::{
     },
 };
 use event_listener::Event;
+use futures_lite::future;
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     rc::Rc,
     sync::Arc,
     time::Duration,
 };
-pub(super) const MAX_BACKOFF: Duration = Duration::from_secs(30);
 #[derive(Default)]
 pub(super) struct Lifetime {
     closed: Cell<bool>,
@@ -100,6 +100,7 @@ impl DeviceSlot {
 pub(super) struct Session {
     pub(super) handle: SessionHandle,
     pub(super) access: Rc<AccessRefresh>,
+    pub(super) refresh_changed: Rc<Event>,
     pub(super) devices: BTreeMap<String, Rc<DeviceWork>>,
     pub(super) tasks: Rc<TaskSet>,
 }
@@ -108,6 +109,7 @@ impl Session {
         Self {
             handle,
             access: Rc::new(AccessRefresh::default()),
+            refresh_changed: Rc::new(Event::new()),
             devices: BTreeMap::new(),
             tasks: Rc::new(TaskSet::default()),
         }
@@ -115,21 +117,50 @@ impl Session {
 }
 #[derive(Default)]
 pub(super) struct AccessRefresh {
-    pub(super) requested: Cell<bool>,
+    full_deadline: Cell<Option<Duration>>,
+    pending: RefCell<BTreeSet<String>>,
     changed: Event,
 }
+pub(super) enum AccessRequest {
+    Full,
+    Filtered(Vec<String>),
+}
 impl AccessRefresh {
-    pub(super) fn request(&self) {
-        self.requested.set(true);
+    pub(super) fn request(&self, now: Duration) {
+        if self.full_deadline.get().is_none() {
+            self.full_deadline.set(Some(now + Duration::from_secs(3)));
+        }
         self.changed.notify(usize::MAX);
     }
-    pub(super) async fn next(&self) {
+    pub(super) fn retry_full(&self, now: Duration) {
+        self.full_deadline.set(Some(now + Duration::from_secs(3)));
+        self.changed.notify(usize::MAX);
+    }
+    pub(super) fn request_filtered(&self, dids: Vec<String>) {
+        self.pending.borrow_mut().extend(dids);
+        self.changed.notify(usize::MAX);
+    }
+    pub(super) async fn next(&self, clock: &dyn Clock) -> AccessRequest {
         loop {
             let listener = self.changed.listen();
-            if self.requested.replace(false) {
-                return;
+            let deadline = self.full_deadline.get();
+            if deadline.is_some_and(|deadline| clock.now() >= deadline) {
+                self.full_deadline.set(None);
+                self.pending.borrow_mut().clear();
+                return AccessRequest::Full;
             }
-            listener.await;
+            if !self.pending.borrow().is_empty() {
+                return AccessRequest::Filtered(
+                    std::mem::take(&mut *self.pending.borrow_mut())
+                        .into_iter()
+                        .collect(),
+                );
+            }
+            if let Some(deadline) = deadline {
+                future::or(listener, clock.wait_until(deadline)).await;
+            } else {
+                listener.await;
+            }
         }
     }
 }
@@ -252,7 +283,7 @@ impl Context {
         if session.devices.contains_key(did) {
             return;
         }
-        let work = Rc::new(DeviceWork::new(record));
+        let work = Rc::new(DeviceWork::new(record, session.refresh_changed.clone()));
         let handle = session.handle.clone();
         session.devices.insert(did.into(), work.clone());
         session
@@ -261,19 +292,33 @@ impl Context {
     }
     /// Apply only observations in wire order; admission and storage run after the request future wakes.
     pub(super) fn observe_access(&self, entries: Vec<DeviceEntry>) {
+        let dids = self
+            .live
+            .borrow()
+            .devices
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.observe_access_filtered(&dids, entries);
+    }
+    pub(super) fn observe_access_filtered(&self, dids: &[String], entries: Vec<DeviceEntry>) {
         let mut entries = entries
             .into_iter()
             .map(|entry| (entry.did, entry.access))
             .collect::<BTreeMap<_, _>>();
-        let dids = {
+        let observed = {
             let mut live = self.live.borrow_mut();
-            for (did, slot) in &mut live.devices {
-                slot.access = entries.remove(did);
+            let mut observed = Vec::new();
+            for did in dids {
+                if let Some(slot) = live.devices.get_mut(did) {
+                    slot.access = entries.remove(did);
+                    observed.push(did);
+                }
             }
-            live.devices.keys().cloned().collect::<Vec<_>>()
+            observed
         };
-        for did in dids {
-            self.update_availability(&did);
+        for did in observed {
+            self.update_availability(did);
         }
     }
     pub(super) fn reconcile_all(self: &Rc<Self>) -> Result<(), SourceError> {
@@ -503,19 +548,18 @@ pub(super) fn update_auth(context: &Context, preparation: &BridgePreparation) {
 }
 pub(super) struct Backoff {
     delay: Duration,
+    maximum: Duration,
 }
 impl Backoff {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(minimum_secs: u64, maximum_secs: u64) -> Self {
         Self {
-            delay: Duration::from_secs(1),
+            delay: Duration::from_secs(minimum_secs),
+            maximum: Duration::from_secs(maximum_secs),
         }
     }
-    pub(super) fn failed(&mut self, stable: bool) -> Duration {
-        if stable {
-            self.delay = Duration::from_secs(1);
-        }
+    pub(super) fn failed(&mut self) -> Duration {
         let delay = self.delay;
-        self.delay = (self.delay * 2).min(MAX_BACKOFF);
+        self.delay = (self.delay * 2).min(self.maximum);
         delay
     }
 }

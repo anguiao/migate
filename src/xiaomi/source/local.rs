@@ -1,6 +1,6 @@
 use super::{
     model::{GatewayStatus, SourceError},
-    state::{AccessRefresh, Backoff, Context, MAX_BACKOFF, Session},
+    state::{AccessRefresh, AccessRequest, Backoff, Context, Session},
 };
 use crate::xiaomi::{
     central::{self, CentralError, CentralEvent, SessionHandle},
@@ -15,20 +15,21 @@ pub(super) async fn run(
 ) -> Result<(), SourceError> {
     let mut changes = discovery.subscribe();
     let mut route = None;
-    let mut backoff = Backoff::new();
+    let mut backoff = Backoff::new(1, 30);
+    let mut reconnect = Backoff::new(6, 60);
     let mut first_deadline = Some(context.clock.now() + Duration::from_secs(30));
     loop {
         let scope = context.live.borrow().scope.clone();
-        let selected = scope
+        let mut routes = scope
             .as_ref()
-            .and_then(|scope| discovery.snapshot().route(&scope.group_id, route.as_ref()));
-        let Some(selected) = selected else {
+            .map(|scope| discovery.snapshot().routes(&scope.group_id, None))
+            .unwrap_or_default();
+        if routes.is_empty() {
             if first_deadline.is_some() {
                 context.set_gateway(GatewayStatus::Discovering);
             }
             let listener = context.changed.listen();
-            let deadline =
-                first_deadline.unwrap_or_else(|| context.clock.now() + backoff.failed(false));
+            let deadline = first_deadline.unwrap_or_else(|| context.clock.now() + backoff.failed());
             future::or(
                 async {
                     changes.changed().await?;
@@ -54,28 +55,23 @@ pub(super) async fn run(
             )
             .await?;
             continue;
-        };
+        }
+        // Continue after the failed session in stable candidate order.
+        if let Some(previous) = route.as_ref()
+            && let Some(index) = routes.iter().position(|candidate| candidate == previous)
+        {
+            routes.rotate_left(index + 1);
+        }
         let Some(credentials) = context.live.borrow().credentials.clone() else {
             let listener = context.changed.listen();
             listener.await;
             continue;
         };
-        context.set_gateway(GatewayStatus::Connecting(selected.did.clone()));
-        let snapshot = discovery.snapshot();
-        let addresses = snapshot
-            .gateways
-            .iter()
-            .find(|gateway| gateway.did == selected.did && gateway.group_id == selected.group_id)
-            .unwrap()
-            .addresses
-            .clone();
         let mut connected = None;
         let mut failure = SourceError::NoLocalGateway;
-        for address in std::iter::once(selected.address).chain(
-            addresses
-                .into_iter()
-                .filter(|address| *address != selected.address),
-        ) {
+        for selected in routes {
+            context.set_gateway(GatewayStatus::Connecting(selected.did.clone()));
+            let address = selected.address;
             #[cfg(test)]
             let result = if let Some(ca) = &test.0 {
                 central::test_support::connect(address, &credentials, ca, test.1).await
@@ -92,8 +88,6 @@ pub(super) async fn run(
                             && gateway.addresses.contains(&address)
                     }) && context.live.borrow().scope == scope
                     {
-                        let mut selected = selected.clone();
-                        selected.address = address;
                         connected = Some((selected, session));
                         break;
                     }
@@ -102,8 +96,8 @@ pub(super) async fn run(
                 Err(error) => failure = error.into(),
             }
         }
-        let connected_since = context.clock.now();
         let result = if let Some((selected, (handle, driver))) = connected {
+            reconnect = Backoff::new(6, 60);
             let reconnecting = route.is_some();
             route = Some(selected.clone());
             first_deadline = None;
@@ -111,6 +105,7 @@ pub(super) async fn run(
             let access = session.access.clone();
             let tasks = session.tasks.clone();
             context.live.borrow_mut().session = Some(session);
+            tasks.spawn(super::work::refreshes(context.clone(), handle.clone()));
 
             context.set_gateway(GatewayStatus::Connected(selected.did.clone()));
             refresh_access(&context);
@@ -154,8 +149,15 @@ pub(super) async fn run(
                                 }
                             }
                         }
-                        CentralEvent::DeviceListChanged { .. } => {
-                            refresh_access(&events);
+                        CentralEvent::DeviceListChanged { dids } => {
+                            events
+                                .live
+                                .borrow()
+                                .session
+                                .as_ref()
+                                .unwrap()
+                                .access
+                                .request_filtered(dids);
                             events.request_sync();
                         }
                     })
@@ -182,14 +184,13 @@ pub(super) async fn run(
         if matches!(error, SourceError::Storage(_) | SourceError::Discovery(_)) {
             return Err(error);
         }
-        let delay =
-            backoff.failed(context.clock.now().saturating_sub(connected_since) >= MAX_BACKOFF);
+        let delay = reconnect.failed();
         wait_retry(&context, &discovery, &mut changes, route.as_ref(), delay).await?;
     }
 }
 pub(super) fn refresh_access(context: &Rc<Context>) {
     if let Some(session) = &context.live.borrow().session {
-        session.access.request();
+        session.access.request(context.clock.now());
     }
 }
 async fn access_refreshes(
@@ -198,35 +199,57 @@ async fn access_refreshes(
     access: Rc<AccessRefresh>,
 ) -> Result<(), SourceError> {
     loop {
-        access.next().await;
-        let mut backoff = Backoff::new();
-        loop {
-            let current = context.clone();
-            let result = handle
-                .get_devices(move |result| match result {
-                    Ok(entries) => {
-                        current.set_access_problem(None);
-                        current.observe_access(entries);
-                    }
-                    Err(CentralError::Cancelled) => {}
-                    Err(error) => current.set_access_problem(Some(error.to_string())),
-                })
-                .await;
-            match result {
-                Ok(_) => {
-                    context.reconcile_all()?;
-                    break;
+        let request = access.next(context.clock.as_ref()).await;
+        let current = context.clone();
+        let mut affected = None;
+        let result = match request {
+            AccessRequest::Full => {
+                let result = handle
+                    .get_devices(move |result| match result {
+                        Ok(entries) => {
+                            current.set_access_problem(None);
+                            current.observe_access(entries);
+                        }
+                        Err(CentralError::Cancelled) => {}
+                        Err(error) => current.set_access_problem(Some(error.to_string())),
+                    })
+                    .await;
+                if result.is_err() {
+                    access.retry_full(context.clock.now());
                 }
-                Err(CentralError::Cancelled) => return Ok(()),
-                Err(_) => {
-                    context
-                        .clock
-                        .wait_until(context.clock.now() + backoff.failed(false))
-                        .await;
-                    // The retry also covers refresh requests received during backoff.
-                    access.requested.set(false);
+                result
+            }
+            AccessRequest::Filtered(dids) => {
+                let requested = dids.clone();
+                let result = handle
+                    .get_devices_filtered(&dids, move |result| match result {
+                        Ok(entries) => {
+                            current.set_access_problem(None);
+                            current.observe_access_filtered(&requested, entries);
+                        }
+                        Err(CentralError::Cancelled) => {}
+                        Err(error) => current.set_access_problem(Some(error.to_string())),
+                    })
+                    .await;
+                affected = Some(dids);
+                result
+            }
+        };
+        match result {
+            Ok(_) => {
+                if let Some(dids) = affected {
+                    for did in dids {
+                        if context.live.borrow().devices.contains_key(&did) {
+                            context.reconcile(&did)?;
+                        }
+                    }
+                    context.changed.notify(usize::MAX);
+                } else {
+                    context.reconcile_all()?;
                 }
             }
+            Err(CentralError::Cancelled) => return Ok(()),
+            Err(_) => {}
         }
     }
 }
@@ -275,9 +298,10 @@ pub(super) async fn wait_retry(
         .scope
         .as_ref()
         .map(|scope| scope.group_id.clone());
-    let route = group
+    let routes = group
         .as_ref()
-        .and_then(|group| discovery.snapshot().route(group, previous));
+        .map(|group| discovery.snapshot().routes(group, previous))
+        .unwrap_or_default();
     let credentials = context.live.borrow().credentials.as_ref().map(|record| {
         (
             record.uid.clone(),
@@ -298,8 +322,9 @@ pub(super) async fn wait_retry(
                     changes.changed().await?;
                     if group
                         .as_ref()
-                        .and_then(|group| discovery.snapshot().route(group, route.as_ref()))
-                        != route
+                        .map(|group| discovery.snapshot().routes(group, previous))
+                        .unwrap_or_default()
+                        != routes
                     {
                         return Ok(());
                     }

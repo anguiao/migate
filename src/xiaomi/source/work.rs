@@ -11,36 +11,51 @@ use crate::{
 };
 use event_listener::Event;
 use futures_lite::future;
+use futures_util::future::join_all;
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     rc::Rc,
     time::Duration,
 };
+const REFRESH_DELAY: Duration = Duration::from_millis(200);
+const READ_TIMEOUT: Duration = Duration::from_secs(6);
+const RETRY_DELAY: Duration = Duration::from_secs(3);
+
+struct Refresh {
+    id: String,
+    binding: PropertyBinding,
+    attempts: u8,
+    ready_at: Duration,
+}
 pub(super) struct DeviceWork {
     pub(super) life: Lifetime,
     pub(super) record: Rc<DeviceRecord>,
     pub(super) subscribed: RefCell<BTreeSet<(u32, u32)>>,
     subscribe_requested: Cell<bool>,
     subscribe_running: Cell<bool>,
-    refresh_requested: Cell<bool>,
+    refresh_pending: RefCell<VecDeque<Refresh>>,
+    refresh_changed: Rc<Event>,
     changed: Event,
     subscribe_problem: RefCell<Option<String>>,
-    read_problem: RefCell<Option<String>>,
+    read_problems: RefCell<BTreeMap<String, String>>,
 }
 impl DeviceWork {
-    pub(super) fn new(record: Rc<DeviceRecord>) -> Self {
-        Self {
+    pub(super) fn new(record: Rc<DeviceRecord>, refresh_changed: Rc<Event>) -> Self {
+        let work = Self {
             life: Lifetime::default(),
             record,
             subscribed: RefCell::new(BTreeSet::new()),
             subscribe_requested: Cell::new(true),
             subscribe_running: Cell::new(false),
-            refresh_requested: Cell::new(true),
+            refresh_pending: RefCell::new(VecDeque::new()),
+            refresh_changed,
             changed: Event::new(),
             subscribe_problem: RefCell::new(None),
-            read_problem: RefCell::new(None),
-        }
+            read_problems: RefCell::new(BTreeMap::new()),
+        };
+        work.refresh();
+        work
     }
     pub(super) fn retry_subscriptions(&self) {
         if !self.subscribe_running.get() {
@@ -49,12 +64,27 @@ impl DeviceWork {
         }
     }
     pub(super) fn refresh(&self) {
-        self.refresh_requested.set(true);
-        self.changed.notify(usize::MAX);
+        let mut pending = self.refresh_pending.borrow_mut();
+        for function in &self.record.cached.borrow().device.functions {
+            if !pending
+                .iter()
+                .any(|read| read.id == function.description.id)
+            {
+                pending.push_back(Refresh {
+                    id: function.description.id.clone(),
+                    binding: function.power,
+                    attempts: 0,
+                    ready_at: Duration::ZERO,
+                });
+            }
+        }
+        self.refresh_changed.notify(usize::MAX);
     }
     pub(super) fn bindings_changed(&self) {
         self.subscribe_requested.set(true);
-        self.refresh_requested.set(true);
+        self.refresh_pending.borrow_mut().clear();
+        self.read_problems.borrow_mut().clear();
+        self.refresh();
         self.changed.notify(usize::MAX);
     }
     fn bindings(&self) -> Vec<PropertyBinding> {
@@ -73,13 +103,13 @@ impl DeviceWork {
         values
     }
     pub(super) fn diagnostic(&self) -> Option<String> {
-        let values = [
-            self.subscribe_problem.borrow().clone(),
-            self.read_problem.borrow().clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let values = self
+            .subscribe_problem
+            .borrow()
+            .clone()
+            .into_iter()
+            .chain(self.read_problems.borrow().values().cloned())
+            .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
     }
     fn report(&self, context: &Context, did: &str) {
@@ -108,10 +138,7 @@ pub(super) async fn run(
             work.life.ended().await;
             Ok(())
         },
-        future::or(
-            subscriptions(&work, &handle, &context),
-            refreshes(&work, &handle, &context),
-        ),
+        subscriptions(&work, &handle, &context),
     )
     .await
 }
@@ -128,6 +155,10 @@ async fn subscriptions(
             continue;
         }
         work.subscribe_running.set(true);
+        context
+            .clock
+            .wait_until(context.clock.now() + Duration::from_millis(10))
+            .await;
         let mut pending = work
             .bindings()
             .into_iter()
@@ -168,66 +199,149 @@ async fn subscriptions(
         work.subscribe_running.set(false);
     }
 }
-async fn refreshes(
-    work: &Rc<DeviceWork>,
-    handle: &SessionHandle,
-    context: &Rc<Context>,
+pub(super) async fn refreshes(
+    context: Rc<Context>,
+    handle: SessionHandle,
 ) -> Result<(), SourceError> {
-    let did = work.record.cached.borrow().device.key.id.clone();
+    let changed = context
+        .live
+        .borrow()
+        .session
+        .as_ref()
+        .unwrap()
+        .refresh_changed
+        .clone();
+    let mut next_round = None;
     loop {
-        let listener = work.changed.listen();
-        if !work.refresh_requested.replace(false) {
+        let listener = changed.listen();
+        let works = context
+            .live
+            .borrow()
+            .session
+            .as_ref()
+            .unwrap()
+            .devices
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let ready_at = works
+            .iter()
+            .filter_map(|work| {
+                work.refresh_pending
+                    .borrow()
+                    .iter()
+                    .map(|read| read.ready_at)
+                    .min()
+            })
+            .min();
+        let Some(ready_at) = ready_at else {
+            next_round = None;
             listener.await;
             continue;
+        };
+        let deadline = next_round
+            .map_or(
+                context.clock.now() + REFRESH_DELAY,
+                |scheduled: Duration| scheduled.min(context.clock.now() + REFRESH_DELAY),
+            )
+            .max(ready_at);
+        next_round = Some(deadline);
+        future::or(context.clock.wait_until(deadline), async {
+            listener.await;
+        })
+        .await;
+        if context.clock.now() < deadline {
+            continue;
         }
-        let mut pending = work.record.cached.borrow().device.functions.clone();
-        for attempt in 0..4 {
-            let mut failed = Vec::new();
-            let mut problem = None;
-            for function in pending {
-                if work.record.binding(&function.description.id) != function.power {
-                    continue;
+        // Re-read membership after waiting: removed devices cannot enter the round.
+        let round = context
+            .live
+            .borrow()
+            .session
+            .as_ref()
+            .unwrap()
+            .devices
+            .values()
+            .filter_map(|work| {
+                let mut pending = work.refresh_pending.borrow_mut();
+                let index = pending
+                    .iter()
+                    .position(|read| read.ready_at <= context.clock.now())?;
+                Some((work.clone(), pending.remove(index).unwrap()))
+            })
+            .collect::<Vec<_>>();
+        // Match the upstream round barrier: one property per DID, concurrent DIDs.
+        join_all(
+            round
+                .into_iter()
+                .map(|(work, read)| read_one(work, read, &handle, &context)),
+        )
+        .await;
+        next_round = Some(context.clock.now() + REFRESH_DELAY);
+    }
+}
+async fn read_one(
+    work: Rc<DeviceWork>,
+    mut read: Refresh,
+    handle: &SessionHandle,
+    context: &Context,
+) {
+    future::or(
+        async {
+            work.life.ended().await;
+        },
+        async {
+            let did = work.record.physical.key().id.clone();
+            let binding = read.binding;
+            let id = read.id.clone();
+            if work.record.binding(&id) != binding {
+                return;
+            }
+            let observing = work.clone();
+            let observing_id = id.clone();
+            let result = handle
+                .read_property_with_timeout(&did, binding, READ_TIMEOUT, move |result| {
+                    if observing.record.binding(&observing_id) == binding
+                        && let Ok(value) = result
+                    {
+                        observing
+                            .record
+                            .physical
+                            .function(&observing_id)
+                            .unwrap()
+                            .observe(value);
+                    }
+                })
+                .await;
+            if work.record.binding(&id) != binding {
+                return;
+            }
+            match result {
+                Ok(_) => {
+                    work.read_problems.borrow_mut().remove(&id);
                 }
-                let observing = work.clone();
-                let id = function.description.id.clone();
-                let binding = function.power;
-                let observing_id = id.clone();
-                let result = handle
-                    .read_property(&did, binding, move |result| {
-                        if observing.record.binding(&observing_id) == binding
-                            && let Ok(value) = result
-                        {
-                            observing
-                                .record
-                                .physical
-                                .function(&observing_id)
-                                .unwrap()
-                                .observe(value);
-                        }
-                    })
-                    .await;
-                match result {
-                    Ok(_) => {}
-                    Err(error) => {
-                        if work.record.binding(&id) == binding {
-                            problem = Some(work.problem("read", binding, &error));
-                            failed.push(function);
+                Err(error) => {
+                    let problem = work.problem("read", binding, &error);
+                    let mut pending = work.refresh_pending.borrow_mut();
+                    if read.attempts == 3 {
+                        pending.retain(|queued| queued.id != id);
+                        work.read_problems.borrow_mut().insert(id, problem);
+                    } else {
+                        read.attempts += 1;
+                        read.ready_at = context.clock.now() + RETRY_DELAY;
+                        // A trigger during this read merges into its retry, retaining backoff.
+                        if let Some(queued) = pending.iter_mut().find(|queued| queued.id == id) {
+                            *queued = read;
+                        } else {
+                            pending.push_back(read);
                         }
                     }
                 }
             }
-            if failed.is_empty() || attempt == 3 {
-                *work.read_problem.borrow_mut() = problem;
-                work.report(context, &did);
-                break;
-            }
-            pending = failed;
-            context
-                .clock
-                .wait_until(context.clock.now() + Duration::from_secs(3))
-                .await;
-        }
-    }
+            work.report(context, &did);
+        },
+    )
+    .await;
 }
 fn command_error(error: CentralError) -> CommandError {
     match error {

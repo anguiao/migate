@@ -39,6 +39,48 @@ fn default_request_timeout_is_ten_seconds() {
     assert_eq!(Timing::default().request, Duration::from_secs(10));
 }
 
+fn queued_handle(timing: Timing) -> SessionHandle {
+    SessionHandle {
+        shared: Rc::new(super::request::Shared {
+            queue: Default::default(),
+            event: event_listener::Event::new(),
+            closed: Cell::new(false),
+            outstanding: Cell::new(0),
+            cancellations: Default::default(),
+        }),
+        timing,
+    }
+}
+
+#[test]
+fn refresh_read_timeout_does_not_shorten_other_requests() {
+    for request_timeout in [Duration::from_secs(10), Duration::from_millis(25)] {
+        let handle = queued_handle(Timing {
+            request: request_timeout,
+            keepalive: None,
+        });
+        let binding = PropertyBinding { siid: 2, piid: 1 };
+        let before = Instant::now();
+        drop(handle.read_property_with_timeout("target", binding, Duration::from_secs(6), |_| {}));
+        drop(handle.read_property("target", binding, |_| {}));
+        drop(handle.set_property("target", binding, true, |_| {}));
+        drop(handle.get_devices(|_| {}));
+        drop(handle.get_devices_filtered(&["target".into()], |_| {}));
+        let after = Instant::now();
+        let queue = handle.shared.queue.borrow();
+        assert_eq!(queue.len(), 5);
+        for (index, request) in queue.iter().enumerate() {
+            let timeout = if index == 0 {
+                request_timeout.min(Duration::from_secs(6))
+            } else {
+                request_timeout
+            };
+            assert!(request.deadline >= before + timeout);
+            assert!(request.deadline <= after + timeout);
+        }
+    }
+}
+
 pub(crate) struct Broker {
     stream: TlsStream<Async<TcpStream>>,
     frames: wire::Frames,

@@ -280,6 +280,44 @@ fn routes_keep_valid_current_address_and_change_when_master_or_address_disappear
 }
 
 #[test]
+fn connection_candidates_include_all_master_addresses_only_in_the_current_group() {
+    let mut registry = Registry::default();
+    for (name, did, group, role, mqtt, addresses) in [
+        ("current", 456, 7, 1, true, "192.0.2.3,192.0.2.2"),
+        ("next", 123, 7, 1, true, "192.0.2.1"),
+        ("foreign", 1, 8, 1, true, "192.0.2.4"),
+        ("backup", 2, 7, 2, true, "192.0.2.5"),
+        ("no-mqtt", 3, 7, 1, false, "192.0.2.6"),
+    ] {
+        registry
+            .resolve(resolved(
+                name,
+                &profile(did, group, role, mqtt),
+                addresses,
+                8883,
+            ))
+            .unwrap();
+    }
+    let current = route("456", "0000000000000007", "192.0.2.3:8883");
+    assert_eq!(
+        registry
+            .snapshot()
+            .routes(&current.group_id, Some(&current)),
+        [
+            current.clone(),
+            route("456", "0000000000000007", "192.0.2.2:8883"),
+            route("123", "0000000000000007", "192.0.2.1:8883"),
+        ]
+    );
+    assert!(
+        registry
+            .snapshot()
+            .routes("remote", Some(&current))
+            .is_empty()
+    );
+}
+
+#[test]
 fn invalid_replacement_removes_the_previous_route_without_stopping_discovery() {
     block_on(async {
         let (sender, receiver) = flume::unbounded();

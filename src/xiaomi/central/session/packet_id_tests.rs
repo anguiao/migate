@@ -132,3 +132,61 @@ fn cancelled_and_expired_subscriptions_reserve_packet_ids_until_their_late_ack()
         }
     });
 }
+
+#[test]
+fn refresh_timeout_keeps_the_ten_second_qos2_handshake_deadline() {
+    block_on(async {
+        let (handle, mut driver) = SessionDriver::new(
+            Box::new(PendingIo),
+            wire::Frames::default(),
+            "client",
+            Timing::default(),
+            wire::MAX_FRAME_SIZE,
+            LIMIT,
+        )
+        .unwrap();
+        driver.subscriptions.clear();
+        driver.output.clear();
+        driver.ready = true;
+        let before = Instant::now();
+        let read = handle.read_property_with_timeout(
+            "target",
+            PropertyBinding { siid: 2, piid: 1 },
+            Duration::from_secs(6),
+            |result| assert_eq!(result, Err(CentralError::Timeout)),
+        );
+        driver.drain_requests().unwrap();
+        let after = Instant::now();
+        let (&pkid, publication) = driver.publications.iter().next().unwrap();
+        assert!(publication.deadline >= before + Duration::from_secs(10));
+        assert!(publication.deadline <= after + Duration::from_secs(10));
+        let mid = publication.mid;
+        let request = driver.pending.get_mut(&mid).unwrap();
+        assert!(request.deadline >= before + Duration::from_secs(6));
+        assert!(request.deadline <= after + Duration::from_secs(6));
+        request.deadline = Instant::now() - Duration::from_secs(1);
+        // The PUBLISH has left the client, but its QoS2 handshake is unfinished.
+        driver.output.clear();
+        driver.expire().unwrap();
+        assert_eq!(read.await, Err(CentralError::Timeout));
+        assert!(driver.publications.contains_key(&pkid));
+        driver
+            .packet(
+                Packet::PubRec(mqttbytes::v5::PubRec::new(pkid)),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(
+            driver.publications[&pkid].stage,
+            PublicationStage::AwaitPubComp
+        );
+        assert!(driver.output[0].deadline >= before + Duration::from_secs(10));
+        driver
+            .packet(
+                Packet::PubComp(mqttbytes::v5::PubComp::new(pkid)),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(driver.publications.is_empty());
+    });
+}

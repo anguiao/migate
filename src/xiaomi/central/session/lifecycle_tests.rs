@@ -221,6 +221,62 @@ fn full_device_lists_preserve_names_validate_flags_and_single_did_scope() {
 }
 
 #[test]
+fn filtered_device_requests_preserve_their_payload_and_response_scope() {
+    let handle = queued_handle(Timing::default());
+    let observed = Rc::new(RefCell::new(None));
+    let callback = observed.clone();
+    let dids = vec!["one".into(), "missing".into(), "bad".into()];
+    let future = handle.get_devices_filtered(&dids, move |result| {
+        *callback.borrow_mut() = Some(result);
+    });
+    let request = handle.shared.queue.borrow_mut().pop_front().unwrap();
+    let publish = request.kind.publication(1, "reply").unwrap();
+    assert_eq!(publish.topic, "master/proxy/getDevList");
+    let payload = wire::decode_mips(&publish.payload).unwrap().payload;
+    assert_eq!(payload["filter"]["did"], json!(dids));
+    assert_eq!(
+        payload["info"],
+        json!([
+            "name",
+            "model",
+            "urn",
+            "online",
+            "specV2Access",
+            "pushAvailable"
+        ])
+    );
+    let reply = json!({"devList":{
+        "one":access(json!("插座 一")),
+        "bad":{},
+        "unrelated":access(json!("other")),
+        "invalid unrelated did":null
+    }});
+    (request.complete)(parse_response(&request.kind, &reply));
+    let entries = block_on(future).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].did, "bad");
+    assert_eq!(entries[0].access, Err(CentralError::Protocol));
+    assert_eq!(entries[1].did, "one");
+    assert_eq!(
+        entries[1].access.as_ref().unwrap().name.as_deref(),
+        Some("插座 一")
+    );
+    assert_eq!(*observed.borrow(), Some(Ok(entries)));
+}
+
+#[test]
+fn empty_or_invalid_device_filters_are_rejected_before_submission() {
+    let handle = queued_handle(Timing::default());
+    for dids in [vec![], vec!["valid".into(), "invalid did".into()]] {
+        let request = handle.get_devices_filtered(&dids, |result| {
+            assert_eq!(result, Err(CentralError::InvalidInput));
+        });
+        assert_eq!(block_on(request), Err(CentralError::InvalidInput));
+        assert!(handle.shared.queue.borrow().is_empty());
+    }
+}
+
+#[test]
 fn full_and_single_device_requests_share_the_session_and_keep_their_response_scope() {
     block_on(pair(
         |mut broker| async move {

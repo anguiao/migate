@@ -39,7 +39,7 @@ pub(super) async fn run(
     context: Rc<Context>,
 ) -> Result<(), SourceError> {
     let sync = Rc::new(RefCell::new(CloudSync::default()));
-    let mut backoff = Backoff::new();
+    let mut backoff = Backoff::new(1, 30);
     let mut due = context.clock.now();
     loop {
         let listener = context.sync_changed.listen();
@@ -119,7 +119,7 @@ pub(super) async fn run(
                 || matches!(&preparation.report.certificate_update,crate::xiaomi::auth::CertificateUpdate::Failed(FailureReason::Cloud(error)) if transient(error));
             due = context.clock.now()
                 + if retry {
-                    backoff.failed(false)
+                    backoff.failed()
                 } else {
                     MEMBER_INTERVAL
                 };
@@ -145,7 +145,7 @@ pub(super) async fn run(
             Ok(home) => home,
             Err(error) => {
                 context.set_catalog_problem(Some(error.to_string()));
-                due = context.clock.now() + backoff.failed(false);
+                due = context.clock.now() + backoff.failed();
                 continue;
             }
         };
@@ -156,6 +156,7 @@ pub(super) async fn run(
         };
         context.store.devices().save_scope(&scope)?;
         let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
+        let membership_changed = context.live.borrow().devices.keys().ne(members.iter());
         let removed = {
             let live = context.live.borrow();
             live.devices
@@ -178,7 +179,9 @@ pub(super) async fn run(
         }
         context.set_catalog_problem(None);
         context.changed.notify(usize::MAX);
-        super::local::refresh_access(&context);
+        if membership_changed {
+            super::local::refresh_access(&context);
+        }
         for did in members {
             let prepare = context.live.borrow().devices[&did].needs_description();
             if !prepare {
@@ -272,9 +275,9 @@ pub(super) async fn run(
         let retry_certificate = matches!(&preparation.report.certificate_update,crate::xiaomi::auth::CertificateUpdate::Failed(FailureReason::Cloud(error)) if transient(error));
         due = context.clock.now()
             + if retry_certificate {
-                backoff.failed(false)
+                backoff.failed()
             } else {
-                backoff = Backoff::new();
+                backoff = Backoff::new(1, 30);
                 MEMBER_INTERVAL
             };
     }

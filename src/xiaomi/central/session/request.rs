@@ -13,7 +13,7 @@ use std::{
         OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +52,9 @@ pub(super) struct Request {
 }
 pub(super) enum RequestKind {
     ListAll,
+    ListFiltered {
+        dids: Vec<String>,
+    },
     List {
         did: String,
     },
@@ -78,6 +81,10 @@ impl RequestKind {
             Self::ListAll => (
                 "master/proxy/getDevList",
                 json!({"info":["name","model","urn","online","specV2Access","pushAvailable"]}),
+            ),
+            Self::ListFiltered { dids } => (
+                "master/proxy/getDevList",
+                json!({"filter":{"did":dids},"info":["name","model","urn","online","specV2Access","pushAvailable"]}),
             ),
             Self::List { did } => (
                 "master/proxy/getDevList",
@@ -108,7 +115,7 @@ impl RequestKind {
 
     pub(super) fn operation(&self) -> &'static str {
         match self {
-            Self::List { .. } | Self::ListAll => "getDevList",
+            Self::List { .. } | Self::ListAll | Self::ListFiltered { .. } => "getDevList",
             Self::Subscribe { .. } => "subscribe",
             Self::Unsubscribe { .. } => "unsubscribe",
             Self::Read { .. } => "get",
@@ -117,7 +124,7 @@ impl RequestKind {
     }
     pub(super) fn did(&self) -> &str {
         match self {
-            Self::ListAll => "*",
+            Self::ListAll | Self::ListFiltered { .. } => "*",
             Self::List { did }
             | Self::Subscribe { did, .. }
             | Self::Unsubscribe { did }
@@ -127,7 +134,10 @@ impl RequestKind {
     }
 
     pub(super) fn cancelled_for(&self, did: &str) -> bool {
-        !matches!(self, Self::ListAll | Self::Unsubscribe { .. }) && self.did() == did
+        !matches!(
+            self,
+            Self::ListAll | Self::ListFiltered { .. } | Self::Unsubscribe { .. }
+        ) && self.did() == did
     }
 }
 pub(super) struct Shared {
@@ -161,6 +171,25 @@ impl SessionHandle {
     ) -> impl Future<Output = Result<Vec<DeviceEntry>, CentralError>> + use<F> {
         self.submit(
             RequestKind::ListAll,
+            self.timing.request,
+            |response| match response {
+                Response::Devices(devices) => devices,
+                _ => unreachable!("device list request returns devices"),
+            },
+            on_result,
+        )
+    }
+    /// Return only entries for the requested devices; missing entries stay absent.
+    pub fn get_devices_filtered<F: FnOnce(Result<Vec<DeviceEntry>, CentralError>) + 'static>(
+        &self,
+        dids: &[String],
+        on_result: F,
+    ) -> impl Future<Output = Result<Vec<DeviceEntry>, CentralError>> + use<F> {
+        self.submit(
+            RequestKind::ListFiltered {
+                dids: dids.to_vec(),
+            },
+            self.timing.request,
             |response| match response {
                 Response::Devices(devices) => devices,
                 _ => unreachable!("device list request returns devices"),
@@ -198,9 +227,14 @@ impl SessionHandle {
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), CentralError>> + use<> {
-        let result = self
-            .cancel_device(did)
-            .map(|()| self.submit(RequestKind::Unsubscribe { did: did.into() }, |_| (), |_| {}));
+        let result = self.cancel_device(did).map(|()| {
+            self.submit(
+                RequestKind::Unsubscribe { did: did.into() },
+                self.timing.request,
+                |_| (),
+                |_| {},
+            )
+        });
         async move { result?.await }
     }
     pub fn get_device_list<F: FnOnce(Result<Option<DeviceAccess>, CentralError>) + 'static>(
@@ -210,6 +244,7 @@ impl SessionHandle {
     ) -> impl Future<Output = Result<Option<DeviceAccess>, CentralError>> + use<F> {
         self.submit(
             RequestKind::List { did: did.into() },
+            self.timing.request,
             |response| match response {
                 Response::Device(device) => device,
                 _ => unreachable!("filtered device list request returns a device"),
@@ -227,6 +262,7 @@ impl SessionHandle {
                 did: did.into(),
                 binding,
             },
+            self.timing.request,
             |_| (),
             |_| {},
         )
@@ -237,11 +273,22 @@ impl SessionHandle {
         binding: PropertyBinding,
         on_result: F,
     ) -> impl Future<Output = Result<bool, CentralError>> + use<F> {
+        self.read_property_with_timeout(did, binding, self.timing.request, on_result)
+    }
+    /// Apply an operation timeout within the session's request deadline limit.
+    pub fn read_property_with_timeout<F: FnOnce(Result<bool, CentralError>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        timeout: Duration,
+        on_result: F,
+    ) -> impl Future<Output = Result<bool, CentralError>> + use<F> {
         self.submit(
             RequestKind::Read {
                 did: did.into(),
                 binding,
             },
+            timeout.min(self.timing.request),
             |response| match response {
                 Response::Power(value) => value,
                 _ => unreachable!("property read returns a power value"),
@@ -262,6 +309,7 @@ impl SessionHandle {
                 binding,
                 value,
             },
+            self.timing.request,
             |_| (),
             on_result,
         )
@@ -269,6 +317,7 @@ impl SessionHandle {
     fn submit<T: Clone + 'static, F: FnOnce(Result<T, CentralError>) + 'static>(
         &self,
         kind: RequestKind,
+        timeout: Duration,
         decode: fn(Response) -> T,
         on_result: F,
     ) -> impl Future<Output = Result<T, CentralError>> + use<T, F> {
@@ -278,7 +327,7 @@ impl SessionHandle {
         });
         let request = Request {
             kind,
-            deadline: Instant::now() + self.timing.request,
+            deadline: Instant::now() + timeout,
             complete: Box::new({
                 let completion = completion.clone();
                 move |result| {
@@ -330,6 +379,9 @@ pub(super) fn valid_identifier(value: &str) -> bool {
 fn valid_request(kind: &RequestKind) -> bool {
     let (did, binding) = match kind {
         RequestKind::ListAll => return true,
+        RequestKind::ListFiltered { dids } => {
+            return !dids.is_empty() && dids.iter().all(|did| valid_identifier(did));
+        }
         RequestKind::List { did } | RequestKind::Unsubscribe { did } => (did, None),
         RequestKind::Subscribe { did, binding }
         | RequestKind::Read { did, binding }
@@ -411,22 +463,27 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
                 code => Err(CentralError::Rejected(code)),
             }
         }
-        RequestKind::ListAll => {
+        RequestKind::ListAll | RequestKind::ListFiltered { .. } => {
             let list = value
                 .get("devList")
                 .and_then(Value::as_object)
                 .ok_or(CentralError::Protocol)?;
-            if list.keys().any(|did| !valid_identifier(did)) {
-                return Err(CentralError::Protocol);
+            let mut entries = Vec::new();
+            for (did, info) in list {
+                if let RequestKind::ListFiltered { dids } = kind
+                    && !dids.contains(did)
+                {
+                    continue;
+                }
+                if !valid_identifier(did) {
+                    return Err(CentralError::Protocol);
+                }
+                entries.push(DeviceEntry {
+                    did: did.clone(),
+                    access: device_access(did, info),
+                });
             }
-            Ok(Response::Devices(
-                list.iter()
-                    .map(|(did, info)| DeviceEntry {
-                        did: did.clone(),
-                        access: device_access(did, info),
-                    })
-                    .collect(),
-            ))
+            Ok(Response::Devices(entries))
         }
         RequestKind::List { did } => {
             let list = value
