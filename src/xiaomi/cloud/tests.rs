@@ -404,14 +404,16 @@ fn miot_instance_endpoint_is_injected_only_for_tests() {
 
 #[test]
 fn authorization_state_matches_upstream_device_binding() {
-    for (uuid, expected_state) in [
+    for (uuid, expected_device_id, expected_state) in [
         (
             "550e8400-e29b-41d4-a716-446655440000",
-            "139e3d81ebea72caaec5f4bb548d66e83ecce75c",
+            "ha.550e8400e29b41d4a716446655440000",
+            "004a628e02325dad7fb5f8db58b6da38cfaa8418",
         ),
         (
             "550e8400-e29b-41d4-a716-446655440001",
-            "510dfb7675e97409da88b563551ea8d59fdc43f6",
+            "ha.550e8400e29b41d4a716446655440001",
+            "2353e712f3c5dfdf92234484bea15ef42312c769",
         ),
     ] {
         let attempt = AuthorizationAttempt::new(Some(uuid)).unwrap();
@@ -419,7 +421,9 @@ fn authorization_state_matches_upstream_device_binding() {
         let query = url
             .query_pairs()
             .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(query["device_id"], format!("ha.{uuid}"));
+        assert_eq!(attempt.oauth_client_uuid(), uuid);
+        assert_eq!(attempt.device_id(), expected_device_id);
+        assert_eq!(query["device_id"], expected_device_id);
         assert_eq!(query["state"], expected_state);
         assert_eq!(attempt.state(), expected_state);
     }
@@ -439,7 +443,7 @@ fn authorization_callbacks_are_bound_to_unique_paths_and_expected_state() {
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(query["client_id"], CLIENT_ID.to_string());
     assert_eq!(query["response_type"], "code");
-    assert_eq!(query["device_id"], format!("ha.{uuid}"));
+    assert_eq!(query["device_id"], "ha.550e8400e29b41d4a716446655440000");
     assert_eq!(query["skip_confirm"], "false");
 
     let callback = format!(
@@ -532,11 +536,47 @@ fn token_requests_match_wire_protocol() {
                 data["device_id"].as_str().unwrap(),
                 authorization_query["device_id"]
             );
+            assert_eq!(data["device_id"], "ha.550e8400e29b41d4a716446655440000");
+        } else {
+            assert!(data.get("device_id").is_none());
         }
         assert!(data.get(expected_key).is_some());
         assert!(data.get("grant_type").is_none());
     }
     assert_eq!(refreshed.expires_in, 1000);
+}
+
+#[test]
+fn new_authorization_uses_compact_device_id_through_token_exchange() {
+    use sha1::{Digest as _, Sha1};
+
+    let attempt = AuthorizationAttempt::new(None).unwrap();
+    let uuid = uuid::Uuid::parse_str(attempt.oauth_client_uuid()).unwrap();
+    assert_eq!(attempt.oauth_client_uuid(), uuid.hyphenated().to_string());
+    let expected_device_id = format!("ha.{}", uuid.simple());
+    let expected_state = Sha1::digest(format!("d={expected_device_id}"))
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let authorization_url = Url::parse(attempt.authorization_url()).unwrap();
+    let query = authorization_url
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(attempt.device_id(), expected_device_id);
+    assert_eq!(query["device_id"], expected_device_id);
+    assert_eq!(query["state"], expected_state);
+
+    let (base, requests) = mock_server(vec![MockResponse::json(
+        200,
+        r#"{"code":0,"result":{"access_token":"access","refresh_token":"refresh","expires_in":1000}}"#,
+    )]);
+    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    future::block_on(client.exchange_token(&attempt, "code")).unwrap();
+    let request = requests.recv().unwrap();
+    let url = Url::parse(&format!("http://local{}", request.target)).unwrap();
+    let data = url.query_pairs().find(|(key, _)| key == "data").unwrap().1;
+    let data: Value = serde_json::from_str(&data).unwrap();
+    assert_eq!(data["device_id"], expected_device_id);
 }
 
 #[test]

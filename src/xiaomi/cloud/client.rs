@@ -90,7 +90,7 @@ impl CloudClient {
                 "client_id": CLIENT_ID,
                 "redirect_uri": attempt.redirect_uri(),
                 "code": code,
-                "device_id": format!("ha.{}", attempt.oauth_client_uuid()),
+                "device_id": attempt.device_id(),
             }),
         )
         .await

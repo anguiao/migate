@@ -35,6 +35,7 @@ pub fn validate_saved_redirect_uri(value: &str) -> Result<(), CloudError> {
 
 pub struct AuthorizationAttempt {
     oauth_client_uuid: String,
+    device_id: String,
     redirect_uri: String,
     state: String,
     authorization_url: String,
@@ -49,15 +50,15 @@ impl AuthorizationAttempt {
                 if parsed.hyphenated().to_string() != value {
                     return Err(CloudError::input("create authorization"));
                 }
-                value.to_owned()
+                parsed
             }
-            None => Uuid::new_v4().hyphenated().to_string(),
+            None => Uuid::new_v4(),
         };
         let redirect_uri = format!(
             "{CALLBACK_BASE_URL}/api/webhook/{}",
             Uuid::new_v4().simple()
         );
-        let device_id = format!("ha.{uuid}");
+        let device_id = format!("ha.{}", uuid.simple());
         let state = Sha1::digest(format!("d={device_id}").as_bytes())
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -72,7 +73,8 @@ impl AuthorizationAttempt {
             .append_pair("state", &state)
             .append_pair("skip_confirm", "false");
         Ok(Self {
-            oauth_client_uuid: uuid,
+            oauth_client_uuid: uuid.hyphenated().to_string(),
+            device_id,
             redirect_uri,
             state,
             authorization_url: url.into(),
@@ -81,6 +83,9 @@ impl AuthorizationAttempt {
 
     pub fn oauth_client_uuid(&self) -> &str {
         &self.oauth_client_uuid
+    }
+    pub fn device_id(&self) -> &str {
+        &self.device_id
     }
     pub fn redirect_uri(&self) -> &str {
         &self.redirect_uri
