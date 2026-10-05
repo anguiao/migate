@@ -16,6 +16,7 @@ cargo run --locked
 仓库 Cargo 配置默认使用 `.migate/`；直接运行构建产物时目录规则不同，详见运行指南。
 
 - [运行与 Apple Home 配对指南](docs/running.md)
+- [已知限制与恢复经验](docs/known-limitations.md)
 - [起步方案](docs/specs/2026-09-08-virtual-light-bootstrap/spec.md)
 - [米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md)
 - [最小设备模型方案](docs/specs/2026-10-03-minimal-device-model/spec.md)
