@@ -5,6 +5,7 @@ pub mod central;
 pub mod certificate;
 pub mod cloud;
 pub mod discovery;
+mod mqtt;
 pub mod source;
 
 #[cfg(test)]

@@ -231,7 +231,10 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                     }
                 }
             };
-            assert_eq!(callbacks.borrow().as_slice(), &[expected.clone()]);
+            assert_eq!(
+                callbacks.borrow().as_slice(),
+                std::slice::from_ref(&expected)
+            );
             assert_eq!(write.await, expected);
             reply(
                 &mut driver,
