@@ -1,7 +1,7 @@
 use super::super::CentralError;
 use super::{
     driver::{Publication, PublicationStage, SessionDriver, Subscription, SubscriptionKind},
-    request::{Request, RequestKind, ResultValue, next_mips_id, property_topic},
+    request::{Request, RequestKind, RequestTimeout, ResultValue, next_mips_id, property_topic},
 };
 use mqttbytes::{
     QoS,
@@ -11,17 +11,32 @@ use std::time::Instant;
 
 impl SessionDriver {
     pub(super) fn finish(&self, request: Request, result: ResultValue) {
+        self.finish_outcome(request, result, None);
+    }
+
+    pub(super) fn finish_timeout(&self, request: Request, timeout: RequestTimeout) {
+        self.finish_outcome(request, Err(CentralError::Timeout), Some(timeout));
+    }
+
+    fn finish_outcome(
+        &self,
+        request: Request,
+        result: ResultValue,
+        timeout: Option<RequestTimeout>,
+    ) {
         log::debug!(
-            "Gateway request completed: operation={}, did={}, request_id={:?}, error={:?}",
+            "Gateway request completed: operation={}, did={}, request_id={:?}, stage={:?}, timeout={:?}, error={:?}",
             request.kind.operation(),
             request.kind.did(),
             request.id,
+            request.stage,
+            timeout,
             result.as_ref().err()
         );
         self.shared
             .outstanding
             .set(self.shared.outstanding.get() - 1);
-        (request.complete)(result);
+        (request.complete)(result, request.stage, timeout);
     }
     pub(super) fn finish_all(&mut self, error: CentralError) {
         self.shared.closed.set(true);
@@ -36,7 +51,8 @@ impl SessionDriver {
                 .filter_map(|(_, subscription)| subscription.request),
         );
         for request in requests {
-            self.finish(request, Err(error.clone()));
+            let timeout = (error == CentralError::Timeout).then_some(RequestTimeout::Transport);
+            self.finish_outcome(request, Err(error.clone()), timeout);
         }
         self.shared.event.notify(usize::MAX);
     }
@@ -58,7 +74,7 @@ impl SessionDriver {
             };
             let Some(mut request) = request else { break };
             if Instant::now() >= request.deadline {
-                self.finish(request, Err(CentralError::Timeout));
+                self.finish_timeout(request, RequestTimeout::Queue);
                 continue;
             }
             let pkid = match self.next_pkid() {
@@ -165,9 +181,9 @@ impl SessionDriver {
             }
             let did = cancellation.did;
             let topics = self.retired_topics.entry(did.clone()).or_default();
-            self.property_topics.retain(|_, (property_did, binding)| {
-                if *property_did == did {
-                    topics.insert(property_topic("master", property_did, *binding));
+            self.property_topics.retain(|_, property| {
+                if property.did == did {
+                    topics.insert(property_topic("master", &property.did, property.binding));
                     false
                 } else {
                     true
@@ -176,7 +192,12 @@ impl SessionDriver {
             let pending = self
                 .pending
                 .iter()
-                .filter_map(|(mid, request)| request.kind.cancelled_for(&did).then_some(*mid))
+                .filter_map(|(mid, request)| {
+                    request
+                        .kind
+                        .cancelled_for(&did, cancellation.scope)
+                        .then_some(*mid)
+                })
                 .collect::<Vec<_>>();
             for mid in &pending {
                 if let Some(request) = self.pending.remove(mid) {

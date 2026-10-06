@@ -251,7 +251,11 @@ fn filtered_device_requests_preserve_their_payload_and_response_scope() {
         "unrelated":access(json!("other")),
         "invalid unrelated did":null
     }});
-    (request.complete)(parse_response(&request.kind, &reply));
+    (request.complete)(
+        parse_response(&request.kind, &reply),
+        super::super::RequestStage::BusinessResult,
+        None,
+    );
     let entries = block_on(future).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].did, "bad");

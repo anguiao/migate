@@ -33,6 +33,36 @@ pub struct DeviceEntry {
     pub access: Result<DeviceAccess, CentralError>,
 }
 
+/// The request's observed progress, independent of its completion error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestStage {
+    /// No request bytes have been accepted by the socket.
+    NotSent,
+    /// At least one request byte was accepted; remote execution is uncertain.
+    MayHaveBeenSent,
+    /// A valid, correlated business response reported acceptance or rejection.
+    BusinessResult,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestTimeout {
+    /// The operation deadline elapsed before any request bytes were written.
+    Queue,
+    /// A sent business request did not receive a valid response in time.
+    Response,
+    /// A subscription or unsubscription confirmation did not arrive in time.
+    Subscription,
+    /// MQTT, socket output, or keepalive timed out and ended the session.
+    Transport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestOutcome<T> {
+    pub result: Result<T, CentralError>,
+    pub stage: RequestStage,
+    pub timeout: Option<RequestTimeout>,
+}
+
 pub(super) enum Response {
     Device(Option<DeviceAccess>),
     Devices(Vec<DeviceEntry>),
@@ -41,14 +71,15 @@ pub(super) enum Response {
 }
 pub(super) type ResultValue = Result<Response, CentralError>;
 struct Completion<T> {
-    result: RefCell<Option<Result<T, CentralError>>>,
+    result: RefCell<Option<RequestOutcome<T>>>,
     event: Event,
 }
 pub(super) struct Request {
     pub(super) kind: RequestKind,
     pub(super) deadline: Instant,
-    pub(super) complete: Box<dyn FnOnce(ResultValue)>,
+    pub(super) complete: Box<dyn FnOnce(ResultValue, RequestStage, Option<RequestTimeout>)>,
     pub(super) id: Option<u32>,
+    pub(super) stage: RequestStage,
 }
 pub(super) enum RequestKind {
     ListAll,
@@ -133,11 +164,12 @@ impl RequestKind {
         }
     }
 
-    pub(super) fn cancelled_for(&self, did: &str) -> bool {
+    pub(super) fn cancelled_for(&self, did: &str, scope: CancellationScope) -> bool {
         !matches!(
             self,
             Self::ListAll | Self::ListFiltered { .. } | Self::Unsubscribe { .. }
         ) && self.did() == did
+            && (scope == CancellationScope::Device || matches!(self, Self::Subscribe { .. }))
     }
 }
 pub(super) struct Shared {
@@ -150,7 +182,14 @@ pub(super) struct Shared {
 
 pub(super) struct Cancellation {
     pub(super) did: String,
+    pub(super) scope: CancellationScope,
     pub(super) queued: VecDeque<Request>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum CancellationScope {
+    Device,
+    Properties,
 }
 
 /// Requests are enqueued when these methods are called. Dropping the returned
@@ -179,6 +218,20 @@ impl SessionHandle {
             on_result,
         )
     }
+    pub fn get_devices_detailed<F: FnOnce(RequestOutcome<Vec<DeviceEntry>>) + 'static>(
+        &self,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<Vec<DeviceEntry>>> + use<F> {
+        self.submit_detailed(
+            RequestKind::ListAll,
+            self.timing.request,
+            |response| match response {
+                Response::Devices(devices) => devices,
+                _ => unreachable!("device list request returns devices"),
+            },
+            on_result,
+        )
+    }
     /// Return only entries for the requested devices; missing entries stay absent.
     pub fn get_devices_filtered<F: FnOnce(Result<Vec<DeviceEntry>, CentralError>) + 'static>(
         &self,
@@ -197,9 +250,30 @@ impl SessionHandle {
             on_result,
         )
     }
+    pub fn get_devices_filtered_detailed<F: FnOnce(RequestOutcome<Vec<DeviceEntry>>) + 'static>(
+        &self,
+        dids: &[String],
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<Vec<DeviceEntry>>> + use<F> {
+        self.submit_detailed(
+            RequestKind::ListFiltered {
+                dids: dids.to_vec(),
+            },
+            self.timing.request,
+            |response| match response {
+                Response::Devices(devices) => devices,
+                _ => unreachable!("device list request returns devices"),
+            },
+            on_result,
+        )
+    }
 
     /// Cancel this device's existing work before the driver processes another frame.
     pub fn cancel_device(&self, did: &str) -> Result<(), CentralError> {
+        self.cancel(did, CancellationScope::Device)
+    }
+
+    fn cancel(&self, did: &str, scope: CancellationScope) -> Result<(), CentralError> {
         if !valid_identifier(did) {
             return Err(CentralError::InvalidInput);
         }
@@ -209,13 +283,14 @@ impl SessionHandle {
         let mut queue = self.shared.queue.borrow_mut();
         let (queued, retained) = queue
             .drain(..)
-            .partition(|request| request.kind.cancelled_for(did));
+            .partition(|request| request.kind.cancelled_for(did, scope));
         *queue = retained;
         self.shared
             .cancellations
             .borrow_mut()
             .push_back(Cancellation {
                 did: did.into(),
+                scope,
                 queued,
             });
         self.shared.event.notify(usize::MAX);
@@ -237,12 +312,44 @@ impl SessionHandle {
         });
         async move { result?.await }
     }
+
+    /// Retire property subscriptions without cancelling in-flight reads or writes.
+    /// Late SUBACKs cannot reinstate the retired subscriptions.
+    pub fn unsubscribe_properties(
+        &self,
+        did: &str,
+    ) -> impl Future<Output = Result<(), CentralError>> + use<> {
+        let result = self.cancel(did, CancellationScope::Properties).map(|()| {
+            self.submit(
+                RequestKind::Unsubscribe { did: did.into() },
+                self.timing.request,
+                |_| (),
+                |_| {},
+            )
+        });
+        async move { result?.await }
+    }
     pub fn get_device_list<F: FnOnce(Result<Option<DeviceAccess>, CentralError>) + 'static>(
         &self,
         did: &str,
         on_result: F,
     ) -> impl Future<Output = Result<Option<DeviceAccess>, CentralError>> + use<F> {
         self.submit(
+            RequestKind::List { did: did.into() },
+            self.timing.request,
+            |response| match response {
+                Response::Device(device) => device,
+                _ => unreachable!("filtered device list request returns a device"),
+            },
+            on_result,
+        )
+    }
+    pub fn get_device_list_detailed<F: FnOnce(RequestOutcome<Option<DeviceAccess>>) + 'static>(
+        &self,
+        did: &str,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<Option<DeviceAccess>>> + use<F> {
+        self.submit_detailed(
             RequestKind::List { did: did.into() },
             self.timing.request,
             |response| match response {
@@ -275,6 +382,14 @@ impl SessionHandle {
     ) -> impl Future<Output = Result<bool, CentralError>> + use<F> {
         self.read_property_with_timeout(did, binding, self.timing.request, on_result)
     }
+    pub fn read_property_detailed<F: FnOnce(RequestOutcome<bool>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<bool>> + use<F> {
+        self.read_property_with_timeout_detailed(did, binding, self.timing.request, on_result)
+    }
     /// Apply an operation timeout within the session's request deadline limit.
     pub fn read_property_with_timeout<F: FnOnce(Result<bool, CentralError>) + 'static>(
         &self,
@@ -284,6 +399,26 @@ impl SessionHandle {
         on_result: F,
     ) -> impl Future<Output = Result<bool, CentralError>> + use<F> {
         self.submit(
+            RequestKind::Read {
+                did: did.into(),
+                binding,
+            },
+            timeout.min(self.timing.request),
+            |response| match response {
+                Response::Power(value) => value,
+                _ => unreachable!("property read returns a power value"),
+            },
+            on_result,
+        )
+    }
+    pub fn read_property_with_timeout_detailed<F: FnOnce(RequestOutcome<bool>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        timeout: Duration,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<bool>> + use<F> {
+        self.submit_detailed(
             RequestKind::Read {
                 did: did.into(),
                 binding,
@@ -314,6 +449,24 @@ impl SessionHandle {
             on_result,
         )
     }
+    pub fn set_property_detailed<F: FnOnce(RequestOutcome<()>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        value: bool,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<()>> + use<F> {
+        self.submit_detailed(
+            RequestKind::Write {
+                did: did.into(),
+                binding,
+                value,
+            },
+            self.timing.request,
+            |_| (),
+            on_result,
+        )
+    }
     fn submit<T: Clone + 'static, F: FnOnce(Result<T, CentralError>) + 'static>(
         &self,
         kind: RequestKind,
@@ -321,6 +474,18 @@ impl SessionHandle {
         decode: fn(Response) -> T,
         on_result: F,
     ) -> impl Future<Output = Result<T, CentralError>> + use<T, F> {
+        let submitted = self.submit_detailed(kind, timeout, decode, move |outcome| {
+            on_result(outcome.result);
+        });
+        async move { submitted.await.result }
+    }
+    fn submit_detailed<T: Clone + 'static, F: FnOnce(RequestOutcome<T>) + 'static>(
+        &self,
+        kind: RequestKind,
+        timeout: Duration,
+        decode: fn(Response) -> T,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<T>> + use<T, F> {
         let completion = Rc::new(Completion {
             result: RefCell::new(None),
             event: Event::new(),
@@ -330,14 +495,19 @@ impl SessionHandle {
             deadline: Instant::now() + timeout,
             complete: Box::new({
                 let completion = completion.clone();
-                move |result| {
-                    let result = result.map(decode);
-                    on_result(result.clone());
-                    *completion.result.borrow_mut() = Some(result);
+                move |result, stage, timeout| {
+                    let outcome = RequestOutcome {
+                        result: result.map(decode),
+                        stage,
+                        timeout,
+                    };
+                    on_result(outcome.clone());
+                    *completion.result.borrow_mut() = Some(outcome);
                     completion.event.notify(usize::MAX);
                 }
             }),
             id: None,
+            stage: RequestStage::NotSent,
         };
         let error = if !valid_request(&request.kind) {
             Some(CentralError::InvalidInput)
@@ -349,7 +519,7 @@ impl SessionHandle {
             None
         };
         if let Some(error) = error {
-            (request.complete)(Err(error));
+            (request.complete)(Err(error), RequestStage::NotSent, None);
         } else {
             self.shared
                 .outstanding

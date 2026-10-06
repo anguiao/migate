@@ -8,7 +8,9 @@ pub use connection::connect;
 #[cfg(test)]
 pub(super) use connection::start;
 pub use driver::SessionDriver;
-pub use request::{DeviceAccess, DeviceEntry, SessionHandle};
+pub use request::{
+    DeviceAccess, DeviceEntry, RequestOutcome, RequestStage, RequestTimeout, SessionHandle,
+};
 
 use crate::xiaomi::capability::PropertyBinding;
 use futures_lite::io::{AsyncRead, AsyncWrite};

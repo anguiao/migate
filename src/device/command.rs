@@ -179,12 +179,26 @@ pub struct CommandRequest {
 
 impl CommandRequest {
     pub fn accept(self) -> Result<FunctionSnapshot, CommandError> {
+        self.complete(true)
+    }
+
+    /// Complete an accepted command without overwriting an observation that the
+    /// adapter has already chosen to retain.
+    pub fn accept_preserving_state(self) -> Result<FunctionSnapshot, CommandError> {
+        self.complete(false)
+    }
+
+    fn complete(self, apply_target: bool) -> Result<FunctionSnapshot, CommandError> {
         let mut state = self.function.0.state.lock().unwrap();
         let mut result = self.completion.result.lock().unwrap();
         if let Some(completed) = &*result {
             return completed.clone();
         }
-        let accepted = Ok(self.function.update_power(&mut state, self.target));
+        let accepted = Ok(if apply_target {
+            self.function.update_power(&mut state, self.target)
+        } else {
+            self.function.snapshot_locked(&state)
+        });
         *result = Some(accepted.clone());
         self.completion.changed.notify(usize::MAX);
         accepted

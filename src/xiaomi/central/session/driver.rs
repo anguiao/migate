@@ -1,7 +1,7 @@
 use super::super::{CentralError, wire};
 use super::{
     CentralEvent, LIMIT, SessionHandle, Timing, Transport,
-    request::{Request, Shared},
+    request::{Request, RequestStage, RequestTimeout, Shared},
 };
 use crate::xiaomi::capability::PropertyBinding;
 use event_listener::Event;
@@ -43,6 +43,18 @@ pub(super) struct Subscription {
     pub(super) kind: SubscriptionKind,
 }
 
+#[derive(Clone)]
+pub(super) struct PropertySubscription {
+    pub(super) did: String,
+    pub(super) binding: PropertyBinding,
+    pub(super) generation: u64,
+}
+
+pub(super) struct ReceivedPublish {
+    pub(super) publication: Publish,
+    pub(super) property_generation: Option<u64>,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub(super) enum SubscriptionKind {
     Baseline,
@@ -67,8 +79,9 @@ pub struct SessionDriver {
     pub(super) pending: HashMap<u32, Request>,
     pub(super) publications: HashMap<u16, Publication>,
     pub(super) subscriptions: HashMap<u16, Subscription>,
-    pub(super) incoming: HashMap<u16, Publish>,
-    pub(super) property_topics: HashMap<String, (String, PropertyBinding)>,
+    pub(super) incoming: HashMap<u16, ReceivedPublish>,
+    pub(super) property_topics: HashMap<String, PropertySubscription>,
+    pub(super) property_generation: u64,
     pub(super) retired_topics: HashMap<String, BTreeSet<String>>,
     pub(super) ready: bool,
     pkid: u16,
@@ -109,6 +122,7 @@ impl SessionDriver {
             subscriptions: HashMap::new(),
             incoming: HashMap::new(),
             property_topics: HashMap::new(),
+            property_generation: 0,
             retired_topics: HashMap::new(),
             ready: false,
             pkid: 0,
@@ -275,7 +289,12 @@ impl SessionDriver {
             .collect();
         for id in expired {
             if let Some(request) = self.pending.remove(&id) {
-                self.finish(request, Err(CentralError::Timeout));
+                let timeout = if request.stage == RequestStage::NotSent {
+                    RequestTimeout::Queue
+                } else {
+                    RequestTimeout::Response
+                };
+                self.finish_timeout(request, timeout);
             }
         }
         let expired: Vec<_> = self
@@ -297,7 +316,7 @@ impl SessionDriver {
                     .insert(super::request::property_topic("master", did, *binding));
             }
             if let Some(request) = subscription.request.take() {
-                self.finish(request, Err(CentralError::Timeout));
+                self.finish_timeout(request, RequestTimeout::Subscription);
             } else if subscription.kind == SubscriptionKind::Baseline {
                 return Err(CentralError::Timeout);
             }
@@ -325,7 +344,7 @@ impl SessionDriver {
             expired
         };
         for request in expired {
-            self.finish(request, Err(CentralError::Timeout));
+            self.finish_timeout(request, RequestTimeout::Queue);
         }
         Ok(())
     }
@@ -381,6 +400,18 @@ impl SessionDriver {
                     Poll::Ready(Ok(0)) => return Poll::Ready(Err(CentralError::Io)),
                     Poll::Ready(Ok(count)) => {
                         output.offset += count;
+                        if let Some(mid) = output.request
+                            && let Some(request) = self.pending.get_mut(&mid)
+                        {
+                            request.stage = RequestStage::MayHaveBeenSent;
+                        } else if let Some(pkid) = output.pkid
+                            && let Some(request) = self
+                                .subscriptions
+                                .get_mut(&pkid)
+                                .and_then(|subscription| subscription.request.as_mut())
+                        {
+                            request.stage = RequestStage::MayHaveBeenSent;
+                        }
                         progressed = true;
                     }
                     Poll::Ready(Err(_)) => return Poll::Ready(Err(CentralError::Io)),
@@ -427,3 +458,7 @@ impl Drop for SessionDriver {
 #[cfg(test)]
 #[path = "packet_id_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "outcome_tests.rs"]
+mod outcomes;

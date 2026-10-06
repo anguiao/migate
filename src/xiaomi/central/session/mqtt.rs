@@ -1,9 +1,13 @@
 use super::super::{CentralError, wire};
 use super::{
     CentralEvent, LIMIT,
-    driver::{PublicationStage, SessionDriver, Subscription, SubscriptionKind},
+    driver::{
+        PropertySubscription, PublicationStage, ReceivedPublish, SessionDriver, Subscription,
+        SubscriptionKind,
+    },
     request::{
-        RequestKind, Response, parse_response, property_topic, valid_identifier, validate_identity,
+        RequestKind, RequestStage, RequestTimeout, Response, parse_response, property_topic,
+        valid_identifier, validate_identity,
     },
 };
 use mqttbytes::{QoS, v5::*};
@@ -58,12 +62,17 @@ impl SessionDriver {
                     if let Some(error) = error {
                         self.finish(request, Err(error));
                     } else if Instant::now() >= request.deadline {
-                        self.finish(request, Err(CentralError::Timeout));
+                        self.finish_timeout(request, RequestTimeout::Subscription);
                     } else {
                         if let RequestKind::Subscribe { did, binding } = &request.kind {
+                            self.property_generation = self.property_generation.wrapping_add(1);
                             self.property_topics.insert(
                                 property_topic(&self.client_id, did, *binding),
-                                (did.clone(), *binding),
+                                PropertySubscription {
+                                    did: did.clone(),
+                                    binding: *binding,
+                                    generation: self.property_generation,
+                                },
                             );
                         }
                         self.finish(request, Ok(Response::Unit));
@@ -94,14 +103,13 @@ impl SessionDriver {
                         .map(|reason| CentralError::Rejected(*reason as i64))
                 };
                 if let Some(request) = subscription.request {
-                    let result = if let Some(error) = error {
-                        Err(error)
+                    if let Some(error) = error {
+                        self.finish(request, Err(error));
                     } else if Instant::now() >= request.deadline {
-                        Err(CentralError::Timeout)
+                        self.finish_timeout(request, RequestTimeout::Subscription);
                     } else {
-                        Ok(Response::Unit)
-                    };
-                    self.finish(request, result);
+                        self.finish(request, Ok(Response::Unit));
+                    }
                 }
             }
             Packet::PubRec(ack) => {
@@ -162,8 +170,8 @@ impl SessionDriver {
                         }
                         if let Some(previous) = self.incoming.get(&publish.pkid) {
                             if !publish.dup
-                                || previous.topic != publish.topic
-                                || previous.payload != publish.payload
+                                || previous.publication.topic != publish.topic
+                                || previous.publication.payload != publish.payload
                             {
                                 return Err(CentralError::Protocol);
                             }
@@ -171,7 +179,17 @@ impl SessionDriver {
                             if self.incoming.len() >= LIMIT {
                                 return Err(CentralError::Protocol);
                             }
-                            self.incoming.insert(publish.pkid, publish.clone());
+                            let property_generation = self
+                                .property_topics
+                                .get(&publish.topic)
+                                .map(|property| property.generation);
+                            self.incoming.insert(
+                                publish.pkid,
+                                ReceivedPublish {
+                                    publication: publish.clone(),
+                                    property_generation,
+                                },
+                            );
                         }
                         self.enqueue(
                             Packet::PubRec(PubRec::new(publish.pkid)),
@@ -186,8 +204,18 @@ impl SessionDriver {
                 if ack.pkid == 0 || ack.reason != PubRelReason::Success {
                     return Err(CentralError::Protocol);
                 }
-                if let Some(publish) = self.incoming.remove(&ack.pkid) {
-                    self.message(publish, on_event);
+                if let Some(received) = self.incoming.remove(&ack.pkid) {
+                    let topic = &received.publication.topic;
+                    let current = topic == &self.reply_topic
+                        || topic == &self.list_topic
+                        || received.property_generation.is_some_and(|generation| {
+                            self.property_topics
+                                .get(topic)
+                                .is_some_and(|property| property.generation == generation)
+                        });
+                    if current {
+                        self.message(received.publication, on_event);
+                    }
                 }
                 self.enqueue(
                     Packet::PubComp(PubComp::new(ack.pkid)),
@@ -234,12 +262,20 @@ impl SessionDriver {
         }
         let message = wire::decode_mips(&publish.payload)?;
         if reply {
-            if let Some(request) = self.pending.remove(&message.id) {
-                let result = if Instant::now() >= request.deadline {
-                    Err(CentralError::Timeout)
-                } else {
-                    parse_response(&request.kind, &message.payload)
-                };
+            if let Some(mut request) = self.pending.remove(&message.id) {
+                if Instant::now() >= request.deadline {
+                    let timeout = if request.stage == RequestStage::NotSent {
+                        RequestTimeout::Queue
+                    } else {
+                        RequestTimeout::Response
+                    };
+                    self.finish_timeout(request, timeout);
+                    return Ok(());
+                }
+                let result = parse_response(&request.kind, &message.payload);
+                if result.is_ok() || matches!(result, Err(CentralError::Rejected(_))) {
+                    request.stage = RequestStage::BusinessResult;
+                }
                 log::debug!(
                     "Gateway reply: operation={}, did={}, request_id={}, error={:?}",
                     request.kind.operation(),
@@ -264,7 +300,7 @@ impl SessionDriver {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             on_event(CentralEvent::DeviceListChanged { dids });
-        } else if let Some((did, binding)) = property {
+        } else if let Some(PropertySubscription { did, binding, .. }) = property {
             validate_identity(&message.payload, &did, binding, true)?;
             let value = message
                 .payload

@@ -334,3 +334,45 @@ fn dropping_a_caller_does_not_discard_an_inflight_adapter_result() {
         assert!(poll_once(receiver.next()).await.is_none());
     });
 }
+
+#[test]
+fn acceptance_can_preserve_a_newer_observation_and_continue_the_fifo() {
+    block_on(async {
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
+        let mut first = Box::pin(device.execute(Command::On));
+        let mut next = Box::pin(device.execute(Command::Toggle));
+        assert!(poll_once(first.as_mut()).await.is_none());
+        assert!(poll_once(next.as_mut()).await.is_none());
+        let request = receiver.next().await.unwrap();
+        assert!(request.target);
+        device.observe(false);
+        let observed = device.snapshot();
+        assert_eq!(request.accept_preserving_state().unwrap(), observed);
+        assert_eq!(first.await.unwrap(), observed);
+        let following = receiver.next().await.unwrap();
+        assert!(following.target);
+        following.accept().unwrap();
+        assert_eq!(next.await.unwrap().power, Power::On);
+    });
+}
+
+#[test]
+fn preserving_acceptance_does_not_restore_a_closed_function() {
+    block_on(async {
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
+        let mut command = Box::pin(device.execute(Command::On));
+        assert!(poll_once(command.as_mut()).await.is_none());
+        let request = receiver.next().await.unwrap();
+        device.observe(false);
+        let observed = device.snapshot();
+        drop(receiver);
+        assert_eq!(
+            request.accept_preserving_state(),
+            Err(CommandError::Cancelled)
+        );
+        assert_eq!(command.await, Err(CommandError::Cancelled));
+        assert_eq!(device.snapshot(), observed);
+    });
+}
