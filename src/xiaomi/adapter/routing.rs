@@ -15,7 +15,7 @@ pub(super) enum ControlPath {
     Cloud(XiaomiRecord),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PathPriority {
+pub enum PathPriority {
     LocalFirst,
     CloudFirst,
 }
@@ -65,6 +65,7 @@ impl Context {
                 work.retry_subscriptions();
             }
             self.update_all_availability();
+            self.update_routing("local business response timed out");
             self.refresh_changed.notify(usize::MAX);
             self.changed.notify(usize::MAX);
         }
@@ -96,6 +97,7 @@ impl Context {
                 }
                 self.refresh_changed.notify(usize::MAX);
                 self.changed.notify(usize::MAX);
+                self.update_routing("current local device list succeeded");
             }
         }
     }
@@ -275,23 +277,29 @@ impl Context {
             self.update_availability(&did);
         }
     }
-    pub(super) fn disconnect(&self, _reason: String) {
+    pub(super) fn disconnect(&self, reason: String) {
         let priority_changed =
             self.priority.replace(PathPriority::CloudFirst) != PathPriority::CloudFirst;
-        if let Some(session) = self.live.borrow_mut().session.take() {
+        let disconnected = if let Some(session) = self.live.borrow_mut().session.take() {
             for work in session.devices.values() {
                 work.local_disconnected();
             }
             session.handle.close();
-        }
+            true
+        } else {
+            false
+        };
         for slot in self.live.borrow_mut().devices.values_mut() {
             slot.access = None;
-            if priority_changed && let Some(work) = &slot.work {
+            if (disconnected || priority_changed)
+                && let Some(work) = &slot.work
+            {
                 work.retry_subscriptions();
             }
         }
         self.set_access_problem(None);
         self.update_all_availability();
+        self.update_routing(&format!("local gateway unavailable: {reason}"));
         self.changed.notify(usize::MAX);
     }
     pub(super) fn stop(&self) {
@@ -341,6 +349,18 @@ impl Context {
             }
         }
         self.update_all_availability();
+        let reason = if error.is_unauthorized() {
+            "cloud access token rejected"
+        } else if error.is_temporary() {
+            "cloud HTTP request failed"
+        } else if error.is_device_offline() {
+            "cloud device reported offline"
+        } else if error.is_device_forbidden() {
+            "cloud device access forbidden"
+        } else {
+            "cloud request failed"
+        };
+        self.update_routing(&format!("{reason}: {error}"));
         self.changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
         Ok(())
@@ -371,6 +391,7 @@ impl Context {
             }
         }
         self.update_all_availability();
+        self.update_routing("cloud access token rejected");
         self.changed.notify(usize::MAX);
         self.credentials_changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);

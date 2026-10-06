@@ -267,6 +267,7 @@ impl Context {
             }
         };
         self.problem(did, None);
+        self.commands.remove(did);
         if let Some(session) = self.notifications.borrow().as_ref() {
             drop(session.handle.unsubscribe_device(did));
         }

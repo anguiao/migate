@@ -101,6 +101,22 @@ fn connection_credentials(context: &Context) -> Option<(ConnectionKey, XiaomiRec
 }
 
 impl Context {
+    pub(super) fn active_notification(&self, did: &str) -> Option<super::model::PathKind> {
+        let work = self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.work.clone())?;
+        let active = work.active.borrow();
+        let source = active
+            .as_ref()
+            .filter(|source| self.source_valid(did, source))?;
+        Some(match source {
+            NotificationSource::Local(_) => super::model::PathKind::Local,
+            NotificationSource::Cloud(_) => super::model::PathKind::Cloud,
+        })
+    }
     pub(super) fn current_notifications(&self, handle: &NotificationHandle) -> bool {
         self.cloud_authenticated()
             && self.notifications.borrow().as_ref().is_some_and(|session| {
@@ -178,13 +194,10 @@ impl Context {
         }
         if let Some(slot) = self.live.borrow_mut().devices.get_mut(did) {
             if let Some(access) = &mut slot.cloud_access {
-                if online
-                    && !access.online
+                if online != access.online
                     && let Some(work) = &slot.work
                 {
-                    work.cloud_exhausted.set(false);
-                    work.condition_generation
-                        .set(work.condition_generation.get() + 1);
+                    work.retry_subscriptions();
                 }
                 access.online = online;
             } else {
@@ -196,6 +209,7 @@ impl Context {
         }
         // Online reports only update this path's access, never HTTP/auth suspension.
         self.update_availability(did);
+        self.update_routing("cloud online conditions changed");
         self.changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
     }
@@ -211,7 +225,7 @@ fn ready(work: &DeviceWork, source: &NotificationSource) -> bool {
             .all(|b| work.cloud_subscribed.borrow().contains(&(b.siid, b.piid))),
     }
 }
-fn activate(work: &DeviceWork, source: NotificationSource) {
+fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
     let did = &work.record.physical.key().id;
     // Invalidate received QoS2 values before granting delivery; keep handshakes and ready SUBACKs.
     source.invalidate(did);
@@ -220,6 +234,7 @@ fn activate(work: &DeviceWork, source: NotificationSource) {
     }
     *work.active.borrow_mut() = Some(source);
     work.source_changed();
+    context.note_notification_switch(did, "notification subscriptions ready; source activated");
 }
 async fn selections(context: Rc<Context>) -> Result<(), AdapterError> {
     loop {
@@ -252,6 +267,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         old.retire(&work, &did);
         work.active.borrow_mut().take();
         work.source_changed();
+        context.update_routing("notification source access conditions invalidated");
     }
     let Some(desired) = context.notification_source(&did) else {
         if (!work.subscribed.borrow().is_empty() || work.subscribe_running.get())
@@ -318,7 +334,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         return;
     }
     if ready(&work, &desired) {
-        activate(&work, desired);
+        activate(context, &work, desired);
         return;
     }
     match desired {
@@ -342,19 +358,29 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         }
     }
 }
+fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
+    let live = context.live.borrow();
+    let slot = live.devices.get(did)?;
+    let record = slot.admitted.as_ref()?;
+    if record.life.is_closed()
+        || slot.blocked.is_some()
+        || slot.cloud_forbidden
+        || slot.cloud_access.is_none()
+    {
+        return None;
+    }
+    slot.work
+        .as_ref()
+        .filter(|work| !work.life.is_closed())
+        .cloned()
+}
 fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
     let works = context
         .live
         .borrow()
         .devices
-        .iter()
-        .filter(|(_, slot)| {
-            slot.admitted.is_some()
-                && slot.blocked.is_none()
-                && !slot.cloud_forbidden
-                && slot.cloud_access.is_some()
-        })
-        .filter_map(|(did, slot)| slot.work.clone().map(|work| (did.clone(), work)))
+        .keys()
+        .filter_map(|did| online_work(context, did).map(|work| (did.clone(), work)))
         .collect::<BTreeMap<_, _>>();
     let registered = session.online.borrow().keys().cloned().collect::<Vec<_>>();
     for did in registered {
@@ -397,26 +423,41 @@ async fn prepare_online(
     did: String,
     state: Rc<OnlinePreparation>,
 ) -> Result<(), AdapterError> {
+    let current = || {
+        context.current_notifications(&handle)
+            && online_work(&context, &did).is_some_and(|current| Rc::ptr_eq(&current, &work))
+            && context
+                .notifications
+                .borrow()
+                .as_ref()
+                .is_some_and(|session| {
+                    session
+                        .online
+                        .borrow()
+                        .get(&did)
+                        .is_some_and(|current| Rc::ptr_eq(current, &state))
+                })
+    };
     for attempt in 0..4 {
-        if work.life.is_closed() || !context.current_notifications(&handle) {
+        if !current() {
             state.running.set(false);
             return Ok(());
         }
         match handle.subscribe_online(&did).await {
             Ok(()) => {
-                if !work.life.is_closed() && context.current_notifications(&handle) {
+                if current() {
                     state.ready.set(true);
                 }
                 break;
             }
-            Err(NotificationError::Unauthorized) if context.current_notifications(&handle) => {
+            Err(NotificationError::Unauthorized) if current() => {
                 context.token_rejected(
                     &token,
                     FailureReason::CloudNotification(NotificationError::Unauthorized),
                 )?;
                 break;
             }
-            Err(error) => {
+            Err(error) if current() => {
                 log::warn!("{did} cloud online subscribe: {error}");
                 if attempt < 3 {
                     context
@@ -425,6 +466,7 @@ async fn prepare_online(
                         .await;
                 }
             }
+            Err(_) => break,
         }
     }
     state.running.set(false);
@@ -609,8 +651,10 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     .filter_map(|slot| slot.work.as_ref())
                 {
                     work.cloud_disconnected();
+                    work.retry_subscriptions();
                 }
                 context.changed.notify(usize::MAX);
+                context.update_routing("cloud notification connection established");
                 let events = context.clone();
                 let event_handle = handle.clone();
                 let driving = async {
@@ -659,8 +703,10 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     .filter_map(|slot| slot.work.as_ref())
                 {
                     work.cloud_disconnected();
+                    work.retry_subscriptions();
                 }
                 context.changed.notify(usize::MAX);
+                context.update_routing("cloud notification connection ended");
                 result
             }
             Err(error) => Some(error),

@@ -110,6 +110,7 @@ pub(super) async fn run(
             context.authentication(AuthenticationState::Unavailable(reason));
             context.cloud_scope_valid.set(false);
             context.update_all_availability();
+            context.update_routing("cloud account identity invalidated");
             context.changed.notify(usize::MAX);
             due = context.clock.now() + MEMBER_INTERVAL;
             continue;
@@ -133,6 +134,7 @@ pub(super) async fn run(
                 context.set_catalog_problem(Some(error.to_string()));
                 context.cloud_scope_valid.set(false);
                 context.update_all_availability();
+                context.update_routing("cloud home scope invalidated");
                 due = context.sync_failed();
                 continue;
             }
@@ -217,6 +219,7 @@ pub(super) async fn run(
         context.sync_not_before.set(None);
         *context.sync_backoff.borrow_mut() = Backoff::new(1, 30);
         context.update_all_availability();
+        context.update_routing("complete cloud directory and device information synchronized");
         context.set_catalog_problem(None);
         context.changed.notify(usize::MAX);
         if membership_changed {

@@ -146,6 +146,47 @@ fn an_unsent_pending_write_reselects_cloud_and_submits_the_absolute_target_once(
 }
 
 #[test]
+fn command_diagnostics_record_no_local_submission_for_a_withdrawn_zero_byte_write() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().online.insert("one".into());
+    block_on(rig.run(|c| async move {
+        until(|| c.context.cloud_scope_valid.get()).await;
+        let wire = Rc::new(Wire::default());
+        let (handle, driver) = local(&c, wire.clone());
+        let one = function(&c.context.registry, "one", "main");
+        future::or(
+            async {
+                driver.run(|_| {}).await.unwrap();
+                panic!("driver unexpectedly stopped")
+            },
+            async {
+                let mut command = Box::pin(one.execute(Command::On));
+                assert!(poll_once(command.as_mut()).await.is_none());
+                until(|| wire.polls.get() > 0).await;
+                let status = c.context.diagnostics();
+                let inflight = status.devices[0].commands[0].inflight.as_ref().unwrap();
+                let id = inflight.id;
+                assert_eq!(inflight.actual_path, None);
+                c.context.local_outcome(&handle, &response_timeout());
+                wire.allow(usize::MAX);
+                command.await.unwrap();
+                let status = c.context.diagnostics();
+                let last = status.devices[0].commands[0].last.as_ref().unwrap();
+                assert_eq!(last.id, id);
+                assert_eq!(
+                    last.actual_path,
+                    Some(crate::xiaomi::adapter::PathKind::Cloud)
+                );
+                assert_eq!(last.result, Some(Ok(())));
+                assert!(wire.written.borrow().is_empty());
+                assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+            },
+        )
+        .await;
+    }));
+}
+
+#[test]
 fn write_observation_capture_occurs_at_first_socket_bytes() {
     for after_send in [false, true] {
         block_on(Rig::new(true, &["one"]).run(|c| async move {

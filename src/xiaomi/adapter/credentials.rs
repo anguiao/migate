@@ -34,13 +34,14 @@ fn saved(auth: &AuthService, context: &Context) -> Result<XiaomiRecord, AdapterE
     Ok(record)
 }
 
-fn eligibility_changed(context: &Context) {
+fn eligibility_changed(context: &Context, reason: &str) {
     context
         .status
         .borrow_mut()
         .authentication
         .set_completed_at(context.clock.unix_now());
     context.update_all_availability();
+    context.update_routing(reason);
     context.credentials_changed.notify(usize::MAX);
     context.changed.notify(usize::MAX);
     context.refresh_changed.notify(usize::MAX);
@@ -53,7 +54,7 @@ fn token_expired(context: &Context) {
             FailureReason::AccessTokenExpired,
         ));
     }
-    eligibility_changed(context);
+    eligibility_changed(context, "access token expired");
 }
 
 async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterError> {
@@ -132,7 +133,7 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                     }
                     // A maintenance network failure does not suspend a still-valid, unrejected token.
                     retry = Some(context.clock.now() + delay);
-                    eligibility_changed(&context);
+                    eligibility_changed(&context, "cloud token maintenance failed");
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -175,7 +176,7 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
         let now = context.clock.unix_now();
         if now >= validity.not_after && last_expiry != Some(validity.not_after) {
             last_expiry = Some(validity.not_after);
-            eligibility_changed(&context);
+            eligibility_changed(&context, "local gateway certificate expired");
         }
         if validity.renewal_due(now) && context.cloud_authenticated() && context.clock.now() >= due
         {
@@ -188,7 +189,7 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
                         .wait_until(deadline(&context, validity.not_after))
                         .await;
                     last_expiry = Some(validity.not_after);
-                    eligibility_changed(&context);
+                    eligibility_changed(&context, "local gateway certificate expired");
                     None
                 })
                 .await

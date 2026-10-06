@@ -70,12 +70,20 @@ pub async fn handle_line(
             }
             text
         }
-        ("status", [_]) => format!("{}\n{}", render(registry, None), status.render(now)),
+        ("status", [_]) => format!(
+            "{}\n{}",
+            render(registry, None),
+            status.render_devices(now, None)
+        ),
         ("status", [_, did]) => {
             if registry.get(&DeviceKey::new("xiaomi", *did)).is_none() {
                 invalid(status, now, "Unknown device DID.")
             } else {
-                format!("{}\n{}", render(registry, Some(did)), status.render(now))
+                format!(
+                    "{}\n{}",
+                    render(registry, Some(did)),
+                    status.render_devices(now, Some(did))
+                )
             }
         }
         ("on" | "off", [_, did] | [_, did, _]) => {

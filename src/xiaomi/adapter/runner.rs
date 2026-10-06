@@ -31,18 +31,25 @@ impl XiaomiAdapter {
         Self::build(store, cloud, discovery, bootstrap::system_clock())
     }
     pub async fn run(self, mut on_status: impl FnMut(AdapterStatus)) -> Result<(), AdapterError> {
-        let mut reported = self.context.status.borrow().clone();
+        let mut reported = self.context.diagnostics();
         on_status(reported.clone());
         let context = self.context.clone();
         let monitor = async {
             loop {
                 let listener = context.status_changed.listen();
-                let status = context.status.borrow().clone();
+                let changed = context.changed.listen();
+                let credentials = context.credentials_changed.listen();
+                let commands = context.commands.changed.listen();
+                let status = context.diagnostics();
                 if status != reported {
                     on_status(status.clone());
                     reported = status;
                 }
-                listener.await;
+                future::or(
+                    listener,
+                    future::or(changed, future::or(credentials, commands)),
+                )
+                .await;
             }
         };
         let result = future::or(monitor, self.run_inner()).await;
@@ -50,7 +57,7 @@ impl XiaomiAdapter {
             self.context.ready.finish(Err(error.clone()));
             self.context.disconnect(error.to_string());
         }
-        let status = self.context.status.borrow().clone();
+        let status = self.context.diagnostics();
         if status != reported {
             on_status(status);
         }

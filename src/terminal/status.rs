@@ -1,4 +1,8 @@
 use crate::xiaomi::{
+    adapter::{
+        AdapterStatus, ChannelCommands, CommandStatus, DeviceStatus, GatewayStatus, PathKind,
+        PathPriority, PendingDevice, RecoveryStatus, RoutingStatus,
+    },
     auth::{AuthReport, AuthenticationState, CertificateUpdate},
     certificate::{CertificateStatus, CertificateValidity},
 };
@@ -9,11 +13,13 @@ use std::{
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-type BridgeDiagnostics = (
-    crate::xiaomi::adapter::GatewayStatus,
-    Option<String>,
-    Vec<crate::xiaomi::adapter::PendingDevice>,
-);
+struct BridgeDiagnostics {
+    gateway: GatewayStatus,
+    catalog_problem: Option<String>,
+    pending: Vec<PendingDevice>,
+    routing: RoutingStatus,
+    devices: Vec<DeviceStatus>,
+}
 
 pub struct AuthStatus {
     report: RefCell<AuthReport>,
@@ -44,11 +50,12 @@ impl AuthStatus {
     pub fn render(&self, now: i64) -> String {
         let mut report =
             format_report(&self.report.borrow(), now, &self.executable, &self.data_dir);
-        if let Some((gateway, problem, _)) = &*self.adapter.borrow() {
-            let _ = write!(report, "\n{}", format_gateway(gateway));
-            if let Some(problem) = problem {
+        if let Some(adapter) = &*self.adapter.borrow() {
+            let _ = write!(report, "\n{}", format_gateway(&adapter.gateway));
+            if let Some(problem) = &adapter.catalog_problem {
                 let _ = write!(report, "\nDevice description: {problem}.");
             }
+            let _ = write!(report, "\n{}", format_routing(&adapter.routing));
         }
         if self.adapter.borrow().is_some()
             && matches!(
@@ -61,26 +68,53 @@ impl AuthStatus {
         report
     }
 
-    pub fn update_adapter(&self, status: crate::xiaomi::adapter::AdapterStatus) {
+    pub fn render_devices(&self, now: i64, did: Option<&str>) -> String {
+        let mut report = self.render(now);
+        if let Some(adapter) = &*self.adapter.borrow() {
+            for device in adapter
+                .devices
+                .iter()
+                .filter(|device| did.is_none_or(|did| device.did == did))
+            {
+                let _ = write!(report, "\n{}", format_device(device));
+            }
+        }
+        report
+    }
+
+    pub fn update_adapter(&self, status: AdapterStatus) {
         if self.replace(status.authentication) {
             self.log(current_time());
         }
-        let next = (status.gateway, status.catalog_problem, status.pending);
+        let next = BridgeDiagnostics {
+            gateway: status.gateway,
+            catalog_problem: status.catalog_problem,
+            pending: status.pending,
+            routing: status.routing,
+            devices: status.devices,
+        };
         let mut adapter = self.adapter.borrow_mut();
-        if adapter.as_ref() != Some(&next) {
-            log::info!("{}", format_gateway(&next.0));
-            if let Some(problem) = &next.1 {
-                log::warn!("Device description: {problem}.");
-            }
-            *adapter = Some(next);
+        if adapter
+            .as_ref()
+            .is_none_or(|old| old.gateway != next.gateway)
+        {
+            log::info!("{}", format_gateway(&next.gateway));
         }
+        if adapter
+            .as_ref()
+            .is_none_or(|old| old.catalog_problem != next.catalog_problem)
+            && let Some(problem) = &next.catalog_problem
+        {
+            log::warn!("Device description: {problem}.");
+        }
+        *adapter = Some(next);
     }
 
-    pub fn pending(&self) -> Vec<crate::xiaomi::adapter::PendingDevice> {
+    pub fn pending(&self) -> Vec<PendingDevice> {
         self.adapter
             .borrow()
             .as_ref()
-            .map(|adapter| adapter.2.clone())
+            .map(|adapter| adapter.pending.clone())
             .unwrap_or_default()
     }
 
@@ -143,14 +177,118 @@ pub fn format_report(report: &AuthReport, now: i64, executable: &Path, data_dir:
     output
 }
 
-fn format_gateway(status: &crate::xiaomi::adapter::GatewayStatus) -> String {
-    use crate::xiaomi::adapter::GatewayStatus;
+fn format_gateway(status: &GatewayStatus) -> String {
     match status {
         GatewayStatus::Discovering => "Gateway: discovering local gateway.".into(),
         GatewayStatus::Connecting(did) => format!("Gateway: connecting ({did})."),
         GatewayStatus::Connected(did) => format!("Gateway: connected ({did})."),
         GatewayStatus::Unavailable(reason) => format!("Gateway: unavailable. {reason}."),
     }
+}
+
+fn path(path: PathKind) -> &'static str {
+    match path {
+        PathKind::Local => "local",
+        PathKind::Cloud => "cloud",
+    }
+}
+
+fn format_routing(status: &RoutingStatus) -> String {
+    let priority = match status.priority {
+        PathPriority::LocalFirst => "local-first",
+        PathPriority::CloudFirst => "cloud-first",
+    };
+    let mut report = format!(
+        "Routing: {priority}; local {}; business {}.",
+        if status.local_connected {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        if status.business_degraded {
+            "degraded"
+        } else {
+            "not degraded"
+        }
+    );
+    match status.recovery {
+        RecoveryStatus::None => report.push_str("\nLocal recovery: none."),
+        RecoveryStatus::Scheduled(deadline) => {
+            let _ = write!(
+                report,
+                "\nLocal recovery: scheduled for {}.",
+                timestamp(deadline)
+            );
+        }
+        RecoveryStatus::Running => report.push_str("\nLocal recovery: running."),
+    }
+    if let Some(reason) = &status.last_switch_reason {
+        let _ = write!(report, "\nRouting last switch: {reason}.");
+    }
+    report
+}
+
+fn format_device(status: &DeviceStatus) -> String {
+    let paths = status
+        .usable_control_paths
+        .iter()
+        .copied()
+        .map(path)
+        .collect::<Vec<_>>();
+    let paths = if paths.is_empty() {
+        "none".into()
+    } else {
+        paths.join(", ")
+    };
+    let mut report = format!(
+        "{} routing:\n  Usable control paths: {paths}.\n  Selected control: {}.\n  Notification source: {}.",
+        status.did,
+        status.selected_control.map(path).unwrap_or("none"),
+        status.notification_source.map(path).unwrap_or("none")
+    );
+    if let Some(reason) = &status.unavailable_reason {
+        let _ = write!(report, "\n  Control unavailable: {reason}.");
+    }
+    if let Some(reason) = &status.sync_limited_reason {
+        let _ = write!(report, "\n  State synchronization limited: {reason}.");
+    }
+    if let Some(reason) = &status.last_switch_reason {
+        let _ = write!(report, "\n  Device last switch: {reason}.");
+    }
+    for ChannelCommands {
+        channel,
+        inflight,
+        last,
+    } in &status.commands
+    {
+        if let Some(command) = inflight {
+            let _ = write!(
+                report,
+                "\n  {}",
+                format_command(channel, "in-flight", command)
+            );
+        }
+        if let Some(command) = last {
+            let _ = write!(report, "\n  {}", format_command(channel, "last", command));
+        }
+    }
+    report
+}
+
+fn format_command(channel: &str, state: &str, command: &CommandStatus) -> String {
+    let result = match &command.result {
+        None => "awaiting result".into(),
+        Some(Ok(())) => "accepted".into(),
+        Some(Err(error)) => error.to_string(),
+    };
+    format!(
+        "{channel} {state} command #{}: target {}; property {}.{}; actual path {}; {result}.",
+        command.id,
+        if command.target { "on" } else { "off" },
+        command.binding.siid,
+        command.binding.piid,
+        command.actual_path.map(path).unwrap_or("not sent")
+    )
 }
 
 fn format_authentication(authentication: &AuthenticationState) -> String {
@@ -201,7 +339,7 @@ fn format_certificate(validity: Option<CertificateValidity>, now: i64) -> String
 
 fn timestamp(value: i64) -> String {
     OffsetDateTime::from_unix_timestamp(value)
-        .expect("validated certificate timestamp")
+        .expect("validated diagnostic timestamp")
         .format(&Rfc3339)
         .expect("RFC 3339 timestamp formatting")
 }
@@ -262,6 +400,8 @@ mod tests {
             gateway: GatewayStatus::Connected("gateway".into()),
             catalog_problem: Some("refresh failed".into()),
             pending: Vec::new(),
+            routing: Default::default(),
+            devices: Vec::new(),
         });
         let report = status.render(0);
         assert!(report.contains("Xiaomi: sign-in required"));
@@ -358,5 +498,152 @@ mod tests {
             1_700_000_001,
         );
         assert!(!status.replace(same_visible_status));
+    }
+
+    #[test]
+    fn routing_status_distinguishes_selected_control_from_the_actual_command_path() {
+        use crate::{
+            device::CommandError,
+            xiaomi::{adapter::*, capability::PropertyBinding},
+        };
+        let report = AuthReport::for_test(
+            AuthenticationState::Authenticated,
+            None,
+            CertificateUpdate::NotNeeded,
+            0,
+        );
+        let status = AuthStatus::new(report.clone(), "/bin/migate".into(), "/data".into());
+        status.update_adapter(AdapterStatus {
+            authentication: report,
+            gateway: GatewayStatus::Connected("gateway".into()),
+            catalog_problem: None,
+            pending: Vec::new(),
+            routing: RoutingStatus {
+                priority: PathPriority::CloudFirst,
+                local_connected: true,
+                business_degraded: true,
+                recovery: RecoveryStatus::Scheduled(1_700_000_060),
+                last_switch_reason: Some("local business response timed out".into()),
+            },
+            devices: vec![DeviceStatus {
+                did: "one".into(),
+                usable_control_paths: vec![PathKind::Local, PathKind::Cloud],
+                selected_control: Some(PathKind::Cloud),
+                notification_source: Some(PathKind::Local),
+                unavailable_reason: None,
+                sync_limited_reason: Some("cloud property subscriptions pending".into()),
+                last_switch_reason: Some("cloud preferred after local timeout".into()),
+                commands: vec![ChannelCommands {
+                    channel: "main".into(),
+                    inflight: Some(CommandStatus {
+                        id: 42,
+                        binding: PropertyBinding { siid: 2, piid: 1 },
+                        target: true,
+                        actual_path: Some(PathKind::Local),
+                        result: None,
+                    }),
+                    last: Some(CommandStatus {
+                        id: 41,
+                        binding: PropertyBinding { siid: 2, piid: 1 },
+                        target: false,
+                        actual_path: Some(PathKind::Cloud),
+                        result: Some(Err(CommandError::Timeout)),
+                    }),
+                }],
+            }],
+        });
+        let output = status.render_devices(1_700_000_000, None);
+        assert!(
+            output.contains("Routing: cloud-first; local connected; business degraded."),
+            "{output}"
+        );
+        assert!(
+            output.contains("Local recovery: scheduled for 2023-11-14T22:14:20Z."),
+            "{output}"
+        );
+        assert!(
+            output.contains("Usable control paths: local, cloud."),
+            "{output}"
+        );
+        assert!(output.contains("Selected control: cloud."), "{output}");
+        assert!(output.contains("Notification source: local."), "{output}");
+        assert!(output.contains("main in-flight command #42: target on; property 2.1; actual path local; awaiting result."), "{output}");
+        assert!(output.contains("main last command #41: target off; property 2.1; actual path cloud; command acceptance timed out."), "{output}");
+        assert!(
+            output.contains("State synchronization limited: cloud property subscriptions pending."),
+            "{output}"
+        );
+        assert!(
+            output.contains("Device last switch: cloud preferred after local timeout."),
+            "{output}"
+        );
+        let help = status.render(1_700_000_000);
+        assert!(help.contains("Routing: cloud-first"));
+        assert!(!help.contains("command #"));
+        assert!(!help.contains("one routing:"));
+    }
+
+    #[test]
+    fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance() {
+        use crate::xiaomi::{adapter::*, capability::PropertyBinding};
+        let report = AuthReport::for_test(
+            AuthenticationState::Authenticated,
+            None,
+            CertificateUpdate::NotNeeded,
+            0,
+        );
+        let status = AuthStatus::new(report.clone(), "/bin/migate".into(), "/data".into());
+        status.update_adapter(AdapterStatus {
+            authentication: report,
+            gateway: GatewayStatus::Unavailable("transport disconnected".into()),
+            catalog_problem: None,
+            pending: Vec::new(),
+            routing: RoutingStatus {
+                recovery: RecoveryStatus::Running,
+                ..Default::default()
+            },
+            devices: vec![DeviceStatus {
+                did: "one".into(),
+                usable_control_paths: Vec::new(),
+                selected_control: None,
+                notification_source: None,
+                unavailable_reason: Some("token expired".into()),
+                sync_limited_reason: Some("no notification source".into()),
+                last_switch_reason: None,
+                commands: vec![ChannelCommands {
+                    channel: "main".into(),
+                    inflight: Some(CommandStatus {
+                        id: 8,
+                        binding: PropertyBinding { siid: 3, piid: 1 },
+                        target: false,
+                        actual_path: None,
+                        result: None,
+                    }),
+                    last: Some(CommandStatus {
+                        id: 7,
+                        binding: PropertyBinding { siid: 3, piid: 1 },
+                        target: true,
+                        actual_path: Some(PathKind::Local),
+                        result: Some(Ok(())),
+                    }),
+                }],
+            }],
+        });
+        let output = status.render_devices(0, Some("one"));
+        assert!(output.contains("Local recovery: running."), "{output}");
+        assert!(output.contains("Usable control paths: none."), "{output}");
+        assert!(output.contains("Selected control: none."), "{output}");
+        assert!(output.contains("Notification source: none."), "{output}");
+        assert!(
+            output.contains("Control unavailable: token expired."),
+            "{output}"
+        );
+        assert!(output.contains("main in-flight command #8: target off; property 3.1; actual path not sent; awaiting result."), "{output}");
+        assert!(
+            output.contains(
+                "main last command #7: target on; property 3.1; actual path local; accepted."
+            ),
+            "{output}"
+        );
     }
 }

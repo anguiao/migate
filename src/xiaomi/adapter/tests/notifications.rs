@@ -973,3 +973,347 @@ fn a_real_cloud_online_recovery_reopens_one_exhausted_subscription_window() {
         .await;
     }));
 }
+
+#[test]
+fn losing_cloud_connection_reopens_the_exhausted_local_fallback_window() {
+    let (rig, listener, cloud) = with_cloud_peer(&["one"]);
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            let local = Rc::new(Peer::default());
+            local
+                .state
+                .borrow_mut()
+                .sub_reject
+                .insert(("one".into(), 2, 1));
+            c.announce();
+            let control = &c;
+            let cloud = &cloud;
+            c.peer(local, |local| async move {
+                until(|| {
+                    local.count("subscribe", "one", 2) == 4
+                        && cloud_active(control, "one")
+                        && control.context.live.borrow().devices["one"]
+                            .work
+                            .as_ref()
+                            .unwrap()
+                            .local_exhausted
+                            .get()
+                })
+                .await;
+                assert_eq!(
+                    control.context.priority(),
+                    super::super::routing::PathPriority::LocalFirst
+                );
+                control
+                    .clock
+                    .automatic
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                local.state.borrow_mut().sub_reject.clear();
+
+                cloud.send(Packet::Disconnect(Disconnect::new()));
+                until(|| control.context.notifications.borrow().is_none()).await;
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                assert!(
+                    !control.context.live.borrow().devices["one"]
+                        .work
+                        .as_ref()
+                        .unwrap()
+                        .local_exhausted
+                        .get(),
+                    "removing the cloud candidate must reopen one local fallback window"
+                );
+                let due = control.clock.now() + Duration::from_millis(10);
+                advance_to(&control.clock, due).await;
+                until(|| local_active(control, "one")).await;
+                assert_eq!(local.count("subscribe", "one", 2), 5);
+                for _ in 0..20 {
+                    control.context.changed.notify(usize::MAX);
+                    future::yield_now().await;
+                }
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                assert_eq!(local.count("subscribe", "one", 2), 5);
+            })
+            .await;
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn losing_local_connection_reopens_cloud_without_another_priority_change() {
+    let (rig, listener, cloud) = with_cloud_peer(&["one"]);
+    let property = "device/one/up/properties_changed/2/1";
+    cloud
+        .state
+        .borrow_mut()
+        .reject
+        .insert(property.into(), SubscribeReasonCode::QuotaExceeded);
+    let (release, gate) = flume::bounded(1);
+    rig.cloud.lock().unwrap().home_gate = Some(gate);
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            c.announce();
+            let control = &c;
+            let cloud = &cloud;
+            c.peer(Rc::new(Peer::default()), |local| async move {
+                initialized(control, &local, &["one"]).await;
+                until(|| local_active(control, "one")).await;
+                control.cloud.lock().unwrap().home_gate = None;
+                release.send(()).unwrap();
+                until(|| cloud.count("device/one/state/#") == 1).await;
+
+                local.state.borrow_mut().hold_writes = true;
+                let one = function(&control.context.registry, "one", "main");
+                let command = one.execute(Command::On);
+                assert_eq!(command.await, Err(crate::device::CommandError::Timeout));
+                until(|| {
+                    cloud.count(property) == 4
+                        && local_active(control, "one")
+                        && control.context.live.borrow().devices["one"]
+                            .work
+                            .as_ref()
+                            .unwrap()
+                            .cloud_exhausted
+                            .get()
+                })
+                .await;
+                assert_eq!(
+                    control.context.priority(),
+                    super::super::routing::PathPriority::CloudFirst
+                );
+                control
+                    .clock
+                    .automatic
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                cloud.state.borrow_mut().reject.clear();
+            })
+            .await;
+
+            until(|| c.context.live.borrow().session.is_none()).await;
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(
+                c.context.priority(),
+                super::super::routing::PathPriority::CloudFirst
+            );
+            assert!(
+                !c.context.live.borrow().devices["one"]
+                    .work
+                    .as_ref()
+                    .unwrap()
+                    .cloud_exhausted
+                    .get(),
+                "removing local must reopen the eligible cloud source even when priority is unchanged"
+            );
+            until(|| cloud_active(&c, "one")).await;
+            assert_eq!(cloud.count(property), 5);
+            for _ in 0..20 {
+                c.context.changed.notify(usize::MAX);
+                future::yield_now().await;
+            }
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(cloud.count(property), 5);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not() {
+    let (rig, listener, cloud) = with_cloud_peer(&["one"]);
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            let local = Rc::new(Peer::default());
+            local
+                .state
+                .borrow_mut()
+                .sub_reject
+                .insert(("one".into(), 2, 1));
+            c.announce();
+            let control = &c;
+            let cloud = &cloud;
+            c.peer(local, |local| async move {
+                until(|| {
+                    local.count("subscribe", "one", 2) == 4
+                        && cloud_active(control, "one")
+                        && control.context.live.borrow().devices["one"]
+                            .work
+                            .as_ref()
+                            .unwrap()
+                            .local_exhausted
+                            .get()
+                })
+                .await;
+                control
+                    .clock
+                    .automatic
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                for _ in 0..20 {
+                    cloud.online("one", true);
+                    control.context.changed.notify(usize::MAX);
+                    future::yield_now().await;
+                }
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                assert_eq!(local.count("subscribe", "one", 2), 4);
+                assert!(
+                    control.context.live.borrow().devices["one"]
+                        .work
+                        .as_ref()
+                        .unwrap()
+                        .local_exhausted
+                        .get()
+                );
+
+                cloud.online("one", false);
+                until(|| {
+                    !control.context.live.borrow().devices["one"]
+                        .cloud_access
+                        .as_ref()
+                        .unwrap()
+                        .online
+                })
+                .await;
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                assert!(
+                    !control.context.live.borrow().devices["one"]
+                        .work
+                        .as_ref()
+                        .unwrap()
+                        .local_exhausted
+                        .get(),
+                    "a real cloud online change must reopen the still-eligible local source"
+                );
+                for attempt in 5..=8 {
+                    let spacing = if attempt == 5 { 10 } else { 100 };
+                    let due = control.clock.now() + Duration::from_millis(spacing);
+                    advance_to(&control.clock, due).await;
+                    until(|| local.count("subscribe", "one", 2) == attempt).await;
+                }
+                until(|| {
+                    control.context.live.borrow().devices["one"]
+                        .work
+                        .as_ref()
+                        .unwrap()
+                        .local_exhausted
+                        .get()
+                })
+                .await;
+                for _ in 0..20 {
+                    cloud.online("one", false);
+                    control.context.changed.notify(usize::MAX);
+                    future::yield_now().await;
+                }
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                assert_eq!(local.count("subscribe", "one", 2), 8);
+                assert!(
+                    control.context.live.borrow().devices["one"]
+                        .work
+                        .as_ref()
+                        .unwrap()
+                        .local_exhausted
+                        .get()
+                );
+
+                local.state.borrow_mut().sub_reject.clear();
+                cloud.online("one", true);
+                until(|| {
+                    control.context.live.borrow().devices["one"]
+                        .cloud_access
+                        .as_ref()
+                        .unwrap()
+                        .online
+                })
+                .await;
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                assert!(
+                    !control.context.live.borrow().devices["one"]
+                        .work
+                        .as_ref()
+                        .unwrap()
+                        .local_exhausted
+                        .get()
+                );
+                let due = control.clock.now() + Duration::from_millis(10);
+                advance_to(&control.clock, due).await;
+                until(|| local_active(control, "one")).await;
+                assert_eq!(local.count("subscribe", "one", 2), 9);
+            })
+            .await;
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn held_online_subscription_cannot_retry_after_device_access_is_revoked() {
+    let (rig, listener, peer) = with_cloud_peer(&["one"]);
+    let online = "device/one/state/#";
+    let property = "device/one/up/properties_changed/2/1";
+    peer.state.borrow_mut().hold.insert(online.into());
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| {
+                cloud_active(&c, "one")
+                    && peer.count(online) == 1
+                    && peer
+                        .state
+                        .borrow()
+                        .held
+                        .iter()
+                        .any(|subscribe| subscribe.filters[0].path == online)
+            })
+            .await;
+            assert_eq!(peer.count(property), 1);
+            c.clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let token_requests = c.cloud.lock().unwrap().tokens;
+            c.cloud.lock().unwrap().property_code = -704_012_904;
+            let one = function(&c.context.registry, "one", "main");
+            assert_eq!(
+                one.execute(Command::On).await,
+                Err(crate::device::CommandError::Rejected(
+                    "cloud code -704012904".into()
+                ))
+            );
+            until(|| {
+                c.context.live.borrow().devices["one"].cloud_forbidden
+                    && !cloud_active(&c, "one")
+                    && peer.state.borrow().seen.iter().any(|packet| {
+                        matches!(packet, Packet::Unsubscribe(unsubscribe)
+                            if unsubscribe.filters.iter().any(|filter| filter == online))
+                    })
+            })
+            .await;
+
+            // A late ACK belongs to the cancelled preparation, even on the same connection.
+            peer.release(online);
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            c.clock.advance(Duration::from_secs(1));
+            for _ in 0..20 {
+                c.context.changed.notify(usize::MAX);
+                future::yield_now().await;
+            }
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(
+                peer.count(online),
+                1,
+                "a retired online preparation must not subscribe the forbidden device again"
+            );
+            assert_eq!(peer.count(property), 1);
+            assert_eq!(c.cloud.lock().unwrap().tokens, token_requests);
+            assert!(c.context.notifications.borrow().is_some());
+            assert!(
+                c.context.live.borrow().devices["one"]
+                    .work
+                    .as_ref()
+                    .unwrap()
+                    .cloud_subscribed
+                    .borrow()
+                    .is_empty()
+            );
+        })
+        .await;
+    }));
+}

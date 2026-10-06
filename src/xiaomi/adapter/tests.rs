@@ -1,6 +1,7 @@
 use super::{bootstrap::Clock, *};
 mod cloud_refresh;
 mod credentials;
+mod diagnostics;
 mod http_routing;
 mod list_scheduling;
 mod local_recovery;

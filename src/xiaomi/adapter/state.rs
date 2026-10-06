@@ -79,6 +79,7 @@ pub(super) struct DeviceSlot {
     pub(super) loading: Option<Rc<Lifetime>>,
     pub(super) access: Option<Result<DeviceAccess, CentralError>>,
     pub(super) blocked: Option<String>,
+    pub(super) last_switch_reason: Option<String>,
 }
 impl DeviceSlot {
     pub(super) fn restored(cached: CachedPhysicalDevice, physical: PhysicalDevice) -> Self {
@@ -144,6 +145,18 @@ pub(super) enum AccessRequest {
     Recovery,
 }
 impl AccessRefresh {
+    pub(super) fn recovery_status(&self, clock: &dyn Clock) -> super::model::RecoveryStatus {
+        use super::model::RecoveryStatus;
+        if self.recovery_running.get() {
+            RecoveryStatus::Running
+        } else if let Some(due) = self.recovery_due.get() {
+            let remaining = due.saturating_sub(clock.now());
+            let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0);
+            RecoveryStatus::Scheduled(clock.unix_now() + seconds as i64)
+        } else {
+            RecoveryStatus::None
+        }
+    }
     pub(super) fn is_degraded(&self) -> bool {
         self.degraded.get()
     }
@@ -231,6 +244,7 @@ pub(super) struct Live {
     pub(super) session: Option<Session>,
 }
 pub(super) struct Context {
+    pub(super) commands: Rc<super::commands::Commands>,
     pub(super) notifications: RefCell<Option<Rc<super::notifications::CloudSession>>>,
     pub(super) credentials_changed: Event,
     #[cfg(test)]
@@ -272,6 +286,7 @@ impl Context {
             self.changed.notify(usize::MAX);
             self.refresh_changed.notify(usize::MAX);
             self.update_all_availability();
+            self.update_routing("cloud credentials updated");
         }
     }
     pub(super) fn authentication(&self, authentication: AuthenticationState) {
@@ -293,6 +308,7 @@ impl Context {
         drop(status);
         self.status_changed.notify(usize::MAX);
         self.update_all_availability();
+        self.update_routing("local gateway certificate updated");
         self.changed.notify(usize::MAX);
     }
 }

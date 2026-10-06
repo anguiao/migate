@@ -1,5 +1,5 @@
 use super::state::DeviceRecord;
-use crate::device::CommandRequest;
+use crate::device::{CommandError, CommandRequest};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -102,18 +102,18 @@ impl Observations {
         id: &str,
         stamp: &WriteStamp,
         request: CommandRequest,
-    ) {
+    ) -> Result<(), CommandError> {
         if record.life.is_closed() || record.binding_generation.get() != stamp.binding {
-            request.reject(crate::device::CommandError::Cancelled);
-            return;
+            request.reject(CommandError::Cancelled);
+            return Err(CommandError::Cancelled);
         }
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(id.into()).or_default();
         counts.observed += 1;
         if counts.notified == stamp.notified {
-            let _ = request.accept();
+            request.accept().map(|_| ())
         } else {
-            let _ = request.accept_preserving_state();
+            request.accept_preserving_state().map(|_| ())
         }
     }
 }

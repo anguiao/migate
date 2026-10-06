@@ -1,5 +1,6 @@
 mod bootstrap;
 mod cloud;
+mod commands;
 mod credentials;
 mod diagnostics;
 mod local;
@@ -14,7 +15,11 @@ mod state;
 mod tasks;
 mod work;
 
-pub use model::{AdapterError, AdapterStatus, GatewayStatus, PendingDevice, TopologyReady};
+pub use model::{
+    AdapterError, AdapterStatus, ChannelCommands, CommandStatus, DeviceStatus, GatewayStatus,
+    PathKind, PendingDevice, RecoveryStatus, RoutingStatus, TopologyReady,
+};
+pub use routing::PathPriority;
 pub use runner::XiaomiAdapter;
 
 #[cfg(test)]

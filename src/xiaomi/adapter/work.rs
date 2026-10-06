@@ -198,6 +198,12 @@ impl DeviceWork {
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
     }
+    pub(super) fn subscription_problem(&self) -> Option<String> {
+        self.subscribe_problem
+            .borrow()
+            .clone()
+            .or_else(|| self.cloud_problem.borrow().clone())
+    }
     pub(super) fn report(&self, context: &Context, did: &str) {
         if self.life.is_closed() {
             return;
@@ -335,9 +341,10 @@ async fn send_local_write(
     work: Rc<DeviceWork>,
     id: &str,
     binding: PropertyBinding,
-    generation: u64,
     request: Rc<RefCell<Option<crate::device::CommandRequest>>>,
+    operation: Rc<super::commands::CommandOperation>,
 ) -> bool {
+    let generation = work.record.binding_generation.get();
     let did = work.record.physical.key().id.clone();
     let target = request.borrow().as_ref().unwrap().target;
     let observing = work.clone();
@@ -352,6 +359,7 @@ async fn send_local_write(
     let guard_did = did.clone();
     let result_context = context.clone();
     let result_handle = handle.clone();
+    let submitted = operation.clone();
     let outcome = handle.set_property_guarded(
         &did, binding, target,
         SendHooks::new(move || {
@@ -366,6 +374,7 @@ async fn send_local_write(
                 SendDecision::Withdraw
             }
         }, move || {
+            submitted.submitted(super::model::PathKind::Local);
             *capture_stamp.borrow_mut() = Some(capture_work.observations.write_stamp(&capture_work.record, &capture_id));
         }),
         move |outcome| {
@@ -381,12 +390,14 @@ async fn send_local_write(
             match outcome.result {
                 Ok(()) => {
                     if let Some(stamp) = stamp.borrow_mut().take() {
-                        observing.observations.accept_write(&observing.record, &id, &stamp, request);
+                        operation.finish(observing.observations.accept_write(&observing.record, &id, &stamp, request));
                     } else {
-                        request.reject(CommandError::SendFailed("gateway accepted an unsent write".into()));
+                        let error = CommandError::SendFailed("gateway accepted an unsent write".into());
+                        operation.finish(Err(error.clone()));
+                        request.reject(error);
                     }
                 }
-                Err(error) => request.reject(command_error(error)),
+                Err(error) => { let error = command_error(error); operation.finish(Err(error.clone())); request.reject(error); },
             }
         },
     ).await;
@@ -407,6 +418,9 @@ pub(super) async fn consume(
         async {
             let did = record.physical.key().id.clone();
             while let Some(request) = receiver.next().await {
+                let binding = record.binding(&function_id);
+                let target = request.target;
+                let command = context.commands.begin(&did, &function_id, binding, target);
                 let work = context
                     .live
                     .borrow()
@@ -415,11 +429,11 @@ pub(super) async fn consume(
                     .and_then(|slot| slot.work.clone());
                 let path = context.control_path(&did);
                 let (Some(work), Some(path)) = (work, path) else {
-                    request.reject(CommandError::Unavailable("no usable control path".into()));
+                    let error = CommandError::Unavailable("no usable control path".into());
+                    command.0.finish(Err(error.clone()));
+                    request.reject(error);
                     continue;
                 };
-                let binding = record.binding(&function_id);
-                let target = request.target;
                 let generation = record.binding_generation.get();
                 let request = Rc::new(RefCell::new(Some(request)));
                 let mut path = path;
@@ -428,6 +442,7 @@ pub(super) async fn consume(
                         || record.life.is_closed()
                         || record.binding_generation.get() != generation
                     {
+                        command.0.finish(Err(CommandError::Cancelled));
                         request
                             .borrow_mut()
                             .take()
@@ -443,15 +458,16 @@ pub(super) async fn consume(
                                 work.clone(),
                                 &function_id,
                                 binding,
-                                generation,
                                 request.clone(),
+                                command.0.clone(),
                             )
                             .await
                             {
                                 let Some(selected) = context.control_path(&did) else {
-                                    request.borrow_mut().take().unwrap().reject(
-                                        CommandError::Unavailable("no usable control path".into()),
-                                    );
+                                    let error =
+                                        CommandError::Unavailable("no usable control path".into());
+                                    command.0.finish(Err(error.clone()));
+                                    request.borrow_mut().take().unwrap().reject(error);
                                     break;
                                 };
                                 path = selected;
@@ -460,6 +476,7 @@ pub(super) async fn consume(
                         }
                         ControlPath::Cloud(credentials) => {
                             let stamp = work.observations.write_stamp(&record, &function_id);
+                            command.0.submitted(super::model::PathKind::Cloud);
                             match context
                                 .cloud
                                 .set_property(
@@ -470,18 +487,14 @@ pub(super) async fn consume(
                                 )
                                 .await
                             {
-                                Ok(()) => work.observations.accept_write(
+                                Ok(()) => command.0.finish(work.observations.accept_write(
                                     &record,
                                     &function_id,
                                     &stamp,
                                     request.borrow_mut().take().unwrap(),
-                                ),
+                                )),
                                 Err(error) => {
-                                    request
-                                        .borrow_mut()
-                                        .take()
-                                        .unwrap()
-                                        .reject(match error.kind() {
+                                    let command_error = match error.kind() {
                                         crate::xiaomi::cloud::CloudErrorKind::Timeout => {
                                             CommandError::Timeout
                                         }
@@ -490,7 +503,9 @@ pub(super) async fn consume(
                                             code,
                                         ) => CommandError::Rejected(format!("cloud code {code}")),
                                         _ => CommandError::SendFailed(error.to_string()),
-                                    });
+                                    };
+                                    command.0.finish(Err(command_error.clone()));
+                                    request.borrow_mut().take().unwrap().reject(command_error);
                                     context.cloud_error(
                                         &credentials.tokens.access_token,
                                         Some(&did),

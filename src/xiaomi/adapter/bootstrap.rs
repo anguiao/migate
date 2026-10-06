@@ -62,9 +62,8 @@ impl XiaomiAdapter {
         if let Some(scope) = &scope {
             for (metadata, stored) in store.devices().restore_cached(&scope.uid, &scope.home_id)? {
                 let (physical, receivers) = PhysicalDevice::new(stored.description());
-                physical.set_availability(Availability::Unavailable(
-                    "restoring local gateway connection".into(),
-                ));
+                physical
+                    .set_availability(Availability::Unavailable("restoring Xiaomi access".into()));
                 registry.insert(physical.clone());
                 let did = metadata.device.key.id.clone();
                 let slot = DeviceSlot::restored(metadata, physical);
@@ -78,6 +77,7 @@ impl XiaomiAdapter {
         }
         let report = auth.local_status()?;
         let context = Rc::new(Context {
+            commands: Rc::new(super::commands::Commands::default()),
             notifications: RefCell::new(None),
             credentials_changed: Event::new(),
             #[cfg(test)]
@@ -107,6 +107,8 @@ impl XiaomiAdapter {
                 gateway: GatewayStatus::Discovering,
                 catalog_problem: None,
                 pending: Vec::new(),
+                routing: Default::default(),
+                devices: Vec::new(),
             }),
             status_changed: Event::new(),
             cloud_problem: RefCell::new(None),

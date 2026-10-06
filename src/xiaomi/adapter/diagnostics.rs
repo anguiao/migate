@@ -1,8 +1,218 @@
 use super::{
-    model::{GatewayStatus, PendingDevice},
+    model::{
+        AdapterStatus, DeviceStatus, GatewayStatus, PathKind, PendingDevice, RecoveryStatus,
+        RoutingStatus,
+    },
+    routing::PathPriority,
     state::Context,
 };
 impl Context {
+    pub(super) fn diagnostics(&self) -> AdapterStatus {
+        self.update_routing("access conditions changed");
+        self.status.borrow().clone()
+    }
+    pub(super) fn update_routing(&self, reason: &str) {
+        // Eligibility can change at a deadline before its maintenance task is polled.
+        let reason = if reason == "access conditions changed" {
+            let expired = self
+                .live
+                .borrow()
+                .credentials
+                .as_ref()
+                .is_some_and(|record| record.tokens.expires_at <= self.clock.unix_now());
+            if expired {
+                "access token expired"
+            } else if self.live.borrow().session.is_some()
+                && self
+                    .status
+                    .borrow()
+                    .authentication
+                    .certificate
+                    .is_some_and(|validity| validity.not_after <= self.clock.unix_now())
+            {
+                "local gateway certificate expired"
+            } else {
+                reason
+            }
+        } else {
+            reason
+        };
+        let previous = self.status.borrow().clone();
+        let session = self
+            .live
+            .borrow()
+            .session
+            .as_ref()
+            .map(|s| s.access.clone());
+        let mut routing = RoutingStatus {
+            priority: self.priority(),
+            local_connected: session.is_some(),
+            business_degraded: session.as_ref().is_some_and(|a| a.is_degraded()),
+            recovery: session.as_ref().map_or(RecoveryStatus::None, |a| {
+                a.recovery_status(self.clock.as_ref())
+            }),
+            last_switch_reason: previous.routing.last_switch_reason.clone(),
+        };
+        if routing.priority != previous.routing.priority {
+            routing.last_switch_reason = Some(reason.into());
+        }
+        let dids = self
+            .live
+            .borrow()
+            .devices
+            .iter()
+            .filter_map(|(did, slot)| slot.admitted.as_ref().map(|_| did.clone()))
+            .collect::<Vec<_>>();
+        let mut devices = Vec::new();
+        for did in dids {
+            let mut usable = Vec::new();
+            if self.local_candidate(&did, false).is_some() {
+                usable.push(PathKind::Local);
+            }
+            if self.cloud_candidate(&did, true) {
+                usable.push(PathKind::Cloud);
+            }
+            let selected = match self.priority() {
+                PathPriority::LocalFirst => usable.first().copied(),
+                PathPriority::CloudFirst => usable.last().copied(),
+            };
+            let notification = self.active_notification(&did);
+            let old = previous.devices.iter().find(|device| device.did == did);
+            let switched = old.is_some_and(|old| {
+                old.selected_control != selected || old.notification_source != notification
+            });
+            let last_switch_reason = {
+                let mut live = self.live.borrow_mut();
+                let slot = live.devices.get_mut(&did).unwrap();
+                if switched {
+                    slot.last_switch_reason = Some(reason.into());
+                }
+                slot.last_switch_reason.clone()
+            };
+            let unavailable_reason = selected.is_none().then(|| {
+                format!(
+                    "local: {}; cloud: {}",
+                    self.local_reason(&did, false),
+                    self.cloud_reason(&did, true)
+                )
+            });
+            let sync_limited_reason = notification
+                .is_none()
+                .then(|| self.notification_reason(&did));
+            let channels = self.live.borrow().devices[&did]
+                .admitted
+                .as_ref()
+                .unwrap()
+                .cached
+                .borrow()
+                .device
+                .functions
+                .iter()
+                .map(|function| function.description.id.clone())
+                .collect::<Vec<_>>();
+            let commands = self.commands.snapshot(&did, channels.into_iter());
+            devices.push(DeviceStatus {
+                did,
+                usable_control_paths: usable,
+                selected_control: selected,
+                notification_source: notification,
+                unavailable_reason,
+                sync_limited_reason,
+                last_switch_reason,
+                commands,
+            });
+        }
+        let mut current = self.status.borrow_mut();
+        if current.routing != routing || current.devices != devices {
+            current.routing = routing;
+            current.devices = devices;
+            self.status_changed.notify(usize::MAX);
+        }
+    }
+    pub(super) fn note_notification_switch(&self, did: &str, reason: &str) {
+        self.live
+            .borrow_mut()
+            .devices
+            .get_mut(did)
+            .unwrap()
+            .last_switch_reason = Some(reason.into());
+        self.update_routing(reason);
+    }
+    fn local_reason(&self, did: &str, push: bool) -> String {
+        let live = self.live.borrow();
+        let slot = &live.devices[did];
+        if let Some(reason) = &slot.blocked {
+            return reason.clone();
+        }
+        if live.session.is_none() {
+            return "gateway disconnected".into();
+        }
+        if !self
+            .status
+            .borrow()
+            .authentication
+            .certificate
+            .is_some_and(|v| v.currently_valid(self.clock.unix_now()))
+        {
+            return "gateway certificate not currently valid".into();
+        }
+        match &slot.access {
+            None => "device access not available".into(),
+            Some(Err(error)) => error.to_string(),
+            Some(Ok(access)) if !access.online => "device offline".into(),
+            Some(Ok(access)) if !access.spec_v2_access => "property access unavailable".into(),
+            Some(Ok(access)) if push && !access.push_available => {
+                "notification access unavailable".into()
+            }
+            Some(Ok(_)) => "device description or binding unavailable".into(),
+        }
+    }
+    fn cloud_reason(&self, did: &str, http: bool) -> String {
+        if !self.cloud_scope_valid.get() {
+            return "account/home scope not validated".into();
+        }
+        if !self.token_usable() {
+            return "credentials unavailable, expired or rejected".into();
+        }
+        if http && self.http_paused.get() {
+            return "HTTP temporarily paused".into();
+        }
+        let live = self.live.borrow();
+        let slot = &live.devices[did];
+        if let Some(reason) = &slot.blocked {
+            return reason.clone();
+        }
+        if slot.cloud_forbidden {
+            return "device access forbidden".into();
+        }
+        match &slot.cloud_access {
+            None => "device information not available".into(),
+            Some(access) if !access.online => "device offline".into(),
+            Some(_) => "device description or binding unavailable".into(),
+        }
+    }
+    fn notification_reason(&self, did: &str) -> String {
+        let work = self.live.borrow().devices[did].work.clone();
+        if let Some(work) = work {
+            if work.subscribe_running.get() || work.cloud_running.get() {
+                return "notification subscriptions preparing".into();
+            }
+            if let Some(reason) = work.subscription_problem() {
+                return reason;
+            }
+        }
+        let local = if self.local_candidate(did, true).is_some() {
+            "notification subscriptions not ready".into()
+        } else {
+            self.local_reason(did, true)
+        };
+        let cloud = if self.cloud_candidate(did, false) {
+            "notifications disconnected or subscriptions not ready".into()
+        } else {
+            self.cloud_reason(did, false)
+        };
+        format!("local notifications: {local}; cloud notifications: {cloud}")
+    }
     pub(super) fn request_sync(&self) {
         self.sync_requested.set(true);
         self.sync_changed.notify(usize::MAX);

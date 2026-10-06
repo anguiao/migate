@@ -241,6 +241,8 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
                 name: "New cloud name".into(),
                 reason: "subscription rejected".into(),
             }],
+            routing: Default::default(),
+            devices: Vec::new(),
         });
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
             .await
@@ -260,7 +262,89 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
 }
 
 #[test]
+fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
+    use migate::xiaomi::adapter::*;
+    block_on(async {
+        let (_dir, store, status, registry, _receivers) = fixture();
+        let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .local_status()
+            .unwrap();
+        status.update_adapter(AdapterStatus {
+            authentication: report,
+            gateway: GatewayStatus::Connected("hub".into()),
+            catalog_problem: None,
+            pending: Vec::new(),
+            routing: RoutingStatus {
+                priority: PathPriority::CloudFirst,
+                local_connected: true,
+                business_degraded: true,
+                recovery: RecoveryStatus::Scheduled(1_700_000_060),
+                last_switch_reason: None,
+            },
+            devices: ["one", "multi"]
+                .into_iter()
+                .map(|did| DeviceStatus {
+                    did: did.into(),
+                    usable_control_paths: vec![PathKind::Local, PathKind::Cloud],
+                    selected_control: Some(PathKind::Cloud),
+                    notification_source: Some(PathKind::Local),
+                    unavailable_reason: None,
+                    sync_limited_reason: None,
+                    last_switch_reason: None,
+                    commands: Vec::new(),
+                })
+                .collect(),
+        });
+        let selected = handle_line(
+            &registry,
+            &store.devices(),
+            &status,
+            "status multi",
+            1_700_000_000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(selected.contains("multi (name multi)"), "{selected}");
+        assert!(selected.contains("multi routing:"), "{selected}");
+        assert!(!selected.contains("one routing:"), "{selected}");
+        assert!(!selected.contains("one (name one)"), "{selected}");
+        assert!(selected.contains("Gateway: connected (hub)."), "{selected}");
+        assert!(selected.contains("Routing: cloud-first"), "{selected}");
+        assert!(selected.contains("2023-11-14T22:14:20Z"), "{selected}");
+        let all = handle_line(
+            &registry,
+            &store.devices(),
+            &status,
+            "status",
+            1_700_000_000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(all.contains("one routing:"));
+        assert!(all.contains("multi routing:"));
+        let list = handle_line(&registry, &store.devices(), &status, "list", 1_700_000_000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(list.contains("one (name one)"));
+        assert!(!list.contains("routing:"));
+        assert!(!list.contains("Selected control:"));
+        let help = handle_line(&registry, &store.devices(), &status, "help", 1_700_000_000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(help.contains("Available commands:"));
+        assert!(help.contains("Routing: cloud-first"));
+        assert!(!help.contains("one routing:"));
+        assert!(!help.contains("multi routing:"));
+    });
+}
+
+#[test]
 fn startup_login_command_is_a_single_prefixed_log_record() {
+    use migate::xiaomi::adapter::*;
     let capture = tempfile::NamedTempFile::new().unwrap();
     env_logger::Builder::new()
         .filter_module("migate::terminal::status", log::LevelFilter::Info)
@@ -269,10 +353,58 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
             capture.reopen().unwrap(),
         )))
         .init();
-    let (directory, _store, status, _registry, _receivers) = fixture();
+    let (directory, store, status, _registry, _receivers) = fixture();
     status.log(0);
 
+    let gateway = format!(
+        "status-log-{}",
+        directory.path().file_name().unwrap().to_string_lossy()
+    );
+    let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+        .local_status()
+        .unwrap();
+    let mut adapter = AdapterStatus {
+        authentication: report,
+        gateway: GatewayStatus::Connected(gateway.clone()),
+        catalog_problem: None,
+        pending: Vec::new(),
+        routing: Default::default(),
+        devices: Vec::new(),
+    };
+    status.update_adapter(adapter.clone());
+    adapter.devices.push(DeviceStatus {
+        did: "one".into(),
+        usable_control_paths: vec![PathKind::Local],
+        selected_control: Some(PathKind::Local),
+        notification_source: Some(PathKind::Local),
+        unavailable_reason: None,
+        sync_limited_reason: None,
+        last_switch_reason: None,
+        commands: vec![ChannelCommands {
+            channel: "main".into(),
+            inflight: None,
+            last: None,
+        }],
+    });
+    status.update_adapter(adapter.clone());
+    adapter.devices[0].commands[0].last = Some(CommandStatus {
+        id: 1,
+        binding: migate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+        target: true,
+        actual_path: Some(PathKind::Local),
+        result: Some(Ok(())),
+    });
+    status.update_adapter(adapter);
+
     let output = std::fs::read_to_string(capture.path()).unwrap();
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains(&format!("Gateway: connected ({gateway}).")))
+            .count(),
+        1,
+        "{output}"
+    );
     let lines: Vec<_> = output
         .lines()
         .filter(|line| {

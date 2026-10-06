@@ -1,8 +1,9 @@
 use crate::{
-    device::DeviceRegistry,
+    device::{CommandError, DeviceRegistry},
     storage::StorageError,
     xiaomi::{
         auth::{AuthError, AuthReport},
+        capability::PropertyBinding,
         catalog::CatalogError,
         central::CentralError,
         cloud::CloudError,
@@ -89,12 +90,78 @@ pub struct PendingDevice {
     pub name: String,
     pub reason: String,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathKind {
+    Local,
+    Cloud,
+}
+impl fmt::Display for PathKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Local => "local",
+            Self::Cloud => "cloud",
+        })
+    }
+}
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RecoveryStatus {
+    #[default]
+    None,
+    Scheduled(i64),
+    Running,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoutingStatus {
+    pub priority: super::routing::PathPriority,
+    pub local_connected: bool,
+    pub business_degraded: bool,
+    pub recovery: RecoveryStatus,
+    pub last_switch_reason: Option<String>,
+}
+impl Default for RoutingStatus {
+    fn default() -> Self {
+        Self {
+            priority: super::routing::PathPriority::LocalFirst,
+            local_connected: false,
+            business_degraded: false,
+            recovery: RecoveryStatus::None,
+            last_switch_reason: None,
+        }
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandStatus {
+    pub id: u64,
+    pub binding: PropertyBinding,
+    pub target: bool,
+    pub actual_path: Option<PathKind>,
+    pub result: Option<Result<(), CommandError>>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChannelCommands {
+    pub channel: String,
+    pub inflight: Option<CommandStatus>,
+    pub last: Option<CommandStatus>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceStatus {
+    pub did: String,
+    pub usable_control_paths: Vec<PathKind>,
+    pub selected_control: Option<PathKind>,
+    pub notification_source: Option<PathKind>,
+    pub unavailable_reason: Option<String>,
+    pub sync_limited_reason: Option<String>,
+    pub last_switch_reason: Option<String>,
+    pub commands: Vec<ChannelCommands>,
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterStatus {
     pub authentication: AuthReport,
     pub gateway: GatewayStatus,
     pub catalog_problem: Option<String>,
     pub pending: Vec<PendingDevice>,
+    pub routing: RoutingStatus,
+    pub devices: Vec<DeviceStatus>,
 }
 #[derive(Default)]
 pub(super) struct Ready {
