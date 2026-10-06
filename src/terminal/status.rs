@@ -10,16 +10,16 @@ use std::{
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 type BridgeDiagnostics = (
-    crate::xiaomi::source::GatewayStatus,
+    crate::xiaomi::adapter::GatewayStatus,
     Option<String>,
-    Vec<crate::xiaomi::source::PendingDevice>,
+    Vec<crate::xiaomi::adapter::PendingDevice>,
 );
 
 pub struct AuthStatus {
     report: RefCell<AuthReport>,
     executable: PathBuf,
     data_dir: PathBuf,
-    source: RefCell<Option<BridgeDiagnostics>>,
+    adapter: RefCell<Option<BridgeDiagnostics>>,
 }
 
 impl AuthStatus {
@@ -28,7 +28,7 @@ impl AuthStatus {
             report: RefCell::new(report),
             executable,
             data_dir,
-            source: RefCell::new(None),
+            adapter: RefCell::new(None),
         }
     }
 
@@ -44,13 +44,13 @@ impl AuthStatus {
     pub fn render(&self, now: i64) -> String {
         let mut report =
             format_report(&self.report.borrow(), now, &self.executable, &self.data_dir);
-        if let Some((gateway, problem, _)) = &*self.source.borrow() {
+        if let Some((gateway, problem, _)) = &*self.adapter.borrow() {
             let _ = write!(report, "\n{}", format_gateway(gateway));
             if let Some(problem) = problem {
                 let _ = write!(report, "\nDevice description: {problem}.");
             }
         }
-        if self.source.borrow().is_some()
+        if self.adapter.borrow().is_some()
             && matches!(
                 self.report.borrow().authentication,
                 AuthenticationState::SignInRequired(_)
@@ -61,26 +61,26 @@ impl AuthStatus {
         report
     }
 
-    pub fn update_source(&self, status: crate::xiaomi::source::SourceStatus) {
+    pub fn update_adapter(&self, status: crate::xiaomi::adapter::AdapterStatus) {
         if self.replace(status.authentication) {
             self.log(current_time());
         }
         let next = (status.gateway, status.catalog_problem, status.pending);
-        let mut source = self.source.borrow_mut();
-        if source.as_ref() != Some(&next) {
+        let mut adapter = self.adapter.borrow_mut();
+        if adapter.as_ref() != Some(&next) {
             log::info!("{}", format_gateway(&next.0));
             if let Some(problem) = &next.1 {
                 log::warn!("Device description: {problem}.");
             }
-            *source = Some(next);
+            *adapter = Some(next);
         }
     }
 
-    pub fn pending(&self) -> Vec<crate::xiaomi::source::PendingDevice> {
-        self.source
+    pub fn pending(&self) -> Vec<crate::xiaomi::adapter::PendingDevice> {
+        self.adapter
             .borrow()
             .as_ref()
-            .map(|source| source.2.clone())
+            .map(|adapter| adapter.2.clone())
             .unwrap_or_default()
     }
 
@@ -143,8 +143,8 @@ pub fn format_report(report: &AuthReport, now: i64, executable: &Path, data_dir:
     output
 }
 
-fn format_gateway(status: &crate::xiaomi::source::GatewayStatus) -> String {
-    use crate::xiaomi::source::GatewayStatus;
+fn format_gateway(status: &crate::xiaomi::adapter::GatewayStatus) -> String {
+    use crate::xiaomi::adapter::GatewayStatus;
     match status {
         GatewayStatus::Discovering => "Gateway: discovering local gateway.".into(),
         GatewayStatus::Connecting(did) => format!("Gateway: connecting ({did})."),
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn connected_gateway_keeps_authentication_and_catalog_diagnostics_visible() {
-        use crate::xiaomi::source::{GatewayStatus, SourceStatus};
+        use crate::xiaomi::adapter::{AdapterStatus, GatewayStatus};
         let status = AuthStatus::new(
             AuthReport::for_test(
                 AuthenticationState::Checking,
@@ -250,7 +250,7 @@ mod tests {
             "/bin/migate".into(),
             "/data".into(),
         );
-        status.update_source(SourceStatus {
+        status.update_adapter(AdapterStatus {
             authentication: AuthReport::for_test(
                 AuthenticationState::SignInRequired(
                     crate::xiaomi::auth::FailureReason::AccountIdentityMismatch,

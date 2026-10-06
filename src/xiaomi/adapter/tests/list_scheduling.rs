@@ -1,7 +1,7 @@
 use super::*;
 use crate::xiaomi::{
+    adapter::state::{AccessRefresh, AccessRequest, Backoff},
     central::{DeviceAccess, DeviceEntry},
-    source::state::{AccessRefresh, AccessRequest, Backoff},
 };
 
 #[test]
@@ -94,49 +94,60 @@ fn observation(record: &CachedPhysicalDevice, online: bool) -> DeviceEntry {
 
 #[test]
 fn filtered_lists_only_update_requested_members_and_preserve_other_access() {
-    let rig = Rig::new(true, &["one", "multi"]);
-    let context = &rig.source.context;
-    context.observe_access(
-        rig.data
-            .iter()
-            .map(|record| observation(record, true))
-            .collect(),
-    );
-    let one = context
-        .registry
-        .get(&DeviceKey::new("xiaomi", "one"))
-        .unwrap();
-    let multi = context
-        .registry
-        .get(&DeviceKey::new("xiaomi", "multi"))
-        .unwrap();
-    assert_eq!(one.availability(), Availability::Available);
-    assert_eq!(multi.availability(), Availability::Available);
+    block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            initialized(control, &peer, &["one", "multi"]).await;
+            let context = &control.context;
+            context.observe_access(
+                control
+                    .data
+                    .iter()
+                    .map(|record| observation(record, true))
+                    .collect(),
+            );
+            let one = context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "one"))
+                .unwrap();
+            let multi = context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "multi"))
+                .unwrap();
+            assert_eq!(one.availability(), Availability::Available);
+            assert_eq!(multi.availability(), Availability::Available);
 
-    context.observe_access_filtered(
-        &["one".into(), "unknown".into()],
-        vec![
-            observation(&rig.data[0], false),
-            observation(&rig.data[1], false),
-        ],
-    );
-    assert!(matches!(one.availability(), Availability::Unavailable(_)));
-    assert_eq!(multi.availability(), Availability::Available);
-    assert!(
-        context.live.borrow().devices["multi"]
-            .access
-            .as_ref()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .online
-    );
+            context.observe_access_filtered(
+                &["one".into(), "unknown".into()],
+                vec![
+                    observation(&control.data[0], false),
+                    observation(&control.data[1], false),
+                ],
+            );
+            assert!(matches!(one.availability(), Availability::Unavailable(_)));
+            assert_eq!(multi.availability(), Availability::Available);
+            assert!(
+                context.live.borrow().devices["multi"]
+                    .access
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .online
+            );
 
-    context.observe_access_filtered(&["one".into()], vec![observation(&rig.data[0], true)]);
-    assert_eq!(one.availability(), Availability::Available);
-    context.observe_access_filtered(&["one".into()], Vec::new());
-    assert!(context.live.borrow().devices["one"].access.is_none());
-    assert_eq!(multi.availability(), Availability::Available);
+            context.observe_access_filtered(
+                &["one".into()],
+                vec![observation(&control.data[0], true)],
+            );
+            assert_eq!(one.availability(), Availability::Available);
+            context.observe_access_filtered(&["one".into()], Vec::new());
+            assert!(context.live.borrow().devices["one"].access.is_none());
+            assert_eq!(multi.availability(), Availability::Available);
+        })
+        .await;
+    }));
 }
 
 #[test]

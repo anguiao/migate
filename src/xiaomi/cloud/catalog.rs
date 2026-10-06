@@ -30,6 +30,14 @@ pub struct CloudDevice {
     pub instance_type: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloudDeviceInfo {
+    pub did: String,
+    pub model: String,
+    pub instance_type: String,
+    pub online: bool,
+}
+
 pub fn group_id(uid: &str, home_id: &str) -> String {
     let digest = Sha1::digest(format!("{uid}central_service{home_id}"));
     digest[..8]
@@ -92,6 +100,21 @@ struct DeviceDescription {
     model: String,
     #[serde(deserialize_with = "description")]
     spec_type: String,
+}
+
+#[derive(Deserialize)]
+struct HomeDevicesResponse {
+    list: Vec<DeviceRecord>,
+    has_more: Option<bool>,
+    next_start_did: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeviceInfo {
+    #[serde(flatten)]
+    description: DeviceDescription,
+    #[serde(rename = "isOnline")]
+    online: bool,
 }
 
 #[derive(Default)]
@@ -194,6 +217,73 @@ impl CloudClient {
             cursor = pages.advance(result.has_more, result.max_id, operation)?;
         }
         Ok(catalog)
+    }
+
+    /// Read every device-information page for the requested home members.
+    /// Missing members remain absent from this result: only the owned-home
+    /// directory establishes membership, and an absent record is not online.
+    pub async fn get_home_devices(
+        &self,
+        access_token: &str,
+        home: &OwnedHome,
+        requested_dids: &[String],
+    ) -> Result<Vec<CloudDeviceInfo>, CloudError> {
+        let operation = "read Xiaomi home device information";
+        let members = home.dids.iter().map(String::as_str).collect::<HashSet<_>>();
+        let mut targets = HashSet::new();
+        for did in requested_dids {
+            if !valid_description(did)
+                || !members.contains(did.as_str())
+                || !targets.insert(did.as_str())
+            {
+                return Err(CloudError::input(operation));
+            }
+        }
+        let mut devices = Vec::new();
+        let mut seen = HashSet::new();
+        for dids in requested_dids.chunks(150) {
+            let mut cursor = None;
+            let mut pages = Pagination::default();
+            loop {
+                let mut body = json!({"limit":200,"get_split_device":true,"get_third_device":true,"dids":dids});
+                if let Some(start_did) = &cursor {
+                    body["start_did"] = json!(start_did);
+                }
+                let result: HomeDevicesResponse = self
+                    .protected_post(
+                        operation,
+                        "/app/v2/home/device_list_page",
+                        access_token,
+                        body,
+                    )
+                    .await?;
+                for record in result.list {
+                    if !targets.contains(record.did.as_str()) {
+                        continue;
+                    }
+                    if !seen.insert(record.did.clone()) {
+                        return Err(CloudError::protocol(operation));
+                    }
+                    let details: DeviceInfo = serde_json::from_value(Value::Object(record.details))
+                        .map_err(|_| CloudError::protocol(operation))?;
+                    devices.push(CloudDeviceInfo {
+                        did: record.did,
+                        model: details.description.model,
+                        instance_type: details.description.spec_type,
+                        online: details.online,
+                    });
+                }
+                cursor = pages.advance(
+                    result.has_more,
+                    result.next_start_did.filter(|did| valid_description(did)),
+                    operation,
+                )?;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+        }
+        Ok(devices)
     }
 
     /// The caller selects a home using local discovery before reaching this

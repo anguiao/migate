@@ -1,5 +1,5 @@
 use super::{
-    model::{GatewayStatus, SourceError},
+    model::{AdapterError, GatewayStatus},
     state::{AccessRefresh, AccessRequest, Backoff, Context, Session},
 };
 use crate::xiaomi::{
@@ -12,7 +12,7 @@ pub(super) async fn run(
     context: Rc<Context>,
     discovery: Discovery,
     #[cfg(test)] test: (Option<String>, Duration),
-) -> Result<(), SourceError> {
+) -> Result<(), AdapterError> {
     let mut changes = discovery.subscribe();
     let mut route = None;
     let mut backoff = Backoff::new(1, 30);
@@ -36,7 +36,7 @@ pub(super) async fn run(
                     if context.live.borrow().scope.is_none() {
                         context.request_sync();
                     }
-                    Ok::<(), SourceError>(())
+                    Ok::<(), AdapterError>(())
                 },
                 future::or(
                     async {
@@ -46,7 +46,7 @@ pub(super) async fn run(
                     async {
                         context.clock.wait_until(deadline).await;
                         context.set_gateway(GatewayStatus::Unavailable(
-                            SourceError::NoLocalGateway.to_string(),
+                            AdapterError::NoLocalGateway.to_string(),
                         ));
                         first_deadline = None;
                         Ok(())
@@ -68,7 +68,7 @@ pub(super) async fn run(
             continue;
         };
         let mut connected = None;
-        let mut failure = SourceError::NoLocalGateway;
+        let mut failure = AdapterError::NoLocalGateway;
         for selected in routes {
             context.set_gateway(GatewayStatus::Connecting(selected.did.clone()));
             let address = selected.address;
@@ -101,7 +101,7 @@ pub(super) async fn run(
             let reconnecting = route.is_some();
             route = Some(selected.clone());
             first_deadline = None;
-            let session = Session::new(handle.clone());
+            let session = Session::new(handle.clone(), context.refresh_changed.clone());
             let access = session.access.clone();
             let tasks = session.tasks.clone();
             context.live.borrow_mut().session = Some(session);
@@ -132,21 +132,7 @@ pub(super) async fn run(
                                 .get(&did)
                                 .cloned();
                             if let Some(work) = work {
-                                let cached = work.record.cached.borrow();
-                                if cached.device.refresh_trigger == Some(binding) {
-                                    work.refresh();
-                                } else if let Some(function) = cached
-                                    .device
-                                    .functions
-                                    .iter()
-                                    .find(|function| function.power == binding)
-                                {
-                                    work.record
-                                        .physical
-                                        .function(&function.description.id)
-                                        .unwrap()
-                                        .observe(value);
-                                }
+                                work.notify(binding, value);
                             }
                         }
                         CentralEvent::DeviceListChanged { dids } => {
@@ -162,7 +148,7 @@ pub(super) async fn run(
                         }
                     })
                     .await
-                    .map_err(SourceError::Central)
+                    .map_err(AdapterError::Central)
             };
             future::or(
                 route_watch(&discovery, &mut changes, &context, &selected),
@@ -178,10 +164,10 @@ pub(super) async fn run(
         } else {
             Err(failure)
         };
-        let error = result.err().unwrap_or(SourceError::Cancelled);
+        let error = result.err().unwrap_or(AdapterError::Cancelled);
         context.disconnect(error.to_string());
         context.set_gateway(GatewayStatus::Unavailable(error.to_string()));
-        if matches!(error, SourceError::Storage(_) | SourceError::Discovery(_)) {
+        if matches!(error, AdapterError::Storage(_) | AdapterError::Discovery(_)) {
             return Err(error);
         }
         let delay = reconnect.failed();
@@ -197,7 +183,7 @@ async fn access_refreshes(
     context: Rc<Context>,
     handle: SessionHandle,
     access: Rc<AccessRefresh>,
-) -> Result<(), SourceError> {
+) -> Result<(), AdapterError> {
     loop {
         let request = access.next(context.clock.as_ref()).await;
         let current = context.clone();
@@ -258,7 +244,7 @@ async fn route_watch(
     changes: &mut DiscoveryChanges,
     context: &Context,
     route: &GatewayRoute,
-) -> Result<(), SourceError> {
+) -> Result<(), AdapterError> {
     loop {
         let listener = context.changed.listen();
         if discovery
@@ -267,7 +253,7 @@ async fn route_watch(
             .as_ref()
             != Some(route)
         {
-            return Err(SourceError::NoLocalGateway);
+            return Err(AdapterError::NoLocalGateway);
         }
         future::or(
             async {
@@ -275,7 +261,7 @@ async fn route_watch(
                     .changed()
                     .await
                     .map(|_| ())
-                    .map_err(SourceError::Discovery)
+                    .map_err(AdapterError::Discovery)
             },
             async {
                 listener.await;
@@ -291,7 +277,7 @@ pub(super) async fn wait_retry(
     changes: &mut DiscoveryChanges,
     previous: Option<&GatewayRoute>,
     delay: Duration,
-) -> Result<(), SourceError> {
+) -> Result<(), AdapterError> {
     let group = context
         .live
         .borrow()

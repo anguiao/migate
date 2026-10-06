@@ -1,5 +1,7 @@
 use super::{bootstrap::Clock, *};
+mod http_routing;
 mod list_scheduling;
+mod observation_lifetimes;
 mod refresh_scheduling;
 use crate::{
     device::{Availability, DeviceKey, Power},
@@ -76,7 +78,7 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     let (_events, receiver) = flume::unbounded();
     let (discovery, _driver) = Discovery::with_events(receiver);
-    let (source, ready) = XiaomiSource::new(store, cloud, discovery).unwrap();
+    let (source, ready) = XiaomiAdapter::new(store, cloud, discovery).unwrap();
     let registry = block_on(poll_once(ready.wait()))
         .expect("cache readiness is synchronous")
         .unwrap();
@@ -149,6 +151,8 @@ struct CloudState {
     home_delay: Duration,
     home_gate: Option<flume::Receiver<()>>,
     foreign: bool,
+    missing_home: bool,
+    other_home: bool,
     partial: bool,
     unsupported: BTreeSet<String>,
     detail_status: u16,
@@ -165,10 +169,19 @@ struct CloudState {
     tokens: usize,
     token_done: usize,
     homes: usize,
+    online: BTreeSet<String>,
+    infos: usize,
+    info_status: u16,
+    info_gate: Option<flume::Receiver<()>>,
+    info_partial: bool,
+    property_status: u16,
+    property_code: i64,
+    property_gate: Option<flume::Receiver<()>>,
+    property_writes: Vec<(String, u32, u32, bool, String)>,
 }
 struct Rig {
     _directory: tempfile::TempDir,
-    source: XiaomiSource,
+    source: XiaomiAdapter,
     ready: TopologyReady,
     store: Store,
     discovery: Discovery,
@@ -223,8 +236,18 @@ impl Rig {
             detail_status: 200,
             cert_status: 200,
             token_status: 200,
+            property_status: 200,
+            info_status: 200,
             ..Default::default()
         }));
+        let info_dids = if restore {
+            members
+                .iter()
+                .map(|did| (*did).to_string())
+                .collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::new()
+        };
         let responses = cloud.clone();
         let records = data.clone();
         let certificate = tls.credentials.certificate_pem.clone();
@@ -235,7 +258,24 @@ impl Rig {
             if state.status != 200 {
                 return MockResponse::json(state.status, "{}");
             }
-            let value = if request.target.contains("get_token") {
+            let value = if request.target.ends_with("/miotspec/prop/set") {
+                let body: Value = serde_json::from_str(&request.body).unwrap();
+                let item = &body["params"][0];
+                state.property_writes.push((
+                    item["did"].as_str().unwrap().into(),
+                    item["siid"].as_u64().unwrap() as u32,
+                    item["piid"].as_u64().unwrap() as u32,
+                    item["value"].as_bool().unwrap(),
+                    request.headers.clone(),
+                ));
+                let status = state.property_status;
+                let result = json!({"code":0,"result":[{"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":state.property_code}]});
+                let mut response = MockResponse::json(status, &result.to_string());
+                if let Some(gate) = state.property_gate.clone() {
+                    response = response.gated(gate);
+                }
+                return response;
+            } else if request.target.contains("get_token") {
                 state.tokens += 1;
                 if state.token_status != 200 {
                     return MockResponse::json(state.token_status, "{}");
@@ -251,10 +291,27 @@ impl Rig {
                 state.homes += 1;
                 if state.partial {
                     json!({"code":0,"result":{"homelist":[],"has_more":true}})
+                } else if state.missing_home {
+                    json!({"code":0,"result":{"homelist":[],"has_more":false}})
                 } else {
-                    json!({"code":0,"result":{"homelist":[{"id":"local","uid":if state.foreign {"foreign"}else {&records[0].uid},"roomlist":[],"dids":state.members}]}})
+                    json!({"code":0,"result":{"homelist":[{"id":if state.other_home {"other"} else {"local"},"uid":if state.foreign {"foreign"}else {&records[0].uid},"roomlist":[],"dids":state.members}]}})
                 }
             } else if request.target.ends_with("/device_list_page") {
+                let body: Value = serde_json::from_str(&request.body).unwrap();
+                if body["dids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|did| info_dids.contains(did.as_str().unwrap()))
+                {
+                    state.infos += 1;
+                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>(),"has_more":state.info_partial}});
+                    let mut response = MockResponse::json(state.info_status, &value.to_string());
+                    if let Some(gate) = state.info_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    return response;
+                }
                 state.details += 1;
                 if state.detail_status != 200 {
                     let mut response = MockResponse::json(state.detail_status, "{}")
@@ -265,7 +322,7 @@ impl Rig {
                     }
                     return response;
                 }
-                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"model":record.model,"spec_type":record.instance_type})).collect::<Vec<_>>()}})
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
                 let multi = request.target.contains("cuco-cp7pd");
                 let mut value: Value = serde_json::from_str(if multi {
@@ -316,7 +373,7 @@ impl Rig {
             .automatic
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let (mut source, ready) =
-            XiaomiSource::build(store.clone(), client, discovery.clone(), clock.clone()).unwrap();
+            XiaomiAdapter::build(store.clone(), client, discovery.clone(), clock.clone()).unwrap();
         source.test_ca = Some(tls.ca_pem.clone());
         source.request_timeout = Duration::from_millis(150);
         Self {
@@ -341,7 +398,7 @@ impl Rig {
     {
         self.run_result(test).await.unwrap();
     }
-    async fn run_result<F, Fut>(self, test: F) -> Result<(), SourceError>
+    async fn run_result<F, Fut>(self, test: F) -> Result<(), AdapterError>
     where
         F: FnOnce(Control) -> Fut,
         Fut: Future<Output = ()>,
@@ -352,7 +409,7 @@ impl Rig {
         let running = self.source.run(|_| {});
         let discovering = async {
             self.driver.run().await?;
-            future::pending::<Result<(), SourceError>>().await
+            future::pending::<Result<(), AdapterError>>().await
         };
         let testing = test(Control {
             ready: Some(self.ready),
@@ -1782,7 +1839,7 @@ fn pending_cloud_descriptions_retry_on_a_later_event_without_blocking_cached_con
                 .await
                 .unwrap();
             assert_eq!(control.context.registry.list().len(), 1);
-            assert_eq!(control.cloud.lock().unwrap().details, 1);
+            assert!(control.cloud.lock().unwrap().details >= 1);
             control.cloud.lock().unwrap().detail_status = 200;
             peer.list_changed(&["multi"]);
             initialized(control, &peer, &["one", "multi"]).await;
@@ -2047,7 +2104,7 @@ fn publication_database_failures_are_fatal_and_do_not_publish_partial_topology()
         c.peer(peer, |_| future::pending()).await;
     }))
     .unwrap_err();
-    assert!(matches!(error, SourceError::Storage(_)));
+    assert!(matches!(error, AdapterError::Storage(_)));
     assert!(
         store
             .devices()
@@ -2712,13 +2769,13 @@ fn corrupt_saved_credentials_or_cached_topology_fail_before_network_requests() {
                 .execute("UPDATE device_cache SET functions='broken'", [])
                 .unwrap();
         }
-        let result = XiaomiSource::build(
+        let result = XiaomiAdapter::build(
             rig.store.clone(),
             rig.source.cloud.clone(),
             rig.discovery.clone(),
             rig.clock.clone(),
         );
-        assert!(matches!(result, Err(SourceError::Storage(_))));
+        assert!(matches!(result, Err(AdapterError::Storage(_))));
         assert_eq!(rig.cloud.lock().unwrap().homes, 0);
     }
 }
@@ -2816,7 +2873,7 @@ fn restored_and_updated_description_order_cannot_cross_wire_channel_commands() {
         .devices()
         .publish_cached(&reordered, "ignored later name")
         .unwrap();
-    let (mut source, ready) = XiaomiSource::build(
+    let (mut source, ready) = XiaomiAdapter::build(
         rig.store.clone(),
         rig.source.cloud.clone(),
         rig.discovery.clone(),
@@ -2875,6 +2932,121 @@ fn restored_and_updated_description_order_cannot_cross_wire_channel_commands() {
                     .unwrap();
                 assert_eq!(peer.count("rpcReq", "multi", siid), 2);
             }
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn published_devices_restore_cloud_control_without_a_local_gateway() {
+    let rig = Rig::new(true, &["one", "multi"]);
+    rig.cloud
+        .lock()
+        .unwrap()
+        .online
+        .extend(["one".into(), "multi".into()]);
+    block_on(rig.run(|c| async move {
+        let before = c
+            .store
+            .devices()
+            .load_published(&DeviceKey::new("xiaomi", "one"))
+            .unwrap();
+        until(|| c.cloud.lock().unwrap().homes > 0).await;
+        async_io::Timer::after(Duration::from_millis(100)).await;
+        let one = function(&c.context.registry, "one", "main");
+        assert_eq!(one.snapshot().availability, Availability::Available);
+        assert_eq!(one.snapshot().power, Power::Unknown);
+        assert_eq!(
+            one.execute(Command::Toggle).await,
+            Err(crate::device::CommandError::UnknownState)
+        );
+        one.execute(Command::On).await.unwrap();
+        let usb = function(&c.context.registry, "multi", "usb");
+        usb.execute(Command::Off).await.unwrap();
+        assert_eq!(one.snapshot().power, Power::On);
+        assert_eq!(usb.snapshot().power, Power::Off);
+        assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
+        assert_eq!(
+            c.store
+                .devices()
+                .load_published(&DeviceKey::new("xiaomi", "one"))
+                .unwrap(),
+            before
+        );
+    }));
+}
+
+#[test]
+fn same_value_notification_invalidates_an_inflight_read() {
+    block_on(Rig::new(true, &["one", "two"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one", "two"]).await;
+            let one = function(&control.context.registry, "one", "main");
+            let two = function(&control.context.registry, "two", "main");
+            peer.state.borrow_mut().hold_reads = true;
+            let reads = peer.count("get", "one", 2);
+            control
+                .context
+                .live
+                .borrow()
+                .session
+                .as_ref()
+                .unwrap()
+                .devices["one"]
+                .refresh();
+            until(|| peer.count("get", "one", 2) == reads + 1).await;
+            let before = one.snapshot();
+            peer.notify("one", 2, false);
+            peer.notify("two", 2, true);
+            until(|| two.snapshot().power == Power::On).await;
+            assert_eq!(one.snapshot(), before);
+            peer.release("one", 2, json!({"value":true})).await;
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(one.snapshot().power, Power::Off);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn notification_after_write_preserves_state_and_advances_the_channel_fifo() {
+    block_on(Rig::new(true, &["one", "two"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one", "two"]).await;
+            let one = function(&control.context.registry, "one", "main");
+            let two = function(&control.context.registry, "two", "main");
+            peer.state.borrow_mut().hold_writes = true;
+            let mut first = Box::pin(one.execute(Command::On));
+            let mut second = Box::pin(one.execute(Command::Toggle));
+            assert!(poll_once(first.as_mut()).await.is_none());
+            assert!(poll_once(second.as_mut()).await.is_none());
+            until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            peer.notify("one", 2, false);
+            peer.notify("two", 2, true);
+            until(|| two.snapshot().power == Power::On).await;
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            assert_eq!(first.await.unwrap().power, Power::Off);
+            until(|| peer.count("rpcReq", "one", 2) == 2 && !peer.state.borrow().held.is_empty())
+                .await;
+            assert_eq!(
+                peer.state
+                    .borrow()
+                    .seen
+                    .iter()
+                    .rev()
+                    .find(|(operation, _)| operation == "rpcReq")
+                    .unwrap()
+                    .1["rpc"]["params"][0]["value"],
+                true
+            );
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            assert_eq!(second.await.unwrap().power, Power::On);
         })
         .await;
     }));

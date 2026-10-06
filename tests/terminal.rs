@@ -232,11 +232,11 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
             .local_status()
             .unwrap();
-        status.update_source(migate::xiaomi::source::SourceStatus {
+        status.update_adapter(migate::xiaomi::adapter::AdapterStatus {
             authentication: report,
-            gateway: migate::xiaomi::source::GatewayStatus::Connected("hub".into()),
+            gateway: migate::xiaomi::adapter::GatewayStatus::Connected("hub".into()),
             catalog_problem: None,
-            pending: vec![migate::xiaomi::source::PendingDevice {
+            pending: vec![migate::xiaomi::adapter::PendingDevice {
                 did: "multi".into(),
                 name: "New cloud name".into(),
                 reason: "subscription rejected".into(),

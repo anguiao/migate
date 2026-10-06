@@ -12,7 +12,7 @@ use crate::{
 use event_listener::Event;
 use std::{cell::RefCell, error::Error, fmt, rc::Rc};
 #[derive(Clone, Debug)]
-pub enum SourceError {
+pub enum AdapterError {
     Storage(StorageError),
     Cloud(CloudError),
     Discovery(DiscoveryError),
@@ -21,7 +21,7 @@ pub enum SourceError {
     NoLocalGateway,
     Cancelled,
 }
-impl fmt::Display for SourceError {
+impl fmt::Display for AdapterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Storage(e) => e.fmt(f),
@@ -30,11 +30,11 @@ impl fmt::Display for SourceError {
             Self::Central(e) => e.fmt(f),
             Self::Unavailable(e) => f.write_str(e),
             Self::NoLocalGateway => f.write_str("no current local gateway for the selected home"),
-            Self::Cancelled => f.write_str("Xiaomi source stopped"),
+            Self::Cancelled => f.write_str("Xiaomi adapter stopped"),
         }
     }
 }
-impl Error for SourceError {
+impl Error for AdapterError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Storage(e) => Some(e),
@@ -45,22 +45,22 @@ impl Error for SourceError {
         }
     }
 }
-impl From<StorageError> for SourceError {
+impl From<StorageError> for AdapterError {
     fn from(e: StorageError) -> Self {
         Self::Storage(e)
     }
 }
-impl From<CentralError> for SourceError {
+impl From<CentralError> for AdapterError {
     fn from(e: CentralError) -> Self {
         Self::Central(e)
     }
 }
-impl From<DiscoveryError> for SourceError {
+impl From<DiscoveryError> for AdapterError {
     fn from(e: DiscoveryError) -> Self {
         Self::Discovery(e)
     }
 }
-impl From<AuthError> for SourceError {
+impl From<AuthError> for AdapterError {
     fn from(e: AuthError) -> Self {
         match e {
             AuthError::Storage(e) => Self::Storage(e),
@@ -68,7 +68,7 @@ impl From<AuthError> for SourceError {
         }
     }
 }
-impl From<CatalogError> for SourceError {
+impl From<CatalogError> for AdapterError {
     fn from(e: CatalogError) -> Self {
         match e {
             CatalogError::Cloud(e) => Self::Cloud(e),
@@ -90,7 +90,7 @@ pub struct PendingDevice {
     pub reason: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SourceStatus {
+pub struct AdapterStatus {
     pub authentication: AuthReport,
     pub gateway: GatewayStatus,
     pub catalog_problem: Option<String>,
@@ -98,11 +98,11 @@ pub struct SourceStatus {
 }
 #[derive(Default)]
 pub(super) struct Ready {
-    result: RefCell<Option<Result<DeviceRegistry, SourceError>>>,
+    result: RefCell<Option<Result<DeviceRegistry, AdapterError>>>,
     changed: Event,
 }
 impl Ready {
-    pub(super) fn finish(&self, result: Result<DeviceRegistry, SourceError>) {
+    pub(super) fn finish(&self, result: Result<DeviceRegistry, AdapterError>) {
         let mut current = self.result.borrow_mut();
         if current.is_none() {
             *current = Some(result);
@@ -110,10 +110,10 @@ impl Ready {
         }
     }
 }
-/// Poll the source alongside this one-shot topology wait; the registry remains shared.
+/// Poll the adapter alongside this one-shot topology wait; the registry remains shared.
 pub struct TopologyReady(pub(super) Rc<Ready>);
 impl TopologyReady {
-    pub async fn wait(self) -> Result<DeviceRegistry, SourceError> {
+    pub async fn wait(self) -> Result<DeviceRegistry, AdapterError> {
         loop {
             let listener = self.0.changed.listen();
             if let Some(result) = self.0.result.borrow().clone() {

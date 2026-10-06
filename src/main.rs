@@ -10,10 +10,10 @@ use migate::{
     storage::{InstanceLock, Store, XiaomiStore},
     terminal::{self, AuthStatus},
     xiaomi::{
+        adapter::XiaomiAdapter,
         auth::{AuthService, AuthenticationState},
         cloud::CloudClient,
         discovery::Discovery,
-        source::XiaomiSource,
     },
 };
 
@@ -118,7 +118,7 @@ fn run_bridge(
     let status = AuthStatus::new(report, executable, data_dir);
     status.log(terminal::current_time());
     let (discovery, driver) = Discovery::start()?;
-    let (source, ready) = XiaomiSource::new(store.clone(), cloud, discovery)?;
+    let (adapter, ready) = XiaomiAdapter::new(store.clone(), cloud, discovery)?;
     future::block_on(async {
         let interrupt = async {
             let signal = shutdown_signal().await?;
@@ -127,8 +127,8 @@ fn run_bridge(
         };
         let networking = future::or(
             async {
-                source.run(|report| status.update_source(report)).await?;
-                Err::<(), RuntimeError>("Xiaomi source ended unexpectedly".into())
+                adapter.run(|report| status.update_adapter(report)).await?;
+                Err::<(), RuntimeError>("Xiaomi adapter ended unexpectedly".into())
             },
             async {
                 driver.run().await?;

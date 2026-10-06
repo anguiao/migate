@@ -1,5 +1,5 @@
 use super::{
-    model::SourceError,
+    model::AdapterError,
     state::{Backoff, Context, Lifetime},
 };
 use crate::{
@@ -12,10 +12,14 @@ use crate::{
     },
 };
 use futures_lite::future;
-use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+    time::Duration,
+};
 
 #[derive(Default)]
-enum CloudSync {
+pub(super) enum CloudSync {
     #[default]
     Idle,
     // Retained during refresh so concurrent failures coalesce into the same attempt.
@@ -37,15 +41,21 @@ pub(super) async fn run(
     cloud: &CloudClient,
     discovery: &Discovery,
     context: Rc<Context>,
-) -> Result<(), SourceError> {
-    let sync = Rc::new(RefCell::new(CloudSync::default()));
-    let mut backoff = Backoff::new(1, 30);
+) -> Result<(), AdapterError> {
+    let sync = &context.cloud_sync;
     let mut due = context.clock.now();
     loop {
         let listener = context.sync_changed.listen();
         if matches!(*sync.borrow(), CloudSync::Paused) {
             future::pending::<()>().await;
         }
+        if let Some(floor) = context.sync_not_before.get()
+            && context.clock.now() < floor
+        {
+            context.clock.wait_until(floor).await;
+            continue;
+        }
+        context.sync_not_before.set(None);
         if !context.sync_requested.replace(false) && context.clock.now() < due {
             future::or(context.clock.wait_until(due), async {
                 listener.await;
@@ -99,7 +109,7 @@ pub(super) async fn run(
         }
         super::state::update_auth(&context, &preparation);
         let Some(credentials) = preparation.credentials else {
-            return Err(SourceError::Unavailable(
+            return Err(AdapterError::Unavailable(
                 "Xiaomi sign-in is required".into(),
             ));
         };
@@ -109,20 +119,34 @@ pub(super) async fn run(
             AuthenticationState::SignInRequired(_)
         ) {
             *sync.borrow_mut() = CloudSync::Paused;
+            context.update_all_availability();
             continue;
         }
         if !authenticated {
             if let AuthenticationState::Unavailable(reason) = &preparation.report.authentication {
                 context.set_catalog_problem(Some(reason.to_string()));
+                match reason {
+                    FailureReason::AccountIdentityMismatch
+                    | FailureReason::CannotDetermineAccountIdentity => {
+                        context.cloud_scope_valid.set(false);
+                        context.update_all_availability();
+                    }
+                    FailureReason::Cloud(error) if error.is_temporary() => {
+                        context.cloud_error(&credentials.tokens.access_token, None, error)?;
+                    }
+                    _ => {}
+                }
             }
             let retry = matches!(&preparation.report.authentication,AuthenticationState::Unavailable(FailureReason::Cloud(error)) if transient(error))
                 || matches!(&preparation.report.certificate_update,crate::xiaomi::auth::CertificateUpdate::Failed(FailureReason::Cloud(error)) if transient(error));
-            due = context.clock.now()
-                + if retry {
-                    backoff.failed()
-                } else {
-                    MEMBER_INTERVAL
-                };
+            due = if retry {
+                context
+                    .sync_not_before
+                    .get()
+                    .unwrap_or_else(|| context.sync_failed())
+            } else {
+                context.clock.now() + MEMBER_INTERVAL
+            };
             continue;
         }
         let selected = {
@@ -145,7 +169,37 @@ pub(super) async fn run(
             Ok(home) => home,
             Err(error) => {
                 context.set_catalog_problem(Some(error.to_string()));
-                due = context.clock.now() + backoff.failed();
+                context.cloud_scope_valid.set(false);
+                context.update_all_availability();
+                due = context.sync_failed();
+                continue;
+            }
+        };
+        let requested = {
+            let live = context.live.borrow();
+            live.devices
+                .iter()
+                .filter(|(did, slot)| {
+                    home.dids.contains(did) && (slot.admitted.is_some() || slot.candidate.is_some())
+                })
+                .map(|(did, _)| did.clone())
+                .collect::<Vec<_>>()
+        };
+        let infos = match cloud
+            .get_home_devices(&credentials.tokens.access_token, &home, &requested)
+            .await
+        {
+            Ok(infos) => infos
+                .into_iter()
+                .map(|info| (info.did.clone(), info))
+                .collect::<BTreeMap<_, _>>(),
+            Err(error) => {
+                context.set_catalog_problem(Some(error.to_string()));
+                context.cloud_error(&credentials.tokens.access_token, None, &error)?;
+                due = context
+                    .sync_not_before
+                    .get()
+                    .unwrap_or_else(|| context.sync_failed());
                 continue;
             }
         };
@@ -177,6 +231,18 @@ pub(super) async fn run(
                 .entry(did.clone())
                 .or_default();
         }
+        {
+            let mut live = context.live.borrow_mut();
+            for (did, slot) in &mut live.devices {
+                slot.cloud_access = infos.get(did).cloned();
+                slot.cloud_forbidden = false;
+            }
+        }
+        context.cloud_scope_valid.set(true);
+        context.http_paused.set(false);
+        context.sync_not_before.set(None);
+        *context.sync_backoff.borrow_mut() = Backoff::new(1, 30);
+        context.update_all_availability();
         context.set_catalog_problem(None);
         context.changed.notify(usize::MAX);
         if membership_changed {
@@ -200,7 +266,6 @@ pub(super) async fn run(
             let client = cloud.clone();
             let credentials = credentials.clone();
             let home = home.clone();
-            let sync = sync.clone();
             let task = async move {
                 let Some(result) = future::or(
                     async {
@@ -229,6 +294,7 @@ pub(super) async fn run(
                             slot.candidate = Some(cached);
                         }
                         current.reconcile(&did)?;
+                        current.request_sync();
                     }
                     Err(error) => {
                         match &error {
@@ -237,33 +303,12 @@ pub(super) async fn run(
                             }
                             _ => current.block_device(&did, error.to_string()),
                         }
-                        if let CatalogError::Cloud(error) = &error
-                            && error.is_unauthorized()
-                            && current.store.xiaomi().load()?.is_some_and(|record| {
-                                record.uid == credentials.uid
-                                    && record.tokens.access_token == credentials.tokens.access_token
-                            })
-                        {
-                            let mut state = sync.borrow_mut();
-                            match &*state {
-                                CloudSync::Refreshed(token)
-                                    if token == &credentials.tokens.access_token =>
-                                {
-                                    *state = CloudSync::Paused;
-                                    current.status.borrow_mut().authentication.authentication =
-                                        AuthenticationState::SignInRequired(FailureReason::Cloud(
-                                            error.clone(),
-                                        ));
-                                    current.status_changed.notify(usize::MAX);
-                                }
-                                CloudSync::Rejected(_) | CloudSync::Paused => {}
-                                _ => {
-                                    *state = CloudSync::Rejected(
-                                        credentials.tokens.access_token.clone(),
-                                    );
-                                    current.request_sync();
-                                }
-                            }
+                        if let CatalogError::Cloud(error) = &error {
+                            current.cloud_error(
+                                &credentials.tokens.access_token,
+                                Some(&did),
+                                error,
+                            )?;
                         }
                     }
                 }
@@ -275,9 +320,9 @@ pub(super) async fn run(
         let retry_certificate = matches!(&preparation.report.certificate_update,crate::xiaomi::auth::CertificateUpdate::Failed(FailureReason::Cloud(error)) if transient(error));
         due = context.clock.now()
             + if retry_certificate {
-                backoff.failed()
+                context.sync_backoff.borrow_mut().failed()
             } else {
-                backoff = Backoff::new(1, 30);
+                *context.sync_backoff.borrow_mut() = Backoff::new(1, 30);
                 MEMBER_INTERVAL
             };
     }

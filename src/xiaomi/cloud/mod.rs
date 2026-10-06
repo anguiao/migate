@@ -6,7 +6,7 @@ mod oauth;
 mod properties;
 mod response;
 
-pub use catalog::{CloudDevice, OwnedHome, OwnedHomes, group_id};
+pub use catalog::{CloudDevice, CloudDeviceInfo, OwnedHome, OwnedHomes, group_id};
 pub use client::{CLOUD_BASE_URL, CloudClient, HomePage, TokenResponse};
 pub use error::{CloudError, CloudErrorKind};
 pub use notifications::{
@@ -21,6 +21,8 @@ pub use oauth::{AUTHORIZATION_URL, AuthorizationAttempt, validate_saved_redirect
 pub const REGION: &str = "cn";
 pub const CLIENT_ID: u64 = 2_882_303_761_520_251_711;
 
+#[cfg(test)]
+mod device_info_tests;
 #[cfg(test)]
 mod property_tests;
 #[cfg(test)]

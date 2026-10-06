@@ -1,6 +1,6 @@
 use super::{
     bootstrap, cloud, local,
-    model::{SourceError, SourceStatus, TopologyReady},
+    model::{AdapterError, AdapterStatus, TopologyReady},
     state::Context,
 };
 use crate::{
@@ -12,7 +12,7 @@ use std::rc::Rc;
 #[cfg(test)]
 use std::time::Duration;
 /// One shared home session and one persistent command consumer per function.
-pub struct XiaomiSource {
+pub struct XiaomiAdapter {
     pub(super) cloud: CloudClient,
     pub(super) auth: AuthService,
     pub(super) discovery: Discovery,
@@ -22,15 +22,15 @@ pub struct XiaomiSource {
     #[cfg(test)]
     pub(super) request_timeout: Duration,
 }
-impl XiaomiSource {
+impl XiaomiAdapter {
     pub fn new(
         store: Store,
         cloud: CloudClient,
         discovery: Discovery,
-    ) -> Result<(Self, TopologyReady), SourceError> {
+    ) -> Result<(Self, TopologyReady), AdapterError> {
         Self::build(store, cloud, discovery, bootstrap::system_clock())
     }
-    pub async fn run(self, mut on_status: impl FnMut(SourceStatus)) -> Result<(), SourceError> {
+    pub async fn run(self, mut on_status: impl FnMut(AdapterStatus)) -> Result<(), AdapterError> {
         let mut reported = self.context.status.borrow().clone();
         on_status(reported.clone());
         let context = self.context.clone();
@@ -56,7 +56,7 @@ impl XiaomiSource {
         }
         result
     }
-    async fn run_inner(&self) -> Result<(), SourceError> {
+    async fn run_inner(&self) -> Result<(), AdapterError> {
         future::or(
             local::run(
                 self.context.clone(),
@@ -77,9 +77,9 @@ impl XiaomiSource {
         .await
     }
 }
-impl Drop for XiaomiSource {
+impl Drop for XiaomiAdapter {
     fn drop(&mut self) {
-        self.context.disconnect("Xiaomi source stopped".into());
+        self.context.stop();
         for physical in self.context.registry.list() {
             self.context.registry.remove(physical.key());
         }
@@ -89,6 +89,6 @@ impl Drop for XiaomiSource {
             }
         }
         self.context.tasks.clear();
-        self.context.ready.finish(Err(SourceError::Cancelled));
+        self.context.ready.finish(Err(AdapterError::Cancelled));
     }
 }

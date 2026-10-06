@@ -1,5 +1,7 @@
 use super::{
-    model::SourceError,
+    model::AdapterError,
+    observations::Observations,
+    routing::ControlPath,
     state::{Context, DeviceRecord, Lifetime},
 };
 use crate::{
@@ -29,7 +31,9 @@ struct Refresh {
     ready_at: Duration,
 }
 pub(super) struct DeviceWork {
+    // Binding work ends on incompatibility, while the physical device keeps its consumers.
     pub(super) life: Lifetime,
+    pub(super) observations: Observations,
     pub(super) record: Rc<DeviceRecord>,
     pub(super) subscribed: RefCell<BTreeSet<(u32, u32)>>,
     subscribe_requested: Cell<bool>,
@@ -44,6 +48,7 @@ impl DeviceWork {
     pub(super) fn new(record: Rc<DeviceRecord>, refresh_changed: Rc<Event>) -> Self {
         let work = Self {
             life: Lifetime::default(),
+            observations: Observations::default(),
             record,
             subscribed: RefCell::new(BTreeSet::new()),
             subscribe_requested: Cell::new(true),
@@ -57,6 +62,36 @@ impl DeviceWork {
         work.refresh();
         work
     }
+    pub(super) fn local_connected(&self) {
+        self.local_disconnected();
+        self.subscribe_requested.set(true);
+        self.changed.notify(usize::MAX);
+    }
+    pub(super) fn local_disconnected(&self) {
+        self.observations.source_changed();
+        self.subscribed.borrow_mut().clear();
+        self.subscribe_running.set(false);
+        *self.subscribe_problem.borrow_mut() = None;
+        self.refresh();
+    }
+    pub(super) fn notify(&self, binding: PropertyBinding, value: bool) {
+        if self.life.is_closed() {
+            return;
+        }
+        let cached = self.record.cached.borrow();
+        if cached.device.refresh_trigger == Some(binding) {
+            drop(cached);
+            self.refresh();
+        } else if let Some(function) = cached
+            .device
+            .functions
+            .iter()
+            .find(|function| function.power == binding)
+        {
+            self.observations
+                .notify(&self.record, &function.description.id, value);
+        }
+    }
     pub(super) fn retry_subscriptions(&self) {
         if !self.subscribe_running.get() {
             self.subscribe_requested.set(true);
@@ -66,6 +101,7 @@ impl DeviceWork {
     pub(super) fn refresh(&self) {
         let mut pending = self.refresh_pending.borrow_mut();
         for function in &self.record.cached.borrow().device.functions {
+            self.observations.refresh(&function.description.id);
             if !pending
                 .iter()
                 .any(|read| read.id == function.description.id)
@@ -81,6 +117,8 @@ impl DeviceWork {
         self.refresh_changed.notify(usize::MAX);
     }
     pub(super) fn bindings_changed(&self) {
+        self.observations.source_changed();
+        self.subscribed.borrow_mut().clear();
         self.subscribe_requested.set(true);
         self.refresh_pending.borrow_mut().clear();
         self.read_problems.borrow_mut().clear();
@@ -113,6 +151,9 @@ impl DeviceWork {
         (!values.is_empty()).then(|| values.join("; "))
     }
     fn report(&self, context: &Context, did: &str) {
+        if self.life.is_closed() {
+            return;
+        }
         let blocked = context.live.borrow().devices[did].blocked.clone();
         context.problem(did, blocked.or_else(|| self.diagnostic()));
     }
@@ -131,7 +172,7 @@ pub(super) async fn run(
     work: Rc<DeviceWork>,
     handle: SessionHandle,
     context: Rc<Context>,
-) -> Result<(), SourceError> {
+) -> Result<(), AdapterError> {
     // Poll cancellation first so removed work cannot submit another request.
     future::or(
         async {
@@ -146,7 +187,7 @@ async fn subscriptions(
     work: &DeviceWork,
     handle: &SessionHandle,
     context: &Context,
-) -> Result<(), SourceError> {
+) -> Result<(), AdapterError> {
     let did = work.record.cached.borrow().device.key.id.clone();
     loop {
         let listener = work.changed.listen();
@@ -155,6 +196,7 @@ async fn subscriptions(
             continue;
         }
         work.subscribe_running.set(true);
+        let generation = work.record.binding_generation.get();
         context
             .clock
             .wait_until(context.clock.now() + Duration::from_millis(10))
@@ -168,22 +210,30 @@ async fn subscriptions(
             let mut failed = Vec::new();
             let mut problem = None;
             for binding in pending {
-                if !work.bindings().contains(&binding) {
+                if work.record.binding_generation.get() != generation
+                    || !work.bindings().contains(&binding)
+                {
                     continue;
                 }
                 match handle.subscribe_property(&did, binding).await {
-                    Ok(()) => {
+                    Ok(()) if work.record.binding_generation.get() == generation => {
                         work.subscribed
                             .borrow_mut()
                             .insert((binding.siid, binding.piid));
                     }
+                    Ok(()) => {}
                     Err(error) => {
-                        if work.bindings().contains(&binding) {
+                        if work.record.binding_generation.get() == generation
+                            && work.bindings().contains(&binding)
+                        {
                             problem = Some(work.problem("subscribe", binding, &error));
                             failed.push(binding);
                         }
                     }
                 }
+            }
+            if work.record.binding_generation.get() != generation {
+                break;
             }
             if failed.is_empty() || attempt == 3 {
                 *work.subscribe_problem.borrow_mut() = problem;
@@ -202,7 +252,7 @@ async fn subscriptions(
 pub(super) async fn refreshes(
     context: Rc<Context>,
     handle: SessionHandle,
-) -> Result<(), SourceError> {
+) -> Result<(), AdapterError> {
     let changed = context
         .live
         .borrow()
@@ -297,23 +347,28 @@ async fn read_one(
             if work.record.binding(&id) != binding {
                 return;
             }
+            let generation = work.record.binding_generation.get();
+            let stamp = work.observations.read_stamp(&work.record, &id);
             let observing = work.clone();
             let observing_id = id.clone();
             let result = handle
                 .read_property_with_timeout(&did, binding, READ_TIMEOUT, move |result| {
-                    if observing.record.binding(&observing_id) == binding
+                    if !observing.life.is_closed()
                         && let Ok(value) = result
                     {
-                        observing
-                            .record
-                            .physical
-                            .function(&observing_id)
-                            .unwrap()
-                            .observe(value);
+                        observing.observations.observe_read(
+                            &observing.record,
+                            &observing_id,
+                            &stamp,
+                            value,
+                        );
                     }
                 })
                 .await;
-            if work.record.binding(&id) != binding {
+            if work.life.is_closed()
+                || work.record.binding_generation.get() != generation
+                || work.record.binding(&id) != binding
+            {
                 return;
             }
             match result {
@@ -356,36 +411,85 @@ pub(super) async fn consume(
     context: Rc<Context>,
     record: Rc<DeviceRecord>,
     function_id: String,
-) -> Result<(), SourceError> {
-    let did = record.physical.key().id.clone();
-    while let Some(request) = receiver.next().await {
-        let session = context
-            .live
-            .borrow()
-            .session
-            .as_ref()
-            .map(|session| session.handle.clone());
-        let Some(handle) = session else {
-            request.reject(CommandError::Unavailable("gateway is disconnected".into()));
-            continue;
-        };
-        let binding = record.binding(&function_id);
-        let target = request.target;
-        let observing = record.clone();
-        let command_function = function_id.clone();
-        let result = handle.set_property(&did, binding, target, move |result| {
-            if observing.binding(&command_function) != binding {
-                request.reject(CommandError::Cancelled);
-            } else {
-                match result {
-                    Ok(()) => {
-                        let _ = request.accept();
+) -> Result<(), AdapterError> {
+    future::or(
+        async {
+            record.life.ended().await;
+            Ok(())
+        },
+        async {
+            let did = record.physical.key().id.clone();
+            while let Some(request) = receiver.next().await {
+                let work = context
+                    .live
+                    .borrow()
+                    .devices
+                    .get(&did)
+                    .and_then(|slot| slot.work.clone());
+                let path = context.control_path(&did);
+                let (Some(work), Some(path)) = (work, path) else {
+                    request.reject(CommandError::Unavailable("no usable control path".into()));
+                    continue;
+                };
+                let binding = record.binding(&function_id);
+                let target = request.target;
+                let stamp = work.observations.write_stamp(&record, &function_id);
+                match path {
+                    ControlPath::Local(handle) => {
+                        let observing = work.clone();
+                        let id = function_id.clone();
+                        let result =
+                            handle.set_property(
+                                &did,
+                                binding,
+                                target,
+                                move |result| match result {
+                                    Ok(()) => observing.observations.accept_write(
+                                        &observing.record,
+                                        &id,
+                                        &stamp,
+                                        request,
+                                    ),
+                                    Err(error) => request.reject(command_error(error)),
+                                },
+                            );
+                        let _ = result.await;
                     }
-                    Err(error) => request.reject(command_error(error)),
+                    ControlPath::Cloud(credentials) => {
+                        match context
+                            .cloud
+                            .set_property(&credentials.tokens.access_token, &did, binding, target)
+                            .await
+                        {
+                            Ok(()) => work.observations.accept_write(
+                                &record,
+                                &function_id,
+                                &stamp,
+                                request,
+                            ),
+                            Err(error) => {
+                                request.reject(match error.kind() {
+                                    crate::xiaomi::cloud::CloudErrorKind::Timeout => {
+                                        CommandError::Timeout
+                                    }
+                                    crate::xiaomi::cloud::CloudErrorKind::Business(code)
+                                    | crate::xiaomi::cloud::CloudErrorKind::PropertyRejected(
+                                        code,
+                                    ) => CommandError::Rejected(format!("cloud code {code}")),
+                                    _ => CommandError::SendFailed(error.to_string()),
+                                });
+                                context.cloud_error(
+                                    &credentials.tokens.access_token,
+                                    Some(&did),
+                                    &error,
+                                )?;
+                            }
+                        }
+                    }
                 }
             }
-        });
-        let _ = result.await;
-    }
-    Ok(())
+            Ok(())
+        },
+    )
+    .await
 }

@@ -1,7 +1,7 @@
 use super::{
-    model::{GatewayStatus, Ready, SourceError, SourceStatus, TopologyReady},
-    runner::XiaomiSource,
-    state::{Context, DeviceSlot, Live},
+    model::{AdapterError, AdapterStatus, GatewayStatus, Ready, TopologyReady},
+    runner::XiaomiAdapter,
+    state::{Backoff, Context, DeviceSlot, Live},
     tasks::TaskSet,
 };
 use crate::{
@@ -38,13 +38,13 @@ impl Clock for SystemClock {
         })
     }
 }
-impl XiaomiSource {
+impl XiaomiAdapter {
     pub(super) fn build(
         store: Store,
         cloud: CloudClient,
         discovery: Discovery,
         clock: Arc<dyn Clock>,
-    ) -> Result<(Self, TopologyReady), SourceError> {
+    ) -> Result<(Self, TopologyReady), AdapterError> {
         let auth = AuthService::new(store.xiaomi(), cloud.clone());
         let credentials = auth.saved_bridge_credentials()?;
         let scope = credentials
@@ -74,6 +74,13 @@ impl XiaomiSource {
         }
         let report = auth.local_status()?;
         let context = Rc::new(Context {
+            cloud: cloud.clone(),
+            cloud_sync: RefCell::new(super::cloud::CloudSync::default()),
+            http_paused: Cell::new(false),
+            cloud_scope_valid: Cell::new(false),
+            sync_not_before: Cell::new(None),
+            sync_backoff: RefCell::new(Backoff::new(1, 30)),
+            refresh_changed: Rc::new(Event::new()),
             live: RefCell::new(Live {
                 credentials,
                 scope,
@@ -84,7 +91,7 @@ impl XiaomiSource {
             store,
             tasks: TaskSet::default(),
             changed: Event::new(),
-            status: RefCell::new(SourceStatus {
+            status: RefCell::new(AdapterStatus {
                 authentication: report,
                 gateway: GatewayStatus::Discovering,
                 catalog_problem: None,
@@ -100,6 +107,7 @@ impl XiaomiSource {
             sync_changed: Event::new(),
         });
         for (record, receivers) in consumers {
+            context.install_work(&record.physical.key().id);
             context.add_consumers(record, receivers);
         }
         Ok((
