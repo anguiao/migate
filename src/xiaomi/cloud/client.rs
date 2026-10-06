@@ -43,6 +43,7 @@ pub struct HomePage {
 pub struct CloudClient {
     client: HttpClient,
     base_url: String,
+    timeout: Duration,
     pub(super) instance_base_url: String,
 }
 
@@ -72,6 +73,7 @@ impl CloudClient {
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_owned(),
+            timeout,
             instance_base_url: "https://miot-spec.org".to_owned(),
         })
     }
@@ -226,6 +228,18 @@ impl CloudClient {
         access_token: &str,
         body: Value,
     ) -> Result<T, CloudError> {
+        self.protected_post_with_timeout(operation, path, access_token, body, self.timeout)
+            .await
+    }
+
+    pub(super) async fn protected_post_with_timeout<T: DeserializeOwned>(
+        &self,
+        operation: &'static str,
+        path: &str,
+        access_token: &str,
+        body: Value,
+        timeout: Duration,
+    ) -> Result<T, CloudError> {
         if access_token.is_empty() {
             return Err(CloudError::input(operation));
         }
@@ -233,6 +247,7 @@ impl CloudClient {
         let request = Request::builder()
             .method("POST")
             .uri(url.as_str())
+            .timeout(timeout.min(self.timeout))
             .header("Content-Type", "application/json")
             .header("X-Client-BizId", "haapi")
             .header("X-Client-AppId", CLIENT_ID.to_string())

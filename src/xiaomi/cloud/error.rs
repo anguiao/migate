@@ -5,6 +5,7 @@ pub enum CloudErrorKind {
     Unauthorized,
     HttpStatus(u16),
     Business(i64),
+    PropertyRejected(i64),
     Protocol,
     Network,
     Timeout,
@@ -46,10 +47,34 @@ impl CloudError {
         &self.kind
     }
     pub fn is_unauthorized(&self) -> bool {
-        self.kind == CloudErrorKind::Unauthorized
+        matches!(
+            self.kind,
+            CloudErrorKind::Unauthorized
+                | CloudErrorKind::Business(-704_012_903..=-704_012_901)
+                | CloudErrorKind::PropertyRejected(-704_012_903..=-704_012_901)
+        )
     }
     pub fn is_timeout(&self) -> bool {
         self.kind == CloudErrorKind::Timeout
+    }
+    pub fn is_temporary(&self) -> bool {
+        matches!(
+            self.kind,
+            CloudErrorKind::Network
+                | CloudErrorKind::Timeout
+                | CloudErrorKind::HttpStatus(408 | 429 | 500..=599)
+        )
+    }
+    // Xiaomi's MIoT SDK error table distinguishes device offline and access errors
+    // from property errors. Only a correlated item can invalidate device access.
+    pub fn is_device_offline(&self) -> bool {
+        matches!(self.kind, CloudErrorKind::PropertyRejected(-704_042_011))
+    }
+    pub fn is_device_forbidden(&self) -> bool {
+        matches!(
+            self.kind,
+            CloudErrorKind::PropertyRejected(-704_012_904 | -704_012_905)
+        )
     }
     pub fn http_status(&self) -> Option<u16> {
         if let CloudErrorKind::HttpStatus(value) = self.kind {
@@ -80,6 +105,9 @@ impl fmt::Display for CloudError {
                     formatter.write_str(")")?;
                 }
                 Ok(())
+            }
+            CloudErrorKind::PropertyRejected(code) => {
+                write!(formatter, "cloud property rejected with code {code}")
             }
             CloudErrorKind::Protocol => formatter.write_str("invalid cloud response"),
             CloudErrorKind::Network => formatter.write_str("network request failed"),
