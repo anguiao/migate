@@ -132,6 +132,15 @@ impl Context {
             .spawn(super::work::run(work, handle, self.clone()));
     }
     pub(super) fn local_candidate(&self, did: &str, push: bool) -> Option<SessionHandle> {
+        if !self
+            .status
+            .borrow()
+            .authentication
+            .certificate
+            .is_some_and(|validity| validity.currently_valid(self.clock.unix_now()))
+        {
+            return None;
+        }
         let live = self.live.borrow();
         let slot = live.devices.get(did)?;
         let record = slot.admitted.as_ref()?;
@@ -151,19 +160,43 @@ impl Context {
         live.session.as_ref().map(|session| session.handle.clone())
     }
     pub(super) fn cloud_authenticated(&self) -> bool {
-        self.cloud_scope_valid.get()
-            && !matches!(
-                *self.cloud_sync.borrow(),
-                CloudSync::Rejected(_) | CloudSync::Paused
-            )
-            && {
-                let live = self.live.borrow();
-                live.credentials.as_ref().is_some_and(|credentials| {
-                    live.scope
-                        .as_ref()
-                        .is_some_and(|scope| scope.uid == credentials.uid)
-                })
+        self.cloud_scope_valid.get() && self.token_usable() && {
+            let live = self.live.borrow();
+            live.credentials.as_ref().is_some_and(|credentials| {
+                live.scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.uid == credentials.uid)
+            })
+        }
+    }
+    pub(super) fn token_usable(&self) -> bool {
+        !matches!(
+            *self.cloud_sync.borrow(),
+            CloudSync::Rejected(_) | CloudSync::Paused
+        ) && self
+            .live
+            .borrow()
+            .credentials
+            .as_ref()
+            .is_some_and(|credentials| credentials.tokens.expires_at > self.clock.unix_now())
+    }
+    pub(super) fn current_token(&self, token: &str) -> bool {
+        self.token_usable()
+            && self
+                .live
+                .borrow()
+                .credentials
+                .as_ref()
+                .is_some_and(|credentials| credentials.tokens.access_token == token)
+    }
+    pub(super) async fn token_retired(&self, token: &str) {
+        loop {
+            let listener = self.credentials_changed.listen();
+            if !self.current_token(token) {
+                return;
             }
+            listener.await;
+        }
     }
     pub(super) fn cloud_candidate(&self, did: &str, http: bool) -> bool {
         if !self.cloud_authenticated() || (http && self.http_paused.get()) {

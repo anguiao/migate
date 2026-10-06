@@ -9,9 +9,10 @@ use crate::{
     device::{DeviceRegistry, PhysicalDevice},
     storage::{CachedPhysicalDevice, CachedScope, Store, XiaomiRecord},
     xiaomi::{
-        auth::BridgePreparation,
+        auth::{AuthenticationState, CertificateUpdate},
         capability::PropertyBinding,
         central::{CentralError, DeviceAccess, SessionHandle},
+        certificate::CertificateValidity,
         cloud::{CloudClient, CloudDeviceInfo},
     },
 };
@@ -256,28 +257,44 @@ pub(super) struct Context {
     pub(super) sync_requested: Cell<bool>,
     pub(super) sync_changed: Event,
 }
-pub(super) fn update_auth(context: &Context, preparation: &BridgePreparation) {
-    let mut live = context.live.borrow_mut();
-    if let Some(credentials) = &preparation.credentials
-        && live
-            .scope
-            .as_ref()
-            .is_none_or(|scope| scope.uid == credentials.uid)
-    {
+impl Context {
+    pub(super) fn adopt_credentials(&self, credentials: XiaomiRecord) {
+        let mut live = self.live.borrow_mut();
         let changed = live.credentials.as_ref().is_none_or(|old| {
-            old.uid != credentials.uid
-                || old.tokens.access_token != credentials.tokens.access_token
+            old.tokens != credentials.tokens
+                || old.certificate_pem != credentials.certificate_pem
                 || old.oauth_client_uuid != credentials.oauth_client_uuid
         });
-        live.credentials = Some(credentials.clone());
+        live.credentials = Some(credentials);
+        drop(live);
         if changed {
-            context.credentials_changed.notify(usize::MAX);
+            self.credentials_changed.notify(usize::MAX);
+            self.changed.notify(usize::MAX);
+            self.refresh_changed.notify(usize::MAX);
+            self.update_all_availability();
         }
     }
-    drop(live);
-    context.status.borrow_mut().authentication = preparation.report.clone();
-    context.status_changed.notify(usize::MAX);
-    context.changed.notify(usize::MAX);
+    pub(super) fn authentication(&self, authentication: AuthenticationState) {
+        let mut status = self.status.borrow_mut();
+        status.authentication.authentication = authentication;
+        status
+            .authentication
+            .set_completed_at(self.clock.unix_now());
+        drop(status);
+        self.status_changed.notify(usize::MAX);
+    }
+    pub(super) fn certificate(&self, validity: CertificateValidity, update: CertificateUpdate) {
+        let mut status = self.status.borrow_mut();
+        status.authentication.certificate = Some(validity);
+        status.authentication.certificate_update = update;
+        status
+            .authentication
+            .set_completed_at(self.clock.unix_now());
+        drop(status);
+        self.status_changed.notify(usize::MAX);
+        self.update_all_availability();
+        self.changed.notify(usize::MAX);
+    }
 }
 pub(super) struct Backoff {
     delay: Duration,

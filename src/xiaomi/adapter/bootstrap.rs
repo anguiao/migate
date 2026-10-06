@@ -21,6 +21,7 @@ use std::{
 };
 pub(super) trait Clock: Send + Sync {
     fn now(&self) -> Duration;
+    fn unix_now(&self) -> i64;
     fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
@@ -31,6 +32,9 @@ struct SystemClock(Instant);
 impl Clock for SystemClock {
     fn now(&self) -> Duration {
         self.0.elapsed()
+    }
+    fn unix_now(&self) -> i64 {
+        time::OffsetDateTime::now_utc().unix_timestamp()
     }
     fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {

@@ -1,8 +1,8 @@
-use super::{AuthError, AuthReport, AuthenticationState, CertificateUpdate, FailureReason};
+use super::{AuthError, AuthReport, AuthenticationState, CertificateUpdate, FailureReason, tokens};
 use crate::{
-    storage::{StorageError, XiaomiRecord, XiaomiStore},
+    storage::{StorageError, TokenSet, XiaomiRecord, XiaomiStore},
     xiaomi::{
-        certificate::{CertificateValidity, validate_certificate},
+        certificate::{CertificateValidity, ClientIdentity, validate_certificate},
         cloud::{CloudClient, OwnedHome, validate_saved_redirect_uri},
     },
 };
@@ -62,24 +62,8 @@ impl AuthService {
     /// A cloud failure remains diagnostic; local authorization is determined
     /// by the gateway using these saved credentials. Source owns static cache restoration.
     pub async fn prepare_bridge(&self) -> Result<BridgePreparation, AuthError> {
-        self.prepare_bridge_mode(None).await
-    }
-
-    pub(crate) async fn prepare_bridge_after_unauthorized(
-        &self,
-        rejected_token: &str,
-    ) -> Result<BridgePreparation, AuthError> {
-        self.prepare_bridge_mode(Some(rejected_token)).await
-    }
-
-    async fn prepare_bridge_mode(
-        &self,
-        rejected_token: Option<&str>,
-    ) -> Result<BridgePreparation, AuthError> {
         let mut homes = Vec::new();
-        let report = self
-            .check_mode_with_token(Some(&mut homes), rejected_token)
-            .await?;
+        let report = self.check_mode(Some(&mut homes)).await?;
         if matches!(
             report.authentication,
             AuthenticationState::Unavailable(
@@ -101,6 +85,59 @@ impl AuthService {
     /// or unavailable. Gateway TLS performs current validity and authorization.
     pub fn saved_bridge_credentials(&self) -> Result<Option<XiaomiRecord>, AuthError> {
         Ok(self.load_validated()?.map(|stored| stored.record))
+    }
+
+    pub(super) async fn refresh_tokens_once(
+        &self,
+        redirect_uri: &str,
+        refresh_token: &str,
+        now: impl Fn() -> i64,
+    ) -> Result<TokenSet, AuthError> {
+        let response = self
+            .cloud
+            .refresh_token(redirect_uri, refresh_token)
+            .await
+            .map_err(AuthError::Cloud)?;
+        let replacement = tokens::from_response(response, now()).map_err(AuthError::Cloud)?;
+        self.store.update_tokens(&replacement)?;
+        Ok(replacement)
+    }
+
+    pub(super) fn client_identity(
+        &self,
+        record: &XiaomiRecord,
+    ) -> Result<ClientIdentity, AuthError> {
+        ClientIdentity::from_private_key(&record.uid, &record.virtual_did, &record.private_key_pem)
+            .map_err(|error| self.corrupt_record(error).into())
+    }
+
+    pub(super) fn save_certificate_response(
+        &self,
+        record: &XiaomiRecord,
+        certificate_pem: &str,
+        completed_at: i64,
+    ) -> Result<Result<CertificateValidity, FailureReason>, AuthError> {
+        let validity = match validate_certificate(
+            &record.uid,
+            &record.virtual_did,
+            &record.private_key_pem,
+            certificate_pem,
+        ) {
+            Ok(validity) => validity,
+            Err(_) => return Ok(Err(FailureReason::InvalidCertificate)),
+        };
+        if !validity.currently_valid(completed_at) {
+            return Ok(Err(FailureReason::CertificateNotCurrentlyValid));
+        }
+        self.store.update_certificate(certificate_pem)?;
+        Ok(Ok(validity))
+    }
+
+    pub(super) fn reload_credentials(&self) -> Result<StoredRecord, AuthError> {
+        self.load_validated()?.ok_or_else(|| {
+            self.corrupt_record("Xiaomi credentials disappeared after an update")
+                .into()
+        })
     }
 
     pub(super) fn load_validated(&self) -> Result<Option<StoredRecord>, AuthError> {

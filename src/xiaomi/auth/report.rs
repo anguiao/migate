@@ -24,6 +24,7 @@ pub enum CertificateUpdate {
 pub enum FailureReason {
     Cloud(CloudError),
     CloudNotification(crate::xiaomi::cloud::NotificationError),
+    AccessTokenExpired,
     CannotDetermineAccountIdentity,
     AccountIdentityMismatch,
     InvalidClientIdentity,
@@ -36,6 +37,7 @@ impl fmt::Display for FailureReason {
         match self {
             Self::Cloud(error) => error.fmt(formatter),
             Self::CloudNotification(error) => error.fmt(formatter),
+            Self::AccessTokenExpired => formatter.write_str("Xiaomi access token has expired"),
             Self::CannotDetermineAccountIdentity => formatter
                 .write_str("Cannot determine account identity required for gateway certificate"),
             Self::AccountIdentityMismatch => {
@@ -75,6 +77,10 @@ impl AuthReport {
 
     pub fn completed_at(&self) -> i64 {
         self.completed_at
+    }
+
+    pub(crate) fn set_completed_at(&mut self, completed_at: i64) {
+        self.completed_at = completed_at;
     }
 
     #[cfg(test)]

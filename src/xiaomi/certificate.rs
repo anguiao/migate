@@ -127,7 +127,11 @@ impl CertificateValidity {
     }
 
     pub fn renewal_due(&self, now: i64) -> bool {
-        now >= self.not_after.saturating_sub(RENEWAL_MARGIN_SECONDS)
+        now >= self.renewal_at()
+    }
+
+    pub(crate) fn renewal_at(&self) -> i64 {
+        self.not_after.saturating_sub(RENEWAL_MARGIN_SECONDS)
     }
 }
 

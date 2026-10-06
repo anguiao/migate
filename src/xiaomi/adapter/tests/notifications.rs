@@ -101,8 +101,8 @@ fn cloud_notifications_activate_after_subscription_and_update_cloud_only_device(
 }
 
 #[derive(Default)]
-struct CloudPeerState {
-    connects: Vec<String>,
+pub(super) struct CloudPeerState {
+    pub(super) connects: Vec<String>,
     connacks: std::collections::VecDeque<ConnectReturnCode>,
     seen: Vec<Packet>,
     held: Vec<Subscribe>,
@@ -111,8 +111,8 @@ struct CloudPeerState {
     send: Vec<Packet>,
 }
 #[derive(Default)]
-struct CloudPeer {
-    state: RefCell<CloudPeerState>,
+pub(super) struct CloudPeer {
+    pub(super) state: RefCell<CloudPeerState>,
     changed: Event,
 }
 impl CloudPeer {
@@ -172,7 +172,7 @@ impl CloudPeer {
             }
         })
     }
-    async fn run(&self, listener: &Async<TcpListener>) {
+    pub(super) async fn run(&self, listener: &Async<TcpListener>) {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
             let mut broker = CloudBroker {
@@ -266,7 +266,7 @@ impl CloudBroker {
         }
     }
 }
-fn with_cloud_peer(members: &[&str]) -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
+pub(super) fn with_cloud_peer(members: &[&str]) -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
     let rig = Rig::new(true, members);
     rig.cloud
         .lock()
@@ -281,7 +281,7 @@ fn with_cloud_peer(members: &[&str]) -> (Rig, Async<TcpListener>, Rc<CloudPeer>)
     );
     (rig, listener, Rc::new(CloudPeer::default()))
 }
-fn cloud_active(c: &Control, did: &str) -> bool {
+pub(super) fn cloud_active(c: &Control, did: &str) -> bool {
     c.context.live.borrow().devices[did]
         .work
         .as_ref()
@@ -365,6 +365,7 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
                     .store(false, std::sync::atomic::Ordering::Relaxed);
                 if scope_failure {
                     c.context.cloud_scope_valid.set(false);
+                    c.context.update_all_availability();
                     c.context.changed.notify(usize::MAX);
                 } else {
                     c.cloud.lock().unwrap().property_code = -704_012_904;

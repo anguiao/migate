@@ -1,5 +1,6 @@
 mod bootstrap;
 mod cloud;
+mod credentials;
 mod diagnostics;
 mod local;
 mod membership;

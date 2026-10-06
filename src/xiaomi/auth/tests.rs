@@ -1,4 +1,6 @@
 use super::*;
+#[path = "bridge_tests.rs"]
+mod bridge_tests;
 use crate::{
     storage::{Store, TokenSet, XiaomiRecord},
     xiaomi::{

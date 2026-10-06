@@ -1,11 +1,10 @@
 use super::{
     AuthError, AuthReport, AuthService, AuthenticationState, CertificateUpdate, FailureReason,
-    tokens,
 };
 use crate::{
     storage::{StorageError, TokenSet},
     xiaomi::{
-        certificate::{CertificateValidity, ClientIdentity, validate_certificate},
+        certificate::CertificateValidity,
         cloud::{CloudError, HomePage, OwnedHome},
     },
 };
@@ -31,15 +30,7 @@ impl AuthService {
 
     pub(super) async fn check_mode(
         &self,
-        bridge_homes: Option<&mut Vec<OwnedHome>>,
-    ) -> Result<AuthReport, AuthError> {
-        self.check_mode_with_token(bridge_homes, None).await
-    }
-
-    pub(super) async fn check_mode_with_token(
-        &self,
         mut bridge_homes: Option<&mut Vec<OwnedHome>>,
-        rejected_token: Option<&str>,
     ) -> Result<AuthReport, AuthError> {
         let Some(stored) = self.load_validated()? else {
             return Ok(AuthReport {
@@ -58,8 +49,7 @@ impl AuthService {
             refreshed: false,
         };
 
-        if ((self.now)() >= session.tokens.refresh_at
-            || rejected_token == Some(session.tokens.access_token.as_str()))
+        if (self.now)() >= session.tokens.refresh_at
             && let Err(failure) = session.refresh().await
         {
             return failure.auth_report(old_validity, (self.now)());
@@ -109,12 +99,7 @@ impl AuthService {
             });
         }
 
-        let identity = ClientIdentity::from_private_key(
-            &record.uid,
-            &record.virtual_did,
-            &record.private_key_pem,
-        )
-        .map_err(|error| self.corrupt_record(error))?;
+        let identity = self.client_identity(&record)?;
         let certificate_pem = match session
             .request(async |token| self.cloud.get_certificate(token, &identity.csr_pem).await)
             .await
@@ -122,32 +107,18 @@ impl AuthService {
             Ok(certificate) => certificate,
             Err(failure) => return failure.certificate_report(old_validity, (self.now)()),
         };
-        let new_validity = match validate_certificate(
-            &record.uid,
-            &record.virtual_did,
-            &record.private_key_pem,
-            &certificate_pem,
-        ) {
-            Ok(validity) => validity,
-            Err(_) => {
-                return Ok(AuthReport::failed_certificate(
-                    FailureReason::InvalidCertificate,
-                    Some(old_validity),
-                    (self.now)(),
-                ));
-            }
-        };
         let completed_at = (self.now)();
-        if !new_validity.currently_valid(completed_at) {
-            return Ok(AuthReport::failed_certificate(
-                FailureReason::CertificateNotCurrentlyValid,
-                Some(old_validity),
-                completed_at,
-            ));
-        }
-        self.store
-            .update_certificate(&certificate_pem)
-            .map_err(AuthError::Storage)?;
+        let new_validity =
+            match self.save_certificate_response(&record, &certificate_pem, completed_at)? {
+                Ok(validity) => validity,
+                Err(reason) => {
+                    return Ok(AuthReport::failed_certificate(
+                        reason,
+                        Some(old_validity),
+                        completed_at,
+                    ));
+                }
+            };
         Ok(AuthReport {
             authentication: AuthenticationState::Authenticated,
             certificate: Some(new_validity),
@@ -183,18 +154,14 @@ impl CheckSession<'_> {
 
     async fn refresh(&mut self) -> Result<(), RequestFailure> {
         self.refreshed = true;
-        let response = self
+        let replacement = self
             .auth
-            .cloud
-            .refresh_token(self.redirect_uri, &self.tokens.refresh_token)
+            .refresh_tokens_once(self.redirect_uri, &self.tokens.refresh_token, self.auth.now)
             .await
-            .map_err(RequestFailure::Refresh)?;
-        let replacement =
-            tokens::from_response(response, (self.auth.now)()).map_err(RequestFailure::Refresh)?;
-        self.auth
-            .store
-            .update_tokens(&replacement)
-            .map_err(RequestFailure::Storage)?;
+            .map_err(|error| match error {
+                AuthError::Cloud(error) => RequestFailure::Refresh(error),
+                AuthError::Storage(error) => RequestFailure::Storage(error),
+            })?;
         self.tokens = replacement;
         Ok(())
     }

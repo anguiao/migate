@@ -65,17 +65,15 @@ impl XiaomiAdapter {
                 (self.test_ca.clone(), self.request_timeout),
             ),
             future::or(
-                cloud::run(
-                    &self.auth,
-                    &self.cloud,
-                    &self.discovery,
-                    self.context.clone(),
-                ),
+                cloud::run(&self.cloud, &self.discovery, self.context.clone()),
                 future::or(
-                    super::notifications::run(self.context.clone()),
+                    super::credentials::run(&self.auth, self.context.clone()),
                     future::or(
-                        super::refresh::cloud(self.context.clone()),
-                        self.context.tasks.run(),
+                        super::notifications::run(self.context.clone()),
+                        future::or(
+                            super::refresh::cloud(self.context.clone()),
+                            self.context.tasks.run(),
+                        ),
                     ),
                 ),
             ),

@@ -5,9 +5,9 @@ use super::{
 use crate::{
     storage::CachedScope,
     xiaomi::{
-        auth::{AuthService, AuthenticationState, FailureReason},
+        auth::{AuthenticationState, FailureReason},
         catalog::{self, CatalogError},
-        cloud::{CloudClient, CloudError, CloudErrorKind},
+        cloud::CloudClient,
         discovery::Discovery,
     },
 };
@@ -28,16 +28,7 @@ pub(super) enum CloudSync {
     Paused,
 }
 pub(super) const MEMBER_INTERVAL: Duration = Duration::from_secs(300);
-fn transient(error: &CloudError) -> bool {
-    matches!(
-        error.kind(),
-        CloudErrorKind::Network
-            | CloudErrorKind::Timeout
-            | CloudErrorKind::HttpStatus(408 | 429 | 500..=599)
-    )
-}
 pub(super) async fn run(
-    auth: &AuthService,
     cloud: &CloudClient,
     discovery: &Discovery,
     context: Rc<Context>,
@@ -63,106 +54,77 @@ pub(super) async fn run(
             .await;
             continue;
         }
-        let rejected = match &*sync.borrow() {
-            CloudSync::Rejected(token) => Some(token.clone()),
-            _ => None,
-        };
-        let preparation = if let Some(token) = &rejected {
-            auth.prepare_bridge_after_unauthorized(token).await?
-        } else {
-            auth.prepare_bridge().await?
-        };
-        let fresh = preparation
-            .credentials
-            .as_ref()
-            .map(|record| &record.tokens.access_token);
-        let authenticated = matches!(
-            preparation.report.authentication,
-            AuthenticationState::Authenticated
-        );
-        {
-            let mut state = sync.borrow_mut();
-            match &*state {
-                CloudSync::Rejected(token)
-                    if authenticated && (rejected.is_some() || Some(token) != fresh) =>
-                {
-                    *state = CloudSync::Refreshed(fresh.unwrap().clone());
-                }
-                CloudSync::Refreshed(token) if Some(token) != fresh => {
-                    *state = CloudSync::Idle;
-                }
-                CloudSync::Paused => {
-                    let renewed = authenticated
-                        && context
-                            .live
-                            .borrow()
-                            .credentials
-                            .as_ref()
-                            .is_some_and(|old| Some(&old.tokens.access_token) != fresh);
-                    if !renewed {
-                        continue;
-                    }
-                    *state = CloudSync::Idle;
-                }
-                _ => {}
-            }
-        }
-        super::state::update_auth(&context, &preparation);
-        let Some(credentials) = preparation.credentials else {
-            return Err(AdapterError::Unavailable(
-                "Xiaomi sign-in is required".into(),
-            ));
-        };
-        context.ready.finish(Ok(context.registry.clone()));
-        if matches!(
-            preparation.report.authentication,
-            AuthenticationState::SignInRequired(_)
-        ) {
-            *sync.borrow_mut() = CloudSync::Paused;
-            context.update_all_availability();
+        if !context.token_usable() {
+            let credentials = context.credentials_changed.listen();
+            future::or(
+                async {
+                    listener.await;
+                },
+                async {
+                    credentials.await;
+                },
+            )
+            .await;
             continue;
         }
-        if !authenticated {
-            if let AuthenticationState::Unavailable(reason) = &preparation.report.authentication {
-                context.set_catalog_problem(Some(reason.to_string()));
-                match reason {
-                    FailureReason::AccountIdentityMismatch
-                    | FailureReason::CannotDetermineAccountIdentity => {
-                        context.cloud_scope_valid.set(false);
-                        context.update_all_availability();
-                    }
-                    FailureReason::Cloud(error) if error.is_temporary() => {
-                        context.cloud_error(&credentials.tokens.access_token, None, error)?;
-                    }
-                    _ => {}
+        let credentials = context.live.borrow().credentials.as_ref().unwrap().clone();
+        context.ready.finish(Ok(context.registry.clone()));
+        let token = &credentials.tokens.access_token;
+        let Some(homes) = future::or(async { Some(cloud.get_owned_homes(token).await) }, async {
+            context.token_retired(token).await;
+            None
+        })
+        .await
+        else {
+            continue;
+        };
+        if !context.current_token(token) {
+            continue;
+        }
+        let homes = match homes {
+            Ok(homes) => homes,
+            Err(error) => {
+                context.set_catalog_problem(Some(error.to_string()));
+                context.cloud_error(token, None, &error)?;
+                if !matches!(*context.cloud_sync.borrow(), CloudSync::Paused) {
+                    context.authentication(if error.is_unauthorized() {
+                        AuthenticationState::Checking
+                    } else {
+                        AuthenticationState::Unavailable(FailureReason::Cloud(error))
+                    });
                 }
-            }
-            let retry = matches!(&preparation.report.authentication,AuthenticationState::Unavailable(FailureReason::Cloud(error)) if transient(error))
-                || matches!(&preparation.report.certificate_update,crate::xiaomi::auth::CertificateUpdate::Failed(FailureReason::Cloud(error)) if transient(error));
-            due = if retry {
-                context
+                due = context
                     .sync_not_before
                     .get()
-                    .unwrap_or_else(|| context.sync_failed())
-            } else {
-                context.clock.now() + MEMBER_INTERVAL
-            };
+                    .unwrap_or_else(|| context.sync_failed());
+                continue;
+            }
+        };
+        let identity_failure = match homes.uid.as_deref() {
+            None => Some(FailureReason::CannotDetermineAccountIdentity),
+            Some(uid) if uid != credentials.uid => Some(FailureReason::AccountIdentityMismatch),
+            _ => None,
+        };
+        if let Some(reason) = identity_failure {
+            context.set_catalog_problem(Some(reason.to_string()));
+            context.authentication(AuthenticationState::Unavailable(reason));
+            context.cloud_scope_valid.set(false);
+            context.update_all_availability();
+            context.changed.notify(usize::MAX);
+            due = context.clock.now() + MEMBER_INTERVAL;
             continue;
         }
+        let expected_scope = context.live.borrow().scope.clone();
         let selected = {
             let live = context.live.borrow();
             if let Some(scope) = &live.scope {
                 if scope.uid != credentials.uid {
                     Err(CatalogError::InvalidScope)
                 } else {
-                    catalog::current_home(&preparation.homes, scope)
+                    catalog::current_home(&homes.homes, scope)
                 }
             } else {
-                catalog::select_local_home(
-                    &discovery.snapshot(),
-                    &preparation.homes,
-                    &credentials.uid,
-                )
+                catalog::select_local_home(&discovery.snapshot(), &homes.homes, &credentials.uid)
             }
         };
         let home = match selected {
@@ -185,10 +147,21 @@ pub(super) async fn run(
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
         };
-        let infos = match cloud
-            .get_home_devices(&credentials.tokens.access_token, &home, &requested)
-            .await
-        {
+        let Some(infos) = future::or(
+            async { Some(cloud.get_home_devices(token, &home, &requested).await) },
+            async {
+                context.token_retired(token).await;
+                None
+            },
+        )
+        .await
+        else {
+            continue;
+        };
+        if !context.current_token(token) || context.live.borrow().scope != expected_scope {
+            continue;
+        }
+        let infos = match infos {
             Ok(infos) => infos
                 .into_iter()
                 .map(|info| (info.did.clone(), info))
@@ -238,6 +211,7 @@ pub(super) async fn run(
                 slot.cloud_forbidden = false;
             }
         }
+        context.authentication(AuthenticationState::Authenticated);
         context.cloud_scope_valid.set(true);
         context.http_paused.set(false);
         context.sync_not_before.set(None);
@@ -317,13 +291,6 @@ pub(super) async fn run(
             context.tasks.spawn(task);
             context.changed.notify(usize::MAX);
         }
-        let retry_certificate = matches!(&preparation.report.certificate_update,crate::xiaomi::auth::CertificateUpdate::Failed(FailureReason::Cloud(error)) if transient(error));
-        due = context.clock.now()
-            + if retry_certificate {
-                context.sync_backoff.borrow_mut().failed()
-            } else {
-                *context.sync_backoff.borrow_mut() = Backoff::new(1, 30);
-                MEMBER_INTERVAL
-            };
+        due = context.clock.now() + MEMBER_INTERVAL;
     }
 }

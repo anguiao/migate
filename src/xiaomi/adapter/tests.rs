@@ -1,5 +1,6 @@
 use super::{bootstrap::Clock, *};
 mod cloud_refresh;
+mod credentials;
 mod http_routing;
 mod list_scheduling;
 mod local_recovery;
@@ -100,14 +101,28 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     assert_eq!(requests.try_iter().count(), 0);
     drop(source);
 }
-#[derive(Default)]
 struct TestClock {
+    unix_start: i64,
     elapsed: Mutex<Duration>,
     deadlines: Mutex<Vec<Duration>>,
     changed: Event,
     automatic: std::sync::atomic::AtomicBool,
 }
+impl Default for TestClock {
+    fn default() -> Self {
+        Self {
+            unix_start: time::OffsetDateTime::now_utc().unix_timestamp(),
+            elapsed: Default::default(),
+            deadlines: Default::default(),
+            changed: Event::new(),
+            automatic: Default::default(),
+        }
+    }
+}
 impl TestClock {
+    fn wall(&self) -> i64 {
+        self.unix_start + self.now().as_secs() as i64
+    }
     fn advance(&self, by: Duration) {
         *self.elapsed.lock().unwrap() += by;
         self.changed.notify(usize::MAX);
@@ -116,6 +131,9 @@ impl TestClock {
 impl Clock for TestClock {
     fn now(&self) -> Duration {
         *self.elapsed.lock().unwrap()
+    }
+    fn unix_now(&self) -> i64 {
+        self.wall()
     }
     fn wait_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         self.deadlines.lock().unwrap().push(deadline);
@@ -154,6 +172,7 @@ struct CloudState {
     status: u16,
     home_delay: Duration,
     home_gate: Option<flume::Receiver<()>>,
+    home_status: u16,
     foreign: bool,
     missing_home: bool,
     other_home: bool,
@@ -165,6 +184,8 @@ struct CloudState {
     details: usize,
     detail_done: usize,
     cert_status: u16,
+    cert_gate: Option<flume::Receiver<()>>,
+    cert_pem: Option<String>,
     certs: usize,
     token_status: u16,
     token_access: Option<String>,
@@ -172,6 +193,7 @@ struct CloudState {
     token_gate: Option<flume::Receiver<()>>,
     tokens: usize,
     token_done: usize,
+    token_lifetime: u64,
     homes: usize,
     online: BTreeSet<String>,
     infos: usize,
@@ -218,7 +240,11 @@ impl Rig {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let tls = TlsFixture::new(false);
-        store.xiaomi().replace(&tls.credentials).unwrap();
+        let mut credentials = tls.credentials.clone();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        credentials.tokens.refresh_at = now + 1_000_000;
+        credentials.tokens.expires_at = now + 2_000_000;
+        store.xiaomi().replace(&credentials).unwrap();
         let data = vec![
             cached(&tls.credentials.uid, "one", false),
             cached(&tls.credentials.uid, "multi", true),
@@ -241,9 +267,11 @@ impl Rig {
         let cloud = Arc::new(Mutex::new(CloudState {
             members: members.iter().map(|v| v.to_string()).collect(),
             status: 200,
+            home_status: 200,
             detail_status: 200,
             cert_status: 200,
             token_status: 200,
+            token_lifetime: 1_000_000,
             property_status: 200,
             read_status: 200,
             info_status: 200,
@@ -305,15 +333,26 @@ impl Rig {
                 if state.token_status != 200 {
                     return MockResponse::json(state.token_status, "{}");
                 }
-                json!({"code":0,"result":{"access_token":state.token_access.as_deref().unwrap_or("fresh-access"),"refresh_token":"fresh-refresh","expires_in":1000}})
+                json!({"code":0,"result":{"access_token":state.token_access.as_deref().unwrap_or("fresh-access"),"refresh_token":"fresh-refresh","expires_in":state.token_lifetime}})
             } else if request.target.ends_with("/get_central_crt") {
                 state.certs += 1;
                 if state.cert_status != 200 {
-                    return MockResponse::json(state.cert_status, "{}");
+                    let mut response = MockResponse::json(state.cert_status, "{}");
+                    if let Some(gate) = state.cert_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    return response;
                 }
-                json!({"code":0,"result":{"cert":certificate}})
+                json!({"code":0,"result":{"cert":state.cert_pem.as_deref().unwrap_or(&certificate)}})
             } else if request.target.ends_with("/gethome") {
                 state.homes += 1;
+                if state.home_status != 200 {
+                    let mut response = MockResponse::json(state.home_status, "{}");
+                    if let Some(gate) = state.home_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    return response;
+                }
                 if state.partial {
                     json!({"code":0,"result":{"homelist":[],"has_more":true}})
                 } else if state.missing_home {
@@ -385,6 +424,12 @@ impl Rig {
                 response
             } else if request.target.ends_with("/device_list_page") {
                 response.delayed(state.detail_delay)
+            } else if request.target.ends_with("/get_central_crt") {
+                if let Some(gate) = state.cert_gate.clone() {
+                    response.gated(gate)
+                } else {
+                    response
+                }
             } else {
                 response
             }
