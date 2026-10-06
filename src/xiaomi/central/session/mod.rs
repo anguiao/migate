@@ -9,7 +9,8 @@ pub use connection::connect;
 pub(super) use connection::start;
 pub use driver::SessionDriver;
 pub use request::{
-    DeviceAccess, DeviceEntry, RequestOutcome, RequestStage, RequestTimeout, SessionHandle,
+    DeviceAccess, DeviceEntry, RequestOutcome, RequestStage, RequestTimeout, SendDecision,
+    SendHooks, SessionHandle,
 };
 
 use crate::xiaomi::capability::PropertyBinding;

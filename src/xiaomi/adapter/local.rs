@@ -187,20 +187,30 @@ async fn access_refreshes(
     loop {
         let request = access.next(context.clock.as_ref()).await;
         let current = context.clone();
+        let connection = handle.clone();
+        let recovery = matches!(request, AccessRequest::Recovery);
         let mut affected = None;
         let result = match request {
-            AccessRequest::Full => {
+            AccessRequest::Full | AccessRequest::Recovery => {
                 let result = handle
-                    .get_devices(move |result| match result {
-                        Ok(entries) => {
-                            current.set_access_problem(None);
-                            current.observe_access(entries);
+                    .get_devices_detailed(move |outcome| {
+                        if !current.current_local(&connection) {
+                            return;
                         }
-                        Err(CentralError::Cancelled) => {}
-                        Err(error) => current.set_access_problem(Some(error.to_string())),
+                        current.local_outcome(&connection, &outcome);
+                        match outcome.result {
+                            Ok(entries) => {
+                                current.local_list_success(&connection);
+                                current.set_access_problem(None);
+                                current.observe_access(entries);
+                            }
+                            Err(CentralError::Cancelled) => {}
+                            Err(error) => current.set_access_problem(Some(error.to_string())),
+                        }
                     })
-                    .await;
-                if result.is_err() {
+                    .await
+                    .result;
+                if result.is_err() && !recovery {
                     access.retry_full(context.clock.now());
                 }
                 result
@@ -208,19 +218,28 @@ async fn access_refreshes(
             AccessRequest::Filtered(dids) => {
                 let requested = dids.clone();
                 let result = handle
-                    .get_devices_filtered(&dids, move |result| match result {
-                        Ok(entries) => {
-                            current.set_access_problem(None);
-                            current.observe_access_filtered(&requested, entries);
+                    .get_devices_filtered_detailed(&dids, move |outcome| {
+                        if !current.current_local(&connection) {
+                            return;
                         }
-                        Err(CentralError::Cancelled) => {}
-                        Err(error) => current.set_access_problem(Some(error.to_string())),
+                        current.local_outcome(&connection, &outcome);
+                        match outcome.result {
+                            Ok(entries) => {
+                                current.local_list_success(&connection);
+                                current.set_access_problem(None);
+                                current.observe_access_filtered(&requested, entries);
+                            }
+                            Err(CentralError::Cancelled) => {}
+                            Err(error) => current.set_access_problem(Some(error.to_string())),
+                        }
                     })
-                    .await;
+                    .await
+                    .result;
                 affected = Some(dids);
                 result
             }
         };
+        finish_access_round(&access, recovery, &result, context.clock.now());
         match result {
             Ok(_) => {
                 if let Some(dids) = affected {
@@ -234,9 +253,19 @@ async fn access_refreshes(
                     context.reconcile_all()?;
                 }
             }
-            Err(CentralError::Cancelled) => return Ok(()),
+            Err(CentralError::Cancelled) => {}
             Err(_) => {}
         }
+    }
+}
+pub(super) fn finish_access_round(
+    access: &AccessRefresh,
+    recovery: bool,
+    result: &Result<Vec<central::DeviceEntry>, CentralError>,
+    now: Duration,
+) {
+    if recovery && result.is_err() {
+        access.recovery_finished(now);
     }
 }
 async fn route_watch(

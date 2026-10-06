@@ -63,6 +63,29 @@ pub struct RequestOutcome<T> {
     pub timeout: Option<RequestTimeout>,
 }
 
+/// A last check made while the operation has written no socket bytes.
+pub enum SendDecision {
+    Send,
+    Withdraw,
+    Cancel,
+}
+
+pub struct SendHooks {
+    pub(super) guard: Box<dyn FnMut() -> SendDecision>,
+    pub(super) first_send: Box<dyn FnOnce()>,
+}
+impl SendHooks {
+    pub fn new(
+        guard: impl FnMut() -> SendDecision + 'static,
+        on_first_send: impl FnOnce() + 'static,
+    ) -> Self {
+        Self {
+            guard: Box::new(guard),
+            first_send: Box::new(on_first_send),
+        }
+    }
+}
+
 pub(super) enum Response {
     Device(Option<DeviceAccess>),
     Devices(Vec<DeviceEntry>),
@@ -80,6 +103,7 @@ pub(super) struct Request {
     pub(super) complete: Box<dyn FnOnce(ResultValue, RequestStage, Option<RequestTimeout>)>,
     pub(super) id: Option<u32>,
     pub(super) stage: RequestStage,
+    pub(super) hooks: Option<SendHooks>,
 }
 pub(super) enum RequestKind {
     ListAll,
@@ -107,6 +131,12 @@ pub(super) enum RequestKind {
     },
 }
 impl RequestKind {
+    pub(super) fn is_read_or_list(&self) -> bool {
+        matches!(
+            self,
+            Self::ListAll | Self::ListFiltered { .. } | Self::List { .. } | Self::Read { .. }
+        )
+    }
     pub(super) fn publication(&self, id: u32, reply_topic: &str) -> Result<Publish, CentralError> {
         let (topic, payload) = match self {
             Self::ListAll => (
@@ -178,6 +208,7 @@ pub(super) struct Shared {
     pub(super) closed: Cell<bool>,
     pub(super) outstanding: Cell<usize>,
     pub(super) cancellations: RefCell<VecDeque<Cancellation>>,
+    pub(super) cancel_unsent_business: Cell<bool>,
 }
 
 pub(super) struct Cancellation {
@@ -200,6 +231,15 @@ pub struct SessionHandle {
     pub(super) timing: Timing,
 }
 impl SessionHandle {
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// Retire only zero-byte lists and reads; writes and MQTT exchanges remain owned.
+    pub fn cancel_unsent_business(&self) {
+        self.shared.cancel_unsent_business.set(true);
+        self.shared.event.notify(usize::MAX);
+    }
     pub fn close(&self) {
         self.shared.closed.set(true);
         self.shared.event.notify(usize::MAX);
@@ -467,6 +507,48 @@ impl SessionHandle {
             on_result,
         )
     }
+    pub fn set_property_guarded<F: FnOnce(RequestOutcome<()>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        value: bool,
+        hooks: SendHooks,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<()>> + use<F> {
+        self.submit_with_hooks(
+            RequestKind::Write {
+                did: did.into(),
+                binding,
+                value,
+            },
+            self.timing.request,
+            Some(hooks),
+            |_| (),
+            on_result,
+        )
+    }
+    pub fn read_property_with_timeout_guarded<F: FnOnce(RequestOutcome<bool>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        timeout: Duration,
+        hooks: SendHooks,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<bool>> + use<F> {
+        self.submit_with_hooks(
+            RequestKind::Read {
+                did: did.into(),
+                binding,
+            },
+            timeout.min(self.timing.request),
+            Some(hooks),
+            |response| match response {
+                Response::Power(value) => value,
+                _ => unreachable!("property read returns a power value"),
+            },
+            on_result,
+        )
+    }
     fn submit<T: Clone + 'static, F: FnOnce(Result<T, CentralError>) + 'static>(
         &self,
         kind: RequestKind,
@@ -483,6 +565,16 @@ impl SessionHandle {
         &self,
         kind: RequestKind,
         timeout: Duration,
+        decode: fn(Response) -> T,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<T>> + use<T, F> {
+        self.submit_with_hooks(kind, timeout, None, decode, on_result)
+    }
+    fn submit_with_hooks<T: Clone + 'static, F: FnOnce(RequestOutcome<T>) + 'static>(
+        &self,
+        kind: RequestKind,
+        timeout: Duration,
+        hooks: Option<SendHooks>,
         decode: fn(Response) -> T,
         on_result: F,
     ) -> impl Future<Output = RequestOutcome<T>> + use<T, F> {
@@ -508,6 +600,7 @@ impl SessionHandle {
             }),
             id: None,
             stage: RequestStage::NotSent,
+            hooks,
         };
         let error = if !valid_request(&request.kind) {
             Some(CentralError::InvalidInput)

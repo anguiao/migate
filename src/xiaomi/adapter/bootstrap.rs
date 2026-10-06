@@ -74,6 +74,7 @@ impl XiaomiAdapter {
         }
         let report = auth.local_status()?;
         let context = Rc::new(Context {
+            priority: Cell::new(super::routing::PathPriority::LocalFirst),
             cloud: cloud.clone(),
             cloud_sync: RefCell::new(super::cloud::CloudSync::default()),
             http_paused: Cell::new(false),

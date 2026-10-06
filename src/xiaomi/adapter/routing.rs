@@ -4,7 +4,7 @@ use crate::{
     storage::XiaomiRecord,
     xiaomi::{
         auth::{AuthenticationState, FailureReason},
-        central::SessionHandle,
+        central::{RequestOutcome, RequestStage, RequestTimeout, SessionHandle},
         cloud::CloudError,
     },
 };
@@ -14,7 +14,81 @@ pub(super) enum ControlPath {
     Local(SessionHandle),
     Cloud(XiaomiRecord),
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PathPriority {
+    LocalFirst,
+    CloudFirst,
+}
 impl Context {
+    pub(super) fn priority(&self) -> PathPriority {
+        self.priority.get()
+    }
+    pub(super) fn current_local(&self, handle: &SessionHandle) -> bool {
+        self.live
+            .borrow()
+            .session
+            .as_ref()
+            .is_some_and(|session| session.handle.same_connection(handle))
+    }
+    pub(super) fn local_reads_allowed(&self, did: &str, handle: &SessionHandle) -> bool {
+        self.priority() == PathPriority::LocalFirst
+            && matches!(self.control_path(did), Some(ControlPath::Local(selected)) if selected.same_connection(handle))
+    }
+    pub(super) fn local_outcome<T>(&self, handle: &SessionHandle, outcome: &RequestOutcome<T>) {
+        if outcome.stage != RequestStage::MayHaveBeenSent
+            || outcome.timeout != Some(RequestTimeout::Response)
+        {
+            return;
+        }
+        let access = self
+            .live
+            .borrow()
+            .session
+            .as_ref()
+            .filter(|session| session.handle.same_connection(handle))
+            .map(|session| session.access.clone());
+        if let Some(access) = access
+            && access.degrade(self.clock.now())
+        {
+            self.priority.set(PathPriority::CloudFirst);
+            log::warn!(
+                "Gateway business response timed out; cloud control now preferred, recovery in 60s"
+            );
+            handle.cancel_unsent_business();
+            self.update_all_availability();
+            self.refresh_changed.notify(usize::MAX);
+            self.changed.notify(usize::MAX);
+        }
+    }
+    pub(super) fn local_list_success(&self, handle: &SessionHandle) {
+        let access = self
+            .live
+            .borrow()
+            .session
+            .as_ref()
+            .filter(|session| session.handle.same_connection(handle))
+            .map(|session| session.access.clone());
+        if let Some(access) = access {
+            let recovering =
+                self.priority.replace(PathPriority::LocalFirst) == PathPriority::CloudFirst;
+            access.recovered();
+            if recovering {
+                log::info!("Gateway device list succeeded; local control priority restored");
+                let works = self
+                    .live
+                    .borrow()
+                    .devices
+                    .values()
+                    .filter_map(|slot| slot.work.clone())
+                    .collect::<Vec<_>>();
+                for work in works {
+                    work.refresh();
+                }
+                self.refresh_changed.notify(usize::MAX);
+                self.changed.notify(usize::MAX);
+            }
+        }
+    }
     pub(super) fn install_work(self: &Rc<Self>, did: &str) {
         let mut live = self.live.borrow_mut();
         let slot = live.devices.get_mut(did).unwrap();
@@ -55,7 +129,7 @@ impl Context {
             return None;
         }
         let cached = record.cached.borrow();
-        if let Some(session) = &live.session
+        let local = if let Some(session) = &live.session
             && slot.access.as_ref().is_some_and(|access| {
                 access.as_ref().is_ok_and(|access| {
                     access.online
@@ -63,11 +137,12 @@ impl Context {
                         && access.model == cached.model
                         && access.instance_type == cached.instance_type
                 })
-            })
-        {
-            return Some(ControlPath::Local(session.handle.clone()));
-        }
-        if self.cloud_scope_valid.get()
+            }) {
+            Some(ControlPath::Local(session.handle.clone()))
+        } else {
+            None
+        };
+        let cloud = if self.cloud_scope_valid.get()
             && !self.http_paused.get()
             && !matches!(
                 *self.cloud_sync.borrow(),
@@ -78,11 +153,15 @@ impl Context {
                 access.online
                     && access.model == cached.model
                     && access.instance_type == cached.instance_type
-            })
-        {
-            return live.credentials.clone().map(ControlPath::Cloud);
+            }) {
+            live.credentials.clone().map(ControlPath::Cloud)
+        } else {
+            None
+        };
+        match self.priority() {
+            PathPriority::LocalFirst => local.or(cloud),
+            PathPriority::CloudFirst => cloud.or(local),
         }
-        None
     }
     pub(super) fn update_availability(&self, did: &str) {
         let available = self.control_path(did).is_some();
@@ -121,6 +200,7 @@ impl Context {
         }
     }
     pub(super) fn disconnect(&self, _reason: String) {
+        self.priority.set(PathPriority::CloudFirst);
         if let Some(session) = self.live.borrow_mut().session.take() {
             for work in session.devices.values() {
                 work.local_disconnected();

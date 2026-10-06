@@ -3,7 +3,7 @@ mod tls;
 mod wire;
 pub use session::{
     CentralEvent, DeviceAccess, DeviceEntry, RequestOutcome, RequestStage, RequestTimeout,
-    SessionDriver, SessionHandle, connect,
+    SendDecision, SendHooks, SessionDriver, SessionHandle, connect,
 };
 pub use tls::connect_tls;
 pub use wire::{Frames as MqttFrames, MipsMessage, decode_mips, encode_mips};
@@ -21,6 +21,7 @@ pub enum CentralError {
     Timeout,
     Rejected(i64),
     Cancelled,
+    Withdrawn,
     QueueFull,
 }
 
@@ -38,6 +39,7 @@ impl fmt::Display for CentralError {
             Self::Timeout => f.write_str("Gateway request timed out"),
             Self::Rejected(code) => write!(f, "Gateway rejected request with code {code}"),
             Self::Cancelled => f.write_str("Gateway session was cancelled"),
+            Self::Withdrawn => f.write_str("Unsent gateway request was withdrawn"),
             Self::QueueFull => f.write_str("Gateway request queue is full"),
         }
     }

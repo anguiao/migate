@@ -171,6 +171,7 @@ impl SessionDriver {
     }
 
     pub(super) fn drain_cancellations(&mut self) {
+        self.drain_unsent_business();
         loop {
             let cancellation = self.shared.cancellations.borrow_mut().pop_front();
             let Some(cancellation) = cancellation else {

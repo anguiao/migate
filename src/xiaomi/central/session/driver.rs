@@ -92,6 +92,28 @@ pub struct SessionDriver {
 }
 
 impl SessionDriver {
+    #[cfg(test)]
+    pub(crate) fn ready_for_test(
+        stream: impl AsyncRead + AsyncWrite + Unpin + 'static,
+        request: std::time::Duration,
+    ) -> (SessionHandle, Self) {
+        let (handle, mut driver) = Self::new(
+            Box::new(stream),
+            wire::Frames::default(),
+            "controlled",
+            Timing {
+                request,
+                keepalive: None,
+            },
+            wire::MAX_FRAME_SIZE,
+            LIMIT,
+        )
+        .unwrap();
+        driver.subscriptions.clear();
+        driver.output.clear();
+        driver.ready = true;
+        (handle, driver)
+    }
     pub(super) fn new(
         stream: Box<dyn Transport>,
         frames: wire::Frames,
@@ -106,6 +128,7 @@ impl SessionDriver {
             closed: Default::default(),
             outstanding: Default::default(),
             cancellations: Default::default(),
+            cancel_unsent_business: Default::default(),
         });
         let now = Instant::now();
         let mut driver = SessionDriver {
@@ -233,6 +256,39 @@ impl SessionDriver {
         Ok(())
     }
     /// Remove complete unsent frames; partial frames and sent QoS exchanges remain owned here.
+    pub(super) fn drain_unsent_business(&mut self) {
+        if !self.shared.cancel_unsent_business.replace(false) {
+            return;
+        }
+        let mut retired = {
+            let mut queue = self.shared.queue.borrow_mut();
+            let (retired, retained): (VecDeque<_>, _) = queue
+                .drain(..)
+                .partition(|request| request.kind.is_read_or_list());
+            *queue = retained;
+            retired
+        };
+        let mids = self
+            .pending
+            .iter()
+            .filter_map(|(mid, request)| {
+                (request.kind.is_read_or_list()
+                    && request.stage == RequestStage::NotSent
+                    && self
+                        .output
+                        .iter()
+                        .any(|output| output.request == Some(*mid) && output.offset == 0))
+                .then_some(*mid)
+            })
+            .collect::<Vec<_>>();
+        self.cancel_unsent_outputs(&mids, &[]);
+        for mid in mids {
+            retired.push_back(self.pending.remove(&mid).unwrap());
+        }
+        for request in retired {
+            self.finish(request, Err(CentralError::Cancelled));
+        }
+    }
     pub(super) fn cancel_unsent_outputs(&mut self, requests: &[u32], subscriptions: &[u16]) {
         let mut removed = Vec::new();
         self.output.retain(|output| {
@@ -388,10 +444,36 @@ impl SessionDriver {
         deadline
     }
     fn poll_io(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), CentralError>> {
+        self.drain_cancellations();
         // A timer and a writable socket can wake together. Recheck before
         // touching the stream so an unsent expired request stays unsent.
         if let Err(error) = self.expire() {
             return Poll::Ready(Err(error));
+        }
+        // A response timeout callback may retire queued business in this poll.
+        self.drain_cancellations();
+        // Pending socket writes have made no progress: recheck on every poll.
+        let guarded = self
+            .output
+            .front()
+            .and_then(|output| (output.offset == 0).then_some(output.request).flatten());
+        if let Some(mid) = guarded {
+            let decision = self
+                .pending
+                .get_mut(&mid)
+                .and_then(|request| request.hooks.as_mut().map(|hooks| (hooks.guard)()));
+            let error = match decision {
+                Some(super::request::SendDecision::Withdraw) => Some(CentralError::Withdrawn),
+                Some(super::request::SendDecision::Cancel) => Some(CentralError::Cancelled),
+                _ => None,
+            };
+            if let Some(error) = error {
+                self.cancel_unsent_outputs(&[mid], &[]);
+                if let Some(request) = self.pending.remove(&mid) {
+                    self.finish(request, Err(error));
+                }
+                return Poll::Ready(Ok(()));
+            }
         }
         let mut progressed = false;
         if let Some(output) = self.output.front_mut() {
@@ -404,6 +486,9 @@ impl SessionDriver {
                             && let Some(request) = self.pending.get_mut(&mid)
                         {
                             request.stage = RequestStage::MayHaveBeenSent;
+                            if let Some(hooks) = request.hooks.take() {
+                                (hooks.first_send)();
+                            }
                         } else if let Some(pkid) = output.pkid
                             && let Some(request) = self
                                 .subscriptions

@@ -135,19 +135,55 @@ pub(super) struct AccessRefresh {
     full_deadline: Cell<Option<Duration>>,
     pending: RefCell<BTreeSet<String>>,
     changed: Event,
+    degraded: Cell<bool>,
+    recovery_due: Cell<Option<Duration>>,
+    recovery_running: Cell<bool>,
 }
 pub(super) enum AccessRequest {
     Full,
     Filtered(Vec<String>),
+    Recovery,
 }
 impl AccessRefresh {
+    pub(super) fn is_degraded(&self) -> bool {
+        self.degraded.get()
+    }
+    pub(super) fn degrade(&self, now: Duration) -> bool {
+        if self.degraded.replace(true) {
+            return false;
+        }
+        self.full_deadline.set(None);
+        self.pending.borrow_mut().clear();
+        self.recovery_due.set(Some(now + Duration::from_secs(60)));
+        self.changed.notify(usize::MAX);
+        true
+    }
+    pub(super) fn recovery_finished(&self, now: Duration) {
+        self.recovery_running.set(false);
+        if self.is_degraded() {
+            self.recovery_due.set(Some(now + Duration::from_secs(300)));
+            self.changed.notify(usize::MAX);
+        }
+    }
+    pub(super) fn recovered(&self) {
+        self.degraded.set(false);
+        self.recovery_due.set(None);
+        self.recovery_running.set(false);
+        self.changed.notify(usize::MAX);
+    }
     pub(super) fn request(&self, now: Duration) {
+        if self.is_degraded() {
+            return;
+        }
         if self.full_deadline.get().is_none() {
             self.full_deadline.set(Some(now + Duration::from_secs(3)));
         }
         self.changed.notify(usize::MAX);
     }
     pub(super) fn retry_full(&self, now: Duration) {
+        if self.is_degraded() {
+            return;
+        }
         self.full_deadline.set(Some(now + Duration::from_secs(3)));
         self.changed.notify(usize::MAX);
     }
@@ -158,6 +194,15 @@ impl AccessRefresh {
     pub(super) async fn next(&self, clock: &dyn Clock) -> AccessRequest {
         loop {
             let listener = self.changed.listen();
+            if self
+                .recovery_due
+                .get()
+                .is_some_and(|due| clock.now() >= due)
+                && !self.recovery_running.replace(true)
+            {
+                self.recovery_due.set(None);
+                return AccessRequest::Recovery;
+            }
             let deadline = self.full_deadline.get();
             if deadline.is_some_and(|deadline| clock.now() >= deadline) {
                 self.full_deadline.set(None);
@@ -171,6 +216,7 @@ impl AccessRefresh {
                         .collect(),
                 );
             }
+            let deadline = deadline.into_iter().chain(self.recovery_due.get()).min();
             if let Some(deadline) = deadline {
                 future::or(listener, clock.wait_until(deadline)).await;
             } else {
@@ -186,6 +232,7 @@ pub(super) struct Live {
     pub(super) session: Option<Session>,
 }
 pub(super) struct Context {
+    pub(super) priority: Cell<super::routing::PathPriority>,
     pub(super) cloud: CloudClient,
     pub(super) cloud_sync: RefCell<CloudSync>,
     pub(super) http_paused: Cell<bool>,

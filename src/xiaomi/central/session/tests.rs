@@ -47,6 +47,7 @@ fn queued_handle(timing: Timing) -> SessionHandle {
             closed: Cell::new(false),
             outstanding: Cell::new(0),
             cancellations: Default::default(),
+            cancel_unsent_business: Default::default(),
         }),
         timing,
     }

@@ -8,7 +8,7 @@ use crate::{
     device::{CommandError, CommandReceiver},
     xiaomi::{
         capability::PropertyBinding,
-        central::{CentralError, SessionHandle},
+        central::{CentralError, RequestStage, SendDecision, SendHooks, SessionHandle},
     },
 };
 use event_listener::Event;
@@ -264,6 +264,11 @@ pub(super) async fn refreshes(
     let mut next_round = None;
     loop {
         let listener = changed.listen();
+        if context.priority() == super::routing::PathPriority::CloudFirst {
+            next_round = None;
+            listener.await;
+            continue;
+        }
         let works = context
             .live
             .borrow()
@@ -303,6 +308,9 @@ pub(super) async fn refreshes(
         if context.clock.now() < deadline {
             continue;
         }
+        if context.priority() == super::routing::PathPriority::CloudFirst {
+            continue;
+        }
         // Re-read membership after waiting: removed devices cannot enter the round.
         let round = context
             .live
@@ -313,6 +321,9 @@ pub(super) async fn refreshes(
             .devices
             .values()
             .filter_map(|work| {
+                if !context.local_reads_allowed(&work.record.physical.key().id, &handle) {
+                    return None;
+                }
                 let mut pending = work.refresh_pending.borrow_mut();
                 let index = pending
                     .iter()
@@ -324,7 +335,7 @@ pub(super) async fn refreshes(
         join_all(
             round
                 .into_iter()
-                .map(|(work, read)| read_one(work, read, &handle, &context)),
+                .map(|(work, read)| read_one(work, read, handle.clone(), context.clone())),
         )
         .await;
         next_round = Some(context.clock.now() + REFRESH_DELAY);
@@ -333,8 +344,8 @@ pub(super) async fn refreshes(
 async fn read_one(
     work: Rc<DeviceWork>,
     mut read: Refresh,
-    handle: &SessionHandle,
-    context: &Context,
+    handle: SessionHandle,
+    context: Rc<Context>,
 ) {
     future::or(
         async {
@@ -348,22 +359,63 @@ async fn read_one(
                 return;
             }
             let generation = work.record.binding_generation.get();
-            let stamp = work.observations.read_stamp(&work.record, &id);
+            let stamp = Rc::new(work.observations.read_stamp(&work.record, &id));
             let observing = work.clone();
             let observing_id = id.clone();
+            let guard_work = work.clone();
+            let guard_stamp = stamp.clone();
+            let guard_context = context.clone();
+            let guard_handle = handle.clone();
+            let guard_id = id.clone();
+            let guard_did = did.clone();
+            let result_context = context.clone();
+            let result_handle = handle.clone();
             let result = handle
-                .read_property_with_timeout(&did, binding, READ_TIMEOUT, move |result| {
-                    if !observing.life.is_closed()
-                        && let Ok(value) = result
-                    {
-                        observing.observations.observe_read(
-                            &observing.record,
-                            &observing_id,
-                            &stamp,
-                            value,
-                        );
-                    }
-                })
+                .read_property_with_timeout_guarded(
+                    &did,
+                    binding,
+                    READ_TIMEOUT,
+                    SendHooks::new(
+                        move || {
+                            if guard_work.life.is_closed()
+                                || guard_work.record.life.is_closed()
+                                || guard_work.record.binding_generation.get() != generation
+                                || !guard_context.current_local(&guard_handle)
+                            {
+                                SendDecision::Cancel
+                            } else if !guard_context.local_reads_allowed(&guard_did, &guard_handle)
+                                || !guard_work.observations.read_is_current(
+                                    &guard_work.record,
+                                    &guard_id,
+                                    &guard_stamp,
+                                )
+                            {
+                                SendDecision::Withdraw
+                            } else {
+                                SendDecision::Send
+                            }
+                        },
+                        || {},
+                    ),
+                    move |outcome| {
+                        if !observing.life.is_closed()
+                            && observing.record.binding_generation.get() == generation
+                        {
+                            result_context.local_outcome(&result_handle, &outcome);
+                        }
+                        if !observing.life.is_closed()
+                            && result_context.current_local(&result_handle)
+                            && let Ok(value) = outcome.result
+                        {
+                            observing.observations.observe_read(
+                                &observing.record,
+                                &observing_id,
+                                &stamp,
+                                value,
+                            );
+                        }
+                    },
+                )
                 .await;
             if work.life.is_closed()
                 || work.record.binding_generation.get() != generation
@@ -371,12 +423,25 @@ async fn read_one(
             {
                 return;
             }
-            match result {
+            match result.result {
                 Ok(_) => {
                     work.read_problems.borrow_mut().remove(&id);
                 }
+                Err(CentralError::Withdrawn | CentralError::Cancelled)
+                    if result.stage == RequestStage::NotSent =>
+                {
+                    let mut pending = work.refresh_pending.borrow_mut();
+                    if !pending.iter().any(|queued| queued.id == id) {
+                        pending.push_back(read);
+                    }
+                }
                 Err(error) => {
                     let problem = work.problem("read", binding, &error);
+                    if context.priority() == super::routing::PathPriority::CloudFirst {
+                        work.read_problems
+                            .borrow_mut()
+                            .insert(id.clone(), problem.clone());
+                    }
                     let mut pending = work.refresh_pending.borrow_mut();
                     if read.attempts == 3 {
                         pending.retain(|queued| queued.id != id);
@@ -393,7 +458,7 @@ async fn read_one(
                     }
                 }
             }
-            work.report(context, &did);
+            work.report(&context, &did);
         },
     )
     .await;
@@ -406,6 +471,70 @@ fn command_error(error: CentralError) -> CommandError {
         error => CommandError::SendFailed(error.to_string()),
     }
 }
+async fn send_local_write(
+    context: &Rc<Context>,
+    handle: SessionHandle,
+    work: Rc<DeviceWork>,
+    id: &str,
+    binding: PropertyBinding,
+    generation: u64,
+    request: Rc<RefCell<Option<crate::device::CommandRequest>>>,
+) -> bool {
+    let did = work.record.physical.key().id.clone();
+    let target = request.borrow().as_ref().unwrap().target;
+    let observing = work.clone();
+    let id = id.to_owned();
+    let stamp = Rc::new(RefCell::new(None));
+    let capture_stamp = stamp.clone();
+    let capture_work = work.clone();
+    let capture_id = id.clone();
+    let guard_work = work.clone();
+    let guard_context = context.clone();
+    let guard_handle = handle.clone();
+    let guard_did = did.clone();
+    let result_context = context.clone();
+    let result_handle = handle.clone();
+    let outcome = handle.set_property_guarded(
+        &did, binding, target,
+        SendHooks::new(move || {
+            if guard_work.life.is_closed() || guard_work.record.life.is_closed()
+                || guard_work.record.binding_generation.get() != generation
+                || !guard_context.current_local(&guard_handle)
+            {
+                SendDecision::Cancel
+            } else if matches!(guard_context.control_path(&guard_did), Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle)) {
+                SendDecision::Send
+            } else {
+                SendDecision::Withdraw
+            }
+        }, move || {
+            *capture_stamp.borrow_mut() = Some(capture_work.observations.write_stamp(&capture_work.record, &capture_id));
+        }),
+        move |outcome| {
+            if !observing.life.is_closed()
+                && observing.record.binding_generation.get() == generation
+            {
+                result_context.local_outcome(&result_handle, &outcome);
+            }
+            if outcome.result == Err(CentralError::Withdrawn) && outcome.stage == RequestStage::NotSent {
+                return;
+            }
+            let request = request.borrow_mut().take().unwrap();
+            match outcome.result {
+                Ok(()) => {
+                    if let Some(stamp) = stamp.borrow_mut().take() {
+                        observing.observations.accept_write(&observing.record, &id, &stamp, request);
+                    } else {
+                        request.reject(CommandError::SendFailed("gateway accepted an unsent write".into()));
+                    }
+                }
+                Err(error) => request.reject(command_error(error)),
+            }
+        },
+    ).await;
+    outcome.result == Err(CentralError::Withdrawn) && outcome.stage == RequestStage::NotSent
+}
+
 pub(super) async fn consume(
     mut receiver: CommandReceiver,
     context: Rc<Context>,
@@ -433,59 +562,87 @@ pub(super) async fn consume(
                 };
                 let binding = record.binding(&function_id);
                 let target = request.target;
-                let stamp = work.observations.write_stamp(&record, &function_id);
-                match path {
-                    ControlPath::Local(handle) => {
-                        let observing = work.clone();
-                        let id = function_id.clone();
-                        let result =
-                            handle.set_property(
-                                &did,
-                                binding,
-                                target,
-                                move |result| match result {
-                                    Ok(()) => observing.observations.accept_write(
-                                        &observing.record,
-                                        &id,
-                                        &stamp,
-                                        request,
-                                    ),
-                                    Err(error) => request.reject(command_error(error)),
-                                },
-                            );
-                        let _ = result.await;
+                let generation = record.binding_generation.get();
+                let request = Rc::new(RefCell::new(Some(request)));
+                let mut path = path;
+                loop {
+                    if work.life.is_closed()
+                        || record.life.is_closed()
+                        || record.binding_generation.get() != generation
+                    {
+                        request
+                            .borrow_mut()
+                            .take()
+                            .unwrap()
+                            .reject(CommandError::Cancelled);
+                        break;
                     }
-                    ControlPath::Cloud(credentials) => {
-                        match context
-                            .cloud
-                            .set_property(&credentials.tokens.access_token, &did, binding, target)
-                            .await
-                        {
-                            Ok(()) => work.observations.accept_write(
-                                &record,
+                    match path {
+                        ControlPath::Local(handle) => {
+                            if send_local_write(
+                                &context,
+                                handle,
+                                work.clone(),
                                 &function_id,
-                                &stamp,
-                                request,
-                            ),
-                            Err(error) => {
-                                request.reject(match error.kind() {
-                                    crate::xiaomi::cloud::CloudErrorKind::Timeout => {
-                                        CommandError::Timeout
-                                    }
-                                    crate::xiaomi::cloud::CloudErrorKind::Business(code)
-                                    | crate::xiaomi::cloud::CloudErrorKind::PropertyRejected(
-                                        code,
-                                    ) => CommandError::Rejected(format!("cloud code {code}")),
-                                    _ => CommandError::SendFailed(error.to_string()),
-                                });
-                                context.cloud_error(
+                                binding,
+                                generation,
+                                request.clone(),
+                            )
+                            .await
+                            {
+                                let Some(selected) = context.control_path(&did) else {
+                                    request.borrow_mut().take().unwrap().reject(
+                                        CommandError::Unavailable("no usable control path".into()),
+                                    );
+                                    break;
+                                };
+                                path = selected;
+                                continue;
+                            }
+                        }
+                        ControlPath::Cloud(credentials) => {
+                            let stamp = work.observations.write_stamp(&record, &function_id);
+                            match context
+                                .cloud
+                                .set_property(
                                     &credentials.tokens.access_token,
-                                    Some(&did),
-                                    &error,
-                                )?;
+                                    &did,
+                                    binding,
+                                    target,
+                                )
+                                .await
+                            {
+                                Ok(()) => work.observations.accept_write(
+                                    &record,
+                                    &function_id,
+                                    &stamp,
+                                    request.borrow_mut().take().unwrap(),
+                                ),
+                                Err(error) => {
+                                    request
+                                        .borrow_mut()
+                                        .take()
+                                        .unwrap()
+                                        .reject(match error.kind() {
+                                        crate::xiaomi::cloud::CloudErrorKind::Timeout => {
+                                            CommandError::Timeout
+                                        }
+                                        crate::xiaomi::cloud::CloudErrorKind::Business(code)
+                                        | crate::xiaomi::cloud::CloudErrorKind::PropertyRejected(
+                                            code,
+                                        ) => CommandError::Rejected(format!("cloud code {code}")),
+                                        _ => CommandError::SendFailed(error.to_string()),
+                                    });
+                                    context.cloud_error(
+                                        &credentials.tokens.access_token,
+                                        Some(&did),
+                                        &error,
+                                    )?;
+                                }
                             }
                         }
                     }
+                    break;
                 }
             }
             Ok(())

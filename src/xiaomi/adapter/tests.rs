@@ -1,8 +1,10 @@
 use super::{bootstrap::Clock, *};
 mod http_routing;
 mod list_scheduling;
+mod local_recovery;
 mod observation_lifetimes;
 mod refresh_scheduling;
+mod send_boundary;
 use crate::{
     device::{Availability, DeviceKey, Power},
     storage::{CachedPhysicalDevice, CachedScope, Store},
@@ -1247,7 +1249,8 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 for _ in 0..10 {
                     future::yield_now().await;
                 }
-                assert_eq!(peer.count("get", "one", 2), 4);
+                let failed_reads = if timeout { 1 } else { 4 };
+                assert_eq!(peer.count("get", "one", 2), failed_reads);
                 assert_eq!(peer.count("subscribe", "multi", 9), 4);
                 assert_eq!(peer.count("subscribe", "multi", 3), 1);
                 {
@@ -1273,7 +1276,18 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                         .contains(&(9, 1))
                 })
                 .await;
-                assert_eq!(peer.count("get", "one", 2), 4);
+                if timeout {
+                    until(|| {
+                        function(&control.context.registry, "one", "main")
+                            .snapshot()
+                            .power
+                            == Power::On
+                    })
+                    .await;
+                    assert_eq!(peer.count("get", "one", 2), 2);
+                } else {
+                    assert_eq!(peer.count("get", "one", 2), 4);
+                }
                 peer.state.borrow_mut().online.insert("one".into(), false);
                 peer.list_changed(&["one"]);
                 until(|| {
@@ -1294,7 +1308,9 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                         == Power::On
                 })
                 .await;
-                assert_eq!(peer.count("get", "one", 2), 5);
+                let expected = failed_reads + if timeout { 2 } else { 1 };
+                until(|| peer.count("get", "one", 2) == expected).await;
+                assert_eq!(peer.count("get", "one", 2), expected);
             })
             .await;
         }));
@@ -1699,7 +1715,9 @@ fn gateway_list_retries_recover_without_events_and_preserve_cloud_diagnostics() 
                     state.list_error = false;
                     state.list_timeout = false;
                 }
-                control.clock.advance(Duration::from_secs(3));
+                control
+                    .clock
+                    .advance(Duration::from_secs(if timeout { 60 } else { 3 }));
                 initialized(control, &peer, &["one"]).await;
                 assert_eq!(peer.lists(), 2);
                 assert!(control.context.access_problem.borrow().is_none());

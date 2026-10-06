@@ -54,17 +54,26 @@ impl Observations {
         stamp: &ReadStamp,
         value: bool,
     ) {
+        if self.read_is_current(record, id, stamp) {
+            let mut channels = self.channels.borrow_mut();
+            let counts = channels.entry(id.into()).or_default();
+            counts.observed += 1;
+            record.physical.function(id).unwrap().observe(value);
+        }
+    }
+    pub(super) fn read_is_current(
+        &self,
+        record: &DeviceRecord,
+        id: &str,
+        stamp: &ReadStamp,
+    ) -> bool {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(id.into()).or_default();
-        if !record.life.is_closed()
+        !record.life.is_closed()
             && record.binding_generation.get() == stamp.binding
             && self.source_epoch.get() == stamp.source
             && counts.observed == stamp.observed
             && counts.refresh == stamp.refresh
-        {
-            counts.observed += 1;
-            record.physical.function(id).unwrap().observe(value);
-        }
     }
     pub(super) fn notify(&self, record: &DeviceRecord, id: &str, value: bool) {
         if record.life.is_closed() {
@@ -76,7 +85,6 @@ impl Observations {
         counts.notified += 1;
         record.physical.function(id).unwrap().observe(value);
     }
-    // Stage five moves this capture from enqueue to the first successful socket write.
     pub(super) fn write_stamp(&self, record: &DeviceRecord, id: &str) -> WriteStamp {
         WriteStamp {
             binding: record.binding_generation.get(),

@@ -77,7 +77,7 @@ fn changed_dids_merge_without_delaying_the_pending_full_list() {
     });
 }
 
-fn observation(record: &CachedPhysicalDevice, online: bool) -> DeviceEntry {
+pub(super) fn observation(record: &CachedPhysicalDevice, online: bool) -> DeviceEntry {
     DeviceEntry {
         did: record.device.key.id.clone(),
         access: Ok(DeviceAccess {
