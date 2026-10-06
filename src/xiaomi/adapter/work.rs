@@ -1,6 +1,7 @@
 use super::{
     model::AdapterError,
     observations::Observations,
+    refresh::{ReadFlight, Refresh},
     routing::ControlPath,
     state::{Context, DeviceRecord, Lifetime},
 };
@@ -13,36 +14,35 @@ use crate::{
 };
 use event_listener::Event;
 use futures_lite::future;
-use futures_util::future::join_all;
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
     rc::Rc,
     time::Duration,
 };
-const REFRESH_DELAY: Duration = Duration::from_millis(200);
-const READ_TIMEOUT: Duration = Duration::from_secs(6);
-const RETRY_DELAY: Duration = Duration::from_secs(3);
-
-struct Refresh {
-    id: String,
-    binding: PropertyBinding,
-    attempts: u8,
-    ready_at: Duration,
-}
 pub(super) struct DeviceWork {
     // Binding work ends on incompatibility, while the physical device keeps its consumers.
     pub(super) life: Lifetime,
     pub(super) observations: Observations,
     pub(super) record: Rc<DeviceRecord>,
     pub(super) subscribed: RefCell<BTreeSet<(u32, u32)>>,
+    pub(super) active: RefCell<Option<super::notifications::NotificationSource>>,
+    pub(super) local_generation: Cell<u64>,
+    pub(super) local_exhausted: Cell<bool>,
+    pub(super) cloud_subscribed: RefCell<BTreeSet<(u32, u32)>>,
+    pub(super) cloud_generation: Cell<u64>,
+    pub(super) cloud_running: Cell<bool>,
+    pub(super) cloud_exhausted: Cell<bool>,
+    pub(super) cloud_problem: RefCell<Option<String>>,
+    pub(super) condition_generation: Cell<u64>,
     subscribe_requested: Cell<bool>,
-    subscribe_running: Cell<bool>,
-    refresh_pending: RefCell<VecDeque<Refresh>>,
-    refresh_changed: Rc<Event>,
+    pub(super) subscribe_running: Cell<bool>,
+    pub(super) refresh_pending: RefCell<VecDeque<Refresh>>,
+    pub(super) refresh_inflight: RefCell<BTreeMap<String, Rc<ReadFlight>>>,
+    pub(super) refresh_changed: Rc<Event>,
     changed: Event,
     subscribe_problem: RefCell<Option<String>>,
-    read_problems: RefCell<BTreeMap<String, String>>,
+    pub(super) read_problems: RefCell<BTreeMap<String, String>>,
 }
 impl DeviceWork {
     pub(super) fn new(record: Rc<DeviceRecord>, refresh_changed: Rc<Event>) -> Self {
@@ -51,9 +51,19 @@ impl DeviceWork {
             observations: Observations::default(),
             record,
             subscribed: RefCell::new(BTreeSet::new()),
-            subscribe_requested: Cell::new(true),
+            active: RefCell::new(None),
+            local_generation: Cell::new(0),
+            local_exhausted: Cell::new(false),
+            cloud_subscribed: RefCell::new(BTreeSet::new()),
+            cloud_generation: Cell::new(0),
+            cloud_running: Cell::new(false),
+            cloud_exhausted: Cell::new(false),
+            cloud_problem: RefCell::new(None),
+            condition_generation: Cell::new(0),
+            subscribe_requested: Cell::new(false),
             subscribe_running: Cell::new(false),
             refresh_pending: RefCell::new(VecDeque::new()),
+            refresh_inflight: RefCell::new(BTreeMap::new()),
             refresh_changed,
             changed: Event::new(),
             subscribe_problem: RefCell::new(None),
@@ -64,15 +74,41 @@ impl DeviceWork {
     }
     pub(super) fn local_connected(&self) {
         self.local_disconnected();
-        self.subscribe_requested.set(true);
+        self.subscribe_requested.set(false);
         self.changed.notify(usize::MAX);
     }
-    pub(super) fn local_disconnected(&self) {
+    pub(super) fn source_changed(&self) {
         self.observations.source_changed();
+        super::refresh::cancel(self);
+        self.refresh();
+    }
+    pub(super) fn local_disconnected(&self) {
+        if matches!(
+            *self.active.borrow(),
+            Some(super::notifications::NotificationSource::Local(_))
+        ) {
+            self.active.borrow_mut().take();
+            self.source_changed();
+        }
+        self.local_generation.set(self.local_generation.get() + 1);
+        self.local_exhausted.set(false);
         self.subscribed.borrow_mut().clear();
         self.subscribe_running.set(false);
         *self.subscribe_problem.borrow_mut() = None;
-        self.refresh();
+    }
+    pub(super) fn cloud_disconnected(&self) {
+        if matches!(
+            *self.active.borrow(),
+            Some(super::notifications::NotificationSource::Cloud(_))
+        ) {
+            self.active.borrow_mut().take();
+            self.source_changed();
+        }
+        self.cloud_generation.set(self.cloud_generation.get() + 1);
+        self.cloud_subscribed.borrow_mut().clear();
+        self.cloud_running.set(false);
+        self.cloud_exhausted.set(false);
+        self.cloud_problem.borrow_mut().take();
     }
     pub(super) fn notify(&self, binding: PropertyBinding, value: bool) {
         if self.life.is_closed() {
@@ -92,11 +128,18 @@ impl DeviceWork {
                 .notify(&self.record, &function.description.id, value);
         }
     }
-    pub(super) fn retry_subscriptions(&self) {
-        if !self.subscribe_running.get() {
+    pub(super) fn request_local_subscriptions(&self) {
+        if !self.subscribe_running.get() && !self.local_exhausted.get() {
             self.subscribe_requested.set(true);
             self.changed.notify(usize::MAX);
         }
+    }
+    pub(super) fn retry_subscriptions(&self) {
+        self.condition_generation
+            .set(self.condition_generation.get() + 1);
+        self.local_exhausted.set(false);
+        self.cloud_exhausted.set(false);
+        self.changed.notify(usize::MAX);
     }
     pub(super) fn refresh(&self) {
         let mut pending = self.refresh_pending.borrow_mut();
@@ -117,15 +160,19 @@ impl DeviceWork {
         self.refresh_changed.notify(usize::MAX);
     }
     pub(super) fn bindings_changed(&self) {
-        self.observations.source_changed();
+        self.active.borrow_mut().take();
+        self.local_generation.set(self.local_generation.get() + 1);
+        self.cloud_disconnected();
+        self.source_changed();
         self.subscribed.borrow_mut().clear();
+        self.local_exhausted.set(false);
         self.subscribe_requested.set(true);
         self.refresh_pending.borrow_mut().clear();
         self.read_problems.borrow_mut().clear();
         self.refresh();
         self.changed.notify(usize::MAX);
     }
-    fn bindings(&self) -> Vec<PropertyBinding> {
+    pub(super) fn bindings(&self) -> Vec<PropertyBinding> {
         let mut values = self
             .record
             .cached
@@ -146,18 +193,24 @@ impl DeviceWork {
             .borrow()
             .clone()
             .into_iter()
+            .chain(self.cloud_problem.borrow().clone())
             .chain(self.read_problems.borrow().values().cloned())
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
     }
-    fn report(&self, context: &Context, did: &str) {
+    pub(super) fn report(&self, context: &Context, did: &str) {
         if self.life.is_closed() {
             return;
         }
         let blocked = context.live.borrow().devices[did].blocked.clone();
         context.problem(did, blocked.or_else(|| self.diagnostic()));
     }
-    fn problem(&self, operation: &str, binding: PropertyBinding, error: &CentralError) -> String {
+    pub(super) fn problem(
+        &self,
+        operation: &str,
+        binding: PropertyBinding,
+        error: &CentralError,
+    ) -> String {
         let message = format!(
             "{} {operation} {}.{}: {error}",
             self.record.cached.borrow().device.key.id,
@@ -195,8 +248,13 @@ async fn subscriptions(
             listener.await;
             continue;
         }
+        if !matches!(context.notification_source(&did), Some(super::notifications::NotificationSource::Local(selected)) if selected.same_connection(handle))
+        {
+            continue;
+        }
         work.subscribe_running.set(true);
         let generation = work.record.binding_generation.get();
+        let preparation = work.local_generation.get();
         context
             .clock
             .wait_until(context.clock.now() + Duration::from_millis(10))
@@ -210,20 +268,29 @@ async fn subscriptions(
             let mut failed = Vec::new();
             let mut problem = None;
             for binding in pending {
-                if work.record.binding_generation.get() != generation
+                if !context.current_local(handle)
+                    || !matches!(context.notification_source(&did), Some(super::notifications::NotificationSource::Local(selected)) if selected.same_connection(handle))
+                    || work.local_generation.get() != preparation
+                    || work.record.binding_generation.get() != generation
                     || !work.bindings().contains(&binding)
                 {
                     continue;
                 }
                 match handle.subscribe_property(&did, binding).await {
-                    Ok(()) if work.record.binding_generation.get() == generation => {
+                    Ok(())
+                        if context.current_local(handle)
+                            && work.local_generation.get() == preparation
+                            && work.record.binding_generation.get() == generation =>
+                    {
                         work.subscribed
                             .borrow_mut()
                             .insert((binding.siid, binding.piid));
                     }
                     Ok(()) => {}
                     Err(error) => {
-                        if work.record.binding_generation.get() == generation
+                        if context.current_local(handle)
+                            && work.local_generation.get() == preparation
+                            && work.record.binding_generation.get() == generation
                             && work.bindings().contains(&binding)
                         {
                             problem = Some(work.problem("subscribe", binding, &error));
@@ -232,10 +299,14 @@ async fn subscriptions(
                     }
                 }
             }
-            if work.record.binding_generation.get() != generation {
+            if !context.current_local(handle)
+                || work.local_generation.get() != preparation
+                || work.record.binding_generation.get() != generation
+            {
                 break;
             }
             if failed.is_empty() || attempt == 3 {
+                work.local_exhausted.set(problem.is_some());
                 *work.subscribe_problem.borrow_mut() = problem;
                 work.report(context, &did);
                 break;
@@ -247,221 +318,8 @@ async fn subscriptions(
                 .await;
         }
         work.subscribe_running.set(false);
+        context.changed.notify(usize::MAX);
     }
-}
-pub(super) async fn refreshes(
-    context: Rc<Context>,
-    handle: SessionHandle,
-) -> Result<(), AdapterError> {
-    let changed = context
-        .live
-        .borrow()
-        .session
-        .as_ref()
-        .unwrap()
-        .refresh_changed
-        .clone();
-    let mut next_round = None;
-    loop {
-        let listener = changed.listen();
-        if context.priority() == super::routing::PathPriority::CloudFirst {
-            next_round = None;
-            listener.await;
-            continue;
-        }
-        let works = context
-            .live
-            .borrow()
-            .session
-            .as_ref()
-            .unwrap()
-            .devices
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let ready_at = works
-            .iter()
-            .filter_map(|work| {
-                work.refresh_pending
-                    .borrow()
-                    .iter()
-                    .map(|read| read.ready_at)
-                    .min()
-            })
-            .min();
-        let Some(ready_at) = ready_at else {
-            next_round = None;
-            listener.await;
-            continue;
-        };
-        let deadline = next_round
-            .map_or(
-                context.clock.now() + REFRESH_DELAY,
-                |scheduled: Duration| scheduled.min(context.clock.now() + REFRESH_DELAY),
-            )
-            .max(ready_at);
-        next_round = Some(deadline);
-        future::or(context.clock.wait_until(deadline), async {
-            listener.await;
-        })
-        .await;
-        if context.clock.now() < deadline {
-            continue;
-        }
-        if context.priority() == super::routing::PathPriority::CloudFirst {
-            continue;
-        }
-        // Re-read membership after waiting: removed devices cannot enter the round.
-        let round = context
-            .live
-            .borrow()
-            .session
-            .as_ref()
-            .unwrap()
-            .devices
-            .values()
-            .filter_map(|work| {
-                if !context.local_reads_allowed(&work.record.physical.key().id, &handle) {
-                    return None;
-                }
-                let mut pending = work.refresh_pending.borrow_mut();
-                let index = pending
-                    .iter()
-                    .position(|read| read.ready_at <= context.clock.now())?;
-                Some((work.clone(), pending.remove(index).unwrap()))
-            })
-            .collect::<Vec<_>>();
-        // Match the upstream round barrier: one property per DID, concurrent DIDs.
-        join_all(
-            round
-                .into_iter()
-                .map(|(work, read)| read_one(work, read, handle.clone(), context.clone())),
-        )
-        .await;
-        next_round = Some(context.clock.now() + REFRESH_DELAY);
-    }
-}
-async fn read_one(
-    work: Rc<DeviceWork>,
-    mut read: Refresh,
-    handle: SessionHandle,
-    context: Rc<Context>,
-) {
-    future::or(
-        async {
-            work.life.ended().await;
-        },
-        async {
-            let did = work.record.physical.key().id.clone();
-            let binding = read.binding;
-            let id = read.id.clone();
-            if work.record.binding(&id) != binding {
-                return;
-            }
-            let generation = work.record.binding_generation.get();
-            let stamp = Rc::new(work.observations.read_stamp(&work.record, &id));
-            let observing = work.clone();
-            let observing_id = id.clone();
-            let guard_work = work.clone();
-            let guard_stamp = stamp.clone();
-            let guard_context = context.clone();
-            let guard_handle = handle.clone();
-            let guard_id = id.clone();
-            let guard_did = did.clone();
-            let result_context = context.clone();
-            let result_handle = handle.clone();
-            let result = handle
-                .read_property_with_timeout_guarded(
-                    &did,
-                    binding,
-                    READ_TIMEOUT,
-                    SendHooks::new(
-                        move || {
-                            if guard_work.life.is_closed()
-                                || guard_work.record.life.is_closed()
-                                || guard_work.record.binding_generation.get() != generation
-                                || !guard_context.current_local(&guard_handle)
-                            {
-                                SendDecision::Cancel
-                            } else if !guard_context.local_reads_allowed(&guard_did, &guard_handle)
-                                || !guard_work.observations.read_is_current(
-                                    &guard_work.record,
-                                    &guard_id,
-                                    &guard_stamp,
-                                )
-                            {
-                                SendDecision::Withdraw
-                            } else {
-                                SendDecision::Send
-                            }
-                        },
-                        || {},
-                    ),
-                    move |outcome| {
-                        if !observing.life.is_closed()
-                            && observing.record.binding_generation.get() == generation
-                        {
-                            result_context.local_outcome(&result_handle, &outcome);
-                        }
-                        if !observing.life.is_closed()
-                            && result_context.current_local(&result_handle)
-                            && let Ok(value) = outcome.result
-                        {
-                            observing.observations.observe_read(
-                                &observing.record,
-                                &observing_id,
-                                &stamp,
-                                value,
-                            );
-                        }
-                    },
-                )
-                .await;
-            if work.life.is_closed()
-                || work.record.binding_generation.get() != generation
-                || work.record.binding(&id) != binding
-            {
-                return;
-            }
-            match result.result {
-                Ok(_) => {
-                    work.read_problems.borrow_mut().remove(&id);
-                }
-                Err(CentralError::Withdrawn | CentralError::Cancelled)
-                    if result.stage == RequestStage::NotSent =>
-                {
-                    let mut pending = work.refresh_pending.borrow_mut();
-                    if !pending.iter().any(|queued| queued.id == id) {
-                        pending.push_back(read);
-                    }
-                }
-                Err(error) => {
-                    let problem = work.problem("read", binding, &error);
-                    if context.priority() == super::routing::PathPriority::CloudFirst {
-                        work.read_problems
-                            .borrow_mut()
-                            .insert(id.clone(), problem.clone());
-                    }
-                    let mut pending = work.refresh_pending.borrow_mut();
-                    if read.attempts == 3 {
-                        pending.retain(|queued| queued.id != id);
-                        work.read_problems.borrow_mut().insert(id, problem);
-                    } else {
-                        read.attempts += 1;
-                        read.ready_at = context.clock.now() + RETRY_DELAY;
-                        // A trigger during this read merges into its retry, retaining backoff.
-                        if let Some(queued) = pending.iter_mut().find(|queued| queued.id == id) {
-                            *queued = read;
-                        } else {
-                            pending.push_back(read);
-                        }
-                    }
-                }
-            }
-            work.report(&context, &did);
-        },
-    )
-    .await;
 }
 fn command_error(error: CentralError) -> CommandError {
     match error {

@@ -128,6 +128,7 @@ impl SessionDriver {
             closed: Default::default(),
             outstanding: Default::default(),
             cancellations: Default::default(),
+            property_invalidations: Default::default(),
             cancel_unsent_business: Default::default(),
         });
         let now = Instant::now();
@@ -184,6 +185,7 @@ impl SessionDriver {
                 return Ok(());
             }
             self.expire()?;
+            self.drain_property_invalidations();
             // Process one complete frame at a time; callback completion never
             // depends on scheduling a separate request future.
             if let Some(packet) = self.frames.next_packet()? {

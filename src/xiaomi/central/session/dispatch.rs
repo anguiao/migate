@@ -170,6 +170,16 @@ impl SessionDriver {
         Ok(())
     }
 
+    pub(super) fn drain_property_invalidations(&mut self) {
+        let dids = std::mem::take(&mut *self.shared.property_invalidations.borrow_mut());
+        for property in self.property_topics.values_mut() {
+            if dids.contains(&property.did) {
+                self.property_generation = self.property_generation.wrapping_add(1);
+                property.generation = self.property_generation;
+            }
+        }
+    }
+
     pub(super) fn drain_cancellations(&mut self) {
         self.drain_unsent_business();
         loop {

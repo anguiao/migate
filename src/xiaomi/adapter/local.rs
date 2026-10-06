@@ -101,11 +101,11 @@ pub(super) async fn run(
             let reconnecting = route.is_some();
             route = Some(selected.clone());
             first_deadline = None;
-            let session = Session::new(handle.clone(), context.refresh_changed.clone());
+            let session = Session::new(handle.clone());
             let access = session.access.clone();
             let tasks = session.tasks.clone();
             context.live.borrow_mut().session = Some(session);
-            tasks.spawn(super::work::refreshes(context.clone(), handle.clone()));
+            tasks.spawn(super::refresh::local(context.clone(), handle.clone()));
 
             context.set_gateway(GatewayStatus::Connected(selected.did.clone()));
             refresh_access(&context);
@@ -114,6 +114,7 @@ pub(super) async fn run(
             }
             context.changed.notify(usize::MAX);
             let events = context.clone();
+            let event_handle = handle.clone();
             let driving = async {
                 driver
                     .run(move |event| match event {
@@ -122,18 +123,14 @@ pub(super) async fn run(
                             binding,
                             value,
                         } => {
-                            let work = events
-                                .live
-                                .borrow()
-                                .session
-                                .as_ref()
-                                .unwrap()
-                                .devices
-                                .get(&did)
-                                .cloned();
-                            if let Some(work) = work {
-                                work.notify(binding, value);
-                            }
+                            events.property_event(
+                                &super::notifications::NotificationSource::Local(
+                                    event_handle.clone(),
+                                ),
+                                &did,
+                                binding,
+                                value,
+                            );
                         }
                         CentralEvent::DeviceListChanged { dids } => {
                             events

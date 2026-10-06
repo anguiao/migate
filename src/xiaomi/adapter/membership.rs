@@ -139,6 +139,9 @@ impl Context {
                             if let Some(session) = &self.live.borrow().session {
                                 drop(session.handle.unsubscribe_properties(did));
                             }
+                            if let Some(session) = self.notifications.borrow().as_ref() {
+                                drop(session.handle.unsubscribe_properties(did));
+                            }
                             record
                                 .binding_generation
                                 .set(record.binding_generation.get() + 1);
@@ -203,6 +206,7 @@ impl Context {
         if let Some(work) = self.live.borrow().devices[did].work.as_ref() {
             work.retry_subscriptions();
         }
+        self.changed.notify(usize::MAX);
         Ok(())
     }
     pub(super) fn unavailable_device(&self, did: &str, reason: String) {
@@ -230,6 +234,10 @@ impl Context {
                 drop(session.handle.unsubscribe_properties(did));
             }
         }
+        if let Some(session) = self.notifications.borrow().as_ref() {
+            drop(session.handle.unsubscribe_properties(did));
+        }
+        self.changed.notify(usize::MAX);
         self.unavailable_device(did, reason.clone());
         self.problem(did, Some(reason));
     }
@@ -259,6 +267,9 @@ impl Context {
             }
         };
         self.problem(did, None);
+        if let Some(session) = self.notifications.borrow().as_ref() {
+            drop(session.handle.unsubscribe_device(did));
+        }
         if let Some(handle) = handle {
             drop(handle.unsubscribe_device(did));
         }

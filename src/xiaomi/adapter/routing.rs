@@ -32,7 +32,7 @@ impl Context {
     }
     pub(super) fn local_reads_allowed(&self, did: &str, handle: &SessionHandle) -> bool {
         self.priority() == PathPriority::LocalFirst
-            && matches!(self.control_path(did), Some(ControlPath::Local(selected)) if selected.same_connection(handle))
+            && matches!(self.read_path(did), Some(ControlPath::Local(selected)) if selected.same_connection(handle))
     }
     pub(super) fn local_outcome<T>(&self, handle: &SessionHandle, outcome: &RequestOutcome<T>) {
         if outcome.stage != RequestStage::MayHaveBeenSent
@@ -55,6 +55,15 @@ impl Context {
                 "Gateway business response timed out; cloud control now preferred, recovery in 60s"
             );
             handle.cancel_unsent_business();
+            for work in self
+                .live
+                .borrow()
+                .devices
+                .values()
+                .filter_map(|slot| slot.work.as_ref())
+            {
+                work.retry_subscriptions();
+            }
             self.update_all_availability();
             self.refresh_changed.notify(usize::MAX);
             self.changed.notify(usize::MAX);
@@ -82,6 +91,7 @@ impl Context {
                     .filter_map(|slot| slot.work.clone())
                     .collect::<Vec<_>>();
                 for work in works {
+                    work.retry_subscriptions();
                     work.refresh();
                 }
                 self.refresh_changed.notify(usize::MAX);
@@ -121,46 +131,79 @@ impl Context {
             .tasks
             .spawn(super::work::run(work, handle, self.clone()));
     }
-    pub(super) fn control_path(&self, did: &str) -> Option<ControlPath> {
+    pub(super) fn local_candidate(&self, did: &str, push: bool) -> Option<SessionHandle> {
         let live = self.live.borrow();
-        let slot = &live.devices[did];
+        let slot = live.devices.get(did)?;
         let record = slot.admitted.as_ref()?;
         if slot.blocked.is_some() || record.life.is_closed() {
             return None;
         }
         let cached = record.cached.borrow();
-        let local = if let Some(session) = &live.session
-            && slot.access.as_ref().is_some_and(|access| {
-                access.as_ref().is_ok_and(|access| {
-                    access.online
-                        && access.spec_v2_access
-                        && access.model == cached.model
-                        && access.instance_type == cached.instance_type
-                })
-            }) {
-            Some(ControlPath::Local(session.handle.clone()))
-        } else {
-            None
-        };
-        let cloud = if self.cloud_scope_valid.get()
-            && !self.http_paused.get()
+        let access = slot.access.as_ref()?.as_ref().ok()?;
+        if !access.online
+            || !access.spec_v2_access
+            || (push && !access.push_available)
+            || access.model != cached.model
+            || access.instance_type != cached.instance_type
+        {
+            return None;
+        }
+        live.session.as_ref().map(|session| session.handle.clone())
+    }
+    pub(super) fn cloud_authenticated(&self) -> bool {
+        self.cloud_scope_valid.get()
             && !matches!(
                 *self.cloud_sync.borrow(),
                 CloudSync::Rejected(_) | CloudSync::Paused
             )
-            && !slot.cloud_forbidden
-            && slot.cloud_access.as_ref().is_some_and(|access| {
-                access.online
-                    && access.model == cached.model
-                    && access.instance_type == cached.instance_type
-            }) {
-            live.credentials.clone().map(ControlPath::Cloud)
-        } else {
-            None
+            && {
+                let live = self.live.borrow();
+                live.credentials.as_ref().is_some_and(|credentials| {
+                    live.scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.uid == credentials.uid)
+                })
+            }
+    }
+    pub(super) fn cloud_candidate(&self, did: &str, http: bool) -> bool {
+        if !self.cloud_authenticated() || (http && self.http_paused.get()) {
+            return false;
+        }
+        let live = self.live.borrow();
+        let Some(slot) = live.devices.get(did) else {
+            return false;
         };
+        let Some(record) = &slot.admitted else {
+            return false;
+        };
+        if slot.blocked.is_some() || record.life.is_closed() || slot.cloud_forbidden {
+            return false;
+        }
+        let cached = record.cached.borrow();
+        slot.cloud_access.as_ref().is_some_and(|access| {
+            access.online
+                && access.model == cached.model
+                && access.instance_type == cached.instance_type
+        })
+    }
+    pub(super) fn control_path(&self, did: &str) -> Option<ControlPath> {
+        let local = self.local_candidate(did, false);
         match self.priority() {
-            PathPriority::LocalFirst => local.or(cloud),
-            PathPriority::CloudFirst => cloud.or(local),
+            PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
+            _ if self.cloud_candidate(did, true) => self
+                .live
+                .borrow()
+                .credentials
+                .clone()
+                .map(ControlPath::Cloud),
+            _ => local.map(ControlPath::Local),
+        }
+    }
+    /// Automatic local reads never bypass the shared slow recovery schedule.
+    pub(super) fn read_path(&self, did: &str) -> Option<ControlPath> {
+        match self.control_path(did) {
+            Some(ControlPath::Local(_)) if self.priority() == PathPriority::CloudFirst => None,
+            path => path,
         }
     }
     pub(super) fn update_availability(&self, did: &str) {
@@ -200,7 +243,8 @@ impl Context {
         }
     }
     pub(super) fn disconnect(&self, _reason: String) {
-        self.priority.set(PathPriority::CloudFirst);
+        let priority_changed =
+            self.priority.replace(PathPriority::CloudFirst) != PathPriority::CloudFirst;
         if let Some(session) = self.live.borrow_mut().session.take() {
             for work in session.devices.values() {
                 work.local_disconnected();
@@ -209,12 +253,18 @@ impl Context {
         }
         for slot in self.live.borrow_mut().devices.values_mut() {
             slot.access = None;
+            if priority_changed && let Some(work) = &slot.work {
+                work.retry_subscriptions();
+            }
         }
         self.set_access_problem(None);
         self.update_all_availability();
         self.changed.notify(usize::MAX);
     }
     pub(super) fn stop(&self) {
+        if let Some(session) = self.notifications.borrow_mut().take() {
+            session.handle.close();
+        }
         self.disconnect("Xiaomi adapter stopped".into());
         for slot in self.live.borrow().devices.values() {
             if let Some(record) = &slot.admitted {
@@ -236,28 +286,7 @@ impl Context {
         error: &CloudError,
     ) -> Result<(), AdapterError> {
         if error.is_unauthorized() {
-            let current = self.store.xiaomi().load()?;
-            if current
-                .as_ref()
-                .is_some_and(|record| record.tokens.access_token == token)
-            {
-                let mut sync = self.cloud_sync.borrow_mut();
-                match &*sync {
-                    CloudSync::Refreshed(fresh) if fresh == token => {
-                        *sync = CloudSync::Paused;
-                        self.status.borrow_mut().authentication.authentication =
-                            AuthenticationState::SignInRequired(FailureReason::Cloud(
-                                error.clone(),
-                            ));
-                        self.status_changed.notify(usize::MAX);
-                    }
-                    CloudSync::Rejected(_) | CloudSync::Paused => {}
-                    _ => {
-                        *sync = CloudSync::Rejected(token.into());
-                        self.request_sync();
-                    }
-                }
-            }
+            self.token_rejected(token, FailureReason::Cloud(error.clone()))?;
         } else if error.is_temporary() {
             if !self.http_paused.replace(true) {
                 self.sync_not_before.set(Some(
@@ -279,6 +308,39 @@ impl Context {
             }
         }
         self.update_all_availability();
+        self.changed.notify(usize::MAX);
+        self.refresh_changed.notify(usize::MAX);
+        Ok(())
+    }
+    pub(super) fn token_rejected(
+        &self,
+        token: &str,
+        reason: FailureReason,
+    ) -> Result<(), AdapterError> {
+        let current = self.store.xiaomi().load()?;
+        if current
+            .as_ref()
+            .is_some_and(|record| record.tokens.access_token == token)
+        {
+            let mut sync = self.cloud_sync.borrow_mut();
+            match &*sync {
+                CloudSync::Refreshed(fresh) if fresh == token => {
+                    *sync = CloudSync::Paused;
+                    self.status.borrow_mut().authentication.authentication =
+                        AuthenticationState::SignInRequired(reason);
+                    self.status_changed.notify(usize::MAX);
+                }
+                CloudSync::Rejected(_) | CloudSync::Paused => {}
+                _ => {
+                    *sync = CloudSync::Rejected(token.into());
+                    self.request_sync();
+                }
+            }
+        }
+        self.update_all_availability();
+        self.changed.notify(usize::MAX);
+        self.credentials_changed.notify(usize::MAX);
+        self.refresh_changed.notify(usize::MAX);
         Ok(())
     }
     pub(super) fn sync_failed(&self) -> Duration {

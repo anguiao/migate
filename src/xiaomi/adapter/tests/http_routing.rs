@@ -94,6 +94,7 @@ fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let one = function(&c.context.registry, "one", "main");
             let two = function(&c.context.registry, "two", "main");
+            until(|| one.snapshot().power == Power::Off).await;
             c.cloud.lock().unwrap().property_code = code;
             assert!(matches!(
                 one.execute(Command::On).await,
@@ -111,7 +112,7 @@ fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_
             c.cloud.lock().unwrap().property_code = 0;
             two.execute(Command::Off).await.unwrap();
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
-            assert_eq!(one.snapshot().power, Power::Unknown);
+            assert_eq!(one.snapshot().power, Power::Off);
         }));
     }
 }

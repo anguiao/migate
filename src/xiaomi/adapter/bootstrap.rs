@@ -74,6 +74,12 @@ impl XiaomiAdapter {
         }
         let report = auth.local_status()?;
         let context = Rc::new(Context {
+            notifications: RefCell::new(None),
+            credentials_changed: Event::new(),
+            #[cfg(test)]
+            notification_connector: Cell::new(
+                super::notifications::NotificationConnector::Disabled,
+            ),
             priority: Cell::new(super::routing::PathPriority::LocalFirst),
             cloud: cloud.clone(),
             cloud_sync: RefCell::new(super::cloud::CloudSync::default()),

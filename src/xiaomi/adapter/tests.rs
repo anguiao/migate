@@ -1,7 +1,9 @@
 use super::{bootstrap::Clock, *};
+mod cloud_refresh;
 mod http_routing;
 mod list_scheduling;
 mod local_recovery;
+mod notifications;
 mod observation_lifetimes;
 mod refresh_scheduling;
 mod send_boundary;
@@ -180,6 +182,10 @@ struct CloudState {
     property_code: i64,
     property_gate: Option<flume::Receiver<()>>,
     property_writes: Vec<(String, u32, u32, bool, String)>,
+    property_reads: Vec<(String, u32, u32)>,
+    read_values: BTreeMap<(String, u32, u32), bool>,
+    read_gates: BTreeMap<(String, u32, u32), flume::Receiver<()>>,
+    read_status: u16,
 }
 struct Rig {
     _directory: tempfile::TempDir,
@@ -239,6 +245,7 @@ impl Rig {
             cert_status: 200,
             token_status: 200,
             property_status: 200,
+            read_status: 200,
             info_status: 200,
             ..Default::default()
         }));
@@ -260,7 +267,23 @@ impl Rig {
             if state.status != 200 {
                 return MockResponse::json(state.status, "{}");
             }
-            let value = if request.target.ends_with("/miotspec/prop/set") {
+            let value = if request.target.ends_with("/miotspec/prop/get") {
+                let body: Value = serde_json::from_str(&request.body).unwrap();
+                let item = &body["params"][0];
+                let key = (
+                    item["did"].as_str().unwrap().to_string(),
+                    item["siid"].as_u64().unwrap() as u32,
+                    item["piid"].as_u64().unwrap() as u32,
+                );
+                state.property_reads.push(key.clone());
+                let value = state.read_values.get(&key).copied().unwrap_or(false);
+                let result = json!({"code":0,"result":[{"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":0,"value":value}]});
+                let mut response = MockResponse::json(state.read_status, &result.to_string());
+                if let Some(gate) = state.read_gates.get(&key).cloned() {
+                    response = response.gated(gate);
+                }
+                return response;
+            } else if request.target.ends_with("/miotspec/prop/set") {
                 let body: Value = serde_json::from_str(&request.body).unwrap();
                 let item = &body["params"][0];
                 state.property_writes.push((
@@ -519,6 +542,7 @@ struct PeerState {
     names: BTreeMap<String, String>,
     online: BTreeMap<String, bool>,
     bad: BTreeSet<String>,
+    pushless: BTreeSet<String>,
     omit: BTreeSet<String>,
     values: BTreeMap<Binding, bool>,
     sub_reject: BTreeSet<Binding>,
@@ -714,7 +738,7 @@ async fn peer_run(mut broker: Broker, peer: Rc<Peer>, data: Vec<CachedPhysicalDe
                                 {
                                     continue;
                                 }
-                                let mut info = json!({"name":state.names.get(did).cloned().unwrap_or_else(||format!("name {did}")),"model":record.model,"urn":record.instance_type,"online":state.online.get(did).copied().unwrap_or(true),"specV2Access":true,"pushAvailable":true});
+                                let mut info = json!({"name":state.names.get(did).cloned().unwrap_or_else(||format!("name {did}")),"model":record.model,"urn":record.instance_type,"online":state.online.get(did).copied().unwrap_or(true),"specV2Access":true,"pushAvailable":!state.pushless.contains(did)});
                                 if state.bad.contains(did) {
                                     info.as_object_mut().unwrap().remove("pushAvailable");
                                 }
@@ -856,6 +880,14 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
                     Err(crate::device::CommandError::UnknownState)
                 );
                 assert_eq!(one.execute(Command::On).await.unwrap().power, Power::On);
+                until(|| {
+                    ["one", "multi", "two"].iter().all(|did| {
+                        let live = control.context.live.borrow();
+                        let work = live.devices[*did].work.as_ref().unwrap();
+                        work.active.borrow().is_some()
+                    })
+                })
+                .await;
                 peer.notify("two", 2, true);
                 peer.notify("multi", 4, true);
                 until(|| {
@@ -2973,11 +3005,7 @@ fn published_devices_restore_cloud_control_without_a_local_gateway() {
         async_io::Timer::after(Duration::from_millis(100)).await;
         let one = function(&c.context.registry, "one", "main");
         assert_eq!(one.snapshot().availability, Availability::Available);
-        assert_eq!(one.snapshot().power, Power::Unknown);
-        assert_eq!(
-            one.execute(Command::Toggle).await,
-            Err(crate::device::CommandError::UnknownState)
-        );
+        assert_eq!(one.snapshot().power, Power::Off);
         one.execute(Command::On).await.unwrap();
         let usb = function(&c.context.registry, "multi", "usb");
         usb.execute(Command::Off).await.unwrap();

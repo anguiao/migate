@@ -71,7 +71,13 @@ impl XiaomiAdapter {
                     &self.discovery,
                     self.context.clone(),
                 ),
-                self.context.tasks.run(),
+                future::or(
+                    super::notifications::run(self.context.clone()),
+                    future::or(
+                        super::refresh::cloud(self.context.clone()),
+                        self.context.tasks.run(),
+                    ),
+                ),
             ),
         )
         .await

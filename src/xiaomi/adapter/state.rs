@@ -115,16 +115,14 @@ impl DeviceSlot {
 pub(super) struct Session {
     pub(super) handle: SessionHandle,
     pub(super) access: Rc<AccessRefresh>,
-    pub(super) refresh_changed: Rc<Event>,
     pub(super) devices: BTreeMap<String, Rc<DeviceWork>>,
     pub(super) tasks: Rc<TaskSet>,
 }
 impl Session {
-    pub(super) fn new(handle: SessionHandle, refresh_changed: Rc<Event>) -> Self {
+    pub(super) fn new(handle: SessionHandle) -> Self {
         Self {
             handle,
             access: Rc::new(AccessRefresh::default()),
-            refresh_changed,
             devices: BTreeMap::new(),
             tasks: Rc::new(TaskSet::default()),
         }
@@ -232,6 +230,10 @@ pub(super) struct Live {
     pub(super) session: Option<Session>,
 }
 pub(super) struct Context {
+    pub(super) notifications: RefCell<Option<Rc<super::notifications::CloudSession>>>,
+    pub(super) credentials_changed: Event,
+    #[cfg(test)]
+    pub(super) notification_connector: Cell<super::notifications::NotificationConnector>,
     pub(super) priority: Cell<super::routing::PathPriority>,
     pub(super) cloud: CloudClient,
     pub(super) cloud_sync: RefCell<CloudSync>,
@@ -262,7 +264,15 @@ pub(super) fn update_auth(context: &Context, preparation: &BridgePreparation) {
             .as_ref()
             .is_none_or(|scope| scope.uid == credentials.uid)
     {
+        let changed = live.credentials.as_ref().is_none_or(|old| {
+            old.uid != credentials.uid
+                || old.tokens.access_token != credentials.tokens.access_token
+                || old.oauth_client_uuid != credentials.oauth_client_uuid
+        });
         live.credentials = Some(credentials.clone());
+        if changed {
+            context.credentials_changed.notify(usize::MAX);
+        }
     }
     drop(live);
     context.status.borrow_mut().authentication = preparation.report.clone();

@@ -65,6 +65,7 @@ impl Target {
 pub(super) struct Registration {
     pub(super) target: Target,
     pub(super) generation: u64,
+    pub(super) delivery_generation: u64,
     pub(super) ready: bool,
     completion: Rc<Completion>,
 }
@@ -108,6 +109,20 @@ impl Shared {
             .get(topic)
             .is_some_and(|registration| registration.generation == generation)
     }
+    pub(super) fn current_delivery(
+        &self,
+        topic: &str,
+        generation: u64,
+        delivery_generation: u64,
+    ) -> bool {
+        self.registrations
+            .borrow()
+            .get(topic)
+            .is_some_and(|registration| {
+                registration.generation == generation
+                    && registration.delivery_generation == delivery_generation
+            })
+    }
     pub(super) fn finish(&self, request: &Request, result: Result<(), NotificationError>) {
         if request.completion.finish(result.clone()) {
             self.outstanding.set(self.outstanding.get() - 1);
@@ -128,6 +143,21 @@ pub struct NotificationHandle {
 }
 
 impl NotificationHandle {
+    /// Retire only previously received property deliveries. Keep subscription
+    /// readiness, pending handshakes, and online notifications unchanged.
+    pub(crate) fn invalidate_received_properties(&self, did: &str) {
+        for registration in self.shared.registrations.borrow_mut().values_mut() {
+            if matches!(&registration.target, Target::Property { did: target, .. } if target == did)
+            {
+                registration.delivery_generation = registration.delivery_generation.wrapping_add(1);
+            }
+        }
+    }
+
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.shared, &other.shared)
+    }
+
     pub fn subscribe_property(
         &self,
         did: &str,
@@ -204,6 +234,7 @@ impl NotificationHandle {
             Registration {
                 target: target.clone(),
                 generation,
+                delivery_generation: 0,
                 ready: false,
                 completion: completion.clone(),
             },

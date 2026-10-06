@@ -23,6 +23,7 @@ pub enum CertificateUpdate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FailureReason {
     Cloud(CloudError),
+    CloudNotification(crate::xiaomi::cloud::NotificationError),
     CannotDetermineAccountIdentity,
     AccountIdentityMismatch,
     InvalidClientIdentity,
@@ -34,6 +35,7 @@ impl fmt::Display for FailureReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cloud(error) => error.fmt(formatter),
+            Self::CloudNotification(error) => error.fmt(formatter),
             Self::CannotDetermineAccountIdentity => formatter
                 .write_str("Cannot determine account identity required for gateway certificate"),
             Self::AccountIdentityMismatch => {

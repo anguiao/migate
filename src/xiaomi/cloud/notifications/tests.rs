@@ -156,6 +156,204 @@ fn timing() -> Timing {
     }
 }
 
+fn received_property(pkid: u16, value: bool) -> Packet {
+    let mut publish = Publish::new(
+        "device/target/up/properties_changed/2/1",
+        QoS::ExactlyOnce,
+        json!({"params":{"siid":2,"piid":1,"value":value}}).to_string(),
+    );
+    publish.pkid = pkid;
+    Packet::Publish(publish)
+}
+
+#[test]
+fn received_property_invalidation_keeps_ready_subscriptions_and_online_delivery() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let collected = events.clone();
+    let observed = events.clone();
+    let (invalidate, invalidating) = flume::bounded(1);
+    let (resume, resumed) = flume::bounded(1);
+    let (completed, completion) = flume::bounded(1);
+    let (finished, done) = flume::bounded(1);
+    future::block_on(exercise(
+        timing(),
+        move |mut broker| async move {
+            broker.setup().await;
+            let pkid = broker
+                .subscribe("device/target/up/properties_changed/2/1")
+                .await;
+            broker.accept(pkid).await;
+            let pkid = broker.subscribe("device/target/state/#").await;
+            broker.accept(pkid).await;
+            broker.send(received_property(51, false)).await;
+            assert!(matches!(broker.next().await, Packet::PubRec(ack) if ack.pkid == 51));
+            let mut online = Publish::new(
+                "device/target/state/offline",
+                QoS::ExactlyOnce,
+                json!({"device_id":"target","event":"offline"}).to_string(),
+            );
+            online.pkid = 52;
+            broker.send(Packet::Publish(online)).await;
+            assert!(matches!(broker.next().await, Packet::PubRec(ack) if ack.pkid == 52));
+            invalidate.send(()).unwrap();
+            resumed.recv_async().await.unwrap();
+            for pkid in [51, 52] {
+                broker.send(Packet::PubRel(PubRel::new(pkid))).await;
+                assert!(matches!(broker.next().await, Packet::PubComp(ack) if ack.pkid == pkid));
+            }
+            broker.send(received_property(53, true)).await;
+            assert!(matches!(broker.next().await, Packet::PubRec(ack) if ack.pkid == 53));
+            broker.send(Packet::PubRel(PubRel::new(53))).await;
+            assert!(matches!(broker.next().await, Packet::PubComp(ack) if ack.pkid == 53));
+            completed.send(()).unwrap();
+            done.recv_async().await.unwrap();
+        },
+        move |handle, driver| async move {
+            let (result, ()) = future::zip(
+                driver.run(move |event| collected.borrow_mut().push(event)),
+                async {
+                    handle.subscribe_property("target", POWER).await.unwrap();
+                    handle.subscribe_online("target").await.unwrap();
+                    invalidating.recv_async().await.unwrap();
+                    let generations = handle
+                        .shared
+                        .registrations
+                        .borrow()
+                        .iter()
+                        .map(|(topic, registration)| (topic.clone(), registration.generation))
+                        .collect::<Vec<_>>();
+                    handle.invalidate_received_properties("target");
+                    for (topic, generation) in generations {
+                        let registrations = handle.shared.registrations.borrow();
+                        assert!(registrations[&topic].ready);
+                        assert_eq!(registrations[&topic].generation, generation);
+                    }
+                    handle.subscribe_property("target", POWER).await.unwrap();
+                    assert!(handle.shared.queue.borrow().is_empty());
+                    assert_eq!(handle.shared.outstanding.get(), 0);
+                    resume.send(()).unwrap();
+                    completion.recv_async().await.unwrap();
+                    assert_eq!(
+                        observed.borrow().as_slice(),
+                        &[
+                            NotificationEvent::Online {
+                                did: "target".into(),
+                                online: false
+                            },
+                            NotificationEvent::Property {
+                                did: "target".into(),
+                                binding: POWER,
+                                value: true
+                            },
+                        ],
+                        "a received property from the retired source was dispatched"
+                    );
+                    handle.close();
+                },
+            )
+            .await;
+            result.unwrap();
+            finished.send(()).unwrap();
+        },
+    ));
+}
+
+#[test]
+fn received_property_invalidation_keeps_a_pending_suback_current() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let collected = events.clone();
+    let observed = events.clone();
+    let (invalidate, invalidating) = flume::bounded(1);
+    let (resume, resumed) = flume::bounded(1);
+    let (completed, completion) = flume::bounded(1);
+    let (finished, done) = flume::bounded(1);
+    future::block_on(exercise(
+        timing(),
+        move |mut broker| async move {
+            broker.setup().await;
+            let pkid = broker
+                .subscribe("device/target/up/properties_changed/2/1")
+                .await;
+            invalidate.send(()).unwrap();
+            resumed.recv_async().await.unwrap();
+            broker.accept(pkid).await;
+            broker.property(json!(true)).await;
+            let pkid = broker.subscribe("device/target/state/#").await;
+            broker.accept(pkid).await;
+            broker
+                .send(Packet::Publish(Publish::new(
+                    "device/target/state/offline",
+                    QoS::AtMostOnce,
+                    json!({"device_id":"target","event":"offline"}).to_string(),
+                )))
+                .await;
+            completed.send(()).unwrap();
+            done.recv_async().await.unwrap();
+        },
+        move |handle, driver| async move {
+            let (result, ()) = future::zip(
+                driver.run(move |event| collected.borrow_mut().push(event)),
+                async {
+                    let pending = handle.subscribe_property("target", POWER);
+                    invalidating.recv_async().await.unwrap();
+                    let topic = "device/target/up/properties_changed/2/1";
+                    let generation = handle.shared.registrations.borrow()[topic].generation;
+                    assert!(!handle.shared.registrations.borrow()[topic].ready);
+                    handle.invalidate_received_properties("target");
+                    assert_eq!(
+                        handle.shared.registrations.borrow()[topic].generation,
+                        generation
+                    );
+                    assert_eq!(handle.shared.outstanding.get(), 1);
+                    resume.send(()).unwrap();
+                    pending.await.unwrap();
+                    assert!(handle.shared.registrations.borrow()[topic].ready);
+                    handle.subscribe_online("target").await.unwrap();
+                    completion.recv_async().await.unwrap();
+                    while observed.borrow().len() < 2 {
+                        future::yield_now().await;
+                    }
+                    assert_eq!(
+                        observed.borrow().as_slice(),
+                        &[
+                            NotificationEvent::Property {
+                                did: "target".into(),
+                                binding: POWER,
+                                value: true
+                            },
+                            NotificationEvent::Online {
+                                did: "target".into(),
+                                online: false
+                            },
+                        ]
+                    );
+                    handle.close();
+                },
+            )
+            .await;
+            result.unwrap();
+            finished.send(()).unwrap();
+        },
+    ));
+}
+
+#[test]
+fn notification_handle_connection_identity_is_shared_only_by_clones() {
+    let make = || {
+        NotificationDriver::new(
+            Box::new(futures_lite::io::Cursor::new(Vec::new())),
+            mqtt::Frames::default(),
+            "account".into(),
+            timing(),
+            mqtt::MAX_FRAME_SIZE,
+        )
+    };
+    let (one, _driver) = make();
+    let (two, _other_driver) = make();
+    assert!(one.same_connection(&one.clone()));
+    assert!(!one.same_connection(&two));
+}
+
 #[test]
 fn notification_connect_suback_and_messages_follow_wire_order() {
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -351,10 +549,10 @@ fn subscription_rejection_is_per_request_and_ble_online_is_skipped() {
                 handle.subscribe_online("proxy.123").await.unwrap();
                 handle.subscribe_property("other", POWER).await.unwrap();
                 handle.close();
-                finished.send(()).unwrap();
             })
             .await;
             result.unwrap();
+            finished.send(()).unwrap();
         },
     ));
 }

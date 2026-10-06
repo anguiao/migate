@@ -6,7 +6,7 @@ use mqttbytes::{QoS, v5::Publish};
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     future::Future,
     rc::Rc,
     sync::{
@@ -208,6 +208,7 @@ pub(super) struct Shared {
     pub(super) closed: Cell<bool>,
     pub(super) outstanding: Cell<usize>,
     pub(super) cancellations: RefCell<VecDeque<Cancellation>>,
+    pub(super) property_invalidations: RefCell<BTreeSet<String>>,
     pub(super) cancel_unsent_business: Cell<bool>,
 }
 
@@ -231,6 +232,16 @@ pub struct SessionHandle {
     pub(super) timing: Timing,
 }
 impl SessionHandle {
+    /// Retire property deliveries already received, preserving subscriptions
+    /// and business requests. The driver applies this before its next frame.
+    pub(crate) fn invalidate_received_properties(&self, did: &str) {
+        self.shared
+            .property_invalidations
+            .borrow_mut()
+            .insert(did.into());
+        self.shared.event.notify(usize::MAX);
+    }
+
     pub(crate) fn same_connection(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.shared, &other.shared)
     }

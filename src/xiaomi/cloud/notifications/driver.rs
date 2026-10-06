@@ -30,7 +30,7 @@ struct Pending {
 }
 struct Received {
     publish: Publish,
-    registration: Option<(String, u64)>,
+    registration: Option<(String, u64, u64)>,
 }
 
 /// Owns MQTT I/O. Subscription completions and notifications run on this driver
@@ -510,9 +510,11 @@ impl NotificationDriver {
                             if self.incoming.len() >= LIMIT {
                                 return Err(NotificationError::Protocol);
                             }
-                            let registration = self
-                                .registration(&publish.topic)
-                                .map(|(topic, generation, _)| (topic, generation));
+                            let registration = self.registration(&publish.topic).map(
+                                |(topic, generation, delivery_generation, _)| {
+                                    (topic, generation, delivery_generation)
+                                },
+                            );
                             self.incoming.insert(
                                 publish.pkid,
                                 Received {
@@ -534,9 +536,12 @@ impl NotificationDriver {
                     return Err(NotificationError::Protocol);
                 }
                 if let Some(received) = self.incoming.remove(&ack.pkid)
-                    && received
-                        .registration
-                        .is_some_and(|(topic, generation)| self.shared.current(&topic, generation))
+                    && received.registration.is_some_and(
+                        |(topic, generation, delivery_generation)| {
+                            self.shared
+                                .current_delivery(&topic, generation, delivery_generation)
+                        },
+                    )
                 {
                     self.message(received.publish, on_event);
                 }
@@ -561,7 +566,7 @@ impl NotificationDriver {
         Ok(())
     }
 
-    fn registration(&self, topic: &str) -> Option<(String, u64, Target)> {
+    fn registration(&self, topic: &str) -> Option<(String, u64, u64, Target)> {
         self.shared
             .registrations
             .borrow()
@@ -578,6 +583,7 @@ impl NotificationDriver {
                     (
                         filter.clone(),
                         registration.generation,
+                        registration.delivery_generation,
                         registration.target.clone(),
                     )
                 })
@@ -595,7 +601,7 @@ impl NotificationDriver {
         publish: Publish,
         on_event: &mut impl FnMut(NotificationEvent),
     ) -> Result<(), NotificationError> {
-        let Some((_, _, target)) = self.registration(&publish.topic) else {
+        let Some((_, _, _, target)) = self.registration(&publish.topic) else {
             return Ok(());
         };
         let payload: Value =

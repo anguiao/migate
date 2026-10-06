@@ -99,10 +99,7 @@ impl AsyncWrite for Transport {
 }
 fn local(c: &Control, wire: Rc<Wire>) -> (SessionHandle, SessionDriver) {
     let (handle, driver) = SessionDriver::ready_for_test(Transport(wire), Duration::from_secs(1));
-    c.context.live.borrow_mut().session = Some(Session::new(
-        handle.clone(),
-        c.context.refresh_changed.clone(),
-    ));
+    c.context.live.borrow_mut().session = Some(Session::new(handle.clone()));
     c.context.local_list_success(&handle);
     c.context
         .observe_access(vec![super::list_scheduling::observation(&c.data[0], true)]);
@@ -242,8 +239,7 @@ fn only_current_sent_response_timeouts_degrade_and_only_current_lists_restore() 
             Transport(Rc::new(Wire::default())),
             Duration::from_secs(1),
         );
-        c.context.live.borrow_mut().session =
-            Some(Session::new(new.clone(), c.context.refresh_changed.clone()));
+        c.context.live.borrow_mut().session = Some(Session::new(new.clone()));
         assert_eq!(c.context.priority(), PathPriority::CloudFirst);
         c.context.local_list_success(&old);
         assert_eq!(c.context.priority(), PathPriority::CloudFirst);
@@ -261,7 +257,7 @@ fn a_cancelled_zero_byte_refresh_keeps_one_demand_until_shared_recovery() {
         let (handle, driver) = local(&c, wire.clone());
         let one = function(&c.context.registry, "one", "main");
         let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
-        let reads = crate::xiaomi::adapter::work::refreshes(c.context.clone(), handle.clone());
+        let reads = crate::xiaomi::adapter::refresh::local(c.context.clone(), handle.clone());
         future::or(
             async {
                 driver.run(|_| {}).await.unwrap();
@@ -316,6 +312,51 @@ fn a_cancelled_zero_byte_refresh_keeps_one_demand_until_shared_recovery() {
                     assert!(frames.next_packet().unwrap().is_none());
                 },
             ),
+        )
+        .await;
+    }));
+}
+
+#[test]
+fn dropping_a_zero_byte_refresh_task_retires_its_operation_and_returns_the_demand() {
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        let wire = Rc::new(Wire::default());
+        let (handle, driver) = local(&c, wire.clone());
+        let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+        let mut reads = Box::pin(crate::xiaomi::adapter::refresh::local(
+            c.context.clone(),
+            handle,
+        ));
+        future::or(
+            async {
+                driver.run(|_| {}).await.unwrap();
+                panic!("driver unexpectedly stopped");
+            },
+            async {
+                while wire.polls.get() == 0 {
+                    assert!(poll_once(reads.as_mut()).await.is_none());
+                    future::yield_now().await;
+                }
+                c.clock
+                    .automatic
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                assert_eq!(work.refresh_inflight.borrow().len(), 1);
+                drop(reads);
+                assert!(work.refresh_inflight.borrow().is_empty());
+                assert_eq!(work.refresh_pending.borrow().len(), 1);
+                wire.allow(usize::MAX);
+                for _ in 0..20 {
+                    future::yield_now().await;
+                }
+                assert!(wire.written.borrow().is_empty());
+                assert_eq!(c.context.priority(), PathPriority::LocalFirst);
+                assert_eq!(
+                    function(&c.context.registry, "one", "main")
+                        .snapshot()
+                        .power,
+                    Power::Unknown
+                );
+            },
         )
         .await;
     }));
