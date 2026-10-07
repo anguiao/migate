@@ -31,19 +31,19 @@ fn disconnect_and_access_denial_finish_every_pending_callback() {
                 let read = handle.read_property(
                     "target",
                     PropertyBinding { siid: 2, piid: 1 },
-                    move |result| first.borrow_mut().push(result.map(|_| ())),
+                    move |outcome| first.borrow_mut().push(outcome.result.map(|_| ())),
                 );
                 let write = handle.set_property(
                     "target",
                     PropertyBinding { siid: 2, piid: 1 },
                     true,
-                    move |result| second.borrow_mut().push(result),
+                    move |outcome| second.borrow_mut().push(outcome.result),
                 );
                 let (result, (read, write)) =
                     future::zip(driver.run(|_| {}), future::zip(read, write)).await;
                 assert_eq!(result, Err(error.clone()));
-                assert_eq!(read, Err(error.clone()));
-                assert_eq!(write, Err(error));
+                assert_eq!(read.result, Err(error.clone()));
+                assert_eq!(write.result, Err(error));
             },
         ));
         assert_eq!(*callbacks.borrow(), [Err(expected.clone()), Err(expected)]);
@@ -71,18 +71,19 @@ fn dropping_unpolled_driver_completes_queued_callback_and_closes_handle() {
                 "target",
                 PropertyBinding { siid: 2, piid: 1 },
                 true,
-                move |result| results.borrow_mut().push(result),
+                move |outcome| results.borrow_mut().push(outcome.result),
             );
             drop(driver);
-            assert_eq!(request.await, Err(CentralError::Cancelled));
+            assert_eq!(request.await.result, Err(CentralError::Cancelled));
             assert_eq!(
                 handle
                     .read_property(
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
-                        |result| assert_eq!(result, Err(CentralError::Cancelled))
+                        |outcome| assert_eq!(outcome.result, Err(CentralError::Cancelled))
                     )
-                    .await,
+                    .await
+                    .result,
                 Err(CentralError::Cancelled)
             );
         },
@@ -129,9 +130,10 @@ fn reconnect_never_completes_from_old_session_request_id() {
                                 .read_property(
                                     "target",
                                     PropertyBinding { siid: 2, piid: 1 },
-                                    |result| assert_eq!(result, Ok(false))
+                                    |outcome| assert_eq!(outcome.result, Ok(false))
                                 )
                                 .await
+                                .result
                                 .unwrap()
                         );
                         handle.close();

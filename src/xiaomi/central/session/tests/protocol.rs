@@ -70,10 +70,11 @@ fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
                     .unwrap();
                 assert!(
                     !handle
-                        .read_property("target", PropertyBinding { siid: 2, piid: 1 }, |result| {
-                            result.unwrap();
+                        .read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
+                            outcome.result.unwrap();
                         })
                         .await
+                        .result
                         .unwrap()
                 );
                 async_io::Timer::after(Duration::from_millis(10)).await;
@@ -202,9 +203,10 @@ fn rejected_acknowledgements_and_wrong_packet_ids_never_accept_writes() {
                                 "target",
                                 PropertyBinding { siid: 2, piid: 1 },
                                 true,
-                                move |result| results.borrow_mut().push(result)
+                                move |outcome| results.borrow_mut().push(outcome.result)
                             )
-                            .await,
+                            .await
+                            .result,
                         Err(callback_error)
                     );
                     handle.close();
@@ -355,6 +357,7 @@ fn invalid_device_messages_do_not_disconnect_the_shared_session() {
                         handle
                             .read_property("other", binding, |_| {})
                             .await
+                            .result
                             .unwrap()
                     );
                     handle.close();

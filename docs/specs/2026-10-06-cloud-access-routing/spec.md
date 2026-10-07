@@ -62,6 +62,8 @@ date: 2026-10-06
 
 各职责通过明确入口更新自己管理的状态。Context 保留共享资源及状态的持有关系，不继续集中设备发布、路径恢复和属性时序处理的全部逻辑。按职责整理现有实现即可，不要求为每项职责建立新架构层、通用后端接口或消息总线。协议编解码、TLS、HTTP 请求和 MQTT 连接管理继续留在 central、cloud 等对应模块。
 
+共享本地恢复阶段使用互斥状态表达，避免分别维护降级、计时与运行标志。命令消费、选路和回执集中在命令模块；云端操作只携带所需账号标识和访问令牌。外部目录和已保存家庭的字段校验分别由云端解析与存储读取负责，接入协调只检查当前账号、家庭及成员关系，不重复检查已验证字段。
+
 Matter 或终端提交命令后，进入原有通道队列；xiaomi/adapter 在实际发送前选择路径，由相应传输执行。响应与通知回到适配层，完成有效性与时序处理后，再更新同一份设备状态。传输层不绕过适配层直接修改设备状态。
 
 每台设备的路径条件和订阅关系只存在于米家适配层。它们不构成每台设备独立的故障恢复状态机，也不进入持久化的通用设备描述。多个通道继续共享物理设备可用性，同时保留独立状态和命令队列。
@@ -74,7 +76,9 @@ Matter 或终端提交命令后，进入原有通道队列；xiaomi/adapter 在�
 
 复用现有队列、订阅确认、有界重试、补读合并与任务取消机制。新增协调状态限定于路径选择与恢复所需状态、通知来源及有效期、每通道的观察计数和生效补读标识，不保存消息历史。观察计数独立于设备状态修订号，因为同值通知也会影响迟到结果的有效性。
 
-若本地与云端确有可复用的 MQTT/TLS 代码，只抽取共同协议部分；不建立通用路由插件框架。
+动态设备与端点任务使用按唤醒调度的 future 集合，由所属生命周期取消；不在每次事件到达时轮询全部设备任务。
+
+若本地与云端确有可复用的 MQTT/TLS 代码，只抽取共同协议部分；不建立通用路由插件框架。本地 MIPS 请求标识按 32 位序列递增回绕，跨重连连续分配。
 
 ## 云端链路与可用性依据
 
@@ -135,7 +139,7 @@ Matter 或终端提交命令后，进入原有通道队列；xiaomi/adapter 在�
 - 明确受理返回成功，拒绝、超时及结果不明如实返回失败。成功表示服务受理，不增加动作确认、自动回滚或写后定时核验。
 - 当前在途命令仍由原路径的结果完成，后续命令等待它完成后再按新的选择发送；超时结束后的迟到应答不能复活命令。
 - 超时不能撤回远端可能已经执行的写入。MiGate 保证提交顺序和不自动重放，不承诺不同服务之间的物理执行严格有序；后续有效状态观察仍用于修正显示。
-- 删除设备、变更为不兼容的属性绑定或结束所属任务后，旧命令结果不得恢复设备或改写新的绑定。
+- 删除设备、变更属性绑定或结束所属任务后，旧命令结果不得恢复设备、改写新的绑定或撤销新绑定的设备访问条件。账号级认证与 HTTP 故障仍沿用账号恢复规则。
 
 ## 本地恢复检查
 
@@ -167,6 +171,8 @@ Matter 或终端提交命令后，进入原有通道队列；xiaomi/adapter 在�
 3. 新来源准备完成后，统一变更该设备的生效来源，撤销旧来源的状态更新资格，并释放不再需要的旧属性订阅。新旧订阅短暂并存时也只有一个来源可以更新状态。
 4. 为每次来源生效、连接重建与设备生命周期保留可区分的有效期。即使经历本地→云端→本地，旧连接及接收时已关联旧有效期的消息或回调也不能重新获得资格；不只比较来源名字。有效期用于隔离能够辨认的旧工作，不能推断服务端消息的实际生成时间。
 5. 切换后通过统一入口刷新设备状态。两个来源都不可用时保留最近状态并报告同步受限，等待连接、订阅或设备访问条件恢复。
+
+已经发送但超时的订阅请求保留 MQTT 报文标识，避免迟到确认被误认成新请求。云端通知会话耗尽待确认槽位时结束该连接，按既有退避重建并回收旧标识；单次订阅超时仍按原有有界重试处理。
 
 云端在线状态通知与属性来源不同：即使当前属性由本地提供，云端仍可维护自己的设备在线信息。来自不同路径的在线信息只更新各自访问条件，云端离线不能直接使仍可本地控制的设备不可用。
 
@@ -313,3 +319,5 @@ Apple Home 的重启、断线及拓扑恢复保留最长 20 分钟观察窗口�
 - 小米官方集成固定提交 75b3acb6325a3a8d295688b13904737d6738a6a5 的[控制选路](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/miot_client.py#L643-L711)、[云端缓存读取说明](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/miot_client.py#L734-L773)、[通知来源选择](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/miot_client.py#L996-L1029)、[云端断连处理](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/miot_client.py#L1096-L1131)、[本地断连处理](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/miot_client.py#L1134-L1177)：参考其本地优先、控制与通知各自检查能力及失败写入不补发。上游允许能力差异产生混合组合，但云端 MQTT 断开也会影响 HTTP 选路依据，不能据此推断两者具有完整的故障独立性；所查实现未提供业务静默超时后的统一降级与端到端切换时限，本设计对此作明确补充。
 - 同一提交的[云端属性协议](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/miot_cloud.py#L736-L858)、[HTTP 默认超时](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/const.py#L60)、[云端 MQTT 属性与在线通知](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/miot_mips.py#L855-L1023)、[连接退避](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/miot_mips.py#L802-L852)及[本地客户端参数](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/miot_mips.py#L1124-L1131)：用于协议与默认时限参考，不直接照搬其错误处理或状态组织。
 - 上游应用使用前提沿用[米家认证方案](../2026-09-11-xiaomi-authentication/spec.md)。
+- 同一提交的[设备错误码](https://github.com/XiaoMi/ha_xiaomi_home/blob/75b3acb6325a3a8d295688b13904737d6738a6a5/custom_components/xiaomi_home/miot/i18n/en.json#L117-L138)与上述云端写入处理用于区分设备离线、不存在、设备权限拒绝及普通业务拒绝；不把设备级失败扩大为账号失效或共享中枢降级。
+- Rust 实现参考 [futures-rs 的 FuturesUnordered](https://github.com/rust-lang/futures-rs/blob/main/futures-util/src/stream/futures_unordered/mod.rs) 按唤醒调度动态任务，以及 [rumqttc 的 MQTT 状态机](https://github.com/bytebeamio/rumqtt/blob/main/rumqttc/src/v5/state.rs) 对在途请求和报文标识的所有权管理。MiGate 保留失败写入不自动重放的边界。

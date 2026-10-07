@@ -15,7 +15,7 @@ impl Context {
         receivers: Vec<CommandReceiver>,
     ) {
         for (function, receiver) in record.physical.functions().iter().zip(receivers) {
-            self.tasks.spawn(super::work::consume(
+            self.tasks.spawn(super::commands::consume(
                 receiver,
                 self.clone(),
                 record.clone(),

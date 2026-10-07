@@ -61,15 +61,13 @@ impl NotificationSource {
 }
 pub(super) struct CloudSession {
     pub(super) handle: NotificationHandle,
-    credentials: XiaomiRecord,
     key: ConnectionKey,
     tasks: TaskSet,
     online: RefCell<BTreeMap<String, Rc<OnlinePreparation>>>,
 }
 struct OnlinePreparation {
     condition: u64,
-    ready: Cell<bool>,
-    running: Cell<bool>,
+    failed: Cell<bool>,
 }
 #[derive(Clone, Eq, PartialEq)]
 struct ConnectionKey {
@@ -116,11 +114,10 @@ impl Context {
         })
     }
     pub(super) fn current_notifications(&self, handle: &NotificationHandle) -> bool {
-        self.cloud_authenticated()
-            && self.notifications.borrow().as_ref().is_some_and(|session| {
-                session.handle.same_connection(handle)
-                    && connection_key(self).is_some_and(|key| key == session.key)
-            })
+        self.notifications.borrow().as_ref().is_some_and(|session| {
+            session.handle.same_connection(handle)
+                && connection_key(self).is_some_and(|key| key == session.key)
+        })
     }
     pub(super) fn notification_source(&self, did: &str) -> Option<NotificationSource> {
         let local = self
@@ -213,15 +210,13 @@ impl Context {
     }
 }
 fn ready(work: &DeviceWork, source: &NotificationSource) -> bool {
-    let bindings = work.bindings();
-    match source {
-        NotificationSource::Local(_) => bindings
-            .iter()
-            .all(|b| work.subscribed.borrow().contains(&(b.siid, b.piid))),
-        NotificationSource::Cloud(_) => bindings
-            .iter()
-            .all(|b| work.cloud_subscribed.borrow().contains(&(b.siid, b.piid))),
-    }
+    let subscribed = match source {
+        NotificationSource::Local(_) => work.subscribed.borrow(),
+        NotificationSource::Cloud(_) => work.cloud_subscribed.borrow(),
+    };
+    work.bindings()
+        .iter()
+        .all(|b| subscribed.contains(&(b.siid, b.piid)))
 }
 fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
     let did = &work.record.physical.key().id;
@@ -267,61 +262,28 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         work.source_changed();
         context.update_routing("notification source access conditions invalidated");
     }
-    let Some(desired) = context.notification_source(&did) else {
-        if (!work.subscribed.borrow().is_empty() || work.subscribe_running.get())
-            && let Some(handle) = context
-                .live
-                .borrow()
-                .session
-                .as_ref()
-                .map(|session| session.handle.clone())
-        {
-            NotificationSource::Local(handle).retire(&work, &did);
-        }
-        if (!work.cloud_subscribed.borrow().is_empty() || work.cloud_running.get())
-            && let Some(handle) = context
-                .notifications
-                .borrow()
-                .as_ref()
-                .map(|session| session.handle.clone())
-        {
-            NotificationSource::Cloud(handle).retire(&work, &did);
-            work.cloud_running.set(false);
-        }
-        return;
-    };
-    // Release a no-longer-needed preparation; retain only the active source during handoff.
-    match &desired {
-        NotificationSource::Cloud(_)
-            if !matches!(*work.active.borrow(), Some(NotificationSource::Local(_)))
-                && (!work.subscribed.borrow().is_empty() || work.subscribe_running.get()) =>
-        {
-            if let Some(handle) = context
-                .live
-                .borrow()
-                .session
-                .as_ref()
-                .map(|session| session.handle.clone())
-            {
-                NotificationSource::Local(handle).retire(&work, &did);
-            }
-        }
-        NotificationSource::Local(_)
-            if !matches!(*work.active.borrow(), Some(NotificationSource::Cloud(_)))
-                && (!work.cloud_subscribed.borrow().is_empty() || work.cloud_running.get()) =>
-        {
-            if let Some(handle) = context
-                .notifications
-                .borrow()
-                .as_ref()
-                .map(|session| session.handle.clone())
-            {
-                NotificationSource::Cloud(handle).retire(&work, &did);
-                work.cloud_running.set(false);
-            }
-        }
-        _ => {}
+    let desired = context.notification_source(&did);
+    // Keep the desired preparation and the active source while handing over to it.
+    let keep_local = matches!(desired, Some(NotificationSource::Local(_)))
+        || (desired.is_some()
+            && matches!(*work.active.borrow(), Some(NotificationSource::Local(_))));
+    let keep_cloud = matches!(desired, Some(NotificationSource::Cloud(_)))
+        || (desired.is_some()
+            && matches!(*work.active.borrow(), Some(NotificationSource::Cloud(_))));
+    if !keep_local
+        && (!work.subscribed.borrow().is_empty() || work.subscribe_running.get())
+        && let Some(session) = context.live.borrow().session.as_ref()
+    {
+        NotificationSource::Local(session.handle.clone()).retire(&work, &did);
     }
+    if !keep_cloud
+        && (!work.cloud_subscribed.borrow().is_empty() || work.cloud_running.get())
+        && let Some(session) = context.notifications.borrow().as_ref()
+    {
+        NotificationSource::Cloud(session.handle.clone()).retire(&work, &did);
+        work.cloud_running.set(false);
+    }
+    let Some(desired) = desired else { return };
 
     if work
         .active
@@ -337,21 +299,17 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     }
     match desired {
         NotificationSource::Local(_) => {
-            if !work.local_exhausted.get() {
-                work.request_local_subscriptions();
-            }
+            work.request_local_subscriptions();
         }
         NotificationSource::Cloud(handle) => {
-            if !work.cloud_running.replace(true) && !work.cloud_exhausted.get() {
+            if !work.cloud_running.replace(true) {
                 let session = context.notifications.borrow().as_ref().unwrap().clone();
                 session.tasks.spawn(prepare_properties(
                     context.clone(),
                     work.clone(),
                     handle,
-                    session.credentials.tokens.access_token.clone(),
+                    session.key.token.clone(),
                 ));
-            } else if work.cloud_exhausted.get() {
-                work.cloud_running.set(false);
             }
         }
     }
@@ -380,26 +338,24 @@ fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
         .keys()
         .filter_map(|did| online_work(context, did).map(|work| (did.clone(), work)))
         .collect::<BTreeMap<_, _>>();
-    let registered = session.online.borrow().keys().cloned().collect::<Vec<_>>();
-    for did in registered {
-        if !works.contains_key(&did) {
-            drop(session.handle.unsubscribe_device(&did));
-            session.online.borrow_mut().remove(&did);
+    session.online.borrow_mut().retain(|did, _| {
+        if works.contains_key(did) {
+            true
+        } else {
+            drop(session.handle.unsubscribe_device(did));
+            false
         }
-    }
+    });
     for (did, work) in works {
         let state = session.online.borrow().get(&did).cloned();
         if state.as_ref().is_some_and(|state| {
-            state.ready.get()
-                || state.running.get()
-                || state.condition == work.condition_generation.get()
+            !state.failed.get() || state.condition == work.condition_generation.get()
         }) {
             continue;
         }
         let state = Rc::new(OnlinePreparation {
             condition: work.condition_generation.get(),
-            ready: Cell::new(false),
-            running: Cell::new(true),
+            failed: Cell::new(false),
         });
         session
             .online
@@ -407,7 +363,7 @@ fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
             .insert(did.clone(), state.clone());
         let context = context.clone();
         let handle = session.handle.clone();
-        let token = session.credentials.tokens.access_token.clone();
+        let token = session.key.token.clone();
         session
             .tasks
             .spawn(prepare_online(context, work, handle, token, did, state));
@@ -438,24 +394,22 @@ async fn prepare_online(
     };
     for attempt in 0..4 {
         if !current() {
-            state.running.set(false);
-            return Ok(());
+            break;
         }
-        match handle.subscribe_online(&did).await {
-            Ok(()) => {
-                if current() {
-                    state.ready.set(true);
-                }
-                break;
-            }
-            Err(NotificationError::Unauthorized) if current() => {
+        let result = handle.subscribe_online(&did).await;
+        if !current() {
+            break;
+        }
+        match result {
+            Ok(()) => return Ok(()),
+            Err(NotificationError::Unauthorized) => {
                 context.token_rejected(
                     &token,
                     FailureReason::CloudNotification(NotificationError::Unauthorized),
                 )?;
                 break;
             }
-            Err(error) if current() => {
+            Err(error) => {
                 log::warn!("{did} cloud online subscribe: {error}");
                 if attempt < 3 {
                     context
@@ -464,10 +418,9 @@ async fn prepare_online(
                         .await;
                 }
             }
-            Err(_) => break,
         }
     }
-    state.running.set(false);
+    state.failed.set(true);
     Ok(())
 }
 async fn prepare_properties(
@@ -476,12 +429,10 @@ async fn prepare_properties(
     handle: NotificationHandle,
     token: String,
 ) -> Result<(), AdapterError> {
-    let generation = work.record.binding_generation.get();
     let preparation = work.cloud_generation.get();
     let did = work.record.physical.key().id.clone();
     let current = || {
         !work.life.is_closed()
-            && work.record.binding_generation.get() == generation
             && work.cloud_generation.get() == preparation
             && context.current_notifications(&handle)
             && context.cloud_candidate(&did, false)
@@ -496,48 +447,38 @@ async fn prepare_properties(
                 .contains(&(binding.siid, binding.piid))
         })
         .collect::<Vec<_>>();
-    for attempt in 0..4 {
+    'attempts: for attempt in 0..4 {
         let mut failed = Vec::new();
         let mut problem = None;
         for binding in pending {
             if !current() {
-                if work.cloud_generation.get() == preparation {
-                    work.cloud_running.set(false);
-                }
-                return Ok(());
+                break 'attempts;
             }
-            match handle.subscribe_property(&did, binding).await {
-                Ok(()) if current() => {
+            let result = handle.subscribe_property(&did, binding).await;
+            if !current() {
+                break 'attempts;
+            }
+            match result {
+                Ok(()) => {
                     work.cloud_subscribed
                         .borrow_mut()
                         .insert((binding.siid, binding.piid));
                 }
-                Ok(()) => {}
-                Err(NotificationError::Unauthorized) if current() => {
+                Err(NotificationError::Unauthorized) => {
                     context.token_rejected(
                         &token,
                         FailureReason::CloudNotification(NotificationError::Unauthorized),
                     )?;
-                    if work.cloud_generation.get() == preparation {
-                        work.cloud_running.set(false);
-                    }
-                    return Ok(());
+                    break 'attempts;
                 }
-                Err(error) if current() => {
+                Err(error) => {
                     problem = Some(format!(
                         "{did} cloud subscribe {}.{}: {error}",
                         binding.siid, binding.piid
                     ));
                     failed.push(binding);
                 }
-                Err(_) => {}
             }
-        }
-        if !current() {
-            if work.cloud_generation.get() == preparation {
-                work.cloud_running.set(false);
-            }
-            return Ok(());
         }
         if failed.is_empty() || attempt == 3 {
             work.cloud_exhausted.set(problem.is_some());
@@ -607,6 +548,7 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
             None
         })
         .await;
+        drop(record);
         let Some(result) = connecting else {
             backoff = Backoff::new(10, 600);
             continue;
@@ -620,7 +562,6 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                 backoff = Backoff::new(10, 600);
                 let session = Rc::new(CloudSession {
                     handle: handle.clone(),
-                    credentials: record.clone(),
                     key: key.clone(),
                     tasks: TaskSet::default(),
                     online: RefCell::new(BTreeMap::new()),

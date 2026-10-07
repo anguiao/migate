@@ -118,7 +118,7 @@ fn refresh_timeout_keeps_the_ten_second_qos2_handshake_deadline() {
             "target",
             PropertyBinding { siid: 2, piid: 1 },
             Duration::from_secs(6),
-            |result| assert_eq!(result, Err(CentralError::Timeout)),
+            |outcome| assert_eq!(outcome.result, Err(CentralError::Timeout)),
         );
         driver.drain_requests().unwrap();
         let after = Instant::now();
@@ -133,7 +133,7 @@ fn refresh_timeout_keeps_the_ten_second_qos2_handshake_deadline() {
         // The PUBLISH has left the client, but its QoS2 handshake is unfinished.
         driver.output.clear();
         driver.expire().unwrap();
-        assert_eq!(read.await, Err(CentralError::Timeout));
+        assert_eq!(read.await.result, Err(CentralError::Timeout));
         assert!(driver.publications.contains_key(&pkid));
         driver
             .packet(

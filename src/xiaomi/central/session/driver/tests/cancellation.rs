@@ -6,12 +6,12 @@ fn cancelling_unsent_business_keeps_writes_and_subscriptions() {
         for dispatched in [false, true] {
             let (handle, mut driver, budget, written) = rig();
             let callbacks = Rc::new(Cell::new(0));
-            let list = handle.get_devices_detailed(count_result(&callbacks));
-            let filtered =
-                handle.get_devices_filtered_detailed(&["target".into()], count_result(&callbacks));
-            let device = handle.get_device_list_detailed("target", count_result(&callbacks));
-            let read = handle.read_property_detailed("target", BINDING, count_result(&callbacks));
-            let write = handle.set_property_detailed("target", BINDING, true, |_| {});
+            let list = handle.get_devices(count_result(&callbacks));
+            let filtered = handle
+                .get_devices_filtered(&["target".into(), "other".into()], count_result(&callbacks));
+            let device = handle.get_devices_filtered(&["target".into()], count_result(&callbacks));
+            let read = handle.read_property("target", BINDING, count_result(&callbacks));
+            let write = handle.set_property("target", BINDING, true, |_| {});
             let subscription = handle.subscribe_property("target", BINDING);
             if dispatched {
                 driver.drain_requests().unwrap();
@@ -62,12 +62,12 @@ fn cancelling_unsent_business_keeps_writes_and_subscriptions() {
 fn cancelling_unsent_business_preserves_partial_reads_and_qos2_frames() {
     block_on(async {
         let (handle, mut driver, budget, written) = rig();
-        let read = handle.read_property_detailed("target", BINDING, |_| {});
+        let read = handle.read_property("target", BINDING, |_| {});
         driver.drain_requests().unwrap();
         let mid = *driver.pending.keys().next().unwrap();
         let pkid = *driver.publications.keys().next().unwrap();
         write_ready(&mut driver, &budget, 3).await;
-        let list = handle.get_devices_detailed(|_| {});
+        let list = handle.get_devices(|_| {});
         handle.cancel_unsent_business();
         driver.drain_cancellations();
         assert_eq!(list.await, unsent(CentralError::Cancelled));
@@ -108,16 +108,14 @@ fn cancelling_unsent_business_releases_capacity_once() {
             let (handle, mut driver, _, _) = rig();
             let callbacks = Rc::new(Cell::new(0));
             for _ in 0..31 {
-                drop(handle.get_devices_detailed(count_result(&callbacks)));
-                drop(handle.read_property_detailed("target", BINDING, count_result(&callbacks)));
+                drop(handle.get_devices(count_result(&callbacks)));
+                drop(handle.read_property("target", BINDING, count_result(&callbacks)));
             }
-            let write = handle.set_property_detailed("target", BINDING, true, |_| {});
+            let write = handle.set_property("target", BINDING, true, |_| {});
             let subscription = handle.subscribe_property("target", BINDING);
             assert_eq!(handle.shared.outstanding.get(), LIMIT);
             assert_eq!(
-                handle
-                    .set_property_detailed("full", BINDING, false, |_| {})
-                    .await,
+                handle.set_property("full", BINDING, false, |_| {}).await,
                 unsent(CentralError::QueueFull)
             );
             if dispatched {
@@ -131,7 +129,7 @@ fn cancelling_unsent_business_releases_capacity_once() {
             driver.drain_cancellations();
             assert_eq!(callbacks.get(), LIMIT - 2);
             assert_eq!(handle.shared.outstanding.get(), 2);
-            let replacement = handle.read_property_detailed("fresh", BINDING, |_| {});
+            let replacement = handle.read_property("fresh", BINDING, |_| {});
             assert_eq!(handle.shared.outstanding.get(), 3);
             driver.drain_requests().unwrap();
             driver.finish_all(CentralError::Cancelled);
@@ -151,7 +149,7 @@ fn a_response_timeout_callback_cancels_unsent_lists_before_the_same_socket_poll(
         let callbacks = Rc::new(RefCell::new(Vec::new()));
         let observed = callbacks.clone();
         let cancel = handle.clone();
-        let write = handle.set_property_detailed("target", BINDING, true, move |outcome| {
+        let write = handle.set_property("target", BINDING, true, move |outcome| {
             observed.borrow_mut().push(outcome);
             cancel.cancel_unsent_business();
         });
@@ -167,7 +165,7 @@ fn a_response_timeout_callback_cancels_unsent_lists_before_the_same_socket_poll(
         assert!(sent > 0);
 
         let list_callbacks = Rc::new(Cell::new(0));
-        let list = handle.get_devices_detailed(count_result(&list_callbacks));
+        let list = handle.get_devices(count_result(&list_callbacks));
         driver.drain_requests().unwrap();
         assert_eq!(driver.output.len(), 1);
         assert_eq!(driver.output.front().unwrap().offset, 0);
@@ -209,7 +207,7 @@ fn detailed_cancellation_removes_unsent_frames_without_replay() {
     block_on(async {
         for dispatched in [false, true] {
             let (handle, mut driver, budget, written) = rig();
-            let write = handle.set_property_detailed("target", BINDING, true, |_| {});
+            let write = handle.set_property("target", BINDING, true, |_| {});
             if dispatched {
                 driver.drain_requests().unwrap();
             }

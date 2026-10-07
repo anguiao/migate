@@ -12,7 +12,7 @@ use super::{
 };
 use mqttbytes::{QoS, v5::*};
 use serde_json::Value;
-use std::time::Instant;
+use std::{collections::hash_map::Entry, time::Instant};
 
 impl SessionDriver {
     pub(super) fn subscribe_baseline(&mut self, now: Instant) -> Result<(), CentralError> {
@@ -44,12 +44,13 @@ impl SessionDriver {
                 if ack.pkid == 0 {
                     return Err(CentralError::Protocol);
                 }
-                let Some(subscription) = self.subscriptions.remove(&ack.pkid) else {
+                let Entry::Occupied(subscription) = self.subscriptions.entry(ack.pkid) else {
                     return Ok(());
                 };
-                if subscription.kind == SubscriptionKind::Unsubscribe {
+                if subscription.get().kind == SubscriptionKind::Unsubscribe {
                     return Err(CentralError::Protocol);
                 }
+                let subscription = subscription.remove();
                 let error = if ack.return_codes.len() != subscription.count {
                     Some(CentralError::Protocol)
                 } else {
@@ -88,12 +89,13 @@ impl SessionDriver {
                 if ack.pkid == 0 {
                     return Err(CentralError::Protocol);
                 }
-                let Some(subscription) = self.subscriptions.remove(&ack.pkid) else {
+                let Entry::Occupied(subscription) = self.subscriptions.entry(ack.pkid) else {
                     return Ok(());
                 };
-                if subscription.kind != SubscriptionKind::Unsubscribe {
+                if subscription.get().kind != SubscriptionKind::Unsubscribe {
                     return Err(CentralError::Protocol);
                 }
+                let subscription = subscription.remove();
                 let error = if ack.reasons.len() != subscription.count {
                     Some(CentralError::Protocol)
                 } else {

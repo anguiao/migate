@@ -5,7 +5,7 @@ use crate::{
     storage::{CachedPhysicalDevice, CachedScope, XiaomiRecord},
     xiaomi::{
         capability::{CapabilityError, parse_device},
-        cloud::{CloudClient, CloudError, OwnedHome, group_id},
+        cloud::{CloudClient, CloudError, OwnedHome},
         discovery::DiscoverySnapshot,
     },
 };
@@ -46,17 +46,12 @@ impl Error for CatalogError {
 }
 
 /// Select a local owned home before examining any device membership.
+/// Home fields and uniqueness are validated by the cloud directory reader.
 pub fn select_local_home(
     snapshot: &DiscoverySnapshot,
     homes: &[OwnedHome],
     uid: &str,
 ) -> Result<OwnedHome, CatalogError> {
-    if !valid_identifier(uid) {
-        return Err(CatalogError::InvalidScope);
-    }
-    for home in homes {
-        validate_home(home)?;
-    }
     homes
         .iter()
         .filter(|home| {
@@ -73,34 +68,21 @@ pub fn select_local_home(
 
 /// A missing selected home is a scope failure, never an empty member list.
 pub fn current_home(homes: &[OwnedHome], scope: &CachedScope) -> Result<OwnedHome, CatalogError> {
-    if !valid_identifier(&scope.uid)
-        || !valid_identifier(&scope.home_id)
-        || scope.group_id != group_id(&scope.uid, &scope.home_id)
-    {
-        return Err(CatalogError::InvalidScope);
-    }
-    let mut selected = None;
-    for home in homes {
-        validate_home(home)?;
-        if home.uid == scope.uid && home.home_id == scope.home_id {
-            if home.group_id != scope.group_id || selected.is_some() {
-                return Err(CatalogError::InvalidScope);
-            }
-            selected = Some(home.clone());
-        }
-    }
-    selected.ok_or(CatalogError::NoLocalHome)
+    homes
+        .iter()
+        .find(|home| home.uid == scope.uid && home.home_id == scope.home_id)
+        .cloned()
+        .ok_or(CatalogError::NoLocalHome)
 }
 
-/// Load one member of the selected home. Persistence and availability belong to source.
+/// Load one member of the selected home. Persistence and availability belong to the adapter.
 pub async fn load_device(
     cloud: &CloudClient,
     credentials: &XiaomiRecord,
     home: &OwnedHome,
     did: &str,
 ) -> Result<CachedPhysicalDevice, CatalogError> {
-    validate_home(home)?;
-    if home.uid != credentials.uid || !valid_identifier(did) {
+    if home.uid != credentials.uid {
         return Err(CatalogError::InvalidScope);
     }
     if !home.dids.iter().any(|member| member == did) {
@@ -125,19 +107,4 @@ pub async fn load_device(
         instance_type: details.instance_type,
         device,
     })
-}
-
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty() && !value.chars().any(char::is_control)
-}
-
-fn validate_home(home: &OwnedHome) -> Result<(), CatalogError> {
-    if !valid_identifier(&home.uid)
-        || !valid_identifier(&home.home_id)
-        || home.group_id != group_id(&home.uid, &home.home_id)
-        || home.dids.iter().any(|did| !valid_identifier(did))
-    {
-        return Err(CatalogError::InvalidScope);
-    }
-    Ok(())
 }

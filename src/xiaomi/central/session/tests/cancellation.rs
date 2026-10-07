@@ -131,13 +131,13 @@ fn cancel_and_unsubscribe_end_target_requests_ignore_late_results_and_keep_other
                 "target",
                 PropertyBinding { siid: 2, piid: 1 },
                 true,
-                move |result| writing.borrow_mut().push(result),
+                move |outcome| writing.borrow_mut().push(outcome.result),
             );
             let reading = callbacks.clone();
             let read = handle.read_property(
                 "target",
                 PropertyBinding { siid: 2, piid: 1 },
-                move |result| reading.borrow_mut().push(result.map(|_| ())),
+                move |outcome| reading.borrow_mut().push(outcome.result.map(|_| ())),
             );
             let values = Rc::new(RefCell::new(Vec::new()));
             let observed = values.clone();
@@ -149,8 +149,8 @@ fn cancel_and_unsubscribe_end_target_requests_ignore_late_results_and_keep_other
                 handle.cancel_device("target").unwrap();
                 let removed = handle.unsubscribe_device("target");
                 assert_eq!(subscribed.await, Err(CentralError::Cancelled));
-                assert_eq!(write.await, Err(CentralError::Cancelled));
-                assert_eq!(read.await, Err(CentralError::Cancelled));
+                assert_eq!(write.await.result, Err(CentralError::Cancelled));
+                assert_eq!(read.await.result, Err(CentralError::Cancelled));
                 removed.await.unwrap();
                 assert_eq!(
                     *callbacks.borrow(),
@@ -200,17 +200,17 @@ fn queued_cancellation_only_ends_the_named_device() {
         },
         |handle, driver| async move {
             let cancelled =
-                handle.read_property("target", PropertyBinding { siid: 2, piid: 1 }, |result| {
-                    assert_eq!(result, Err(CentralError::Cancelled))
+                handle.read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
+                    assert_eq!(outcome.result, Err(CentralError::Cancelled))
                 });
             let survivor =
-                handle.read_property("other", PropertyBinding { siid: 2, piid: 1 }, |result| {
-                    assert_eq!(result, Ok(false))
+                handle.read_property("other", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
+                    assert_eq!(outcome.result, Ok(false))
                 });
             handle.cancel_device("target").unwrap();
             let work = async {
-                assert_eq!(cancelled.await, Err(CentralError::Cancelled));
-                assert!(!survivor.await.unwrap());
+                assert_eq!(cancelled.await.result, Err(CentralError::Cancelled));
+                assert!(!survivor.await.result.unwrap());
                 handle.close();
             };
             let (result, ()) = future::zip(driver.run(|_| {}), work).await;

@@ -191,7 +191,7 @@ async fn access_refreshes(
         let result = match request {
             AccessRequest::Full | AccessRequest::Recovery => {
                 let result = handle
-                    .get_devices_detailed(move |outcome| {
+                    .get_devices(move |outcome| {
                         if !current.current_local(&connection) {
                             return;
                         }
@@ -216,7 +216,7 @@ async fn access_refreshes(
             AccessRequest::Filtered(dids) => {
                 let requested = dids.clone();
                 let result = handle
-                    .get_devices_filtered_detailed(&dids, move |outcome| {
+                    .get_devices_filtered(&dids, move |outcome| {
                         if !current.current_local(&connection) {
                             return;
                         }

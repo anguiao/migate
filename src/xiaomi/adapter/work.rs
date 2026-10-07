@@ -2,15 +2,11 @@ use super::{
     model::AdapterError,
     observations::Observations,
     refresh::{ReadFlight, Refresh},
-    routing::ControlPath,
     state::{Context, DeviceRecord, Lifetime},
 };
-use crate::{
-    device::{CommandError, CommandReceiver},
-    xiaomi::{
-        capability::PropertyBinding,
-        central::{CentralError, RequestStage, SendDecision, SendHooks, SessionHandle},
-    },
+use crate::xiaomi::{
+    capability::PropertyBinding,
+    central::{CentralError, SessionHandle},
 };
 use event_listener::Event;
 use futures_lite::future;
@@ -161,15 +157,12 @@ impl DeviceWork {
     }
     pub(super) fn bindings_changed(&self) {
         self.active.borrow_mut().take();
-        self.local_generation.set(self.local_generation.get() + 1);
+        self.local_disconnected();
         self.cloud_disconnected();
-        self.source_changed();
-        self.subscribed.borrow_mut().clear();
-        self.local_exhausted.set(false);
         self.subscribe_requested.set(true);
         self.refresh_pending.borrow_mut().clear();
         self.read_problems.borrow_mut().clear();
-        self.refresh();
+        self.source_changed();
         self.changed.notify(usize::MAX);
     }
     pub(super) fn bindings(&self) -> Vec<PropertyBinding> {
@@ -259,8 +252,10 @@ async fn subscriptions(
             continue;
         }
         work.subscribe_running.set(true);
-        let generation = work.record.binding_generation.get();
         let preparation = work.local_generation.get();
+        // Retiring the connection, bindings, or preparation advances this generation.
+        let current =
+            || context.current_local(handle) && work.local_generation.get() == preparation;
         context
             .clock
             .wait_until(context.clock.now() + Duration::from_millis(10))
@@ -270,46 +265,30 @@ async fn subscriptions(
             .into_iter()
             .filter(|b| !work.subscribed.borrow().contains(&(b.siid, b.piid)))
             .collect::<Vec<_>>();
-        for attempt in 0..4 {
+        'attempts: for attempt in 0..4 {
             let mut failed = Vec::new();
             let mut problem = None;
             for binding in pending {
-                if !context.current_local(handle)
+                if !current()
                     || !matches!(context.notification_source(&did), Some(super::notifications::NotificationSource::Local(selected)) if selected.same_connection(handle))
-                    || work.local_generation.get() != preparation
-                    || work.record.binding_generation.get() != generation
-                    || !work.bindings().contains(&binding)
                 {
-                    continue;
+                    break 'attempts;
                 }
-                match handle.subscribe_property(&did, binding).await {
-                    Ok(())
-                        if context.current_local(handle)
-                            && work.local_generation.get() == preparation
-                            && work.record.binding_generation.get() == generation =>
-                    {
+                let result = handle.subscribe_property(&did, binding).await;
+                if !current() {
+                    break 'attempts;
+                }
+                match result {
+                    Ok(()) => {
                         work.subscribed
                             .borrow_mut()
                             .insert((binding.siid, binding.piid));
                     }
-                    Ok(()) => {}
                     Err(error) => {
-                        if context.current_local(handle)
-                            && work.local_generation.get() == preparation
-                            && work.record.binding_generation.get() == generation
-                            && work.bindings().contains(&binding)
-                        {
-                            problem = Some(work.problem("subscribe", binding, &error));
-                            failed.push(binding);
-                        }
+                        problem = Some(work.problem("subscribe", binding, &error));
+                        failed.push(binding);
                     }
                 }
-            }
-            if !context.current_local(handle)
-                || work.local_generation.get() != preparation
-                || work.record.binding_generation.get() != generation
-            {
-                break;
             }
             if failed.is_empty() || attempt == 3 {
                 work.local_exhausted.set(problem.is_some());
@@ -326,200 +305,4 @@ async fn subscriptions(
         work.subscribe_running.set(false);
         context.changed.notify(usize::MAX);
     }
-}
-fn command_error(error: CentralError) -> CommandError {
-    match error {
-        CentralError::Timeout => CommandError::Timeout,
-        CentralError::Rejected(code) => CommandError::Rejected(format!("gateway code {code}")),
-        CentralError::Cancelled => CommandError::Cancelled,
-        error => CommandError::SendFailed(error.to_string()),
-    }
-}
-async fn send_local_write(
-    context: &Rc<Context>,
-    handle: SessionHandle,
-    work: Rc<DeviceWork>,
-    id: &str,
-    binding: PropertyBinding,
-    request: Rc<RefCell<Option<crate::device::CommandRequest>>>,
-    operation: Rc<super::commands::CommandOperation>,
-) -> bool {
-    let generation = work.record.binding_generation.get();
-    let did = work.record.physical.key().id.clone();
-    let target = request.borrow().as_ref().unwrap().target;
-    let observing = work.clone();
-    let id = id.to_owned();
-    let stamp = Rc::new(RefCell::new(None));
-    let capture_stamp = stamp.clone();
-    let capture_work = work.clone();
-    let capture_id = id.clone();
-    let guard_work = work.clone();
-    let guard_context = context.clone();
-    let guard_handle = handle.clone();
-    let guard_did = did.clone();
-    let result_context = context.clone();
-    let result_handle = handle.clone();
-    let submitted = operation.clone();
-    let outcome = handle.set_property_guarded(
-        &did, binding, target,
-        SendHooks::new(move || {
-            if guard_work.life.is_closed() || guard_work.record.life.is_closed()
-                || guard_work.record.binding_generation.get() != generation
-                || !guard_context.current_local(&guard_handle)
-            {
-                SendDecision::Cancel
-            } else if matches!(guard_context.control_path(&guard_did), Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle)) {
-                SendDecision::Send
-            } else {
-                SendDecision::Withdraw
-            }
-        }, move || {
-            submitted.submitted(super::model::PathKind::Local);
-            *capture_stamp.borrow_mut() = Some(capture_work.observations.write_stamp(&capture_work.record, &capture_id));
-        }),
-        move |outcome| {
-            if !observing.life.is_closed()
-                && observing.record.binding_generation.get() == generation
-            {
-                result_context.local_outcome(&result_handle, &outcome);
-            }
-            if outcome.result == Err(CentralError::Withdrawn) && outcome.stage == RequestStage::NotSent {
-                return;
-            }
-            let request = request.borrow_mut().take().unwrap();
-            match outcome.result {
-                Ok(()) => {
-                    if let Some(stamp) = stamp.borrow_mut().take() {
-                        operation.finish(observing.observations.accept_write(&observing.record, &id, &stamp, request));
-                    } else {
-                        let error = CommandError::SendFailed("gateway accepted an unsent write".into());
-                        operation.finish(Err(error.clone()));
-                        request.reject(error);
-                    }
-                }
-                Err(error) => { let error = command_error(error); operation.finish(Err(error.clone())); request.reject(error); },
-            }
-        },
-    ).await;
-    outcome.result == Err(CentralError::Withdrawn) && outcome.stage == RequestStage::NotSent
-}
-
-pub(super) async fn consume(
-    mut receiver: CommandReceiver,
-    context: Rc<Context>,
-    record: Rc<DeviceRecord>,
-    function_id: String,
-) -> Result<(), AdapterError> {
-    future::or(
-        async {
-            record.life.ended().await;
-            Ok(())
-        },
-        async {
-            let did = record.physical.key().id.clone();
-            while let Some(request) = receiver.next().await {
-                let binding = record.binding(&function_id);
-                let target = request.target;
-                let command = context.commands.begin(&did, &function_id, binding, target);
-                let work = context
-                    .live
-                    .borrow()
-                    .devices
-                    .get(&did)
-                    .and_then(|slot| slot.work.clone());
-                let path = context.control_path(&did);
-                let (Some(work), Some(path)) = (work, path) else {
-                    let error = CommandError::Unavailable("no usable control path".into());
-                    command.0.finish(Err(error.clone()));
-                    request.reject(error);
-                    continue;
-                };
-                let generation = record.binding_generation.get();
-                let request = Rc::new(RefCell::new(Some(request)));
-                let mut path = path;
-                loop {
-                    if work.life.is_closed()
-                        || record.life.is_closed()
-                        || record.binding_generation.get() != generation
-                    {
-                        command.0.finish(Err(CommandError::Cancelled));
-                        request
-                            .borrow_mut()
-                            .take()
-                            .unwrap()
-                            .reject(CommandError::Cancelled);
-                        break;
-                    }
-                    match path {
-                        ControlPath::Local(handle) => {
-                            if send_local_write(
-                                &context,
-                                handle,
-                                work.clone(),
-                                &function_id,
-                                binding,
-                                request.clone(),
-                                command.0.clone(),
-                            )
-                            .await
-                            {
-                                let Some(selected) = context.control_path(&did) else {
-                                    let error =
-                                        CommandError::Unavailable("no usable control path".into());
-                                    command.0.finish(Err(error.clone()));
-                                    request.borrow_mut().take().unwrap().reject(error);
-                                    break;
-                                };
-                                path = selected;
-                                continue;
-                            }
-                        }
-                        ControlPath::Cloud(credentials) => {
-                            let stamp = work.observations.write_stamp(&record, &function_id);
-                            command.0.submitted(super::model::PathKind::Cloud);
-                            match context
-                                .cloud
-                                .set_property(
-                                    &credentials.tokens.access_token,
-                                    &did,
-                                    binding,
-                                    target,
-                                )
-                                .await
-                            {
-                                Ok(()) => command.0.finish(work.observations.accept_write(
-                                    &record,
-                                    &function_id,
-                                    &stamp,
-                                    request.borrow_mut().take().unwrap(),
-                                )),
-                                Err(error) => {
-                                    let command_error = match error.kind() {
-                                        crate::xiaomi::cloud::CloudErrorKind::Timeout => {
-                                            CommandError::Timeout
-                                        }
-                                        crate::xiaomi::cloud::CloudErrorKind::Business(code)
-                                        | crate::xiaomi::cloud::CloudErrorKind::PropertyRejected(
-                                            code,
-                                        ) => CommandError::Rejected(format!("cloud code {code}")),
-                                        _ => CommandError::SendFailed(error.to_string()),
-                                    };
-                                    command.0.finish(Err(command_error.clone()));
-                                    request.borrow_mut().take().unwrap().reject(command_error);
-                                    context.cloud_error(
-                                        &credentials.tokens.access_token,
-                                        Some(&did),
-                                        &error,
-                                    )?;
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-            Ok(())
-        },
-    )
-    .await
 }

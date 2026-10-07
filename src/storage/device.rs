@@ -69,8 +69,16 @@ impl DeviceStore {
     }
     pub fn save_scope(&self, scope: &CachedScope) -> Result<(), StorageError> {
         let operation = "save current Xiaomi home";
-        validate_scope(scope).map_err(|error| self.invalid(operation, error))?;
-        save_scope(self.store.connection(), scope)
+        validate_scope(&scope.uid, &scope.home_id, &scope.group_id)
+            .map_err(|error| self.invalid(operation, error))?;
+        self.store
+            .connection()
+            .execute(
+                "INSERT INTO xiaomi_scope VALUES (?1, ?2, ?3)
+                 ON CONFLICT(uid) DO UPDATE SET home_id=excluded.home_id, group_id=excluded.group_id",
+                params![scope.uid, scope.home_id, scope.group_id],
+            )
+            .map(|_| ())
             .map_err(|error| self.store.database_error(operation, error))
     }
     pub fn load_scope(&self, uid: &str) -> Result<Option<CachedScope>, StorageError> {
@@ -93,7 +101,8 @@ impl DeviceStore {
             .optional()
             .map_err(|error| self.store.database_error(operation, error))?;
         if let Some(scope) = &scope {
-            validate_scope(scope).map_err(|error| self.invalid(operation, error))?;
+            validate_scope(&scope.uid, &scope.home_id, &scope.group_id)
+                .map_err(|error| self.invalid(operation, error))?;
         }
         Ok(scope)
     }
@@ -101,10 +110,10 @@ impl DeviceStore {
         StorageError::new(self.store.path(), operation, error)
     }
 }
-fn validate_scope(scope: &CachedScope) -> Result<(), &'static str> {
-    validate_text(&scope.uid)?;
-    validate_text(&scope.home_id)?;
-    if scope.group_id != group_id(&scope.uid, &scope.home_id) {
+fn validate_scope(uid: &str, home_id: &str, stored_group_id: &str) -> Result<(), &'static str> {
+    validate_text(uid)?;
+    validate_text(home_id)?;
+    if stored_group_id != group_id(uid, home_id) {
         return Err("Stored Xiaomi home is invalid");
     }
     Ok(())
@@ -121,11 +130,7 @@ pub(super) fn validate_key(key: &DeviceKey) -> Result<(), &'static str> {
     validate_text(&key.id)
 }
 pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'static str> {
-    validate_scope(&CachedScope {
-        uid: cached.uid.clone(),
-        home_id: cached.home_id.clone(),
-        group_id: cached.group_id.clone(),
-    })?;
+    validate_scope(&cached.uid, &cached.home_id, &cached.group_id)?;
     validate_text(&cached.model)?;
     validate_text(&cached.instance_type)?;
     validate_key(&cached.device.key)?;
@@ -277,13 +282,4 @@ fn load_cached(
     };
     validate_cached(&cached).map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(Some(cached))
-}
-
-fn save_scope(connection: &Connection, scope: &CachedScope) -> rusqlite::Result<()> {
-    connection.execute(
-        "INSERT INTO xiaomi_scope VALUES (?1, ?2, ?3)
-         ON CONFLICT(uid) DO UPDATE SET home_id=excluded.home_id, group_id=excluded.group_id",
-        params![scope.uid, scope.home_id, scope.group_id],
-    )?;
-    Ok(())
 }

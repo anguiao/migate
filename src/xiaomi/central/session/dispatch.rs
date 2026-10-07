@@ -134,20 +134,8 @@ impl SessionDriver {
                 self.enqueue(Packet::Unsubscribe(packet), deadline, None, Some(pkid))?;
                 continue;
             }
-            let mid = match next_mips_id() {
-                Ok(mid) => mid,
-                Err(error) => {
-                    self.finish(request, Err(error.clone()));
-                    return Err(error);
-                }
-            };
-            let mut publish = match request.kind.publication(mid, &self.reply_topic) {
-                Ok(publish) => publish,
-                Err(error) => {
-                    self.finish(request, Err(error.clone()));
-                    return Err(error);
-                }
-            };
+            let mid = next_mips_id();
+            let mut publish = request.kind.publication(mid, &self.reply_topic);
             publish.pkid = pkid;
             let deadline = request.deadline;
             request.id = Some(mid);

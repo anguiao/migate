@@ -223,7 +223,7 @@ impl NotificationHandle {
         if let Some(registration) = self.shared.registrations.borrow().get(&topic) {
             return Ok(registration.completion.clone());
         }
-        if self.shared.outstanding.get() >= LIMIT || self.shared.queue.borrow().len() >= LIMIT {
+        if self.shared.outstanding.get() >= LIMIT {
             return Err(NotificationError::QueueFull);
         }
         let generation = self.shared.generation.get().wrapping_add(1);
@@ -277,23 +277,13 @@ impl NotificationHandle {
         if self.shared.closed.get() {
             return Err(NotificationError::Cancelled);
         }
-        let removed: Vec<_> = {
-            let mut registrations = self.shared.registrations.borrow_mut();
-            let topics: Vec<_> = registrations
-                .iter()
-                .filter_map(|(topic, registration)| {
-                    registration
-                        .target
-                        .retired_by(did, properties_only)
-                        .then_some(topic.clone())
-                })
-                .collect();
-            topics
-                .into_iter()
-                .map(|topic| registrations.remove(&topic).unwrap())
-                .collect()
-        };
-        for registration in removed {
+        let removed: Vec<_> = self
+            .shared
+            .registrations
+            .borrow_mut()
+            .extract_if(|_, registration| registration.target.retired_by(did, properties_only))
+            .collect();
+        for (_, registration) in removed {
             if registration
                 .completion
                 .finish(Err(NotificationError::Cancelled))
@@ -324,7 +314,7 @@ impl NotificationHandle {
         if filters.is_empty() {
             return self.immediate(Ok(()));
         }
-        if self.shared.outstanding.get() >= LIMIT || self.shared.queue.borrow().len() >= LIMIT {
+        if self.shared.outstanding.get() >= LIMIT {
             return Err(NotificationError::QueueFull);
         }
         self.shared

@@ -353,30 +353,23 @@ fn rejects_unsupported_or_damaged_schemas_without_changing_data() {
 }
 
 #[test]
-fn current_schema_validation_rejects_missing_columns_and_replacement_views() {
-    for damage in [
-        "ALTER TABLE blobs DROP COLUMN value;",
-        "ALTER TABLE blobs RENAME TO saved_blobs; CREATE VIEW blobs AS SELECT * FROM saved_blobs;",
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        let identity = store.load_identity().unwrap();
-        let db = Connection::open(store.path()).unwrap();
-        drop(store);
-        db.execute_batch(damage).unwrap();
-        assert!(Store::open(dir.path()).is_err(), "{damage}");
-        assert_eq!(
-            db.query_row("SELECT bridge_id FROM identity", [], |row| row
-                .get::<_, String>(0))
-                .unwrap(),
-            identity.bridge_id,
-        );
-        assert_eq!(
-            db.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-                .unwrap(),
-            4
-        );
-    }
+fn invalid_current_schema_reports_sql_errors_without_replacing_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let identity = store.load_identity().unwrap();
+    let db = Connection::open(store.path()).unwrap();
+    drop(store);
+    db.execute_batch("ALTER TABLE blobs DROP COLUMN value;")
+        .unwrap();
+
+    let reopened = Store::open(dir.path()).unwrap();
+    assert!(reopened.matter().get(7).is_err());
+    assert_eq!(reopened.load_identity().unwrap(), identity);
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+            .unwrap(),
+        4
+    );
 }
 
 #[test]

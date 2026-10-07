@@ -44,21 +44,21 @@ fn short_writes_preserve_offsets_and_partial_timeout_closes_without_replay() {
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
                         true,
-                        move |result| first.borrow_mut().push(result),
+                        move |outcome| first.borrow_mut().push(outcome.result),
                     );
                     let second_write = handle.set_property(
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
                         false,
-                        move |result| second.borrow_mut().push(result),
+                        move |outcome| second.borrow_mut().push(outcome.result),
                     );
                     let (first, second) = future::zip(first_write, second_write).await;
                     if stalls {
-                        assert_eq!(first, Err(CentralError::Timeout));
-                        assert_eq!(second, Err(CentralError::Timeout));
+                        assert_eq!(first.result, Err(CentralError::Timeout));
+                        assert_eq!(second.result, Err(CentralError::Timeout));
                     } else {
-                        first.unwrap();
-                        second.unwrap();
+                        first.result.unwrap();
+                        second.result.unwrap();
                         handle.close();
                     }
                 };
@@ -130,9 +130,10 @@ fn write_gate_opening_at_deadline_does_not_send_expired_request() {
                             "target",
                             PropertyBinding { siid: 2, piid: 1 },
                             true,
-                            |result| assert_eq!(result, Err(CentralError::Timeout))
+                            |outcome| assert_eq!(outcome.result, Err(CentralError::Timeout))
                         )
-                        .await,
+                        .await
+                        .result,
                     Err(CentralError::Timeout)
                 );
                 handle.close();

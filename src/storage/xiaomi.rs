@@ -123,8 +123,9 @@ impl XiaomiStore {
         validate_record(record).map_err(|error| {
             StorageError::new(self.path(), "validate Xiaomi credentials", error)
         })?;
-        self.transaction("replace Xiaomi credentials", |transaction| {
-            transaction.execute(
+        self.store
+            .connection()
+            .execute(
                 "INSERT INTO xiaomi_auth (
                     id, uid, region, oauth_client_uuid, redirect_uri,
                     access_token, refresh_token, expires_at, refresh_at,
@@ -155,16 +156,20 @@ impl XiaomiStore {
                     &record.private_key_pem,
                     &record.certificate_pem,
                 ),
-            )?;
-            Ok(())
-        })
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                self.store
+                    .database_error("replace Xiaomi credentials", error)
+            })
     }
 
     pub fn update_tokens(&self, tokens: &TokenSet) -> Result<(), StorageError> {
         validate_tokens(tokens)
             .map_err(|error| StorageError::new(self.path(), "validate Xiaomi tokens", error))?;
-        self.transaction("update Xiaomi tokens", |transaction| {
-            let changed = transaction.execute(
+        self.store
+            .connection()
+            .execute(
                 "UPDATE xiaomi_auth SET access_token = ?1, refresh_token = ?2,
                     expires_at = ?3, refresh_at = ?4 WHERE id = 1",
                 (
@@ -173,45 +178,37 @@ impl XiaomiStore {
                     tokens.expires_at,
                     tokens.refresh_at,
                 ),
-            )?;
-            require_record(changed)
-        })
+            )
+            .and_then(require_record)
+            .map_err(|error| self.store.database_error("update Xiaomi tokens", error))
     }
 
     pub fn update_certificate(&self, certificate_pem: &str) -> Result<(), StorageError> {
         validate_pem(certificate_pem).map_err(|error| {
             StorageError::new(self.path(), "validate Xiaomi certificate", error)
         })?;
-        self.transaction("update Xiaomi certificate", |transaction| {
-            let changed = transaction.execute(
+        self.store
+            .connection()
+            .execute(
                 "UPDATE xiaomi_auth SET certificate_pem = ?1 WHERE id = 1",
                 [certificate_pem],
-            )?;
-            require_record(changed)
-        })
+            )
+            .and_then(require_record)
+            .map_err(|error| {
+                self.store
+                    .database_error("update Xiaomi certificate", error)
+            })
     }
 
     pub fn logout(&self) -> Result<(), StorageError> {
-        self.transaction("delete Xiaomi credentials", |transaction| {
-            transaction.execute("DELETE FROM xiaomi_auth", [])?;
-            Ok(())
-        })
-    }
-
-    fn transaction(
-        &self,
-        operation: &'static str,
-        body: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<()>,
-    ) -> Result<(), StorageError> {
-        let transaction = self
-            .store
+        self.store
             .connection()
-            .unchecked_transaction()
-            .map_err(|error| self.store.database_error(operation, error))?;
-        body(&transaction).map_err(|error| self.store.database_error(operation, error))?;
-        transaction
-            .commit()
-            .map_err(|error| self.store.database_error(operation, error))
+            .execute("DELETE FROM xiaomi_auth", [])
+            .map(|_| ())
+            .map_err(|error| {
+                self.store
+                    .database_error("delete Xiaomi credentials", error)
+            })
     }
 }
 

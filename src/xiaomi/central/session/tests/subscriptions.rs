@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn mismatched_subscription_ack_finishes_the_request_before_disconnecting() {
+    for unsubscribe in [false, true] {
+        let (finished, done) = flume::bounded(1);
+        block_on(pair(
+            move |mut broker| async move {
+                broker.setup().await;
+                let Packet::Subscribe(subscribe) = broker.next().await else {
+                    panic!("SUBSCRIBE expected");
+                };
+                if unsubscribe {
+                    broker
+                        .send(Packet::SubAck(SubAck::new(
+                            subscribe.pkid,
+                            vec![SubscribeReasonCode::QoS2],
+                        )))
+                        .await;
+                    let Packet::Unsubscribe(packet) = broker.next().await else {
+                        panic!("UNSUBSCRIBE expected");
+                    };
+                    broker
+                        .send(Packet::SubAck(SubAck::new(
+                            packet.pkid,
+                            vec![SubscribeReasonCode::QoS2],
+                        )))
+                        .await;
+                } else {
+                    broker
+                        .send(Packet::UnsubAck(UnsubAck {
+                            pkid: subscribe.pkid,
+                            reasons: vec![UnsubAckReason::Success],
+                            properties: None,
+                        }))
+                        .await;
+                }
+                done.recv_async().await.unwrap();
+            },
+            move |handle, driver| async move {
+                let work = async {
+                    let binding = PropertyBinding { siid: 2, piid: 1 };
+                    if unsubscribe {
+                        handle.subscribe_property("target", binding).await.unwrap();
+                        handle.unsubscribe_device("target").await
+                    } else {
+                        handle.subscribe_property("target", binding).await
+                    }
+                };
+                let (driver_result, request_result) = future::zip(driver.run(|_| {}), work).await;
+                assert_eq!(driver_result, Err(CentralError::Protocol));
+                assert_eq!(request_result, Err(CentralError::Protocol));
+                assert_eq!(handle.shared.outstanding.get(), 0);
+                finished.send(()).unwrap();
+            },
+        ));
+    }
+}
+
+#[test]
 fn baseline_and_property_subscription_rejections_are_observed() {
     for baseline in [true, false] {
         block_on(pair(
@@ -108,18 +165,18 @@ fn receive_maximum_does_not_block_subscription_control_packets() {
         },
         |handle, driver| async move {
             let first =
-                handle.read_property("target", PropertyBinding { siid: 2, piid: 1 }, |result| {
-                    result.unwrap();
+                handle.read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
+                    outcome.result.unwrap();
                 });
             let second =
-                handle.read_property("target", PropertyBinding { siid: 2, piid: 1 }, |result| {
-                    result.unwrap();
+                handle.read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
+                    outcome.result.unwrap();
                 });
             let sub = handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 });
             let work = async {
                 sub.await.unwrap();
-                assert!(first.await.unwrap());
-                assert!(!second.await.unwrap());
+                assert!(first.await.result.unwrap());
+                assert!(!second.await.result.unwrap());
                 handle.close();
             };
             let (result, ()) = future::zip(driver.run(|_| {}), work).await;

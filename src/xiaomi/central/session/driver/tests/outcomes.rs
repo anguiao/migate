@@ -5,7 +5,7 @@ fn detailed_outcomes_keep_unsent_queue_and_output_timeouts_unsent() {
     block_on(async {
         for dispatched in [false, true] {
             let (handle, mut driver, budget, written) = rig();
-            let write = handle.set_property_detailed("target", BINDING, true, |_| {});
+            let write = handle.set_property("target", BINDING, true, |_| {});
             if dispatched {
                 driver.drain_requests().unwrap();
                 let past = Instant::now() - Duration::from_secs(1);
@@ -41,7 +41,7 @@ fn detailed_outcomes_keep_unsent_queue_and_output_timeouts_unsent() {
 fn detailed_outcomes_only_mark_possible_send_after_socket_bytes() {
     block_on(async {
         let (handle, mut driver, budget, written) = rig();
-        let write = handle.set_property_detailed("target", BINDING, true, |_| {});
+        let write = handle.set_property("target", BINDING, true, |_| {});
         driver.drain_requests().unwrap();
         write_ready(&mut driver, &budget, 0).await;
         assert_eq!(
@@ -76,7 +76,7 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
             let (handle, mut driver, budget, _) = rig();
             let callbacks = Rc::new(RefCell::new(Vec::new()));
             let observed = callbacks.clone();
-            let write = handle.set_property_detailed("target", BINDING, true, move |outcome| {
+            let write = handle.set_property("target", BINDING, true, move |outcome| {
                 observed.borrow_mut().push(outcome)
             });
             driver.drain_requests().unwrap();

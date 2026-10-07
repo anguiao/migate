@@ -174,6 +174,7 @@ fn property_operations_reject_invalid_envelopes_and_unassociated_results() {
 fn property_failures_preserve_official_business_codes_and_failure_scope() {
     for (code, unauthorized, offline, forbidden) in [
         (-704_042_011, false, true, false),
+        (-704_010_000, false, false, true),
         (-704_012_904, false, false, true),
         (-704_012_905, false, false, true),
         (-704_012_901, true, false, false),
@@ -236,7 +237,7 @@ fn property_http_failures_are_classified_without_automatic_retries() {
 
 #[test]
 fn property_outer_rejections_remain_distinct_from_correlated_device_rejections() {
-    for code in [-704_012_901, -704_042_011, -704_012_904, 1] {
+    for code in [-704_012_901, -704_042_011, -704_010_000, -704_012_904, 1] {
         let (base, _) = mock_server(vec![MockResponse::json(
             200,
             &json!({"code":code,"message":"secret"}).to_string(),

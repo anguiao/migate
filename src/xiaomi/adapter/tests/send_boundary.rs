@@ -115,6 +115,45 @@ fn response_timeout() -> RequestOutcome<()> {
 }
 
 #[test]
+fn stale_local_device_errors_cannot_revoke_current_access() {
+    for stale in 0..4 {
+        block_on(Rig::new(true, &["one"]).run(|c| async move {
+            let (handle, _) = local(&c, Rc::new(Wire::default()));
+            let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+            let generation = work.record.binding_generation.get();
+            match stale {
+                0 => {
+                    local(&c, Rc::new(Wire::default()));
+                }
+                1 => work.record.binding_generation.set(generation + 1),
+                2 => work.life.close(),
+                _ => work.record.life.close(),
+            }
+            c.context.local_device_outcome(
+                &handle,
+                &work,
+                generation,
+                &RequestOutcome::<()> {
+                    result: Err(CentralError::Rejected(-704_042_011)),
+                    stage: RequestStage::BusinessResult,
+                    timeout: None,
+                },
+            );
+            assert!(
+                c.context.live.borrow().devices["one"]
+                    .access
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .online
+            );
+            assert_eq!(c.context.priority(), PathPriority::LocalFirst);
+        }));
+    }
+}
+
+#[test]
 fn an_unsent_pending_write_reselects_cloud_and_submits_the_absolute_target_once() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());

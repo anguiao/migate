@@ -47,12 +47,10 @@ pub async fn handle_line(
     now: i64,
 ) -> Result<Option<String>, StorageError> {
     let words = line.split_whitespace().collect::<Vec<_>>();
-    let Some(verb) = words.first().copied() else {
-        return Ok(None);
-    };
-    let text = match (verb, words.as_slice()) {
-        ("help", [_]) => format!("{COMMAND_HELP}\n{}", status.render(now)),
-        ("list", [_]) => {
+    let text = match words.as_slice() {
+        [] => return Ok(None),
+        ["help"] => format!("{COMMAND_HELP}\n{}", status.render(now)),
+        ["list"] => {
             let mut text = render(registry, None);
             for pending in status.pending() {
                 let key = DeviceKey::new("xiaomi", &pending.did);
@@ -70,12 +68,12 @@ pub async fn handle_line(
             }
             text
         }
-        ("status", [_]) => format!(
+        ["status"] => format!(
             "{}\n{}",
             render(registry, None),
             status.render_devices(now, None)
         ),
-        ("status", [_, did]) => {
+        ["status", did] => {
             if registry.get(&DeviceKey::new("xiaomi", *did)).is_none() {
                 invalid(status, now, "Unknown device DID.")
             } else {
@@ -86,14 +84,14 @@ pub async fn handle_line(
                 )
             }
         }
-        ("on" | "off", [_, did] | [_, did, _]) => {
+        [verb @ ("on" | "off"), did, channel @ ..] if channel.len() <= 1 => {
             let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
                 return Ok(Some(invalid(status, now, "Unknown device DID.")));
             };
-            let function = if words.len() == 3 {
-                physical.function(words[2])
-            } else if physical.functions().len() == 1 {
-                Some(physical.functions()[0].clone())
+            let function = if let Some(channel) = channel.first() {
+                physical.function(channel)
+            } else if let [function] = physical.functions() {
+                Some(function.clone())
             } else {
                 return Ok(Some(invalid(
                     status,
@@ -110,7 +108,7 @@ pub async fn handle_line(
                 format!("{did}/{}", function.function_key().id)
             };
             match function
-                .execute(if verb == "on" {
+                .execute(if *verb == "on" {
                     Command::On
                 } else {
                     Command::Off

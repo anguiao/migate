@@ -1,6 +1,62 @@
 use super::*;
 
 #[test]
+fn replacing_a_binding_clears_its_previous_subscription_failure() {
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.state
+            .borrow_mut()
+            .sub_reject
+            .insert(("one".into(), 2, 1));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .pending
+                    .iter()
+                    .any(|pending| pending.did == "one" && pending.reason.contains("subscribe 2.1"))
+            })
+            .await;
+            let mut replacement = control.context.live.borrow().devices["one"]
+                .admitted
+                .as_ref()
+                .unwrap()
+                .cached
+                .borrow()
+                .clone();
+            replacement.device.functions[0].power.siid = 7;
+            control
+                .context
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut("one")
+                .unwrap()
+                .candidate = Some(replacement);
+            control.context.reconcile("one").unwrap();
+            assert!(
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .pending
+                    .iter()
+                    .all(|pending| {
+                        pending.did != "one" || !pending.reason.contains("subscribe 2.1")
+                    })
+            );
+            until(|| peer.count("subscribe", "one", 7) == 1).await;
+            initialized(control, &peer, &["one"]).await;
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_command_binding() {
     let rig = Rig::new(true, &["one"]);
     rig.store

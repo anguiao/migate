@@ -135,9 +135,14 @@ pub(super) struct AccessRefresh {
     full_deadline: Cell<Option<Duration>>,
     pending: RefCell<BTreeSet<String>>,
     changed: Event,
-    degraded: Cell<bool>,
-    recovery_due: Cell<Option<Duration>>,
-    recovery_running: Cell<bool>,
+    recovery: Cell<Recovery>,
+}
+#[derive(Clone, Copy, Default)]
+enum Recovery {
+    #[default]
+    Healthy,
+    Scheduled(Duration),
+    Running,
 }
 pub(super) enum AccessRequest {
     Full,
@@ -147,40 +152,39 @@ pub(super) enum AccessRequest {
 impl AccessRefresh {
     pub(super) fn recovery_status(&self, clock: &dyn Clock) -> super::model::RecoveryStatus {
         use super::model::RecoveryStatus;
-        if self.recovery_running.get() {
-            RecoveryStatus::Running
-        } else if let Some(due) = self.recovery_due.get() {
-            let remaining = due.saturating_sub(clock.now());
-            let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0);
-            RecoveryStatus::Scheduled(clock.unix_now() + seconds as i64)
-        } else {
-            RecoveryStatus::None
+        match self.recovery.get() {
+            Recovery::Healthy => RecoveryStatus::None,
+            Recovery::Running => RecoveryStatus::Running,
+            Recovery::Scheduled(due) => {
+                let remaining = due.saturating_sub(clock.now());
+                let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0);
+                RecoveryStatus::Scheduled(clock.unix_now() + seconds as i64)
+            }
         }
     }
     pub(super) fn is_degraded(&self) -> bool {
-        self.degraded.get()
+        !matches!(self.recovery.get(), Recovery::Healthy)
     }
     pub(super) fn degrade(&self, now: Duration) -> bool {
-        if self.degraded.replace(true) {
+        if self.is_degraded() {
             return false;
         }
         self.full_deadline.set(None);
         self.pending.borrow_mut().clear();
-        self.recovery_due.set(Some(now + Duration::from_secs(60)));
+        self.recovery
+            .set(Recovery::Scheduled(now + Duration::from_secs(60)));
         self.changed.notify(usize::MAX);
         true
     }
     pub(super) fn recovery_finished(&self, now: Duration) {
-        self.recovery_running.set(false);
-        if self.is_degraded() {
-            self.recovery_due.set(Some(now + Duration::from_secs(300)));
+        if matches!(self.recovery.get(), Recovery::Running) {
+            self.recovery
+                .set(Recovery::Scheduled(now + Duration::from_secs(300)));
             self.changed.notify(usize::MAX);
         }
     }
     pub(super) fn recovered(&self) {
-        self.degraded.set(false);
-        self.recovery_due.set(None);
-        self.recovery_running.set(false);
+        self.recovery.set(Recovery::Healthy);
         self.changed.notify(usize::MAX);
     }
     pub(super) fn request(&self, now: Duration) {
@@ -206,13 +210,12 @@ impl AccessRefresh {
     pub(super) async fn next(&self, clock: &dyn Clock) -> AccessRequest {
         loop {
             let listener = self.changed.listen();
-            if self
-                .recovery_due
-                .get()
-                .is_some_and(|due| clock.now() >= due)
-                && !self.recovery_running.replace(true)
-            {
-                self.recovery_due.set(None);
+            let recovery_due = match self.recovery.get() {
+                Recovery::Scheduled(due) => Some(due),
+                _ => None,
+            };
+            if recovery_due.is_some_and(|due| clock.now() >= due) {
+                self.recovery.set(Recovery::Running);
                 return AccessRequest::Recovery;
             }
             let deadline = self.full_deadline.get();
@@ -228,7 +231,7 @@ impl AccessRefresh {
                         .collect(),
                 );
             }
-            let deadline = deadline.into_iter().chain(self.recovery_due.get()).min();
+            let deadline = deadline.into_iter().chain(recovery_due).min();
             if let Some(deadline) = deadline {
                 future::or(listener, clock.wait_until(deadline)).await;
             } else {

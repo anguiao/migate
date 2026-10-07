@@ -113,6 +113,36 @@ fn names_are_utf8_truncated_on_import_and_validated_on_write() {
 }
 
 #[test]
+fn malformed_stored_functions_are_rejected_when_reading_published_devices() {
+    for update in [
+        "function_id=''",
+        "label='abcdefghijklmnopqrstuvwxyz1234567'",
+        "category='unknown'",
+        "capabilities='unknown'",
+        "endpoint=2",
+        "endpoint=42",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let desc = description("multi");
+        store.devices().publish(&desc).unwrap();
+        Connection::open(store.path())
+            .unwrap()
+            .execute(
+                &format!("UPDATE device_function SET {update} WHERE function_id='usb'"),
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            store.devices().load_published(&desc.key).is_err(),
+            "{update}"
+        );
+        assert!(store.devices().list_published().is_err(), "{update}");
+    }
+}
+
+#[test]
 fn allocation_is_atomic_on_failure_and_exhaustion_and_never_uses_wildcard_endpoint() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();

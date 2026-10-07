@@ -83,9 +83,10 @@ fn partial_reply_survives_timeout_and_late_ids_do_not_complete_next_request() {
                         .read_property(
                             "target",
                             PropertyBinding { siid: 2, piid: 1 },
-                            move |result| callback.borrow_mut().push(result)
+                            move |outcome| callback.borrow_mut().push(outcome.result)
                         )
-                        .await,
+                        .await
+                        .result,
                     Err(CentralError::Timeout)
                 );
                 assert_eq!(
@@ -93,9 +94,10 @@ fn partial_reply_survives_timeout_and_late_ids_do_not_complete_next_request() {
                         .read_property(
                             "target",
                             PropertyBinding { siid: 2, piid: 1 },
-                            move |result| results.borrow_mut().push(result)
+                            move |outcome| results.borrow_mut().push(outcome.result)
                         )
-                        .await,
+                        .await
+                        .result,
                     Ok(false)
                 );
                 handle.close();
@@ -137,11 +139,12 @@ fn keepalive_requires_ping_response_and_does_not_block_requests() {
                                 .read_property(
                                     "target",
                                     PropertyBinding { siid: 2, piid: 1 },
-                                    |result| {
-                                        result.unwrap();
+                                    |outcome| {
+                                        outcome.result.unwrap();
                                     }
                                 )
                                 .await
+                                .result
                                 .unwrap()
                         );
                         handle.close();
@@ -203,27 +206,29 @@ fn queued_requests_use_the_network_timeout_and_reject_invalid_bindings() {
                 "target",
                 PropertyBinding { siid: 2, piid: 1 },
                 true,
-                move |result| callback.borrow_mut().push(result),
+                move |outcome| callback.borrow_mut().push(outcome.result),
             );
             let work = async {
-                assert_eq!(expired.await, Err(CentralError::Timeout));
+                assert_eq!(expired.await.result, Err(CentralError::Timeout));
                 assert_eq!(
                     handle
                         .set_property(
                             "target",
                             PropertyBinding { siid: 0, piid: 1 },
                             true,
-                            |result| assert_eq!(result, Err(CentralError::InvalidInput))
+                            |outcome| assert_eq!(outcome.result, Err(CentralError::InvalidInput))
                         )
-                        .await,
+                        .await
+                        .result,
                     Err(CentralError::InvalidInput)
                 );
                 assert!(
                     !handle
-                        .read_property("target", PropertyBinding { siid: 2, piid: 1 }, |result| {
-                            result.unwrap();
+                        .read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
+                            outcome.result.unwrap();
                         })
                         .await
+                        .result
                         .unwrap()
                 );
                 handle.close();

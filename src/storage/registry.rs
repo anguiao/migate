@@ -180,28 +180,21 @@ impl DeviceStore {
         let record = load_record(connection, &description.key)
             .map_err(|error| self.store.database_error(operation, error))?;
         match record {
-            Some(record) => {
+            Some(mut record) => {
                 if !record.device.matches_functions(&description.functions) {
                     return Err(AdmissionError::IncompatibleFunctions);
                 }
                 if !record.named {
-                    connection
-                        .execute(
-                            "UPDATE device_identity SET label=?3 WHERE source=?1 AND device_id=?2",
-                            params![
-                                description.key.source,
-                                description.key.id,
-                                import_label(&description.label)
-                            ],
-                        )
-                        .map_err(|error| self.store.database_error(operation, error))?;
+                    record.device.label = import_label(&description.label);
                 }
                 connection
                     .execute(
-                        "UPDATE device_identity SET published=1 WHERE source=?1 AND device_id=?2",
-                        params![description.key.source, description.key.id],
+                        "UPDATE device_identity SET label=?3,published=1 WHERE source=?1 AND device_id=?2",
+                        params![description.key.source, description.key.id, record.device.label],
                     )
                     .map_err(|error| self.store.database_error(operation, error))?;
+                record.device.published = true;
+                Ok(record.device)
             }
             None => {
                 let required = if description.functions.len() == 1 {
@@ -220,14 +213,9 @@ impl DeviceStore {
                     return Err(AdmissionError::EndpointExhausted);
                 }
                 create_record(connection, description, last + 1)
-                    .map_err(|error| self.store.database_error(operation, error))?;
+                    .map_err(|error| self.store.database_error(operation, error).into())
             }
         }
-        let result = load_record(connection, &description.key)
-            .and_then(|record| record.ok_or(rusqlite::Error::InvalidQuery))
-            .map_err(|error| self.store.database_error(operation, error))?
-            .device;
-        Ok(result)
     }
     pub fn load_published(&self, key: &DeviceKey) -> Result<Option<StoredDevice>, StorageError> {
         let operation = "load published device identity";
@@ -316,8 +304,10 @@ fn create_record(
     connection: &Connection,
     description: &PhysicalDeviceDescription,
     endpoint: u16,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<StoredDevice> {
     let single = description.functions.len() == 1;
+    let unique_id = Uuid::new_v4().simple().to_string();
+    let label = import_label(&description.label);
     reserve_endpoint(
         connection,
         &description.key,
@@ -333,11 +323,12 @@ fn create_record(
         params![
             description.key.source,
             description.key.id,
-            Uuid::new_v4().simple().to_string(),
+            unique_id,
             endpoint,
-            import_label(&description.label)
+            label
         ],
     )?;
+    let mut functions = Vec::with_capacity(description.functions.len());
     for (index, function) in description.functions.iter().enumerate() {
         let endpoint = if single {
             endpoint
@@ -346,6 +337,7 @@ fn create_record(
             reserve_endpoint(connection, &description.key, &function.id, child)?;
             child
         };
+        let label = import_label(&function.label);
         connection.execute(
             "INSERT INTO device_function VALUES (?1,?2,?3,?4,?5,'outlet','on_off')",
             params![
@@ -353,11 +345,25 @@ fn create_record(
                 description.key.id,
                 function.id,
                 endpoint,
-                import_label(&function.label)
+                label
             ],
         )?;
+        functions.push(StoredFunction {
+            key: FunctionKey::new(description.key.clone(), &function.id),
+            endpoint,
+            label,
+            category: function.category,
+            capabilities: function.capabilities.clone(),
+        });
     }
-    Ok(())
+    Ok(StoredDevice {
+        key: description.key.clone(),
+        unique_id,
+        endpoint,
+        label,
+        functions,
+        published: true,
+    })
 }
 fn reserve_endpoint(
     connection: &Connection,
@@ -409,13 +415,22 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
         .and_then(|mut statement| {
             statement
                 .query_map(params![key.source, key.id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, u16>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
+                    let id = row.get::<_, String>(0)?;
+                    let label = row.get::<_, String>(2)?;
+                    if validate_text(&id).is_err()
+                        || validate_label(&label).is_err()
+                        || row.get::<_, String>(3)? != "outlet"
+                        || row.get::<_, String>(4)? != "on_off"
+                    {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    Ok(StoredFunction {
+                        key: FunctionKey::new(key.clone(), id),
+                        endpoint: row.get(1)?,
+                        label,
+                        category: Category::Outlet,
+                        capabilities: vec![Capability::OnOff],
+                    })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()
         })?;
@@ -423,27 +438,17 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
         return Err(rusqlite::Error::InvalidQuery);
     }
     let single = functions.len() == 1;
-    let root_slot = if single { functions[0].0.as_str() } else { "" };
+    let root_slot = if single {
+        functions[0].key.id.as_str()
+    } else {
+        ""
+    };
     check_allocation(connection, key, root_slot, endpoint)?;
-    let mut stored = Vec::new();
-    for (id, function_endpoint, function_label, category, capabilities) in functions {
-        if validate_text(&id).is_err()
-            || validate_label(&function_label).is_err()
-            || category != "outlet"
-            || capabilities != "on_off"
-            || single && function_endpoint != endpoint
-            || !single && function_endpoint == endpoint
-        {
+    for function in &functions {
+        if single && function.endpoint != endpoint || !single && function.endpoint == endpoint {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        check_allocation(connection, key, &id, function_endpoint)?;
-        stored.push(StoredFunction {
-            key: FunctionKey::new(key.clone(), id),
-            endpoint: function_endpoint,
-            label: function_label,
-            category: Category::Outlet,
-            capabilities: vec![Capability::OnOff],
-        });
+        check_allocation(connection, key, &function.key.id, function.endpoint)?;
     }
     Ok(Some(Record {
         named: label.is_some(),
@@ -452,7 +457,7 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
             unique_id,
             endpoint,
             label: label.unwrap_or_default(),
-            functions: stored,
+            functions,
             published,
         },
     }))

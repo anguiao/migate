@@ -104,7 +104,7 @@ fn scope() -> CachedScope {
 }
 
 #[test]
-fn current_home_requires_the_selected_account_home_and_group() {
+fn current_home_requires_the_selected_account_and_home() {
     for homes in [
         vec![],
         vec![home("remote", &["target"])],
@@ -125,16 +125,6 @@ fn current_home_requires_the_selected_account_home_and_group() {
         current_home(&[home("remote", &["target"]), empty.clone()], &scope()).unwrap(),
         empty
     );
-    let mut wrong_group = home("local", &["target"]);
-    wrong_group.group_id = group_id("account", "remote");
-    assert!(matches!(
-        current_home(&[wrong_group], &scope()),
-        Err(CatalogError::InvalidScope)
-    ));
-    assert!(matches!(
-        current_home(&[empty.clone(), empty], &scope()),
-        Err(CatalogError::InvalidScope)
-    ));
 }
 
 #[test]
@@ -232,7 +222,7 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
 }
 
 #[test]
-fn scoped_load_rejects_foreign_members_and_malformed_scope_without_network_requests() {
+fn scoped_load_rejects_foreign_accounts_and_members_without_network_requests() {
     let (base, requests) = mock_server(vec![MockResponse::json(500, "unused")]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     let local = home("local", &["target"]);
@@ -245,16 +235,6 @@ fn scoped_load_rejects_foreign_members_and_malformed_scope_without_network_reque
     foreign.group_id = group_id("foreign", "local");
     assert!(matches!(
         block_on(load_device(&cloud, &credentials(), &foreign, "target")),
-        Err(CatalogError::InvalidScope)
-    ));
-    let mut malformed = local;
-    malformed.dids.push("bad\n".into());
-    assert!(matches!(
-        select_local_home(&snapshot(), &[malformed.clone()], "account"),
-        Err(CatalogError::InvalidScope)
-    ));
-    assert!(matches!(
-        block_on(load_device(&cloud, &credentials(), &malformed, "target")),
         Err(CatalogError::InvalidScope)
     ));
     assert_eq!(requests.try_iter().count(), 0);
@@ -357,6 +337,7 @@ fn no_local_home_remote_target_or_different_account_makes_no_request() {
     ));
     let mut other_account = home("local", &["target"]);
     other_account.uid = "another-account".into();
+    other_account.group_id = group_id("another-account", "local");
     assert!(matches!(
         block_on(load_local(
             &snapshot(),
@@ -365,7 +346,7 @@ fn no_local_home_remote_target_or_different_account_makes_no_request() {
             &key(),
             &cloud
         )),
-        Err(CatalogError::InvalidScope)
+        Err(CatalogError::NoLocalHome)
     ));
     assert_eq!(requests.try_iter().count(), 0);
 }

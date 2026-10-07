@@ -37,7 +37,7 @@ impl ReadFlight {
         match (&self.path, context.read_path(did)) {
             (ControlPath::Local(old), Some(ControlPath::Local(new))) => old.same_connection(&new),
             (ControlPath::Cloud(old), Some(ControlPath::Cloud(new))) => {
-                old.uid == new.uid && old.tokens.access_token == new.tokens.access_token
+                old.uid == new.uid && old.access_token == new.access_token
             }
             _ => false,
         }
@@ -304,12 +304,14 @@ fn read_one(
                                 || {},
                             ),
                             move |outcome| {
-                                // Observation counters only gate values; a real response timeout still degrades.
-                                if !result_flight.life.is_closed()
-                                    && !observing.life.is_closed()
-                                    && observing.record.binding_generation.get() == generation
-                                {
-                                    result_context.local_outcome(&result_handle, &outcome);
+                                // Observation counters only gate values; access failures still affect routing.
+                                if !result_flight.life.is_closed() {
+                                    result_context.local_device_outcome(
+                                        &result_handle,
+                                        &observing,
+                                        generation,
+                                        &outcome,
+                                    );
                                 }
                                 if !result_flight.life.is_closed()
                                     && !observing.life.is_closed()
@@ -350,7 +352,7 @@ fn read_one(
                 ControlPath::Cloud(credentials) => {
                     match context
                         .cloud
-                        .read_property(&credentials.tokens.access_token, &did, read.binding)
+                        .read_property(&credentials.access_token, &did, read.binding)
                         .await
                     {
                         Ok(value) => {
@@ -369,11 +371,7 @@ fn read_one(
                             })
                         }
                         Err(error) => {
-                            context.cloud_error(
-                                &credentials.tokens.access_token,
-                                Some(&did),
-                                &error,
-                            )?;
+                            context.cloud_error(&credentials.access_token, Some(&did), &error)?;
                             Ok(ReadResult::Failed(format!(
                                 "{did} read {}.{}: {error}",
                                 read.binding.siid, read.binding.piid

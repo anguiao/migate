@@ -2,17 +2,21 @@ use super::*;
 
 #[test]
 fn list_metadata_requires_explicit_access_flags() {
-    let kind = RequestKind::List {
-        did: "target".into(),
+    let kind = RequestKind::ListFiltered {
+        dids: vec!["target".into()],
     };
     for info in [
         json!({"model":"cuco.plug.v3","urn":"outlet"}),
         json!({"model":"cuco.plug.v3","urn":"outlet","online":false,"specV2Access":true,"pushAvailable":0}),
     ] {
-        assert!(matches!(
-            parse_response(&kind, &json!({"devList":{"target":info}})),
-            Err(CentralError::Protocol)
-        ));
+        let Response::Devices(entries) =
+            parse_response(&kind, &json!({"devList":{"target":info}})).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].did, "target");
+        assert_eq!(entries[0].access, Err(CentralError::Protocol));
     }
 }
 
@@ -92,11 +96,19 @@ fn full_device_lists_preserve_names_validate_flags_and_single_did_scope() {
             .access
             .is_err()
     );
-    assert!(matches!(
-        parse_response(&RequestKind::List { did: "one".into() }, &invalid),
-        Ok(Response::Device(Some(_)))
-    ));
-    let publish = RequestKind::ListAll.publication(1, "reply").unwrap();
+    let Response::Devices(filtered) = parse_response(
+        &RequestKind::ListFiltered {
+            dids: vec!["one".into()],
+        },
+        &invalid,
+    )
+    .unwrap() else {
+        panic!()
+    };
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].did, "one");
+    assert!(filtered[0].access.is_ok());
+    let publish = RequestKind::ListAll.publication(1, "reply");
     let payload = wire::decode_mips(&publish.payload).unwrap().payload;
     assert!(payload.get("filter").is_none());
     assert_eq!(
@@ -118,11 +130,11 @@ fn filtered_device_requests_preserve_their_payload_and_response_scope() {
     let observed = Rc::new(RefCell::new(None));
     let callback = observed.clone();
     let dids = vec!["one".into(), "missing".into(), "bad".into()];
-    let future = handle.get_devices_filtered(&dids, move |result| {
-        *callback.borrow_mut() = Some(result);
+    let future = handle.get_devices_filtered(&dids, move |outcome| {
+        *callback.borrow_mut() = Some(outcome.result);
     });
     let request = handle.shared.queue.borrow_mut().pop_front().unwrap();
-    let publish = request.kind.publication(1, "reply").unwrap();
+    let publish = request.kind.publication(1, "reply");
     assert_eq!(publish.topic, "master/proxy/getDevList");
     let payload = wire::decode_mips(&publish.payload).unwrap().payload;
     assert_eq!(payload["filter"]["did"], json!(dids));
@@ -148,7 +160,7 @@ fn filtered_device_requests_preserve_their_payload_and_response_scope() {
         crate::xiaomi::central::RequestStage::BusinessResult,
         None,
     );
-    let entries = block_on(future).unwrap();
+    let entries = block_on(future).result.unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].did, "bad");
     assert_eq!(entries[0].access, Err(CentralError::Protocol));
@@ -164,10 +176,10 @@ fn filtered_device_requests_preserve_their_payload_and_response_scope() {
 fn empty_or_invalid_device_filters_are_rejected_before_submission() {
     let handle = queued_handle(Timing::default());
     for dids in [vec![], vec!["valid".into(), "invalid did".into()]] {
-        let request = handle.get_devices_filtered(&dids, |result| {
-            assert_eq!(result, Err(CentralError::InvalidInput));
+        let request = handle.get_devices_filtered(&dids, |outcome| {
+            assert_eq!(outcome.result, Err(CentralError::InvalidInput));
         });
-        assert_eq!(block_on(request), Err(CentralError::InvalidInput));
+        assert_eq!(block_on(request).result, Err(CentralError::InvalidInput));
         assert!(handle.shared.queue.borrow().is_empty());
     }
 }
@@ -209,12 +221,13 @@ fn full_and_single_device_requests_share_the_session_and_keep_their_response_sco
             assert!(broker.next_optional().await.is_none());
         },
         |handle, driver| async move {
-            let all = handle.get_devices(|result| assert_eq!(result.unwrap().len(), 2));
-            let single =
-                handle.get_device_list("missing", |result| assert_eq!(result.unwrap(), None));
+            let all = handle.get_devices(|outcome| assert_eq!(outcome.result.unwrap().len(), 2));
+            let single = handle.get_devices_filtered(&["missing".into()], |outcome| {
+                assert!(outcome.result.unwrap().is_empty())
+            });
             let work = async {
-                assert_eq!(single.await.unwrap(), None);
-                let devices = all.await.unwrap();
+                assert!(single.await.result.unwrap().is_empty());
+                let devices = all.await.result.unwrap();
                 assert_eq!(devices[0].did, "one");
                 assert_eq!(
                     devices[0].access.as_ref().unwrap().name.as_deref(),

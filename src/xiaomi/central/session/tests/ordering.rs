@@ -66,13 +66,14 @@ fn business_acceptance_precedes_pubcomp_and_callbacks_preserve_notification_orde
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
                         true,
-                        move |result| {
-                            result.unwrap();
+                        move |outcome| {
+                            outcome.result.unwrap();
                             accepted.set(true);
                             writes.borrow_mut().push(true);
                         },
                     )
                     .await
+                    .result
                     .unwrap();
                 async_io::Timer::after(Duration::from_millis(55)).await;
                 handle.close();
@@ -145,26 +146,30 @@ fn coalesced_read_and_access_callbacks_run_before_later_notifications() {
                     .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
                     .await
                     .unwrap();
-                let access = handle
-                    .get_device_list("target", move |result| {
-                        assert!(!result.unwrap().unwrap().online);
+                let entries = handle
+                    .get_devices_filtered(&["target".into()], move |outcome| {
+                        let entries = outcome.result.unwrap();
+                        assert_eq!(entries.len(), 1);
+                        assert!(!entries[0].access.as_ref().unwrap().online);
                         accesses.borrow_mut().push("offline");
                     })
                     .await
-                    .unwrap()
+                    .result
                     .unwrap();
-                assert_eq!(access.model, "cuco.plug.v3");
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].access.as_ref().unwrap().model, "cuco.plug.v3");
                 assert!(
                     !handle
                         .read_property(
                             "target",
                             PropertyBinding { siid: 2, piid: 1 },
-                            move |result| {
-                                assert!(!result.unwrap());
+                            move |outcome| {
+                                assert!(!outcome.result.unwrap());
                                 observations.borrow_mut().push("read false");
                             }
                         )
                         .await
+                        .result
                         .unwrap()
                 );
                 handle.close();
@@ -222,15 +227,15 @@ fn writes_for_different_devices_and_bindings_can_complete_in_reverse_order() {
                     did,
                     PropertyBinding { siid, piid: 1 },
                     true,
-                    move |result| {
-                        result.unwrap();
+                    move |outcome| {
+                        outcome.result.unwrap();
                         callbacks.borrow_mut().push((did, siid));
                     },
                 ));
             }
             let work = async {
                 for write in writes {
-                    write.await.unwrap();
+                    write.await.result.unwrap();
                 }
                 assert_eq!(*callbacks.borrow(), [("two", 2), ("one", 3), ("one", 2)]);
                 handle.close();
@@ -267,14 +272,14 @@ fn result_callbacks_can_submit_requests_after_waiters_are_dropped() {
             drop(handle.read_property(
                 "target",
                 PropertyBinding { siid: 2, piid: 1 },
-                move |result| {
-                    assert_eq!(result, Ok(true));
+                move |outcome| {
+                    assert_eq!(outcome.result, Ok(true));
                     let close = next.clone();
                     drop(next.read_property(
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
-                        move |result| {
-                            assert_eq!(result, Ok(false));
+                        move |outcome| {
+                            assert_eq!(outcome.result, Ok(false));
                             close.close();
                         },
                     ));

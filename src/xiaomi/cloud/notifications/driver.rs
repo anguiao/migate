@@ -10,7 +10,7 @@ use futures_lite::{
 use mqttbytes::{QoS, v5::*};
 use serde_json::Value;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     pin::Pin,
     rc::Rc,
     task::Poll,
@@ -187,15 +187,17 @@ impl NotificationDriver {
 
     fn next_pkid(&mut self) -> Result<u16, NotificationError> {
         if self.pending.len() >= LIMIT {
-            return Err(NotificationError::QueueFull);
+            // Timed-out or cancelled exchanges retain their packet IDs until
+            // acknowledged. A full table must retire this connection; returning
+            // QueueFull alone would leave every later subscription stuck forever.
+            return Err(NotificationError::Timeout);
         }
-        for _ in 0..u16::MAX {
+        loop {
             self.pkid = self.pkid.wrapping_add(1).max(1);
             if !self.pending.contains_key(&self.pkid) {
                 return Ok(self.pkid);
             }
         }
-        Err(NotificationError::QueueFull)
     }
 
     fn drain_requests(&mut self) -> Result<(), NotificationError> {
@@ -218,8 +220,8 @@ impl NotificationDriver {
             let pkid = match self.next_pkid() {
                 Ok(pkid) => pkid,
                 Err(error) => {
-                    self.shared.finish(&request, Err(error));
-                    continue;
+                    self.shared.finish(&request, Err(error.clone()));
+                    return Err(error);
                 }
             };
             let (packet, unsubscribe, count) = match &request.kind {
@@ -412,12 +414,13 @@ impl NotificationDriver {
                 if ack.pkid == 0 {
                     return Err(NotificationError::Protocol);
                 }
-                let Some(pending) = self.pending.remove(&ack.pkid) else {
+                let Entry::Occupied(pending) = self.pending.entry(ack.pkid) else {
                     return Ok(());
                 };
-                if pending.unsubscribe {
+                if pending.get().unsubscribe {
                     return Err(NotificationError::Protocol);
                 }
+                let pending = pending.remove();
                 if let Some(request) = pending.request {
                     let error = if ack.return_codes.len() != pending.count {
                         Some(NotificationError::Protocol)
@@ -452,12 +455,13 @@ impl NotificationDriver {
                 if ack.pkid == 0 {
                     return Err(NotificationError::Protocol);
                 }
-                let Some(pending) = self.pending.remove(&ack.pkid) else {
+                let Entry::Occupied(pending) = self.pending.entry(ack.pkid) else {
                     return Ok(());
                 };
-                if !pending.unsubscribe {
+                if !pending.get().unsubscribe {
                     return Err(NotificationError::Protocol);
                 }
+                let pending = pending.remove();
                 if let Some(request) = pending.request {
                     let result = if ack.reasons.len() != pending.count {
                         Err(NotificationError::Protocol)
@@ -567,27 +571,22 @@ impl NotificationDriver {
     }
 
     fn registration(&self, topic: &str) -> Option<(String, u64, u64, Target)> {
-        self.shared
-            .registrations
-            .borrow()
-            .iter()
-            .find_map(|(filter, registration)| {
-                let matches = match &registration.target {
-                    Target::Property { .. } => filter == topic,
-                    Target::Online { did } => {
-                        topic == format!("device/{did}/state")
-                            || topic.starts_with(&format!("device/{did}/state/"))
-                    }
-                };
-                (registration.ready && matches).then(|| {
-                    (
-                        filter.clone(),
-                        registration.generation,
-                        registration.delivery_generation,
-                        registration.target.clone(),
-                    )
-                })
-            })
+        let registrations = self.shared.registrations.borrow();
+        let (filter, registration) = registrations.get_key_value(topic).or_else(|| {
+            let (did, suffix) = topic.strip_prefix("device/")?.split_once('/')?;
+            if suffix != "state" && !suffix.starts_with("state/") {
+                return None;
+            }
+            registrations.get_key_value(&format!("device/{did}/state/#"))
+        })?;
+        registration.ready.then(|| {
+            (
+                filter.clone(),
+                registration.generation,
+                registration.delivery_generation,
+                registration.target.clone(),
+            )
+        })
     }
 
     fn message(&self, publish: Publish, on_event: &mut impl FnMut(NotificationEvent)) {

@@ -1,6 +1,97 @@
 use super::*;
 
 #[test]
+fn exhausted_unacknowledged_subscriptions_close_the_connection() {
+    let (finished, done) = flume::bounded(1);
+    future::block_on(exercise(
+        timing(),
+        move |mut broker| async move {
+            broker.setup().await;
+            for siid in 1..=super::super::LIMIT {
+                broker
+                    .subscribe(&format!("device/target/up/properties_changed/{siid}/1"))
+                    .await;
+            }
+            done.recv_async().await.unwrap();
+        },
+        move |handle, driver| async move {
+            let pending: Vec<_> = (1..=super::super::LIMIT)
+                .map(|siid| {
+                    handle.subscribe_property(
+                        "target",
+                        PropertyBinding {
+                            siid: siid as u32,
+                            piid: 1,
+                        },
+                    )
+                })
+                .collect();
+            let work = async {
+                for subscription in pending {
+                    assert_eq!(subscription.await, Err(NotificationError::Timeout));
+                }
+                assert_eq!(
+                    handle.subscribe_property("other", POWER).await,
+                    Err(NotificationError::Timeout)
+                );
+            };
+            let (result, ()) = future::zip(driver.run(|_| {}), work).await;
+            assert_eq!(result, Err(NotificationError::Timeout));
+            assert_eq!(handle.shared.outstanding.get(), 0);
+            finished.send(()).unwrap();
+        },
+    ));
+}
+
+#[test]
+fn mismatched_subscription_ack_finishes_the_request_before_disconnecting() {
+    for unsubscribe in [false, true] {
+        let (finished, done) = flume::bounded(1);
+        future::block_on(exercise(
+            timing(),
+            move |mut broker| async move {
+                broker.setup().await;
+                let mut pkid = broker
+                    .subscribe("device/target/up/properties_changed/2/1")
+                    .await;
+                if unsubscribe {
+                    broker.accept(pkid).await;
+                    let Packet::Unsubscribe(packet) = broker.next().await else {
+                        panic!("UNSUBSCRIBE expected");
+                    };
+                    pkid = packet.pkid;
+                    broker.accept(pkid).await;
+                } else {
+                    broker
+                        .send(Packet::UnsubAck(UnsubAck {
+                            pkid,
+                            reasons: vec![UnsubAckReason::Success],
+                            properties: None,
+                        }))
+                        .await;
+                }
+                done.recv_async().await.unwrap();
+            },
+            move |handle, driver| async move {
+                let work = async {
+                    if unsubscribe {
+                        handle.subscribe_property("target", POWER).await.unwrap();
+                        handle.unsubscribe_device("target").await
+                    } else {
+                        handle.subscribe_property("target", POWER).await
+                    }
+                };
+                let (driver_result, request_result) = future::zip(driver.run(|_| {}), work).await;
+                assert_eq!(driver_result, Err(NotificationError::Protocol));
+                assert_eq!(request_result, Err(NotificationError::Protocol));
+                assert_eq!(handle.shared.outstanding.get(), 0);
+                finished.send(()).unwrap();
+            },
+        ));
+    }
+}
+
+#[test]
 fn subscription_rejection_is_per_request_and_ble_online_is_skipped() {
     let (finished, done) = flume::bounded(1);
     future::block_on(exercise(
@@ -136,7 +227,17 @@ fn retiring_queued_subscriptions_keeps_the_request_queue_bounded() {
         Err(NotificationError::QueueFull)
     );
     drop(handle.unsubscribe_device("target"));
-    assert!(handle.shared.queue.borrow().len() <= 64);
+    assert_eq!(handle.shared.queue.borrow().len(), 1);
+    assert_eq!(handle.shared.outstanding.get(), 1);
+    for siid in 1..64 {
+        drop(handle.subscribe_property("other", PropertyBinding { siid, piid: 1 }));
+    }
+    assert_eq!(handle.shared.queue.borrow().len(), 64);
+    assert_eq!(handle.shared.outstanding.get(), 64);
+    assert_eq!(
+        future::block_on(handle.subscribe_property("full", POWER)),
+        Err(NotificationError::QueueFull)
+    );
     drop(driver);
     assert_eq!(handle.shared.outstanding.get(), 0);
 }

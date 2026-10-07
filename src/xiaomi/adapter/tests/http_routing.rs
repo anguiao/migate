@@ -80,7 +80,7 @@ fn http_temporary_failure_pauses_the_account_until_a_complete_scoped_sync() {
 
 #[test]
 fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_available() {
-    for code in [-704_042_011, -704_012_904, -9] {
+    for code in [-704_042_011, -704_010_000, -704_012_904, -9] {
         let rig = Rig::new(true, &["one", "two"]);
         rig.cloud
             .lock()
@@ -95,6 +95,7 @@ fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_
             let one = function(&c.context.registry, "one", "main");
             let two = function(&c.context.registry, "two", "main");
             until(|| one.snapshot().power == Power::Off).await;
+            let token_refreshes = c.cloud.lock().unwrap().tokens;
             c.cloud.lock().unwrap().property_code = code;
             assert!(matches!(
                 one.execute(Command::On).await,
@@ -108,7 +109,14 @@ fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_
                     one.snapshot().availability,
                     Availability::Unavailable(_)
                 ));
+                assert!(!c.context.cloud_candidate("one", true));
+                assert!(matches!(
+                    one.execute(Command::Off).await,
+                    Err(crate::device::CommandError::Unavailable(_))
+                ));
+                assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
             }
+            assert_eq!(c.cloud.lock().unwrap().tokens, token_refreshes);
             c.cloud.lock().unwrap().property_code = 0;
             two.execute(Command::Off).await.unwrap();
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
@@ -371,4 +379,85 @@ fn published_devices_restore_cloud_control_without_a_local_gateway() {
             before
         );
     }));
+}
+
+#[test]
+fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
+    for code in [-704_042_011, -704_010_000, -704_012_904] {
+        let rig = Rig::new(true, &["one"]);
+        rig.cloud.lock().unwrap().online.insert("one".into());
+        let (release, gate) = flume::bounded(1);
+        block_on(rig.run(|c| async move {
+            cloud_ready(&c, &["one"]).await;
+            let one = function(&c.context.registry, "one", "main");
+            until(|| one.snapshot().power == Power::Off).await;
+            c.clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut cloud = c.cloud.lock().unwrap();
+                cloud.property_code = code;
+                cloud.property_gate = Some(gate);
+            }
+            let mut old = Box::pin(one.execute(Command::On));
+            assert!(poll_once(old.as_mut()).await.is_none());
+            until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
+            let (mut changed, generation) = {
+                let live = c.context.live.borrow();
+                let record = live.devices["one"].admitted.as_ref().unwrap();
+                (
+                    record.cached.borrow().clone(),
+                    record.binding_generation.get(),
+                )
+            };
+            changed.device.functions[0].power.siid = 7;
+            changed.instance_type = "urn:miot-spec-v2:device:outlet:0000A002:cuco-v3:2".into();
+            {
+                let mut live = c.context.live.borrow_mut();
+                let slot = live.devices.get_mut("one").unwrap();
+                slot.cloud_access.as_mut().unwrap().instance_type = changed.instance_type.clone();
+                slot.candidate = Some(changed);
+            }
+            {
+                let mut cloud = c.cloud.lock().unwrap();
+                cloud.property_code = 0;
+                cloud.property_gate = None;
+                cloud.read_values.insert(("one".into(), 7, 1), true);
+            }
+            c.context.reconcile("one").unwrap();
+            assert_eq!(
+                c.context.live.borrow().devices["one"]
+                    .admitted
+                    .as_ref()
+                    .unwrap()
+                    .binding_generation
+                    .get(),
+                generation + 1
+            );
+            until(|| {
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .property_reads
+                    .iter()
+                    .any(|(_, siid, _)| *siid == 7)
+            })
+            .await;
+            until(|| one.snapshot().power == Power::On).await;
+            assert!(c.context.cloud_candidate("one", true));
+            release.send(()).unwrap();
+            assert!(matches!(
+                old.await,
+                Err(crate::device::CommandError::Rejected(_))
+            ));
+            assert!(c.context.cloud_candidate("one", true));
+            assert_eq!(one.snapshot().availability, Availability::Available);
+            assert_eq!(one.snapshot().power, Power::On);
+            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+            one.execute(Command::Off).await.unwrap();
+            let writes = &c.cloud.lock().unwrap().property_writes;
+            assert_eq!(writes.len(), 2);
+            assert_eq!(writes[1].1, 7);
+        }));
+    }
 }

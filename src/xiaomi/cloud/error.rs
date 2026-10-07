@@ -65,7 +65,7 @@ impl CloudError {
                 | CloudErrorKind::HttpStatus(408 | 429 | 500..=599)
         )
     }
-    // Xiaomi's MIoT SDK error table distinguishes device offline and access errors
+    // Xiaomi distinguishes device offline and access errors
     // from property errors. Only a correlated item can invalidate device access.
     pub fn is_device_offline(&self) -> bool {
         matches!(self.kind, CloudErrorKind::PropertyRejected(-704_042_011))
@@ -73,7 +73,7 @@ impl CloudError {
     pub fn is_device_forbidden(&self) -> bool {
         matches!(
             self.kind,
-            CloudErrorKind::PropertyRejected(-704_012_904 | -704_012_905)
+            CloudErrorKind::PropertyRejected(-704_010_000 | -704_012_904 | -704_012_905)
         )
     }
     pub fn http_status(&self) -> Option<u16> {

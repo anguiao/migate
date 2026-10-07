@@ -47,37 +47,41 @@ impl Config {
         home: Option<OsString>,
         cwd: &Path,
     ) -> Result<Self, ConfigError> {
-        let args: Vec<_> = args.into_iter().collect();
-        let mut index = 0;
-        let mut cli_data_dir = None;
-        if args.get(index).is_some_and(|arg| arg == "--data-dir") {
-            index += 1;
-            let value = args
-                .get(index)
-                .filter(|value| !value.as_encoded_bytes().starts_with(b"--"))
-                .ok_or_else(|| ConfigError("--data-dir requires a path".into()))?;
-            cli_data_dir = Some(value.clone());
-            index += 1;
-        }
-        let command = match args.get(index).map(|value| value.to_string_lossy()) {
+        let mut args = args.into_iter().peekable();
+        let cli_data_dir = if args.next_if(|arg| arg == "--data-dir").is_some() {
+            Some(
+                args.next()
+                    .filter(|value| !value.as_encoded_bytes().starts_with(b"--"))
+                    .ok_or_else(|| ConfigError("--data-dir requires a path".into()))?,
+            )
+        } else {
+            None
+        };
+        let command = match args.next() {
             None => Command::Bridge,
             Some(value) if value == "auth" => {
-                index += 1;
-                let command = match args.get(index).map(|value| value.to_string_lossy()) {
+                let command = match args.next() {
                     Some(value) if value == "login" => AuthCommand::Login,
                     Some(value) if value == "check" => AuthCommand::Check,
                     Some(value) if value == "logout" => AuthCommand::Logout,
                     Some(value) => {
-                        return Err(ConfigError(format!("Invalid auth command: {value}")));
+                        return Err(ConfigError(format!(
+                            "Invalid auth command: {}",
+                            value.to_string_lossy()
+                        )));
                     }
                     None => return Err(ConfigError("auth requires a command".into())),
                 };
-                index += 1;
                 Command::Auth(command)
             }
-            Some(value) => return Err(ConfigError(format!("Invalid argument: {value}"))),
+            Some(value) => {
+                return Err(ConfigError(format!(
+                    "Invalid argument: {}",
+                    value.to_string_lossy()
+                )));
+            }
         };
-        if let Some(value) = args.get(index) {
+        if let Some(value) = args.next() {
             return Err(ConfigError(format!(
                 "Invalid argument: {}",
                 value.to_string_lossy()

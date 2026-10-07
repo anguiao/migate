@@ -1,10 +1,9 @@
 use super::{cloud::CloudSync, model::AdapterError, state::Context, work::DeviceWork};
 use crate::{
     device::Availability,
-    storage::XiaomiRecord,
     xiaomi::{
         auth::{AuthenticationState, FailureReason},
-        central::{RequestOutcome, RequestStage, RequestTimeout, SessionHandle},
+        central::{CentralError, RequestOutcome, RequestStage, RequestTimeout, SessionHandle},
         cloud::CloudError,
     },
 };
@@ -12,7 +11,12 @@ use std::{rc::Rc, time::Duration};
 
 pub(super) enum ControlPath {
     Local(SessionHandle),
-    Cloud(XiaomiRecord),
+    Cloud(CloudPath),
+}
+/// Only the account and token identify an HTTP route; local credentials stay in account state.
+pub(super) struct CloudPath {
+    pub(super) uid: String,
+    pub(super) access_token: String,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathPriority {
@@ -33,6 +37,45 @@ impl Context {
     pub(super) fn local_reads_allowed(&self, did: &str, handle: &SessionHandle) -> bool {
         self.priority() == PathPriority::LocalFirst
             && matches!(self.read_path(did), Some(ControlPath::Local(selected)) if selected.same_connection(handle))
+    }
+    pub(super) fn local_device_outcome<T>(
+        &self,
+        handle: &SessionHandle,
+        work: &DeviceWork,
+        generation: u64,
+        outcome: &RequestOutcome<T>,
+    ) {
+        if work.life.is_closed()
+            || work.record.life.is_closed()
+            || work.record.binding_generation.get() != generation
+            || !self.current_local(handle)
+        {
+            return;
+        }
+        self.local_outcome(handle, outcome);
+        // Xiaomi's device offline/missing errors revoke this device, not the shared gateway.
+        if outcome.stage != RequestStage::BusinessResult
+            || !matches!(
+                outcome.result,
+                Err(CentralError::Rejected(
+                    -10_007 | -704_042_001 | -704_042_011 | -704_090_001
+                ))
+            )
+        {
+            return;
+        }
+        let did = &work.record.physical.key().id;
+        {
+            let mut live = self.live.borrow_mut();
+            if let Some(Ok(access)) = &mut live.devices.get_mut(did).unwrap().access {
+                access.online = false;
+            }
+        }
+        work.retry_subscriptions();
+        self.update_availability(did);
+        self.update_routing(&format!("local device {did} reported offline or missing"));
+        self.refresh_changed.notify(usize::MAX);
+        self.changed.notify(usize::MAX);
     }
     pub(super) fn local_outcome<T>(&self, handle: &SessionHandle, outcome: &RequestOutcome<T>) {
         if outcome.stage != RequestStage::MayHaveBeenSent
@@ -225,12 +268,14 @@ impl Context {
         let local = self.local_candidate(did, false);
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
-            _ if self.cloud_candidate(did, true) => self
-                .live
-                .borrow()
-                .credentials
-                .clone()
-                .map(ControlPath::Cloud),
+            _ if self.cloud_candidate(did, true) => {
+                self.live.borrow().credentials.as_ref().map(|credentials| {
+                    ControlPath::Cloud(CloudPath {
+                        uid: credentials.uid.clone(),
+                        access_token: credentials.tokens.access_token.clone(),
+                    })
+                })
+            }
             _ => local.map(ControlPath::Local),
         }
     }

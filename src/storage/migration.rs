@@ -39,69 +39,27 @@ impl From<rusqlite::Error> for MigrationError {
 }
 
 pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
-    let transaction = connection.transaction()?;
-    let version = transaction.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+    let version =
+        connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
     match version {
-        0..=2 => {
-            identity::load(&transaction)?;
-            if version == 0 {
-                migrate_v0_to_v1(&transaction)?;
-            }
-            if version < 2 {
-                migrate_v1_to_v2(&transaction)?;
-            }
-            migrate_v2_to_v3(&transaction)?;
-            migrate_v3_to_v4(&transaction)?;
-        }
-        3 => {
-            identity::load(&transaction)?;
-            migrate_v3_to_v4(&transaction)?;
-        }
-        CURRENT_VERSION => {}
+        CURRENT_VERSION => return Ok(()),
+        0..CURRENT_VERSION => {}
         _ => return Err(MigrationError::UnsupportedVersion),
     }
-    validate_current_schema(&transaction)?;
+    let transaction = connection.transaction()?;
+    identity::load(&transaction)?;
+    if version == 0 {
+        migrate_v0_to_v1(&transaction)?;
+    }
+    if version < 2 {
+        migrate_v1_to_v2(&transaction)?;
+    }
+    if version < 3 {
+        migrate_v2_to_v3(&transaction)?;
+    }
+    migrate_v3_to_v4(&transaction)?;
     transaction.commit()?;
     Ok(())
-}
-
-fn validate_current_schema(connection: &Connection) -> Result<(), MigrationError> {
-    let expected = Connection::open_in_memory()?;
-    expected.execute_batch(SCHEMA)?;
-    let mut tables = expected.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")?;
-    for table in tables.query_map([], |row| row.get::<_, String>(0))? {
-        let table = table?;
-        if table_columns(connection, &table)? != table_columns(&expected, &table)? {
-            return Err(MigrationError::InvalidSchema);
-        }
-    }
-    Ok(())
-}
-
-fn table_columns(
-    connection: &Connection,
-    table: &str,
-) -> Result<Vec<(String, String, bool, u32)>, MigrationError> {
-    let is_table = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1 AND type = 'table')",
-        [table],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if !is_table {
-        return Err(MigrationError::InvalidSchema);
-    }
-    let mut columns =
-        connection.prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info(?1)")?;
-    Ok(columns
-        .query_map([table], |row| {
-            Ok((
-                row.get(0)?,
-                row.get::<_, String>(1)?.to_ascii_uppercase(),
-                row.get(2)?,
-                row.get(3)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<_>>()?)
 }
 
 fn migrate_v2_to_v3(transaction: &Transaction<'_>) -> rusqlite::Result<()> {

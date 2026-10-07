@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn online_topics_match_the_device_and_state_topic_levels() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let collected = events.clone();
+    let (finished, done) = flume::bounded(1);
+    future::block_on(exercise(
+        timing(),
+        move |mut broker| async move {
+            broker.setup().await;
+            let pkid = broker.subscribe("device/target/state/#").await;
+            broker.accept(pkid).await;
+            for topic in [
+                "device/other/state/online",
+                "device/target/stateful/online",
+                "device/target/up/properties_changed/2/1",
+                "device/target/state",
+                "device/target/state/online/detail",
+            ] {
+                broker
+                    .send(Packet::Publish(Publish::new(
+                        topic,
+                        QoS::AtMostOnce,
+                        json!({"device_id":"target","event":"online"}).to_string(),
+                    )))
+                    .await;
+            }
+            done.recv_async().await.unwrap();
+        },
+        move |handle, driver| async move {
+            let stop = handle.clone();
+            let (result, subscription) = future::zip(
+                driver.run(move |event| {
+                    collected.borrow_mut().push(event);
+                    if collected.borrow().len() == 2 {
+                        finished.send(()).unwrap();
+                        stop.close();
+                    }
+                }),
+                handle.subscribe_online("target"),
+            )
+            .await;
+            result.unwrap();
+            subscription.unwrap();
+        },
+    ));
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            NotificationEvent::Online {
+                did: "target".into(),
+                online: true
+            };
+            2
+        ]
+    );
+}
+
+#[test]
 fn received_property_invalidation_keeps_ready_subscriptions_and_online_delivery() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let collected = events.clone();

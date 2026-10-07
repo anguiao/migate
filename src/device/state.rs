@@ -178,14 +178,13 @@ impl Function {
         let mut state = self.0.state.lock().unwrap();
         self.update_power(&mut state, power);
     }
-    pub(super) fn update_power(&self, state: &mut RuntimeState, power: bool) -> FunctionSnapshot {
+    pub(super) fn update_power(&self, state: &mut RuntimeState, power: bool) {
         let power = power.into();
         if state.power != power {
             state.power = power;
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
-        self.snapshot_locked(state)
     }
     pub(super) fn close(&self) {
         let mut state = self.0.state.lock().unwrap();

@@ -3,6 +3,11 @@ use crate::{
     device::{DeviceRegistry, Function, PhysicalDevice},
     storage::{Identity, StorageError, Store},
 };
+use futures_util::{
+    StreamExt,
+    future::{AbortHandle, Abortable},
+    stream::FuturesUnordered,
+};
 use rand::RngExt as _;
 use rs_matter::{
     Matter, clusters, devices,
@@ -26,13 +31,7 @@ use rs_matter::{
     root_endpoint,
     utils::sync::DynBase,
 };
-use std::{
-    cell::RefCell,
-    collections::BTreeMap,
-    future::{Future, poll_fn},
-    rc::Rc,
-    task::Poll,
-};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 const AGGREGATOR_ENDPOINT: u16 = 1;
 const ROOT: Endpoint<'static> = root_endpoint!(eth);
@@ -427,19 +426,26 @@ impl Model {
     }
     async fn run_devices(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         let mut changes = self.registry.subscribe();
-        let mut jobs: Vec<(Rc<Entry>, _)> = Vec::new();
+        let mut jobs = BTreeMap::<u16, AbortHandle>::new();
+        let mut tasks = FuturesUnordered::new();
         let mut devices = self.registry.list();
         loop {
             let changed = self.protocol.record(self.reconcile(devices))?;
-            let entries = self.entries.borrow().clone();
-            jobs.retain(|(entry, _)| entries.iter().any(|current| Rc::ptr_eq(entry, current)));
-            for entry in entries {
-                if jobs.iter().any(|(running, _)| Rc::ptr_eq(running, &entry)) {
-                    continue;
+            for endpoint in &changed {
+                if let Some(job) = jobs.remove(endpoint) {
+                    job.abort();
                 }
-                let running = entry.clone();
-                let context = &ctx;
-                jobs.push((entry, Box::pin(async move { running.run(context).await })));
+            }
+            for entry in self.entries.borrow().iter().cloned() {
+                jobs.entry(entry.endpoint).or_insert_with(|| {
+                    let (handle, registration) = AbortHandle::new_pair();
+                    let context = &ctx;
+                    tasks.push(Abortable::new(
+                        async move { entry.run(context).await },
+                        registration,
+                    ));
+                    handle
+                });
             }
             if !changed.is_empty() {
                 for endpoint in changed {
@@ -455,16 +461,13 @@ impl Model {
             let result = futures_lite::future::or(
                 async { Ok::<_, Error>(changes.changed().await.devices) },
                 async {
-                    poll_fn(|cx| {
-                        for (_, job) in &mut jobs {
-                            if let Poll::Ready(result) = job.as_mut().poll(cx) {
-                                return Poll::Ready(result);
-                            }
+                    while let Some(result) = tasks.next().await {
+                        if let Ok(result) = result {
+                            result?;
+                            return Err(ErrorCode::InvalidState.into());
                         }
-                        Poll::Pending
-                    })
-                    .await?;
-                    Err(ErrorCode::InvalidState.into())
+                    }
+                    std::future::pending().await
                 },
             )
             .await?;

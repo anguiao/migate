@@ -121,7 +121,7 @@ impl CommandReceiver {
         }
         loop {
             let listener = self.function.0.submitted.listen();
-            let request = {
+            {
                 let mut state = self.function.0.state.lock().unwrap();
                 if let Some(pending) = state.queue.pending.pop_front() {
                     let snapshot = self.function.snapshot_locked(&state);
@@ -145,19 +145,15 @@ impl CommandReceiver {
                         }
                     };
                     state.queue.active = Some(pending.completion.clone());
-                    Some(CommandRequest {
+                    return Some(CommandRequest {
                         target,
                         function: self.function.clone(),
                         completion: pending.completion,
-                    })
-                } else if state.queue.closed {
-                    return None;
-                } else {
-                    None
+                    });
                 }
-            };
-            if let Some(request) = request {
-                return Some(request);
+                if state.queue.closed {
+                    return None;
+                }
             }
             listener.await;
         }
@@ -194,11 +190,10 @@ impl CommandRequest {
         if let Some(completed) = &*result {
             return completed.clone();
         }
-        let accepted = Ok(if apply_target {
-            self.function.update_power(&mut state, self.target)
-        } else {
-            self.function.snapshot_locked(&state)
-        });
+        if apply_target {
+            self.function.update_power(&mut state, self.target);
+        }
+        let accepted = Ok(self.function.snapshot_locked(&state));
         *result = Some(accepted.clone());
         self.completion.changed.notify(usize::MAX);
         accepted
