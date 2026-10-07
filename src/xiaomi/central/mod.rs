@@ -51,24 +51,4 @@ impl Error for CentralError {}
 pub(crate) mod tests;
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    pub(crate) use super::session::tests::Broker;
-    pub(crate) use super::tests::TlsFixture;
-    pub(crate) async fn connect(
-        address: std::net::SocketAddr,
-        credentials: &crate::storage::XiaomiRecord,
-        ca: &str,
-        request: std::time::Duration,
-    ) -> Result<(super::SessionHandle, super::SessionDriver), super::CentralError> {
-        let stream = super::tls::connect(address, credentials, ca).await?;
-        super::session::start(
-            Box::new(stream),
-            &credentials.virtual_did,
-            super::session::Timing {
-                request,
-                keepalive: None,
-            },
-        )
-        .await
-    }
-}
+pub(crate) use tests::support as test_support;

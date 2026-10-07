@@ -337,3 +337,38 @@ fn temporary_directory_failures_pause_existing_http_candidates_until_sync_recove
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
     }));
 }
+
+#[test]
+fn published_devices_restore_cloud_control_without_a_local_gateway() {
+    let rig = Rig::new(true, &["one", "multi"]);
+    rig.cloud
+        .lock()
+        .unwrap()
+        .online
+        .extend(["one".into(), "multi".into()]);
+    block_on(rig.run(|c| async move {
+        let before = c
+            .store
+            .devices()
+            .load_published(&DeviceKey::new("xiaomi", "one"))
+            .unwrap();
+        until(|| c.cloud.lock().unwrap().homes > 0).await;
+        async_io::Timer::after(Duration::from_millis(100)).await;
+        let one = function(&c.context.registry, "one", "main");
+        assert_eq!(one.snapshot().availability, Availability::Available);
+        assert_eq!(one.snapshot().power, Power::Off);
+        one.execute(Command::On).await.unwrap();
+        let usb = function(&c.context.registry, "multi", "usb");
+        usb.execute(Command::Off).await.unwrap();
+        assert_eq!(one.snapshot().power, Power::On);
+        assert_eq!(usb.snapshot().power, Power::Off);
+        assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
+        assert_eq!(
+            c.store
+                .devices()
+                .load_published(&DeviceKey::new("xiaomi", "one"))
+                .unwrap(),
+            before
+        );
+    }));
+}

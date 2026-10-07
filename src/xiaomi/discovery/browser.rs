@@ -55,11 +55,6 @@ impl Discovery {
         (discovery, driver)
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_events(receiver: Receiver<ServiceEvent>) -> (Self, DiscoveryDriver) {
-        Self::from_events(receiver, None)
-    }
-
     pub fn snapshot(&self) -> DiscoverySnapshot {
         self.0.state.lock().unwrap().snapshot.clone()
     }

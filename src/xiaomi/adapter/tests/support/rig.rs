@@ -1,0 +1,386 @@
+use super::*;
+
+#[derive(Default)]
+pub(in super::super) struct CloudState {
+    pub(in super::super) members: Vec<String>,
+    pub(in super::super) status: u16,
+    pub(in super::super) home_delay: Duration,
+    pub(in super::super) home_gate: Option<flume::Receiver<()>>,
+    pub(in super::super) home_status: u16,
+    pub(in super::super) foreign: bool,
+    pub(in super::super) missing_home: bool,
+    pub(in super::super) other_home: bool,
+    pub(in super::super) partial: bool,
+    pub(in super::super) unsupported: BTreeSet<String>,
+    pub(in super::super) detail_status: u16,
+    pub(in super::super) detail_delay: Duration,
+    pub(in super::super) detail_gate: Option<flume::Receiver<()>>,
+    pub(in super::super) details: usize,
+    pub(in super::super) detail_done: usize,
+    pub(in super::super) cert_status: u16,
+    pub(in super::super) cert_gate: Option<flume::Receiver<()>>,
+    pub(in super::super) cert_pem: Option<String>,
+    pub(in super::super) certs: usize,
+    pub(in super::super) token_status: u16,
+    pub(in super::super) token_access: Option<String>,
+    pub(in super::super) token_delay: Duration,
+    pub(in super::super) token_gate: Option<flume::Receiver<()>>,
+    pub(in super::super) tokens: usize,
+    pub(in super::super) token_done: usize,
+    pub(in super::super) token_lifetime: u64,
+    pub(in super::super) homes: usize,
+    pub(in super::super) online: BTreeSet<String>,
+    pub(in super::super) infos: usize,
+    pub(in super::super) info_status: u16,
+    pub(in super::super) info_gate: Option<flume::Receiver<()>>,
+    pub(in super::super) info_partial: bool,
+    pub(in super::super) property_status: u16,
+    pub(in super::super) property_code: i64,
+    pub(in super::super) property_gate: Option<flume::Receiver<()>>,
+    pub(in super::super) property_writes: Vec<(String, u32, u32, bool, String)>,
+    pub(in super::super) property_reads: Vec<(String, u32, u32)>,
+    pub(in super::super) read_values: BTreeMap<(String, u32, u32), bool>,
+    pub(in super::super) read_gates: BTreeMap<(String, u32, u32), flume::Receiver<()>>,
+    pub(in super::super) read_status: u16,
+}
+pub(in super::super) struct Rig {
+    pub(in super::super) _directory: tempfile::TempDir,
+    pub(in super::super) source: XiaomiAdapter,
+    pub(in super::super) ready: TopologyReady,
+    pub(in super::super) store: Store,
+    pub(in super::super) discovery: Discovery,
+    pub(in super::super) driver: crate::xiaomi::discovery::DiscoveryDriver,
+    pub(in super::super) events: flume::Sender<mdns_sd::ServiceEvent>,
+    pub(in super::super) listener: Async<TcpListener>,
+    pub(in super::super) acceptor: TlsAcceptor,
+    pub(in super::super) data: Vec<CachedPhysicalDevice>,
+    pub(in super::super) cloud: Arc<Mutex<CloudState>>,
+    pub(in super::super) clock: Arc<TestClock>,
+}
+pub(in super::super) struct Control {
+    pub(in super::super) ready: Option<TopologyReady>,
+    pub(in super::super) store: Store,
+    pub(in super::super) context: Rc<crate::xiaomi::adapter::state::Context>,
+    pub(in super::super) discovery: Discovery,
+    pub(in super::super) events: flume::Sender<mdns_sd::ServiceEvent>,
+    pub(in super::super) listener: Async<TcpListener>,
+    pub(in super::super) acceptor: TlsAcceptor,
+    pub(in super::super) data: Vec<CachedPhysicalDevice>,
+    pub(in super::super) cloud: Arc<Mutex<CloudState>>,
+    pub(in super::super) clock: Arc<TestClock>,
+}
+impl Rig {
+    pub(in super::super) fn new(restore: bool, members: &[&str]) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let tls = TlsFixture::new(false);
+        let mut credentials = tls.credentials.clone();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        credentials.tokens.refresh_at = now + 1_000_000;
+        credentials.tokens.expires_at = now + 2_000_000;
+        store.xiaomi().replace(&credentials).unwrap();
+        let data = vec![
+            cached(&tls.credentials.uid, "one", false),
+            cached(&tls.credentials.uid, "multi", true),
+            cached(&tls.credentials.uid, "two", false),
+        ];
+        if restore {
+            store
+                .devices()
+                .save_scope(&scope(&tls.credentials.uid))
+                .unwrap();
+            for record in &data {
+                if members.contains(&record.device.key.id.as_str()) {
+                    store
+                        .devices()
+                        .publish_cached(record, &format!("name {}", record.device.key.id))
+                        .unwrap();
+                }
+            }
+        }
+        let cloud = Arc::new(Mutex::new(CloudState {
+            members: members.iter().map(|v| v.to_string()).collect(),
+            status: 200,
+            home_status: 200,
+            detail_status: 200,
+            cert_status: 200,
+            token_status: 200,
+            token_lifetime: 1_000_000,
+            property_status: 200,
+            read_status: 200,
+            info_status: 200,
+            ..Default::default()
+        }));
+        let info_dids = if restore {
+            members
+                .iter()
+                .map(|did| (*did).to_string())
+                .collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::new()
+        };
+        let responses = cloud.clone();
+        let records = data.clone();
+        let certificate = tls.credentials.certificate_pem.clone();
+        let (base, _requests) = dynamic_mock_server(200, move |request| {
+            let detail_finished = responses.clone();
+            let token_finished = responses.clone();
+            let mut state = responses.lock().unwrap();
+            if state.status != 200 {
+                return MockResponse::json(state.status, "{}");
+            }
+            let value = if request.target.ends_with("/miotspec/prop/get") {
+                let body: Value = serde_json::from_str(&request.body).unwrap();
+                let item = &body["params"][0];
+                let key = (
+                    item["did"].as_str().unwrap().to_string(),
+                    item["siid"].as_u64().unwrap() as u32,
+                    item["piid"].as_u64().unwrap() as u32,
+                );
+                state.property_reads.push(key.clone());
+                let value = state.read_values.get(&key).copied().unwrap_or(false);
+                let result = json!({"code":0,"result":[{"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":0,"value":value}]});
+                let mut response = MockResponse::json(state.read_status, &result.to_string());
+                if let Some(gate) = state.read_gates.get(&key).cloned() {
+                    response = response.gated(gate);
+                }
+                return response;
+            } else if request.target.ends_with("/miotspec/prop/set") {
+                let body: Value = serde_json::from_str(&request.body).unwrap();
+                let item = &body["params"][0];
+                state.property_writes.push((
+                    item["did"].as_str().unwrap().into(),
+                    item["siid"].as_u64().unwrap() as u32,
+                    item["piid"].as_u64().unwrap() as u32,
+                    item["value"].as_bool().unwrap(),
+                    request.headers.clone(),
+                ));
+                let status = state.property_status;
+                let result = json!({"code":0,"result":[{"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":state.property_code}]});
+                let mut response = MockResponse::json(status, &result.to_string());
+                if let Some(gate) = state.property_gate.clone() {
+                    response = response.gated(gate);
+                }
+                return response;
+            } else if request.target.contains("get_token") {
+                state.tokens += 1;
+                if state.token_status != 200 {
+                    return MockResponse::json(state.token_status, "{}");
+                }
+                json!({"code":0,"result":{"access_token":state.token_access.as_deref().unwrap_or("fresh-access"),"refresh_token":"fresh-refresh","expires_in":state.token_lifetime}})
+            } else if request.target.ends_with("/get_central_crt") {
+                state.certs += 1;
+                if state.cert_status != 200 {
+                    let mut response = MockResponse::json(state.cert_status, "{}");
+                    if let Some(gate) = state.cert_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    return response;
+                }
+                json!({"code":0,"result":{"cert":state.cert_pem.as_deref().unwrap_or(&certificate)}})
+            } else if request.target.ends_with("/gethome") {
+                state.homes += 1;
+                if state.home_status != 200 {
+                    let mut response = MockResponse::json(state.home_status, "{}");
+                    if let Some(gate) = state.home_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    return response;
+                }
+                if state.partial {
+                    json!({"code":0,"result":{"homelist":[],"has_more":true}})
+                } else if state.missing_home {
+                    json!({"code":0,"result":{"homelist":[],"has_more":false}})
+                } else {
+                    json!({"code":0,"result":{"homelist":[{"id":if state.other_home {"other"} else {"local"},"uid":if state.foreign {"foreign"}else {&records[0].uid},"roomlist":[],"dids":state.members}]}})
+                }
+            } else if request.target.ends_with("/device_list_page") {
+                let body: Value = serde_json::from_str(&request.body).unwrap();
+                if body["dids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|did| info_dids.contains(did.as_str().unwrap()))
+                {
+                    state.infos += 1;
+                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>(),"has_more":state.info_partial}});
+                    let mut response = MockResponse::json(state.info_status, &value.to_string());
+                    if let Some(gate) = state.info_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    return response;
+                }
+                state.details += 1;
+                if state.detail_status != 200 {
+                    let mut response = MockResponse::json(state.detail_status, "{}")
+                        .delayed(state.detail_delay)
+                        .on_sent(move || detail_finished.lock().unwrap().detail_done += 1);
+                    if let Some(gate) = state.detail_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    return response;
+                }
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>()}})
+            } else if request.target.starts_with("/miot-spec-v2/instance?") {
+                let multi = request.target.contains("cuco-cp7pd");
+                let mut value: Value = serde_json::from_str(if multi {
+                    include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
+                } else {
+                    include_str!("../../../../../tests/fixtures/miot/outlet.json")
+                })
+                .unwrap();
+                if state
+                    .unsupported
+                    .contains(if multi { "multi" } else { "one" })
+                {
+                    value["services"] = json!([]);
+                }
+                value
+            } else {
+                return MockResponse::json(503, "{}");
+            };
+            let response = MockResponse::json(200, &value.to_string());
+            if request.target.ends_with("/gethome") {
+                {
+                    let mut response = response.delayed(state.home_delay);
+                    if let Some(gate) = state.home_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    response
+                }
+            } else if request.target.contains("get_token") {
+                let mut response = response
+                    .delayed(state.token_delay)
+                    .on_sent(move || token_finished.lock().unwrap().token_done += 1);
+                if let Some(gate) = state.token_gate.clone() {
+                    response = response.gated(gate);
+                }
+                response
+            } else if request.target.ends_with("/device_list_page") {
+                response.delayed(state.detail_delay)
+            } else if request.target.ends_with("/get_central_crt") {
+                if let Some(gate) = state.cert_gate.clone() {
+                    response.gated(gate)
+                } else {
+                    response
+                }
+            } else {
+                response
+            }
+        });
+        let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
+        let (events, receiver) = flume::unbounded();
+        let (discovery, driver) = Discovery::with_events(receiver);
+        let clock = Arc::new(TestClock::default());
+        clock
+            .automatic
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (mut source, ready) =
+            XiaomiAdapter::build(store.clone(), client, discovery.clone(), clock.clone()).unwrap();
+        source.test_ca = Some(tls.ca_pem.clone());
+        source.request_timeout = Duration::from_millis(150);
+        Self {
+            _directory: directory,
+            source,
+            ready,
+            store,
+            discovery,
+            driver,
+            events,
+            listener,
+            acceptor: TlsAcceptor::from(tls.server_config()),
+            data,
+            cloud,
+            clock,
+        }
+    }
+    pub(in super::super) async fn run<F, Fut>(self, test: F)
+    where
+        F: FnOnce(Control) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        self.run_result(test).await.unwrap();
+    }
+    pub(in super::super) async fn run_result<F, Fut>(self, test: F) -> Result<(), AdapterError>
+    where
+        F: FnOnce(Control) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let keep_events = self.events.clone();
+        let context = self.source.context.clone();
+        let clock = self.clock.clone();
+        let running = self.source.run(|_| {});
+        let discovering = async {
+            self.driver.run().await?;
+            future::pending::<Result<(), AdapterError>>().await
+        };
+        let testing = test(Control {
+            ready: Some(self.ready),
+            store: self.store,
+            context,
+            discovery: self.discovery,
+            events: self.events,
+            listener: self.listener,
+            acceptor: self.acceptor,
+            data: self.data,
+            cloud: self.cloud,
+            clock: self.clock,
+        });
+        let ticking = async {
+            loop {
+                async_io::Timer::after(Duration::from_millis(1)).await;
+                if clock.automatic.load(std::sync::atomic::Ordering::Relaxed) {
+                    clock.advance(Duration::from_millis(10));
+                }
+            }
+        };
+        let result = future::or(
+            ticking,
+            future::or(
+                future::or(future::or(running, discovering), async {
+                    testing.await;
+                    Ok(())
+                }),
+                async {
+                    async_io::Timer::after(Duration::from_secs(5)).await;
+                    panic!("source scenario stalled");
+                },
+            ),
+        )
+        .await;
+        drop(keep_events);
+        result
+    }
+}
+impl Control {
+    pub(in super::super) fn announce(&self) {
+        self.events
+            .send(announcement(
+                self.listener.get_ref().local_addr().unwrap(),
+                &self.data[0].uid,
+                "hub",
+                123,
+            ))
+            .unwrap();
+    }
+    pub(in super::super) async fn accept(&self) -> Broker {
+        let (socket, _) = self.listener.accept().await.unwrap();
+        Broker::new(self.acceptor.accept(socket).await.unwrap())
+    }
+    pub(in super::super) async fn peer<F, Fut>(&self, peer: Rc<Peer>, test: F)
+    where
+        F: FnOnce(Rc<Peer>) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let mut broker = self.accept().await;
+        broker.setup().await;
+        peer.state.borrow_mut().client_id = broker.client_id.clone();
+        // The peer remains alive until every scenario assertion has completed.
+        future::or(
+            peer_run(broker, peer.clone(), self.data.clone()),
+            test(peer),
+        )
+        .await;
+    }
+}

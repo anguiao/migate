@@ -52,13 +52,6 @@ impl CloudClient {
         Self::build(CLOUD_BASE_URL, Duration::from_secs(30))
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test(base_url: &str, timeout: Duration) -> Result<Self, CloudError> {
-        let mut client = Self::build(base_url, timeout)?;
-        client.instance_base_url = base_url.trim_end_matches('/').to_owned();
-        Ok(client)
-    }
-
     fn build(base_url: &str, timeout: Duration) -> Result<Self, CloudError> {
         let parsed =
             Url::parse(base_url).map_err(|_| CloudError::input("configure cloud client"))?;
@@ -322,3 +315,6 @@ fn response_read_error_kind(error: &std::io::Error) -> CloudErrorKind {
     }
     CloudErrorKind::Network
 }
+
+#[cfg(test)]
+mod tests;

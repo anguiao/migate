@@ -78,24 +78,4 @@ pub(super) trait Transport: AsyncRead + AsyncWrite + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Unpin> Transport for T {}
 
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-pub(crate) mod test_support {
-    use super::{NotificationDriver, NotificationError, NotificationHandle, Timing};
-    use crate::storage::XiaomiRecord;
-    use async_io::Async;
-    use std::{net::SocketAddr, time::Duration};
-
-    pub(crate) async fn connect(
-        address: SocketAddr,
-        credentials: &XiaomiRecord,
-        request: Duration,
-        keepalive: Option<Duration>,
-    ) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
-        let stream = Async::<std::net::TcpStream>::connect(address)
-            .await
-            .map_err(|_| NotificationError::Io)?;
-        super::connection::start(Box::new(stream), credentials, Timing { request, keepalive }).await
-    }
-}
+pub(crate) mod tests;

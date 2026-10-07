@@ -1317,3 +1317,79 @@ fn held_online_subscription_cannot_retry_after_device_access_is_revoked() {
         .await;
     }));
 }
+
+#[test]
+fn same_value_notification_invalidates_an_inflight_read() {
+    block_on(Rig::new(true, &["one", "two"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one", "two"]).await;
+            let one = function(&control.context.registry, "one", "main");
+            let two = function(&control.context.registry, "two", "main");
+            peer.state.borrow_mut().hold_reads = true;
+            let reads = peer.count("get", "one", 2);
+            control
+                .context
+                .live
+                .borrow()
+                .session
+                .as_ref()
+                .unwrap()
+                .devices["one"]
+                .refresh();
+            until(|| peer.count("get", "one", 2) == reads + 1).await;
+            let before = one.snapshot();
+            peer.notify("one", 2, false);
+            peer.notify("two", 2, true);
+            until(|| two.snapshot().power == Power::On).await;
+            assert_eq!(one.snapshot(), before);
+            peer.release("one", 2, json!({"value":true})).await;
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(one.snapshot().power, Power::Off);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn notification_after_write_preserves_state_and_advances_the_channel_fifo() {
+    block_on(Rig::new(true, &["one", "two"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one", "two"]).await;
+            let one = function(&control.context.registry, "one", "main");
+            let two = function(&control.context.registry, "two", "main");
+            peer.state.borrow_mut().hold_writes = true;
+            let mut first = Box::pin(one.execute(Command::On));
+            let mut second = Box::pin(one.execute(Command::Toggle));
+            assert!(poll_once(first.as_mut()).await.is_none());
+            assert!(poll_once(second.as_mut()).await.is_none());
+            until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            peer.notify("one", 2, false);
+            peer.notify("two", 2, true);
+            until(|| two.snapshot().power == Power::On).await;
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            assert_eq!(first.await.unwrap().power, Power::Off);
+            until(|| peer.count("rpcReq", "one", 2) == 2 && !peer.state.borrow().held.is_empty())
+                .await;
+            assert_eq!(
+                peer.state
+                    .borrow()
+                    .seen
+                    .iter()
+                    .rev()
+                    .find(|(operation, _)| operation == "rpcReq")
+                    .unwrap()
+                    .1["rpc"]["params"][0]["value"],
+                true
+            );
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            assert_eq!(second.await.unwrap().power, Power::On);
+        })
+        .await;
+    }));
+}

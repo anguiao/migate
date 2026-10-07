@@ -31,11 +31,6 @@ impl AuthService {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_clock(store: XiaomiStore, cloud: CloudClient, now: fn() -> i64) -> Self {
-        Self { store, cloud, now }
-    }
-
     pub fn local_status(&self) -> Result<AuthReport, AuthError> {
         let status = self.load_validated()?;
         Ok(match status {

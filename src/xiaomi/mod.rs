@@ -9,4 +9,7 @@ pub mod discovery;
 mod mqtt;
 
 #[cfg(test)]
-pub(crate) mod test_support;
+mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::support as test_support;

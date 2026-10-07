@@ -92,28 +92,6 @@ pub struct SessionDriver {
 }
 
 impl SessionDriver {
-    #[cfg(test)]
-    pub(crate) fn ready_for_test(
-        stream: impl AsyncRead + AsyncWrite + Unpin + 'static,
-        request: std::time::Duration,
-    ) -> (SessionHandle, Self) {
-        let (handle, mut driver) = Self::new(
-            Box::new(stream),
-            wire::Frames::default(),
-            "controlled",
-            Timing {
-                request,
-                keepalive: None,
-            },
-            wire::MAX_FRAME_SIZE,
-            LIMIT,
-        )
-        .unwrap();
-        driver.subscriptions.clear();
-        driver.output.clear();
-        driver.ready = true;
-        (handle, driver)
-    }
     pub(super) fn new(
         stream: Box<dyn Transport>,
         frames: wire::Frames,
@@ -543,9 +521,4 @@ impl Drop for SessionDriver {
 }
 
 #[cfg(test)]
-#[path = "packet_id_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "outcome_tests.rs"]
-mod outcomes;

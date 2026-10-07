@@ -7,3 +7,8 @@
 - `docs/running.md` 是运行指南，随实现更新。
 - 已知限制见 [docs/known-limitations.md](docs/known-limitations.md)。
 - 验收结果仅在任务对话中说明，不写入仓库。
+
+## 代码组织
+
+- 测试按主题组织：模块测试及辅助代码统一放在所属模块的 `tests/` 目录，集成测试放在根目录 `tests/`。
+- 保持模块归属与私有访问边界，不为测试扩大生产代码可见性。

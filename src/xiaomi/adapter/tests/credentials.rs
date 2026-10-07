@@ -478,3 +478,416 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
         assert_eq!(c.cloud.lock().unwrap().tokens, 1);
     }));
 }
+
+#[test]
+fn temporary_certificate_renewal_failures_retry_without_interrupting_local_control() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().cert_status = 503;
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| {
+                matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .certificate_update,
+                    crate::xiaomi::auth::CertificateUpdate::Failed(_)
+                )
+            })
+            .await;
+            let before = control.cloud.lock().unwrap().certs;
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            control.cloud.lock().unwrap().cert_status = 200;
+            until(|| {
+                control.cloud.lock().unwrap().certs > before
+                    && matches!(
+                        control
+                            .context
+                            .status
+                            .borrow()
+                            .authentication
+                            .certificate_update,
+                        crate::xiaomi::auth::CertificateUpdate::Updated
+                    )
+            })
+            .await;
+            assert_eq!(
+                function(&control.context.registry, "one", "main")
+                    .snapshot()
+                    .availability,
+                Availability::Available
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().status = 401;
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| {
+                matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+                )
+            })
+            .await;
+            let before = control.cloud.lock().unwrap().homes;
+            control.cloud.lock().unwrap().status = 200;
+            control.clock.advance(Duration::from_secs(600));
+            peer.list_changed(&["one"]);
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            for _ in 0..10 {
+                future::yield_now().await;
+            }
+            assert_eq!(control.cloud.lock().unwrap().homes, before);
+            assert!(matches!(
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .authentication
+                    .authentication,
+                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+            ));
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn candidate_unauthorized_requests_coalesce_into_one_token_refresh_and_resume_preparation() {
+    let rig = Rig::new(true, &["one"]);
+    let (release, gate) = flume::bounded(1);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.members = vec!["one".into(), "multi".into(), "two".into()];
+        cloud.detail_status = 401;
+        cloud.token_gate = Some(gate);
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                control.cloud.lock().unwrap().tokens == 1
+                    && control
+                        .context
+                        .live
+                        .borrow()
+                        .devices
+                        .values()
+                        .all(|slot| slot.loading.is_none())
+            })
+            .await;
+            control.cloud.lock().unwrap().detail_status = 200;
+            release.send(()).unwrap();
+            initialized(control, &peer, &["one", "multi", "two"]).await;
+            assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+            assert!(!matches!(
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .authentication
+                    .authentication,
+                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+            ));
+            assert_eq!(
+                control
+                    .store
+                    .xiaomi()
+                    .load()
+                    .unwrap()
+                    .unwrap()
+                    .tokens
+                    .access_token,
+                "fresh-access"
+            );
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials() {
+    for late in [false, true] {
+        let rig = Rig::new(true, &["one"]);
+        let (detail_release, detail_gate) = flume::bounded(1);
+        let (token_release, token_gate) = flume::bounded(1);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.members = vec!["one".into(), "multi".into()];
+            cloud.detail_status = 401;
+            cloud.detail_gate = Some(detail_gate);
+            if !late {
+                cloud.token_gate = Some(token_gate);
+            }
+        }
+        block_on(rig.run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                initialized(control, &peer, &["one"]).await;
+                until(|| control.cloud.lock().unwrap().details > 0).await;
+                let mut record = control.store.xiaomi().load().unwrap().unwrap();
+                record.tokens.refresh_at = time::OffsetDateTime::now_utc().unix_timestamp() - 1;
+                control.store.xiaomi().replace(&record).unwrap();
+                control.context.request_sync();
+                until(|| control.cloud.lock().unwrap().tokens == 1).await;
+                {
+                    let mut cloud = control.cloud.lock().unwrap();
+                    cloud.detail_status = 200;
+                    cloud.detail_gate = None;
+                }
+                if late {
+                    until(|| {
+                        control
+                            .store
+                            .xiaomi()
+                            .load()
+                            .unwrap()
+                            .unwrap()
+                            .tokens
+                            .access_token
+                            == "fresh-access"
+                    })
+                    .await;
+                    assert_eq!(control.cloud.lock().unwrap().detail_done, 0);
+                    detail_release.send(()).unwrap();
+                } else {
+                    detail_release.send(()).unwrap();
+                    until(|| control.context.sync_requested.get()).await;
+                    assert_eq!(control.cloud.lock().unwrap().token_done, 0);
+                    assert_eq!(
+                        control
+                            .store
+                            .xiaomi()
+                            .load()
+                            .unwrap()
+                            .unwrap()
+                            .tokens
+                            .access_token,
+                        "unused"
+                    );
+                    token_release.send(()).unwrap();
+                }
+                until(|| {
+                    control
+                        .store
+                        .xiaomi()
+                        .load()
+                        .unwrap()
+                        .unwrap()
+                        .tokens
+                        .access_token
+                        == "fresh-access"
+                        && control
+                            .context
+                            .live
+                            .borrow()
+                            .devices
+                            .values()
+                            .all(|slot| slot.loading.is_none())
+                })
+                .await;
+                assert_eq!(control.cloud.lock().unwrap().detail_done, 1);
+                control.context.request_sync();
+                initialized(control, &peer, &["one", "multi"]).await;
+                assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+                assert!(!matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+                ));
+                assert!(matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::Authenticated
+                ));
+            })
+            .await;
+        }));
+    }
+}
+
+#[test]
+fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopping_local_access() {
+    for refresh_rejected in 0..3 {
+        let rig = Rig::new(true, &["one"]);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.members = vec!["one".into(), "multi".into()];
+            cloud.detail_status = 401;
+            if refresh_rejected == 1 {
+                cloud.token_status = 401;
+            } else if refresh_rejected == 2 {
+                cloud.token_access = Some("unused".into());
+            }
+        }
+        block_on(rig.run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                initialized(control, &peer, &["one"]).await;
+                until(|| {
+                    matches!(
+                        control
+                            .context
+                            .status
+                            .borrow()
+                            .authentication
+                            .authentication,
+                        crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+                    )
+                })
+                .await;
+                assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+                control.clock.advance(Duration::from_secs(600));
+                control.context.request_sync();
+                function(&control.context.registry, "one", "main")
+                    .execute(Command::On)
+                    .await
+                    .unwrap();
+                for _ in 0..10 {
+                    future::yield_now().await;
+                }
+                assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+                assert!(matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+                ));
+            })
+            .await;
+        }));
+    }
+}
+
+#[test]
+fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
+    let rig = Rig::new(true, &["one"]);
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let retry_deadline = control.clock.now() + Duration::from_secs(1);
+            {
+                let mut cloud = control.cloud.lock().unwrap();
+                cloud.members = vec!["one".into(), "multi".into(), "two".into()];
+                cloud.detail_status = 401;
+                cloud.token_status = 503;
+            }
+            control.context.request_sync();
+            until(|| {
+                control.cloud.lock().unwrap().tokens == 1
+                    && control
+                        .context
+                        .live
+                        .borrow()
+                        .devices
+                        .values()
+                        .all(|slot| slot.loading.is_none())
+            })
+            .await;
+            assert_eq!(control.cloud.lock().unwrap().details, 2);
+            until(|| {
+                matches!(
+                    control
+                        .context
+                        .status
+                        .borrow()
+                        .authentication
+                        .authentication,
+                    crate::xiaomi::auth::AuthenticationState::Unavailable(_)
+                )
+            })
+            .await;
+            {
+                let mut cloud = control.cloud.lock().unwrap();
+                cloud.token_status = 200;
+                cloud.detail_status = 200;
+            }
+            for _ in 0..10 {
+                future::yield_now().await;
+            }
+            assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+            assert!(!matches!(
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .authentication
+                    .authentication,
+                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+            ));
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            control.clock.advance(Duration::from_millis(999));
+            for _ in 0..10 {
+                future::yield_now().await;
+            }
+            assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+            advance_to(&control.clock, retry_deadline).await;
+            until(|| control.cloud.lock().unwrap().tokens == 2).await;
+            control
+                .clock
+                .automatic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            initialized(control, &peer, &["one", "multi", "two"]).await;
+            assert_eq!(control.cloud.lock().unwrap().tokens, 2);
+        })
+        .await;
+    }));
+}

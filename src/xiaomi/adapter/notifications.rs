@@ -22,11 +22,9 @@ use std::{
 };
 
 #[cfg(test)]
-#[derive(Clone, Copy)]
-pub(super) enum NotificationConnector {
-    Disabled,
-    Plaintext(std::net::SocketAddr),
-}
+mod tests;
+#[cfg(test)]
+pub(super) use tests::support::NotificationConnector;
 #[derive(Clone)]
 pub(super) enum NotificationSource {
     Local(SessionHandle),
@@ -559,30 +557,15 @@ async fn prepare_properties(
     context.changed.notify(usize::MAX);
     Ok(())
 }
+#[cfg(test)]
+use tests::support::connect;
+#[cfg(not(test))]
 async fn connect(
     context: &Context,
     credentials: &XiaomiRecord,
 ) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
-    #[cfg(test)]
-    {
-        match context.notification_connector.get() {
-            NotificationConnector::Disabled => future::pending().await,
-            NotificationConnector::Plaintext(address) => {
-                crate::xiaomi::cloud::notification_test_support::connect(
-                    address,
-                    credentials,
-                    Duration::from_millis(150),
-                    None,
-                )
-                .await
-            }
-        }
-    }
-    #[cfg(not(test))]
-    {
-        let _ = context;
-        crate::xiaomi::cloud::connect_notifications(credentials).await
-    }
+    let _ = context;
+    crate::xiaomi::cloud::connect_notifications(credentials).await
 }
 async fn changed_credentials(context: &Context, key: &ConnectionKey) {
     loop {
