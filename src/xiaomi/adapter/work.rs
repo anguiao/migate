@@ -1,4 +1,5 @@
 use super::{
+    commands::LightWriteGate,
     model::AdapterError,
     observations::Observations,
     refresh::{ReadFlight, Refresh},
@@ -17,6 +18,7 @@ pub(super) struct DeviceWork {
     // Binding work ends on incompatibility, while the physical device keeps its consumers.
     pub(super) life: Lifetime,
     pub(super) observations: Observations,
+    pub(super) light_write: Option<Rc<LightWriteGate>>,
     pub(super) record: Rc<DeviceRecord>,
     pub(super) subscribed: RefCell<BTreeSet<(u32, u32)>>,
     pub(super) active: RefCell<Option<super::notifications::NotificationSource>>,
@@ -38,10 +40,15 @@ pub(super) struct DeviceWork {
     pub(super) read_problems: RefCell<BTreeMap<super::lighting::PropertyKey, String>>,
 }
 impl DeviceWork {
-    pub(super) fn new(record: Rc<DeviceRecord>, refresh_changed: Rc<Event>) -> Self {
+    pub(super) fn new(
+        record: Rc<DeviceRecord>,
+        refresh_changed: Rc<Event>,
+        light_write: Option<Rc<LightWriteGate>>,
+    ) -> Self {
         let work = Self {
             life: Lifetime::default(),
             observations: Observations::default(),
+            light_write,
             record,
             subscribed: RefCell::new(BTreeSet::new()),
             active: RefCell::new(None),

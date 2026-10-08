@@ -25,7 +25,7 @@ pub(super) struct LightWriteGates {
     gates: RefCell<BTreeMap<String, Weak<LightWriteGate>>>,
 }
 impl LightWriteGates {
-    fn for_device(&self, did: &str) -> Rc<LightWriteGate> {
+    pub(super) fn for_device(&self, did: &str) -> Rc<LightWriteGate> {
         let mut gates = self.gates.borrow_mut();
         gates.retain(|_, gate| gate.strong_count() > 0);
         if let Some(gate) = gates.get(did).and_then(Weak::upgrade) {
@@ -37,9 +37,11 @@ impl LightWriteGates {
     }
 }
 #[derive(Default)]
-struct LightWriteGate {
+pub(super) struct LightWriteGate {
     busy: Cell<bool>,
     changed: Event,
+    // Physical feedback belongs to the outstanding receipt, independent of function instances.
+    feedback: RefCell<Vec<(PropertyBinding, serde_json::Value)>>,
 }
 impl LightWriteGate {
     async fn acquire(self: &Rc<Self>) -> LightWritePermit {
@@ -51,10 +53,23 @@ impl LightWriteGate {
             changed.await;
         }
     }
+    fn register_feedback(&self, properties: &[(PropertyBinding, serde_json::Value)]) {
+        *self.feedback.borrow_mut() = properties.to_vec();
+    }
+    fn finish_feedback(&self) {
+        self.feedback.borrow_mut().clear();
+    }
+    pub(super) fn is_feedback(&self, binding: PropertyBinding, value: &serde_json::Value) -> bool {
+        self.feedback
+            .borrow()
+            .iter()
+            .any(|(target_binding, target)| *target_binding == binding && target == value)
+    }
 }
 struct LightWritePermit(Rc<LightWriteGate>);
 impl Drop for LightWritePermit {
     fn drop(&mut self) {
+        self.0.finish_feedback();
         self.0.busy.set(false);
         self.0.changed.notify(usize::MAX);
     }

@@ -124,7 +124,7 @@ pub(super) async fn send_owned(
     let gate = context.light_writes.for_device(&record.physical.key().id);
     context.tasks.spawn(async move {
         let _permit = gate.acquire().await;
-        let result = send(request, owner, record, &id).await;
+        let result = send(request, owner, record, &id, gate).await;
         complete.0.set(true);
         complete.1.notify(usize::MAX);
         result
@@ -143,6 +143,7 @@ pub(super) async fn send(
     context: Rc<Context>,
     record: Rc<DeviceRecord>,
     id: &str,
+    gate: Rc<super::LightWriteGate>,
 ) -> Result<(), AdapterError> {
     let did = record.physical.key().id.clone();
     let target = match &request {
@@ -229,6 +230,7 @@ pub(super) async fn send(
                 let capture_work = work.clone();
                 let capture_id = id.to_owned();
                 let capture_properties = properties.clone();
+                let capture_gate = gate.clone();
                 let submitted = operation.0.clone();
                 let stamps = Rc::new(RefCell::new(Vec::new()));
                 let capture_stamps = stamps.clone();
@@ -239,6 +241,7 @@ pub(super) async fn send(
                 let result_properties = properties.clone();
                 let result_id = id.to_owned();
                 let result_operation = operation.0.clone();
+                let result_gate = gate.clone();
                 let hooks = SendHooks::new(
                     move || {
                         if !alive(&guard_work, generation)
@@ -278,11 +281,7 @@ pub(super) async fn send(
                                 )
                             })
                             .collect();
-                        capture_work.observations.register_feedback(
-                            &capture_work.record,
-                            &capture_id,
-                            &capture_properties,
-                        );
+                        capture_gate.register_feedback(&capture_properties);
                     },
                 );
                 handle
@@ -299,7 +298,7 @@ pub(super) async fn send(
                             return;
                         }
                         let request = result_pending.borrow_mut().take().unwrap();
-                        result_work.observations.finish_feedback(&result_id);
+                        result_gate.finish_feedback();
                         let result = match outcome.result {
                             Ok(results) => {
                                 apply(
@@ -378,14 +377,13 @@ pub(super) async fn send(
                     .iter()
                     .map(|(binding, _)| work.observations.write_stamp(&record, id, *binding))
                     .collect();
-                work.observations
-                    .register_feedback(&record, id, &properties);
+                gate.register_feedback(&properties);
                 operation.0.submitted(PathKind::Cloud);
                 let result = context
                     .cloud
                     .set_properties(&credentials.access_token, &did, &properties)
                     .await;
-                work.observations.finish_feedback(id);
+                gate.finish_feedback();
                 let outcome = match &result {
                     Ok(results) => {
                         apply(&work, id, &properties, &stamps, results);

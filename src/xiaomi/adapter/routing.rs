@@ -150,7 +150,21 @@ impl Context {
         let record = slot.admitted.as_ref().unwrap().clone();
         let work = slot
             .work
-            .get_or_insert_with(|| Rc::new(DeviceWork::new(record, self.refresh_changed.clone())))
+            .get_or_insert_with(|| {
+                let light_write = record
+                    .cached
+                    .borrow()
+                    .device
+                    .functions
+                    .iter()
+                    .any(|function| function.lighting.is_some())
+                    .then(|| self.light_writes.for_device(did));
+                Rc::new(DeviceWork::new(
+                    record,
+                    self.refresh_changed.clone(),
+                    light_write,
+                ))
+            })
             .clone();
         if !slot.access.as_ref().is_some_and(|access| {
             access.as_ref().is_ok_and(|access| {

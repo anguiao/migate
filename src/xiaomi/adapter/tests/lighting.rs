@@ -448,7 +448,7 @@ fn retained_old_color_cannot_block_an_accepted_current_target() {
 }
 
 #[test]
-fn range_change_replaces_canonical_function_and_retires_old_sent_callback() {
+fn range_change_preserves_in_flight_feedback_without_filtering_completed_targets() {
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
@@ -491,26 +491,32 @@ fn range_change_replaces_canonical_function_and_retires_old_sent_callback() {
                 .unwrap()
                 .candidate = Some((changed, None));
             control.context.reconcile("one").unwrap();
-            let new = function(&control.context.registry, "one", "main");
+            let new = ready_light(control).await;
             assert_eq!(new.description().temperature_range().unwrap().max, 5600);
             assert!(!old.light_action_current(action.token()));
             let next = new
-                .begin_light_action(LightDimension::Brightness, brightness(70.0), true)
+                .begin_light_action(LightDimension::Brightness, brightness(70.0), false)
                 .unwrap();
             async_io::Timer::after(std::time::Duration::from_millis(30)).await;
             assert_eq!(peer.count("rpcReq", "one", 0), 1);
             assert!(poll_once(next.accepted()).await.is_none());
             assert!(poll_once(action.accepted()).await.is_none());
+            peer.notify_value("one", BRIGHTNESS, json!(60), false);
+            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
+            assert!(new.light_action_current(next.token()));
+            assert!(poll_once(next.accepted()).await.is_none());
+            assert_eq!(peer.count("rpcReq", "one", 0), 1);
+            peer.notify_value("one", BRIGHTNESS, json!(55), true);
+            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(55.0)).await;
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
                 .await;
             action.accepted().await.unwrap();
-            for _ in 0..30 {
-                future::yield_now().await;
-            }
-            assert_ne!(
+            until(|| peer.count("rpcReq", "one", 0) == 2).await;
+            assert_eq!(
                 new.snapshot().lighting.unwrap().brightness_percent,
-                Some(60.0)
+                Some(55.0)
             );
+            assert!(poll_once(next.accepted()).await.is_none());
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
                 .await;
             next.accepted().await.unwrap();
@@ -527,13 +533,24 @@ fn range_change_replaces_canonical_function_and_retires_old_sent_callback() {
                 .unwrap();
             assert_eq!(stored.unique_id, after.unique_id);
             assert_eq!(stored.endpoint, after.endpoint);
+            peer.notify_value("one", BRIGHTNESS, json!(60), false);
+            until(|| !new.light_action_current(next.token())).await;
+            assert_eq!(
+                next.ended().await.unwrap_err(),
+                crate::device::CommandError::Superseded
+            );
+            assert_eq!(
+                new.snapshot().lighting.unwrap().brightness_percent,
+                Some(60.0)
+            );
+            assert_eq!(peer.count("rpcReq", "one", 0), 2);
         })
         .await;
     }));
 }
 
 #[test]
-fn removing_and_readding_a_light_keeps_its_original_sent_write_gate() {
+fn removing_and_readding_preserves_only_in_flight_feedback() {
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
@@ -570,28 +587,30 @@ fn removing_and_readding_a_light_keeps_its_original_sent_write_gate() {
                 .devices
                 .insert("one".into(), slot);
             control.context.reconcile("one").unwrap();
-            until(|| {
-                function(&control.context.registry, "one", "main")
-                    .snapshot()
-                    .availability
-                    == Availability::Available
-            })
-            .await;
-            let new = function(&control.context.registry, "one", "main");
+            let new = ready_light(control).await;
             let next = new
-                .begin_light_action(LightDimension::Brightness, brightness(70.0), true)
+                .begin_light_action(LightDimension::Brightness, brightness(70.0), false)
                 .unwrap();
             async_io::Timer::after(std::time::Duration::from_millis(30)).await;
             assert_eq!(peer.count("rpcReq", "one", 0), 1);
             assert!(poll_once(next.accepted()).await.is_none());
             assert!(poll_once(first.accepted()).await.is_none());
+            peer.notify_value("one", BRIGHTNESS, json!(60), false);
+            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
+            assert!(new.light_action_current(next.token()));
+            assert!(poll_once(next.accepted()).await.is_none());
+            assert_eq!(peer.count("rpcReq", "one", 0), 1);
+            peer.notify_value("one", BRIGHTNESS, json!(55), true);
+            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(55.0)).await;
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
                 .await;
             first.accepted().await.unwrap();
-            assert_ne!(
+            until(|| peer.count("rpcReq", "one", 0) == 2).await;
+            assert_eq!(
                 new.snapshot().lighting.unwrap().brightness_percent,
-                Some(60.0)
+                Some(55.0)
             );
+            assert!(poll_once(next.accepted()).await.is_none());
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
                 .await;
             next.accepted().await.unwrap();
@@ -600,6 +619,17 @@ fn removing_and_readding_a_light_keeps_its_original_sent_write_gate() {
                 new.snapshot().lighting.unwrap().brightness_percent,
                 Some(70.0)
             );
+            peer.notify_value("one", BRIGHTNESS, json!(60), false);
+            until(|| !new.light_action_current(next.token())).await;
+            assert_eq!(
+                next.ended().await.unwrap_err(),
+                crate::device::CommandError::Superseded
+            );
+            assert_eq!(
+                new.snapshot().lighting.unwrap().brightness_percent,
+                Some(60.0)
+            );
+            assert_eq!(peer.count("rpcReq", "one", 0), 2);
         })
         .await;
     }));

@@ -4,7 +4,6 @@ use super::{
 };
 use crate::device::{CommandError, CommandRequest};
 use crate::xiaomi::capability::PropertyBinding;
-use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -20,12 +19,6 @@ struct Counts {
 pub(super) struct Observations {
     source_epoch: Cell<u64>,
     channels: RefCell<BTreeMap<PropertyKey, Counts>>,
-    feedback: RefCell<BTreeMap<PropertyKey, Feedback>>,
-}
-struct Feedback {
-    value: Value,
-    binding: u64,
-    source: u64,
 }
 #[derive(Clone)]
 pub(super) struct ReadStamp {
@@ -43,10 +36,6 @@ pub(super) struct WriteStamp {
 impl Observations {
     pub(super) fn source_changed(&self) {
         self.source_epoch.set(self.source_epoch.get() + 1);
-        // Only outstanding receipts have feedback entries; the new source is validated at ingress.
-        for entry in self.feedback.borrow_mut().values_mut() {
-            entry.source = self.source_epoch.get();
-        }
     }
     pub(super) fn refresh(&self, id: &str, binding: PropertyBinding) {
         self.channels
@@ -182,42 +171,5 @@ impl Observations {
                 .or_default()
                 .notified
                 == stamp.notified
-    }
-    pub(super) fn register_feedback(
-        &self,
-        record: &DeviceRecord,
-        id: &str,
-        properties: &[(PropertyBinding, Value)],
-    ) {
-        let mut feedback = self.feedback.borrow_mut();
-        for (binding, value) in properties {
-            feedback.insert(
-                key(id, *binding),
-                Feedback {
-                    value: value.clone(),
-                    binding: record.binding_generation.get(),
-                    source: self.source_epoch.get(),
-                },
-            );
-        }
-    }
-    pub(super) fn finish_feedback(&self, id: &str) {
-        self.feedback.borrow_mut().retain(|key, _| key.0 != id);
-    }
-    pub(super) fn is_feedback(
-        &self,
-        record: &DeviceRecord,
-        id: &str,
-        binding: PropertyBinding,
-        value: &Value,
-    ) -> bool {
-        self.feedback
-            .borrow()
-            .get(&key(id, binding))
-            .is_some_and(|entry| {
-                entry.value == *value
-                    && entry.binding == record.binding_generation.get()
-                    && entry.source == self.source_epoch.get()
-            })
     }
 }

@@ -226,7 +226,10 @@ pub(super) fn observe(
         || patch.color.is_some_and(|value| state.color != Some(value))
         || patch.mode.is_some_and(|value| state.mode != Some(value));
     let feedback = matches!(origin, Origin::Notification)
-        && work.observations.is_feedback(record, id, binding, value);
+        && work
+            .light_write
+            .as_ref()
+            .is_some_and(|gate| gate.is_feedback(binding, value));
     if matches!(origin, Origin::Notification) && changed && !feedback {
         if patch.power == Some(false) {
             function.take_over_light_all().expect("light");

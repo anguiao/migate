@@ -637,6 +637,63 @@ fn unsent_light_target_reselects_cloud_once_without_local_bytes() {
 }
 
 #[test]
+fn an_unsent_light_target_is_not_own_feedback() {
+    use crate::device::{CommandError, LightDimension, LightPatch, LightTarget};
+    use crate::xiaomi::capability::PropertyBinding;
+    block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
+        let wire = Rc::new(Wire::default());
+        let (_, driver) = local(&c, wire.clone());
+        let light = function(&c.context.registry, "one", "main");
+        light
+            .observe_light(LightPatch {
+                brightness_percent: Some(10.0),
+                ..Default::default()
+            })
+            .unwrap();
+        future::or(
+            async {
+                driver.run(|_| {}).await.unwrap();
+                panic!("driver stopped")
+            },
+            async {
+                let action = light
+                    .begin_light_action(
+                        LightDimension::Brightness,
+                        LightTarget {
+                            brightness_percent: Some(60.0),
+                            ..Default::default()
+                        },
+                        false,
+                    )
+                    .unwrap();
+                until(|| wire.polls.get() > 0).await;
+                let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+                work.notify_value(PropertyBinding { siid: 2, piid: 2 }, &json!(60), false);
+                assert!(!light.light_action_current(action.token()));
+                assert_eq!(action.ended().await.unwrap_err(), CommandError::Superseded);
+                assert_eq!(
+                    action.accepted().await.unwrap_err(),
+                    CommandError::Superseded
+                );
+                assert_eq!(
+                    light.snapshot().lighting.unwrap().brightness_percent,
+                    Some(60.0)
+                );
+                wire.allow(usize::MAX);
+                until(|| {
+                    c.context.diagnostics().devices[0].commands[0]
+                        .last
+                        .is_some()
+                })
+                .await;
+                assert!(wire.written.borrow().is_empty());
+            },
+        )
+        .await;
+    }));
+}
+
+#[test]
 fn unsent_stop_keeps_its_actual_result_in_command_diagnostics() {
     use crate::device::{CommandError, LightDimension, LightTarget};
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
