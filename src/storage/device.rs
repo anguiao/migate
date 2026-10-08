@@ -137,7 +137,8 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
     validate_text(&cached.model)?;
     validate_text(&cached.instance_type)?;
     validate_key(&cached.device.key)?;
-    if cached.device.key.source != "xiaomi"
+    if cached.model == "devcea.light.ls2307" && !is_ls2307_type(&cached.instance_type)
+        || cached.device.key.source != "xiaomi"
         || !(is_outlet_type(&cached.instance_type) || is_light_type(&cached.instance_type))
         || cached.device.functions.is_empty()
     {

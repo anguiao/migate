@@ -317,7 +317,13 @@ impl SessionDriver {
                 .get("value")
                 .filter(|value| crate::xiaomi::property::valid_value(value))
                 .ok_or(CentralError::Protocol)?;
-            let event = if let Some(value) = value.as_bool() {
+            let event = if publish.retain {
+                CentralEvent::PropertySnapshot {
+                    did,
+                    binding,
+                    value: value.clone(),
+                }
+            } else if let Some(value) = value.as_bool() {
                 CentralEvent::Property {
                     did,
                     binding,

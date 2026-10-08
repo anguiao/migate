@@ -20,6 +20,11 @@ pub enum NotificationEvent {
         binding: PropertyBinding,
         value: bool,
     },
+    PropertySnapshot {
+        did: String,
+        binding: PropertyBinding,
+        value: serde_json::Value,
+    },
     PropertyValue {
         did: String,
         binding: PropertyBinding,

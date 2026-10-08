@@ -628,7 +628,13 @@ impl NotificationDriver {
                     .get("value")
                     .filter(|value| crate::xiaomi::property::valid_value(value))
                     .ok_or(NotificationError::Protocol)?;
-                let event = if let Some(value) = value.as_bool() {
+                let event = if publish.retain {
+                    NotificationEvent::PropertySnapshot {
+                        did,
+                        binding,
+                        value: value.clone(),
+                    }
+                } else if let Some(value) = value.as_bool() {
                     NotificationEvent::Property {
                         did,
                         binding,

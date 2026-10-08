@@ -82,8 +82,8 @@ fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
             };
             let (result, ()) = future::zip(
                 driver.run(move |event| {
-                    if let CentralEvent::Property { value, .. } = event {
-                        events.borrow_mut().push(value)
+                    if let CentralEvent::PropertySnapshot { value, .. } = event {
+                        events.borrow_mut().push(value.as_bool().unwrap())
                     }
                 }),
                 work,

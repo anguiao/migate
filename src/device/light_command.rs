@@ -473,7 +473,21 @@ pub struct LightRequest {
 }
 impl LightRequest {
     pub fn is_current(&self) -> bool {
-        !self.flight.gate.is_finished() && self.function.light_action_current(self.token)
+        self.current_result().is_ok()
+    }
+    /// Inspect cancellation without transferring actual-send ownership.
+    pub fn current_result(&self) -> Result<(), CommandError> {
+        if !self.flight.gate.is_finished() && self.function.light_action_current(self.token) {
+            Ok(())
+        } else {
+            Err(self
+                .flight
+                .action
+                .ended
+                .result()
+                .and_then(Result::err)
+                .unwrap_or(CommandError::Superseded))
+        }
     }
     /// Call at the actual transport submission boundary, never just on dequeue.
     pub fn mark_sent(&self) -> Result<(), CommandError> {

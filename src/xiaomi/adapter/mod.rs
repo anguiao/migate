@@ -3,6 +3,7 @@ mod cloud;
 mod commands;
 mod credentials;
 mod diagnostics;
+mod lighting;
 mod local;
 mod membership;
 mod model;
@@ -16,8 +17,8 @@ mod tasks;
 mod work;
 
 pub use model::{
-    AdapterError, AdapterStatus, ChannelCommands, CommandStatus, DeviceStatus, GatewayStatus,
-    PathKind, PendingDevice, RecoveryStatus, RoutingStatus, TopologyReady,
+    AdapterError, AdapterStatus, ChannelCommands, CommandStatus, CommandTarget, DeviceStatus,
+    GatewayStatus, PathKind, PendingDevice, RecoveryStatus, RoutingStatus, TopologyReady,
 };
 pub use routing::PathPriority;
 pub use runner::XiaomiAdapter;

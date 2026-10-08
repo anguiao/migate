@@ -143,7 +143,28 @@ pub(super) async fn run(
                                 .request_filtered(dids);
                             events.request_sync();
                         }
-                        CentralEvent::PropertyValue { .. } => {}
+                        CentralEvent::PropertyValue {
+                            did,
+                            binding,
+                            value,
+                        } => events.property_value_event(
+                            &super::notifications::NotificationSource::Local(event_handle.clone()),
+                            &did,
+                            binding,
+                            &value,
+                            false,
+                        ),
+                        CentralEvent::PropertySnapshot {
+                            did,
+                            binding,
+                            value,
+                        } => events.property_value_event(
+                            &super::notifications::NotificationSource::Local(event_handle.clone()),
+                            &did,
+                            binding,
+                            &value,
+                            true,
+                        ),
                     })
                     .await
                     .map_err(AdapterError::Central)

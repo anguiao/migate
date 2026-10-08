@@ -164,6 +164,16 @@ impl Context {
         binding: crate::xiaomi::capability::PropertyBinding,
         value: bool,
     ) {
+        self.property_value_event(source, did, binding, &serde_json::Value::Bool(value), false);
+    }
+    pub(super) fn property_value_event(
+        &self,
+        source: &NotificationSource,
+        did: &str,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        value: &serde_json::Value,
+        cached_report: bool,
+    ) {
         if !self.source_valid(did, source) {
             return;
         }
@@ -180,7 +190,7 @@ impl Context {
                 .as_ref()
                 .is_some_and(|active| active.same(source))
         {
-            work.notify(binding, value);
+            work.notify_value(binding, value, cached_report);
         }
     }
     fn online_event(&self, handle: &NotificationHandle, did: &str, online: bool) {
@@ -597,7 +607,28 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                             NotificationEvent::Online { did, online } => {
                                 events.online_event(&event_handle, &did, online)
                             }
-                            NotificationEvent::PropertyValue { .. } => {}
+                            NotificationEvent::PropertyValue {
+                                did,
+                                binding,
+                                value,
+                            } => events.property_value_event(
+                                &NotificationSource::Cloud(event_handle.clone()),
+                                &did,
+                                binding,
+                                &value,
+                                false,
+                            ),
+                            NotificationEvent::PropertySnapshot {
+                                did,
+                                binding,
+                                value,
+                            } => events.property_value_event(
+                                &NotificationSource::Cloud(event_handle.clone()),
+                                &did,
+                                binding,
+                                &value,
+                                true,
+                            ),
                         })
                         .await
                         .err();

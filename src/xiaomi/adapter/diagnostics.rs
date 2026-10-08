@@ -110,7 +110,19 @@ impl Context {
                 .iter()
                 .map(|function| function.description.id.clone())
                 .collect::<Vec<_>>();
-            let commands = self.commands.snapshot(&did, channels.into_iter());
+            let mut commands = self.commands.snapshot(&did, channels.into_iter());
+            let record = self.live.borrow().devices[&did]
+                .admitted
+                .as_ref()
+                .unwrap()
+                .clone();
+            for command in &mut commands {
+                command.light_actions = record
+                    .physical
+                    .function(&command.channel)
+                    .unwrap()
+                    .light_action_diagnostics();
+            }
             devices.push(DeviceStatus {
                 did,
                 usable_control_paths: usable,

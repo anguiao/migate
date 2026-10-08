@@ -5,6 +5,7 @@ mod credentials;
 mod descriptions;
 mod diagnostics;
 mod http_routing;
+mod lighting;
 mod list_scheduling;
 mod local_device_errors;
 mod local_recovery;

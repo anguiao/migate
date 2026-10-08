@@ -381,6 +381,7 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
         sync_limited_reason: None,
         last_switch_reason: None,
         commands: vec![ChannelCommands {
+            light_actions: None,
             channel: "main".into(),
             inflight: None,
             last: None,
@@ -390,7 +391,8 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
     adapter.devices[0].commands[0].last = Some(CommandStatus {
         id: 1,
         binding: migate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-        target: true,
+        target: migate::xiaomi::adapter::CommandTarget::Power(true),
+        properties: vec![],
         actual_path: Some(PathKind::Local),
         result: Some(Ok(())),
     });

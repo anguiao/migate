@@ -11,6 +11,7 @@ pub(in super::super) struct PeerState {
     pub(in super::super) pushless: BTreeSet<String>,
     pub(in super::super) omit: BTreeSet<String>,
     pub(in super::super) values: BTreeMap<Binding, bool>,
+    pub(in super::super) numeric_values: BTreeMap<Binding, Value>,
     pub(in super::super) sub_reject: BTreeSet<Binding>,
     pub(in super::super) sub_timeout: BTreeSet<Binding>,
     pub(in super::super) held_subs: Vec<Subscribe>,
@@ -30,6 +31,41 @@ pub(in super::super) struct Peer {
     pub(in super::super) changed: Event,
 }
 impl Peer {
+    pub(in super::super) fn value(
+        &self,
+        did: &str,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        value: Value,
+    ) {
+        self.state
+            .borrow_mut()
+            .numeric_values
+            .insert((did.into(), binding.siid, binding.piid), value);
+    }
+    pub(in super::super) fn notify_value(
+        &self,
+        did: &str,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        value: Value,
+        retain: bool,
+    ) {
+        let client = self.state.borrow().client_id.clone();
+        let mut publish = Publish::new(
+            format!(
+                "{client}/appMsg/notify/iot/{did}/property/{}.{}",
+                binding.siid, binding.piid
+            ),
+            QoS::AtMostOnce,
+            encode_mips(
+                700,
+                None,
+                &json!({"did":did,"siid":binding.siid,"piid":binding.piid,"value":value}),
+            ),
+        );
+        publish.retain = retain;
+        self.send(Packet::Publish(publish));
+    }
+
     pub(in super::super) fn lists(&self) -> usize {
         self.state
             .borrow()
@@ -61,6 +97,41 @@ impl Peer {
     pub(in super::super) fn send(&self, packet: Packet) {
         self.state.borrow_mut().send.push(packet);
         self.changed.notify(usize::MAX);
+    }
+    pub(in super::super) async fn release_property(
+        &self,
+        did: &str,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        value: Value,
+    ) {
+        let matches = |publish: &Publish| {
+            let payload = decode_mips(&publish.payload).unwrap().payload;
+            payload["did"] == did
+                && (payload["siid"] == binding.siid && payload["piid"] == binding.piid
+                    || payload["rpc"]["params"].as_array().is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item["siid"] == binding.siid && item["piid"] == binding.piid
+                        })
+                    }))
+        };
+        until(|| {
+            self.state
+                .borrow()
+                .held
+                .iter()
+                .any(|(publish, _)| matches(publish))
+        })
+        .await;
+        let index = self
+            .state
+            .borrow()
+            .held
+            .iter()
+            .position(|(publish, _)| matches(publish))
+            .unwrap();
+        let (publish, _) = self.state.borrow_mut().held.remove(index);
+        let client = self.state.borrow().client_id.clone();
+        self.send(response(&client, &publish, value));
     }
     pub(in super::super) async fn release(&self, did: &str, siid: u32, value: Value) {
         until(|| {
@@ -230,16 +301,16 @@ pub(in super::super) async fn peer_run(
                                 if state.read_fail.contains(&binding) {
                                     json!({"code":-7})
                                 } else {
-                                    json!({"value":state.values.get(&binding).copied().unwrap_or(false)})
+                                    json!({"value":state.numeric_values.get(&binding).cloned().unwrap_or_else(||json!(state.values.get(&binding).copied().unwrap_or(false)))})
                                 },
                                 state.hold_reads,
                                 state.read_timeout.contains(&binding),
                             )
                         }
                         "rpcReq" => {
-                            let property = &payload["rpc"]["params"][0];
+                            let properties = payload["rpc"]["params"].as_array().unwrap();
                             (
-                                json!({"result":[{"did":property["did"],"siid":property["siid"],"piid":property["piid"],"code":0}]}),
+                                json!({"result": properties.iter().map(|property| json!({"did":property["did"],"siid":property["siid"],"piid":property["piid"],"code":0})).collect::<Vec<_>>()}),
                                 state.hold_writes,
                                 false,
                             )

@@ -40,6 +40,9 @@ pub(in super::super) struct CloudState {
     pub(in super::super) property_gate: Option<flume::Receiver<()>>,
     pub(in super::super) property_writes: Vec<(String, u32, u32, bool, String)>,
     pub(in super::super) property_reads: Vec<(String, u32, u32)>,
+    pub(in super::super) raw_values: BTreeMap<(String, u32, u32), Value>,
+    pub(in super::super) property_codes: BTreeMap<(String, u32, u32), i64>,
+    pub(in super::super) numeric_writes: Vec<(Vec<Value>, String)>,
     pub(in super::super) read_values: BTreeMap<(String, u32, u32), bool>,
     pub(in super::super) read_gates: BTreeMap<(String, u32, u32), flume::Receiver<()>>,
     pub(in super::super) read_status: u16,
@@ -72,6 +75,12 @@ pub(in super::super) struct Control {
 }
 impl Rig {
     pub(in super::super) fn new(restore: bool, members: &[&str]) -> Self {
+        Self::build(restore, members, None)
+    }
+    pub(in super::super) fn light(model: &str) -> Self {
+        Self::build(true, &["one"], Some(model))
+    }
+    fn build(restore: bool, members: &[&str], light: Option<&str>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let tls = TlsFixture::new(false);
@@ -80,11 +89,23 @@ impl Rig {
         credentials.tokens.refresh_at = now + 1_000_000;
         credentials.tokens.expires_at = now + 2_000_000;
         store.xiaomi().replace(&credentials).unwrap();
-        let data = vec![
+        let mut data = vec![
             cached(&tls.credentials.uid, "one", false),
             cached(&tls.credentials.uid, "multi", true),
             cached(&tls.credentials.uid, "two", false),
         ];
+        if let Some(model) = light {
+            let text = light_fixture(model);
+            let instance: Value = serde_json::from_str(text).unwrap();
+            data[0].model = model.into();
+            data[0].instance_type = instance["type"].as_str().unwrap().into();
+            data[0].device = crate::xiaomi::capability::parse_device_for_model(
+                DeviceKey::new("xiaomi", "one"),
+                model,
+                &instance,
+            )
+            .unwrap();
+        }
         if restore {
             store
                 .devices()
@@ -139,7 +160,9 @@ impl Rig {
                     item["piid"].as_u64().unwrap() as u32,
                 );
                 state.property_reads.push(key.clone());
-                let value = state.read_values.get(&key).copied().unwrap_or(false);
+                let value = state.raw_values.get(&key).cloned().unwrap_or_else(|| {
+                    json!(state.read_values.get(&key).copied().unwrap_or(false))
+                });
                 let result = json!({"code":0,"result":[{"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":0,"value":value}]});
                 let mut response = MockResponse::json(state.read_status, &result.to_string());
                 if let Some(gate) = state.read_gates.get(&key).cloned() {
@@ -148,16 +171,30 @@ impl Rig {
                 return response;
             } else if request.target.ends_with("/miotspec/prop/set") {
                 let body: Value = serde_json::from_str(&request.body).unwrap();
-                let item = &body["params"][0];
-                state.property_writes.push((
-                    item["did"].as_str().unwrap().into(),
-                    item["siid"].as_u64().unwrap() as u32,
-                    item["piid"].as_u64().unwrap() as u32,
-                    item["value"].as_bool().unwrap(),
-                    request.headers.clone(),
-                ));
+                let items = body["params"].as_array().unwrap();
+                let light = records.iter().any(|record| {
+                    record.device.key.id == items[0]["did"].as_str().unwrap()
+                        && record.device.functions[0].lighting.is_some()
+                });
+                if light {
+                    state
+                        .numeric_writes
+                        .push((items.clone(), request.headers.clone()));
+                } else {
+                    let item = &items[0];
+                    state.property_writes.push((
+                        item["did"].as_str().unwrap().into(),
+                        item["siid"].as_u64().unwrap() as u32,
+                        item["piid"].as_u64().unwrap() as u32,
+                        item["value"].as_bool().unwrap(),
+                        request.headers.clone(),
+                    ));
+                }
                 let status = state.property_status;
-                let result = json!({"code":0,"result":[{"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":state.property_code}]});
+                let result = json!({"code":0,"result":items.iter().map(|item| {
+                    let key=(item["did"].as_str().unwrap().to_owned(),item["siid"].as_u64().unwrap() as u32,item["piid"].as_u64().unwrap() as u32);
+                    json!({"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":state.property_codes.get(&key).copied().unwrap_or(state.property_code)})
+                }).collect::<Vec<_>>()});
                 let mut response = MockResponse::json(status, &result.to_string());
                 if let Some(gate) = state.property_gate.clone() {
                     response = response.gated(gate);
@@ -224,11 +261,15 @@ impl Rig {
                 json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
                 let multi = request.target.contains("cuco-cp7pd");
-                let mut value: Value = serde_json::from_str(if multi {
-                    include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
-                } else {
-                    include_str!("../../../../../tests/fixtures/miot/outlet.json")
-                })
+                let mut value: Value = serde_json::from_str(
+                    if records[0].device.functions[0].lighting.is_some() && !multi {
+                        light_fixture(&records[0].model)
+                    } else if multi {
+                        include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
+                    } else {
+                        include_str!("../../../../../tests/fixtures/miot/outlet.json")
+                    },
+                )
                 .unwrap();
                 if state
                     .unsupported
@@ -383,5 +424,32 @@ impl Control {
             test(peer),
         )
         .await;
+    }
+}
+
+fn light_fixture(model: &str) -> &'static str {
+    match model {
+        "devcea.light.ls2307" => {
+            include_str!("../../../../../tests/fixtures/miot/devcea-light-ls2307.json")
+        }
+        "yeelink.light.light3" => {
+            include_str!("../../../../../tests/fixtures/miot/yeelink-light-light3.json")
+        }
+        "yeelink.light.ml9" => {
+            include_str!("../../../../../tests/fixtures/miot/yeelink-light-ml9.json")
+        }
+        "yeelink.light.spot2" => {
+            include_str!("../../../../../tests/fixtures/miot/yeelink-light-spot2.json")
+        }
+        "xiaomi.light.ceil04" => {
+            include_str!("../../../../../tests/fixtures/miot/xiaomi-light-ceil04.json")
+        }
+        "xiaomi.light.bar2" => {
+            include_str!("../../../../../tests/fixtures/miot/xiaomi-light-bar2.json")
+        }
+        "lemesh.light.wy0c15" => {
+            include_str!("../../../../../tests/fixtures/miot/lemesh-light-wy0c15.json")
+        }
+        _ => panic!("unknown light fixture"),
     }
 }

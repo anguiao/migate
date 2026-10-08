@@ -259,6 +259,7 @@ fn format_device(status: &DeviceStatus) -> String {
         channel,
         inflight,
         last,
+        ..
     } in &status.commands
     {
         if let Some(command) = inflight {
@@ -284,7 +285,16 @@ fn format_command(channel: &str, state: &str, command: &CommandStatus) -> String
     format!(
         "{channel} {state} command #{}: target {}; property {}.{}; actual path {}; {result}.",
         command.id,
-        if command.target { "on" } else { "off" },
+        match &command.target {
+            crate::xiaomi::adapter::CommandTarget::Power(value) =>
+                if *value {
+                    "on".into()
+                } else {
+                    "off".into()
+                },
+            crate::xiaomi::adapter::CommandTarget::Light(target) =>
+                format!("{target:?}; properties {:?}", command.properties),
+        },
         command.binding.siid,
         command.binding.piid,
         command.actual_path.map(path).unwrap_or("not sent")

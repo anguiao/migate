@@ -32,6 +32,11 @@ pub(super) struct ReadFlight {
     life: Lifetime,
     path: ControlPath,
 }
+impl Refresh {
+    fn key(&self) -> super::lighting::PropertyKey {
+        super::lighting::key(&self.id, self.binding)
+    }
+}
 impl ReadFlight {
     fn current(&self, context: &Context, did: &str) -> bool {
         match (&self.path, context.read_path(did)) {
@@ -83,7 +88,7 @@ fn reserve(
     let mut pending = work.refresh_pending.borrow_mut();
     let index = pending.iter().position(|read| {
         read.ready_at <= context.clock.now()
-            && !work.refresh_inflight.borrow().contains_key(&read.id)
+            && !work.refresh_inflight.borrow().contains_key(&read.key())
     })?;
     let read = pending.remove(index).unwrap();
     let flight = Rc::new(ReadFlight {
@@ -92,7 +97,7 @@ fn reserve(
     });
     work.refresh_inflight
         .borrow_mut()
-        .insert(read.id.clone(), flight.clone());
+        .insert(read.key(), flight.clone());
     Some((read, flight))
 }
 pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result<(), AdapterError> {
@@ -108,7 +113,7 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
                 work.refresh_pending
                     .borrow()
                     .iter()
-                    .filter(|read| !work.refresh_inflight.borrow().contains_key(&read.id))
+                    .filter(|read| !work.refresh_inflight.borrow().contains_key(&read.key()))
                     .map(|read| read.ready_at)
                     .min()
             })
@@ -171,7 +176,7 @@ pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
                 work.refresh_pending
                     .borrow()
                     .iter()
-                    .filter(|read| !work.refresh_inflight.borrow().contains_key(&read.id))
+                    .filter(|read| !work.refresh_inflight.borrow().contains_key(&read.key()))
                     .map(|read| read.ready_at)
                     .min()
             })
@@ -210,13 +215,13 @@ impl Drop for ReadCleanup {
             .work
             .refresh_inflight
             .borrow()
-            .get(&self.read.id)
+            .get(&self.read.key())
             .is_some_and(|flight| Rc::ptr_eq(flight, &self.flight));
         if current {
             self.work
                 .refresh_inflight
                 .borrow_mut()
-                .remove(&self.read.id);
+                .remove(&self.read.key());
         }
         if self.retry
             && !self.work.life.is_closed()
@@ -226,7 +231,7 @@ impl Drop for ReadCleanup {
                 .refresh_pending
                 .borrow()
                 .iter()
-                .any(|read| read.id == self.read.id)
+                .any(|read| read.key() == self.read.key())
         {
             self.work
                 .refresh_pending
@@ -254,13 +259,18 @@ fn read_one(
         let mut cleanup = cleanup;
         let did = work.record.physical.key().id.clone();
         let generation = work.record.binding_generation.get();
-        let stamp = Rc::new(work.observations.read_stamp(&work.record, &read.id));
+        let stamp = Rc::new(
+            work.observations
+                .read_stamp(&work.record, &read.id, read.binding),
+        );
         let reading = async {
             if flight.life.is_closed() || !flight.current(&context, &did) {
                 return Ok(ReadResult::Retired);
             }
             match &flight.path {
                 ControlPath::Local(handle) => {
+                    let validation = Rc::new(std::cell::RefCell::new(Ok(())));
+                    let observed_validation = validation.clone();
                     let observing = work.clone();
                     let observed_id = read.id.clone();
                     let observed_stamp = stamp.clone();
@@ -275,7 +285,7 @@ fn read_one(
                     let result_handle = handle.clone();
                     let result_flight = flight.clone();
                     let outcome = handle
-                        .read_property_with_timeout_guarded(
+                        .read_property_value_with_timeout_guarded(
                             &did,
                             read.binding,
                             Duration::from_secs(6),
@@ -293,6 +303,7 @@ fn read_one(
                                         || !guard_work.observations.read_is_current(
                                             &guard_work.record,
                                             &guard_id,
+                                            read.binding,
                                             &guard_stamp,
                                         )
                                     {
@@ -321,11 +332,11 @@ fn read_one(
                                     )
                                     && let Ok(value) = outcome.result
                                 {
-                                    observing.observations.observe_read(
-                                        &observing.record,
+                                    *observed_validation.borrow_mut() = observing.observe_read(
                                         &observed_id,
+                                        read.binding,
                                         &observed_stamp,
-                                        value,
+                                        &value,
                                     );
                                 }
                             },
@@ -333,7 +344,12 @@ fn read_one(
                         .await;
                     match outcome.result {
                         Ok(_) => Ok(if flight.current(&context, &did) {
-                            ReadResult::Observed
+                            match &*validation.borrow() {
+                                Ok(()) => ReadResult::Observed,
+                                Err(error) => {
+                                    ReadResult::Failed(work.problem("read", read.binding, error))
+                                }
+                            }
                         } else {
                             ReadResult::Retired
                         }),
@@ -352,20 +368,24 @@ fn read_one(
                 ControlPath::Cloud(credentials) => {
                     match context
                         .cloud
-                        .read_property(&credentials.access_token, &did, read.binding)
+                        .read_property_value(&credentials.access_token, &did, read.binding)
                         .await
                     {
                         Ok(value) => {
+                            let mut validation = Ok(());
                             if !work.life.is_closed() && flight.current(&context, &did) {
-                                work.observations.observe_read(
-                                    &work.record,
-                                    &read.id,
-                                    &stamp,
-                                    value,
-                                );
+                                validation =
+                                    work.observe_read(&read.id, read.binding, &stamp, &value);
                             }
                             Ok(if flight.current(&context, &did) {
-                                ReadResult::Observed
+                                match validation {
+                                    Ok(()) => ReadResult::Observed,
+                                    Err(error) => ReadResult::Failed(work.problem(
+                                        "read",
+                                        read.binding,
+                                        &error,
+                                    )),
+                                }
                             } else {
                                 ReadResult::Retired
                             })
@@ -398,18 +418,18 @@ fn read_one(
         cleanup.retry = false;
         if !work.life.is_closed()
             && work.record.binding_generation.get() == generation
-            && work.record.binding(&read.id) == read.binding
+            && work.contains(&read.id, read.binding)
         {
             match result? {
                 ReadResult::Observed => {
-                    work.read_problems.borrow_mut().remove(&read.id);
+                    work.read_problems.borrow_mut().remove(&read.key());
                 }
                 ReadResult::Retired => {
                     if !work
                         .refresh_pending
                         .borrow()
                         .iter()
-                        .any(|queued| queued.id == read.id)
+                        .any(|queued| queued.key() == read.key())
                     {
                         work.refresh_pending.borrow_mut().push_back(read);
                     }
@@ -418,20 +438,19 @@ fn read_one(
                     if context.priority() == super::routing::PathPriority::CloudFirst {
                         work.read_problems
                             .borrow_mut()
-                            .insert(read.id.clone(), problem.clone());
+                            .insert(read.key(), problem.clone());
                     }
                     if read.attempts == 3 {
                         work.refresh_pending
                             .borrow_mut()
-                            .retain(|queued| queued.id != read.id);
-                        work.read_problems
-                            .borrow_mut()
-                            .insert(read.id.clone(), problem);
+                            .retain(|queued| queued.key() != read.key());
+                        work.read_problems.borrow_mut().insert(read.key(), problem);
                     } else {
                         read.attempts += 1;
                         read.ready_at = context.clock.now() + RETRY_DELAY;
                         let mut pending = work.refresh_pending.borrow_mut();
-                        if let Some(queued) = pending.iter_mut().find(|queued| queued.id == read.id)
+                        if let Some(queued) =
+                            pending.iter_mut().find(|queued| queued.key() == read.key())
                         {
                             *queued = read;
                         } else {

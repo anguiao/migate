@@ -124,7 +124,14 @@ impl DeviceStore {
             let Some(cached) = self.load_parsed(uid, home_id, &stored.key)? else {
                 continue;
             };
-            if !stored.matches_functions(&cached.physical_description("").functions) {
+            let functions = cached.physical_description("").functions;
+            if !stored.matches_functions(&functions)
+                || stored.functions.iter().any(|stored| {
+                    !functions.iter().any(|function| {
+                        stored.key.id == function.id && stored.capabilities == function.capabilities
+                    })
+                })
+            {
                 return Err(self.invalid(
                     "restore Xiaomi device topology",
                     "Cached functions differ from the published identity",

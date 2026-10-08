@@ -51,6 +51,30 @@ async fn trigger_burst(c: &Control, peer: &Peer) {
 }
 
 #[test]
+fn numeric_outlet_refresh_trigger_is_ignored() {
+    block_on(Rig::new(true, &["multi"]).run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            initialized(control, &peer, &["multi"]).await;
+            let before = peer.count("get", "multi", 0);
+            peer.notify_value(
+                "multi",
+                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                json!(42),
+                false,
+            );
+            let outlet = function(&control.context.registry, "multi", "outlet_2");
+            peer.notify("multi", 4, true);
+            until(|| outlet.snapshot().power == Power::On).await;
+            async_io::Timer::after(Duration::from_millis(50)).await;
+            assert_eq!(peer.count("get", "multi", 0), before);
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn refresh_rounds_wait_for_every_did_and_trigger_bursts_keep_the_pending_deadline() {
     block_on(manual_rig(&["one", "multi"]).run(|c| async move {
         c.announce();

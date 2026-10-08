@@ -441,3 +441,166 @@ fn dropping_a_zero_byte_refresh_task_retires_its_operation_and_returns_the_deman
         .await;
     }));
 }
+
+#[test]
+fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
+    use crate::device::{
+        LightColorTarget, LightDimension, LightMode, LightPatch, LightTarget, Rgb,
+    };
+    use crate::xiaomi::capability::PropertyBinding;
+    block_on(Rig::light("devcea.light.ls2307").run(|c| async move {
+        let wire = Rc::new(Wire::default());
+        let (_, driver) = local(&c, wire.clone());
+        let light = function(&c.context.registry, "one", "main");
+        light
+            .observe_light(LightPatch {
+                power: Some(true),
+                brightness_percent: Some(10.0),
+                temperature_kelvin: Some(2700),
+                color: Rgb::from_packed(0x123456),
+                mode: Some(LightMode::Rgb),
+            })
+            .unwrap();
+        future::or(
+            async {
+                driver.run(|_| {}).await.unwrap();
+                panic!("driver stopped")
+            },
+            async {
+                let action = light
+                    .begin_light_action(
+                        LightDimension::Color,
+                        LightTarget {
+                            power: Some(true),
+                            color: Some(LightColorTarget::Rgb(Rgb::from_packed(0x456789).unwrap())),
+                            ..Default::default()
+                        },
+                        true,
+                    )
+                    .unwrap();
+                until(|| wire.polls.get() > 0).await;
+                let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+                work.notify_value(PropertyBinding { siid: 4, piid: 2 }, &json!(0), true);
+                work.notify_value(PropertyBinding { siid: 2, piid: 1 }, &json!(false), true);
+                assert!(light.light_action_current(action.token()));
+                wire.allow(usize::MAX);
+                until(|| !wire.written.borrow().is_empty()).await;
+                let mut frames = crate::xiaomi::central::MqttFrames::default();
+                frames.push(&wire.written.borrow()).unwrap();
+                let Packet::Publish(publish) = frames.next_packet().unwrap().unwrap() else {
+                    panic!()
+                };
+                assert!(frames.next_packet().unwrap().is_none());
+                let payload = decode_mips(&publish.payload).unwrap().payload;
+                assert_eq!(
+                    payload["rpc"]["params"],
+                    json!([
+                        {"did":"one","siid":2,"piid":1,"value":true},
+                        {"did":"one","siid":4,"piid":1,"value":0x456789},
+                        {"did":"one","siid":4,"piid":2,"value":1}
+                    ])
+                );
+                wire.reply(json!({
+                    "result": [
+                        {"did":"one","siid":2,"piid":1,"code":0},
+                        {"did":"one","siid":4,"piid":1,"code":0},
+                        {"did":"one","siid":4,"piid":2,"code":0}
+                    ]
+                }));
+                action.accepted().await.unwrap();
+                let snapshot = light.snapshot();
+                assert_eq!(snapshot.power, Power::On);
+                assert_eq!(snapshot.lighting.unwrap().mode, Some(LightMode::Rgb));
+            },
+        )
+        .await;
+    }));
+}
+
+#[test]
+fn unsent_light_target_reselects_cloud_once_without_local_bytes() {
+    use crate::device::{LightDimension, LightTarget};
+    let rig = Rig::light("xiaomi.light.ceil04");
+    rig.cloud.lock().unwrap().online.insert("one".into());
+    block_on(rig.run(|c| async move {
+        until(|| c.context.cloud_scope_valid.get()).await;
+        let wire = Rc::new(Wire::default());
+        let (handle, driver) = local(&c, wire.clone());
+        let light = function(&c.context.registry, "one", "main");
+        future::or(
+            async {
+                driver.run(|_| {}).await.unwrap();
+                panic!("driver stopped")
+            },
+            async {
+                let action = light
+                    .begin_light_action(
+                        LightDimension::Brightness,
+                        LightTarget {
+                            brightness_percent: Some(60.0),
+                            ..Default::default()
+                        },
+                        true,
+                    )
+                    .unwrap();
+                until(|| wire.polls.get() > 0).await;
+                c.context.local_outcome(&handle, &response_timeout());
+                wire.allow(usize::MAX);
+                action.accepted().await.unwrap();
+                assert!(wire.written.borrow().is_empty());
+                let cloud = c.cloud.lock().unwrap();
+                assert_eq!(cloud.numeric_writes.len(), 1);
+                assert_eq!(cloud.numeric_writes[0].0[0]["value"], 60);
+            },
+        )
+        .await;
+    }));
+}
+
+#[test]
+fn unsent_stop_keeps_its_actual_result_in_command_diagnostics() {
+    use crate::device::{CommandError, LightDimension, LightTarget};
+    block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
+        let wire = Rc::new(Wire::default());
+        let (_, driver) = local(&c, wire.clone());
+        let light = function(&c.context.registry, "one", "main");
+        future::or(
+            async {
+                driver.run(|_| {}).await.unwrap();
+                panic!("driver stopped")
+            },
+            async {
+                let action = light
+                    .begin_light_action(
+                        LightDimension::Brightness,
+                        LightTarget {
+                            brightness_percent: Some(60.0),
+                            ..Default::default()
+                        },
+                        false,
+                    )
+                    .unwrap();
+                until(|| wire.polls.get() > 0).await;
+                light.stop_light(LightDimension::Brightness).unwrap();
+                assert_eq!(action.ended().await.unwrap_err(), CommandError::Stopped);
+                wire.allow(usize::MAX);
+                until(|| {
+                    c.context.diagnostics().devices[0].commands[0]
+                        .last
+                        .is_some()
+                })
+                .await;
+                assert_eq!(
+                    c.context.diagnostics().devices[0].commands[0]
+                        .last
+                        .as_ref()
+                        .unwrap()
+                        .result,
+                    Some(Err(CommandError::Stopped))
+                );
+                assert!(wire.written.borrow().is_empty());
+            },
+        )
+        .await;
+    }));
+}

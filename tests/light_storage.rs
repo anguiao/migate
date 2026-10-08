@@ -193,3 +193,91 @@ fn corrupted_ls2307_binding_or_mode_conversion_cannot_be_restored() {
         );
     }
 }
+
+#[test]
+fn cached_and_identity_temperature_ranges_must_match_on_restore() {
+    use rusqlite::Connection;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let cached = light(
+        "xiaomi.light.ceil04",
+        include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
+    );
+    store.devices().publish_cached(&cached, "Light").unwrap();
+    let db = Connection::open(store.path()).unwrap();
+    let mut capabilities: Value = serde_json::from_str(
+        &db.query_row("SELECT capabilities FROM device_function", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    capabilities[2]["color_temperature"]["max"] = serde_json::json!(5600);
+    db.execute(
+        "UPDATE device_function SET capabilities=?1",
+        [capabilities.to_string()],
+    )
+    .unwrap();
+    assert!(store.devices().restore_cached("account", "home").is_err());
+}
+
+#[test]
+fn range_update_restores_identical_cache_and_identity_without_reallocating() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut cached = light(
+        "xiaomi.light.ceil04",
+        include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
+    );
+    let original;
+    {
+        let store = Store::open(directory.path()).unwrap();
+        original = store.devices().publish_cached(&cached, "Light").unwrap();
+        let range = &mut cached.device.functions[0]
+            .lighting
+            .as_mut()
+            .unwrap()
+            .temperature
+            .range;
+        range.max = 5600;
+        cached.device.functions[0].description.capabilities[2] =
+            Capability::ColorTemperature(*range);
+        store.devices().publish_cached(&cached, "New name").unwrap();
+    }
+    let store = Store::open(directory.path()).unwrap();
+    let restored = store.devices().restore_cached("account", "home").unwrap();
+    assert_eq!(restored[0].1.unique_id, original.unique_id);
+    assert_eq!(restored[0].1.endpoint, original.endpoint);
+    assert_eq!(restored[0].1.label, original.label);
+    assert_eq!(
+        restored[0].0.device.functions[0].description.capabilities,
+        restored[0].1.functions[0].capabilities
+    );
+}
+
+#[test]
+fn ls2307_cannot_publish_an_outlet_description() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let instance: Value = serde_json::from_str(include_str!("fixtures/miot/outlet.json")).unwrap();
+    assert!(
+        parse_device_for_model(
+            DeviceKey::new("xiaomi", "wrong"),
+            "devcea.light.ls2307",
+            &instance
+        )
+        .is_err()
+    );
+    let cached = CachedPhysicalDevice {
+        uid: "account".into(),
+        home_id: "home".into(),
+        group_id: group_id("account", "home"),
+        model: "devcea.light.ls2307".into(),
+        instance_type: instance["type"].as_str().unwrap().into(),
+        device: migate::xiaomi::capability::parse_device(
+            DeviceKey::new("xiaomi", "wrong"),
+            &instance,
+        )
+        .unwrap(),
+    };
+    assert!(store.devices().publish_cached(&cached, "Wrong").is_err());
+}

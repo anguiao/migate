@@ -1,5 +1,5 @@
 use super::{
-    model::{AdapterError, ChannelCommands, CommandStatus, PathKind},
+    model::{AdapterError, ChannelCommands, CommandStatus, CommandTarget, PathKind},
     routing::ControlPath,
     state::{Context, DeviceRecord},
     work::DeviceWork,
@@ -34,12 +34,29 @@ impl Commands {
         binding: PropertyBinding,
         target: bool,
     ) -> CommandLease {
+        self.begin_operation(
+            did,
+            channel,
+            binding,
+            CommandTarget::Power(target),
+            vec![(binding, serde_json::Value::Bool(target))],
+        )
+    }
+    fn begin_operation(
+        self: &Rc<Self>,
+        did: &str,
+        channel: &str,
+        binding: PropertyBinding,
+        target: CommandTarget,
+        properties: Vec<(PropertyBinding, serde_json::Value)>,
+    ) -> CommandLease {
         let id = self.next.get() + 1;
         self.next.set(id);
         let status = CommandStatus {
             id,
             binding,
             target,
+            properties,
             actual_path: None,
             result: None,
         };
@@ -47,6 +64,7 @@ impl Commands {
         let entry = records
             .entry((did.into(), channel.into()))
             .or_insert_with(|| ChannelCommands {
+                light_actions: None,
                 channel: channel.into(),
                 inflight: None,
                 last: None,
@@ -73,6 +91,7 @@ impl Commands {
                     .get(&(did.into(), channel.clone()))
                     .cloned()
                     .unwrap_or(ChannelCommands {
+                        light_actions: None,
                         channel,
                         inflight: None,
                         last: None,
@@ -94,6 +113,26 @@ struct CommandOperation {
     status: RefCell<CommandStatus>,
 }
 impl CommandOperation {
+    fn properties(&self, properties: Vec<(PropertyBinding, serde_json::Value)>) {
+        let mut status = self.status.borrow_mut();
+        if status.actual_path.is_some() {
+            return;
+        }
+        if let Some((binding, _)) = properties.first() {
+            status.binding = *binding;
+        }
+        status.properties = properties;
+        if let Some(entry) = self
+            .commands
+            .records
+            .borrow_mut()
+            .get_mut(&(self.did.clone(), self.channel.clone()))
+        {
+            entry.inflight = Some(status.clone());
+        }
+        self.commands.changed.notify(usize::MAX);
+    }
+
     fn submitted(&self, path: PathKind) {
         let status = {
             let mut status = self.status.borrow_mut();
@@ -116,7 +155,7 @@ impl CommandOperation {
             entry.inflight = Some(status.clone());
         }
         log::info!(
-            "Xiaomi command start op={} did={} channel={} property={}.{} target={} path={}",
+            "Xiaomi command start op={} did={} channel={} property={}.{} target={:?} path={}",
             status.id,
             self.did,
             self.channel,
@@ -168,7 +207,7 @@ impl CommandOperation {
         };
         log::log!(
             level,
-            "Xiaomi command result op={} did={} channel={} property={}.{} target={} path={} result={}",
+            "Xiaomi command result op={} did={} channel={} property={}.{} target={:?} path={} result={}",
             status.id,
             self.did,
             self.channel,
@@ -242,11 +281,11 @@ async fn send_local_write(
         },
         move || {
             submitted.submitted(super::model::PathKind::Local);
-            *capture_stamp.borrow_mut() = Some(
-                capture_work
-                    .observations
-                    .write_stamp(&capture_work.record, &capture_id),
-            );
+            *capture_stamp.borrow_mut() = Some(capture_work.observations.write_stamp(
+                &capture_work.record,
+                &capture_id,
+                binding,
+            ));
         },
     );
     handle
@@ -295,7 +334,41 @@ pub(super) async fn consume(
         },
         async {
             let did = record.physical.key().id.clone();
-            while let Some(request) = receiver.next().await {
+            while let Some(request) = receiver.next_operation().await {
+                let request = match request {
+                    crate::device::DeviceRequest::Light(request) => {
+                        lighting::send_owned(
+                            crate::device::DeviceRequest::Light(request),
+                            context.clone(),
+                            record.clone(),
+                            &function_id,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    crate::device::DeviceRequest::Power(request)
+                        if record
+                            .cached
+                            .borrow()
+                            .device
+                            .functions
+                            .iter()
+                            .find(|function| function.description.id == function_id)
+                            .unwrap()
+                            .lighting
+                            .is_some() =>
+                    {
+                        lighting::send_owned(
+                            crate::device::DeviceRequest::Power(request),
+                            context.clone(),
+                            record.clone(),
+                            &function_id,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    crate::device::DeviceRequest::Power(request) => request,
+                };
                 let binding = record.binding(&function_id);
                 let target = request.target;
                 let command = context.commands.begin(&did, &function_id, binding, target);
@@ -347,7 +420,9 @@ pub(super) async fn consume(
                             request = withdrawn;
                         }
                         ControlPath::Cloud(credentials) => {
-                            let stamp = work.observations.write_stamp(&record, &function_id);
+                            let stamp =
+                                work.observations
+                                    .write_stamp(&record, &function_id, binding);
                             command.0.submitted(super::model::PathKind::Cloud);
                             match context
                                 .cloud
@@ -396,3 +471,5 @@ pub(super) async fn consume(
 
 #[cfg(test)]
 mod tests;
+
+mod lighting;

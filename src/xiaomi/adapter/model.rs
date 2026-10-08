@@ -129,21 +129,28 @@ impl Default for RoutingStatus {
         }
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommandTarget {
+    Power(bool),
+    Light(crate::device::LightTarget),
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct CommandStatus {
     pub id: u64,
     pub binding: PropertyBinding,
-    pub target: bool,
+    pub target: CommandTarget,
+    pub properties: Vec<(PropertyBinding, serde_json::Value)>,
     pub actual_path: Option<PathKind>,
     pub result: Option<Result<(), CommandError>>,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChannelCommands {
+    pub light_actions: Option<crate::device::LightActionDiagnostics>,
     pub channel: String,
     pub inflight: Option<CommandStatus>,
     pub last: Option<CommandStatus>,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DeviceStatus {
     pub did: String,
     pub usable_control_paths: Vec<PathKind>,
@@ -154,7 +161,7 @@ pub struct DeviceStatus {
     pub last_switch_reason: Option<String>,
     pub commands: Vec<ChannelCommands>,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AdapterStatus {
     pub authentication: AuthReport,
     pub gateway: GatewayStatus,

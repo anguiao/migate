@@ -15,6 +15,27 @@ impl Context {
         receivers: Vec<CommandReceiver>,
     ) {
         for (function, receiver) in record.physical.functions().iter().zip(receivers) {
+            if function.description().category == crate::device::Category::Light {
+                let function = function.clone();
+                let context = self.clone();
+                let life = record.clone();
+                self.tasks.spawn(async move {
+                    let mut changes = function.subscribe_light_actions().expect("light");
+                    futures_lite::future::or(
+                        async {
+                            life.life.ended().await;
+                            Ok(())
+                        },
+                        async {
+                            loop {
+                                changes.changed().await;
+                                context.update_routing("lighting action changed");
+                            }
+                        },
+                    )
+                    .await
+                });
+            }
             self.tasks.spawn(super::commands::consume(
                 receiver,
                 self.clone(),
@@ -93,19 +114,27 @@ impl Context {
                     .devices()
                     .publish_cached(&cached, &record.physical.label())
                 {
-                    Ok(_) => {
+                    Ok(stored) => {
                         let bindings = |device: &CachedPhysicalDevice| {
                             device
                                 .device
                                 .functions
                                 .iter()
-                                .map(|function| (function.description.id.clone(), function.power))
+                                .map(|function| {
+                                    (
+                                        function.description.id.clone(),
+                                        (
+                                            function.power,
+                                            function.lighting.clone(),
+                                            function.description.capabilities.clone(),
+                                        ),
+                                    )
+                                })
                                 .collect::<BTreeMap<_, _>>()
                         };
                         let changed = bindings(&record.cached.borrow()) != bindings(&cached)
                             || record.cached.borrow().device.refresh_trigger
                                 != cached.device.refresh_trigger;
-                        *record.cached.borrow_mut() = cached;
                         if changed {
                             if let Some(session) = &self.live.borrow().session {
                                 drop(session.handle.unsubscribe_properties(did));
@@ -116,7 +145,46 @@ impl Context {
                             record
                                 .binding_generation
                                 .set(record.binding_generation.get() + 1);
-                            if let Some(work) = &self.live.borrow().devices[did].work {
+                        }
+                        let replace = changed
+                            && cached
+                                .device
+                                .functions
+                                .iter()
+                                .any(|function| function.lighting.is_some());
+                        if replace {
+                            record.life.close();
+                            {
+                                let mut live = self.live.borrow_mut();
+                                if let Some(work) = live.devices.get_mut(did).unwrap().work.take() {
+                                    work.life.close();
+                                }
+                                if let Some(session) = live.session.as_mut() {
+                                    session.devices.remove(did);
+                                }
+                            }
+                            let (physical, receivers) = PhysicalDevice::new(stored.description());
+                            let replacement = Rc::new(DeviceRecord {
+                                life: Lifetime::default(),
+                                binding_generation: std::cell::Cell::new(
+                                    record.binding_generation.get(),
+                                ),
+                                cached: RefCell::new(cached),
+                                physical: physical.clone(),
+                            });
+                            // Observers poll only after the complete replacement; storage identity is unchanged.
+                            self.registry.remove(physical.key());
+                            self.registry.insert(physical);
+                            self.live
+                                .borrow_mut()
+                                .devices
+                                .get_mut(did)
+                                .unwrap()
+                                .admitted = Some(replacement.clone());
+                            self.add_consumers(replacement, receivers);
+                        } else {
+                            *record.cached.borrow_mut() = cached;
+                            if changed && let Some(work) = &self.live.borrow().devices[did].work {
                                 work.bindings_changed();
                             }
                         }

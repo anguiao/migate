@@ -4,10 +4,7 @@ use super::{
     refresh::{ReadFlight, Refresh},
     state::{Context, DeviceRecord, Lifetime},
 };
-use crate::xiaomi::{
-    capability::PropertyBinding,
-    central::{CentralError, SessionHandle},
-};
+use crate::xiaomi::{capability::PropertyBinding, central::SessionHandle};
 use event_listener::Event;
 use futures_lite::future;
 use std::{
@@ -34,11 +31,11 @@ pub(super) struct DeviceWork {
     subscribe_requested: Cell<bool>,
     pub(super) subscribe_running: Cell<bool>,
     pub(super) refresh_pending: RefCell<VecDeque<Refresh>>,
-    pub(super) refresh_inflight: RefCell<BTreeMap<String, Rc<ReadFlight>>>,
+    pub(super) refresh_inflight: RefCell<BTreeMap<super::lighting::PropertyKey, Rc<ReadFlight>>>,
     pub(super) refresh_changed: Rc<Event>,
     changed: Event,
     subscribe_problem: RefCell<Option<String>>,
-    pub(super) read_problems: RefCell<BTreeMap<String, String>>,
+    pub(super) read_problems: RefCell<BTreeMap<super::lighting::PropertyKey, String>>,
 }
 impl DeviceWork {
     pub(super) fn new(record: Rc<DeviceRecord>, refresh_changed: Rc<Event>) -> Self {
@@ -106,22 +103,44 @@ impl DeviceWork {
         self.cloud_exhausted.set(false);
         self.cloud_problem.borrow_mut().take();
     }
+    #[cfg(test)]
     pub(super) fn notify(&self, binding: PropertyBinding, value: bool) {
+        self.notify_value(binding, &serde_json::Value::Bool(value), false);
+    }
+    pub(super) fn notify_value(
+        &self,
+        binding: PropertyBinding,
+        value: &serde_json::Value,
+        cached_report: bool,
+    ) {
         if self.life.is_closed() {
             return;
         }
         let cached = self.record.cached.borrow();
-        if cached.device.refresh_trigger == Some(binding) {
+        if cached.device.refresh_trigger == Some(binding) && value.as_bool().is_some() {
             drop(cached);
             self.refresh();
         } else if let Some(function) = cached
             .device
             .functions
             .iter()
-            .find(|function| function.power == binding)
+            .find(|function| super::lighting::bindings(function).contains(&binding))
         {
-            self.observations
-                .notify(&self.record, &function.description.id, value);
+            let id = function.description.id.clone();
+            let light = function.lighting.is_some();
+            drop(cached);
+            if light {
+                let origin = if cached_report {
+                    super::lighting::Origin::Cache
+                } else {
+                    super::lighting::Origin::Notification
+                };
+                if let Err(error) = super::lighting::observe(self, &id, binding, value, origin) {
+                    log::warn!("Ignoring invalid light property: {error}");
+                }
+            } else if let Some(value) = value.as_bool() {
+                self.observations.notify(&self.record, &id, value);
+            }
         }
     }
     pub(super) fn request_local_subscriptions(&self) {
@@ -138,22 +157,77 @@ impl DeviceWork {
         self.changed.notify(usize::MAX);
     }
     pub(super) fn refresh(&self) {
-        let mut pending = self.refresh_pending.borrow_mut();
         for function in &self.record.cached.borrow().device.functions {
-            self.observations.refresh(&function.description.id);
-            if !pending
-                .iter()
-                .any(|read| read.id == function.description.id)
-            {
-                pending.push_back(Refresh {
-                    id: function.description.id.clone(),
-                    binding: function.power,
-                    attempts: 0,
-                    ready_at: Duration::ZERO,
-                });
+            for binding in super::lighting::bindings(function) {
+                self.refresh_property(&function.description.id, binding);
             }
         }
+    }
+    pub(super) fn refresh_property(&self, id: &str, binding: PropertyBinding) {
+        self.observations.refresh(id, binding);
+        let mut pending = self.refresh_pending.borrow_mut();
+        if !pending
+            .iter()
+            .any(|read| read.id == id && read.binding == binding)
+        {
+            pending.push_back(Refresh {
+                id: id.into(),
+                binding,
+                attempts: 0,
+                ready_at: Duration::ZERO,
+            });
+        }
         self.refresh_changed.notify(usize::MAX);
+    }
+    pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
+        self.record
+            .cached
+            .borrow()
+            .device
+            .functions
+            .iter()
+            .any(|function| {
+                function.description.id == id
+                    && super::lighting::bindings(function).contains(&binding)
+            })
+    }
+    pub(super) fn observe_read(
+        &self,
+        id: &str,
+        binding: PropertyBinding,
+        stamp: &super::observations::ReadStamp,
+        value: &serde_json::Value,
+    ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
+        if !self
+            .observations
+            .read_is_current(&self.record, id, binding, stamp)
+        {
+            return Ok(());
+        }
+        let light = self
+            .record
+            .cached
+            .borrow()
+            .device
+            .functions
+            .iter()
+            .find(|function| function.description.id == id)
+            .unwrap()
+            .lighting
+            .is_some();
+        if light {
+            super::lighting::observe(self, id, binding, value, super::lighting::Origin::Read)?;
+        } else {
+            let value =
+                value
+                    .as_bool()
+                    .ok_or(crate::xiaomi::capability::CapabilityError::InvalidValue(
+                        "boolean",
+                    ))?;
+            self.observations
+                .observe_read(&self.record, id, stamp, value);
+        }
+        Ok(())
     }
     pub(super) fn bindings_changed(&self) {
         self.active.borrow_mut().take();
@@ -173,7 +247,7 @@ impl DeviceWork {
             .device
             .functions
             .iter()
-            .map(|f| f.power)
+            .flat_map(super::lighting::bindings)
             .collect::<Vec<_>>();
         if let Some(trigger) = self.record.cached.borrow().device.refresh_trigger {
             values.push(trigger);
@@ -208,7 +282,7 @@ impl DeviceWork {
         &self,
         operation: &str,
         binding: PropertyBinding,
-        error: &CentralError,
+        error: &impl std::fmt::Display,
     ) -> String {
         let message = format!(
             "{} {operation} {}.{}: {error}",
