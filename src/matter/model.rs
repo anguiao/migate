@@ -1,6 +1,6 @@
-use super::{bridged_info::BridgedHandler, on_off::OnOffHandler, storage::StoreAdapter};
+use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler, storage::StoreAdapter};
 use crate::{
-    device::{DeviceRegistry, Function, PhysicalDevice},
+    device::{Category, DeviceRegistry, Function, PhysicalDevice},
     storage::{Identity, StorageError, Store},
 };
 use futures_util::{
@@ -18,7 +18,10 @@ use rs_matter::{
         clusters::{
             app::on_off::{self, ClusterAsyncHandler as _},
             basic_info::BasicInfoConfig,
-            decl::bridged_device_basic_information::{self as bridged, ClusterHandler as _},
+            decl::{
+                bridged_device_basic_information::{self as bridged, ClusterHandler as _},
+                color_control, level_control,
+            },
             desc::{self, ClusterHandler as _},
             groups::{self, ClusterHandler as _},
             identify::{self, ClusterHandler as _},
@@ -57,6 +60,34 @@ const SINGLE_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     identify::IdentifyHandler::<()>::CLUSTER,
     BridgedHandler::CLUSTER,
     OnOffHandler::CLUSTER
+);
+const CT_LIGHT: DeviceType = DeviceType {
+    dtype: 0x010c,
+    drev: 4,
+};
+const RGB_LIGHT: DeviceType = DeviceType {
+    dtype: 0x010d,
+    drev: 4,
+};
+const LIGHT_IDENTIFY: rs_matter::dm::Cluster<'static> = identify::IdentifyHandler::<()>::CLUSTER
+    .with_cmds(rs_matter::with!(identify::CommandId::Identify));
+const CT_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::DescHandler::CLUSTER,
+    groups::GroupsHandler::CLUSTER,
+    LIGHT_IDENTIFY,
+    BridgedHandler::CLUSTER,
+    lighting::OnOffHandler::CLUSTER,
+    <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER,
+    <lighting::ColorHandler<false> as color_control::ClusterAsyncHandler>::CLUSTER
+);
+const RGB_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::DescHandler::CLUSTER,
+    groups::GroupsHandler::CLUSTER,
+    LIGHT_IDENTIFY,
+    BridgedHandler::CLUSTER,
+    lighting::OnOffHandler::CLUSTER,
+    <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER,
+    <lighting::ColorHandler<true> as color_control::ClusterAsyncHandler>::CLUSTER
 );
 const PARENT_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
     clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER);
@@ -99,6 +130,8 @@ struct Versions {
     identify: u32,
     on_off: u32,
     bridged: u32,
+    level: u32,
+    color: u32,
 }
 struct Entry {
     endpoint: u16,
@@ -124,14 +157,28 @@ enum Role {
 struct Control {
     groups: Dataver,
     identify: identify::IdentifyHandler,
-    on_off: OnOffHandler,
+    on_off: Option<OnOffHandler>,
+    lighting: Option<lighting::Lighting>,
 }
 impl Control {
     fn new(function: Function, endpoint: u16, versions: Versions) -> Self {
+        let is_light = function.description().category == Category::Light;
         Self {
             groups: Dataver::new(versions.groups),
             identify: identify::IdentifyHandler::new(Dataver::new(versions.identify)),
-            on_off: OnOffHandler::new(function, endpoint, Dataver::new(versions.on_off)),
+            on_off: (!is_light).then(|| {
+                OnOffHandler::new(function.clone(), endpoint, Dataver::new(versions.on_off))
+            }),
+            lighting: is_light.then(|| {
+                lighting::Lighting::new(
+                    function,
+                    endpoint,
+                    Dataver::new(versions.on_off),
+                    Dataver::new(versions.level),
+                    Dataver::new(versions.color),
+                )
+                .expect("validated published lighting capabilities")
+            }),
         }
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
@@ -152,8 +199,139 @@ impl Control {
             )
             .chain(
                 |_, cluster| cluster == 6,
-                on_off::HandlerAsyncAdaptor(&self.on_off),
+                on_off::HandlerAsyncAdaptor(self.on_off.as_ref().unwrap()),
             )
+    }
+    fn light_handler(&self) -> impl AsyncHandler + '_ {
+        let light = self.lighting.as_ref().unwrap();
+        EmptyHandler
+            .chain(
+                |_, cluster| cluster == 4,
+                Async(
+                    groups::GroupsHandler::new_with_identify(
+                        Dataver::new(self.groups.get()),
+                        &self.identify,
+                    )
+                    .adapt(),
+                ),
+            )
+            .chain(
+                |_, cluster| cluster == 3,
+                Async(identify::HandlerAdaptor(&self.identify)),
+            )
+            .chain(
+                |_, cluster| cluster == 6,
+                on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(light)),
+            )
+            .chain(
+                |_, cluster| cluster == 8,
+                level_control::HandlerAsyncAdaptor(lighting::LevelHandler(light)),
+            )
+            .chain(|_, cluster| cluster == 0x300, ColorDispatch(light))
+    }
+    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        if self.lighting.is_some() {
+            self.light_handler().read(ctx, reply).await
+        } else {
+            self.handler().read(ctx, reply).await
+        }
+    }
+    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+        if self.lighting.is_some() {
+            self.light_handler().write(ctx).await
+        } else {
+            self.handler().write(ctx).await
+        }
+    }
+    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
+        if let Some(light) = &self.lighting {
+            let commands = match ctx.cmd().cluster_id {
+                3 => Some(&LIGHT_IDENTIFY),
+                6 => Some(&lighting::OnOffHandler::CLUSTER),
+                8 => Some(&<lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER),
+                0x300 if light.rgb() => Some(
+                    &<lighting::ColorHandler<true> as color_control::ClusterAsyncHandler>::CLUSTER,
+                ),
+                0x300 => Some(
+                    &<lighting::ColorHandler<false> as color_control::ClusterAsyncHandler>::CLUSTER,
+                ),
+                _ => None,
+            };
+            if commands.is_some_and(|cluster| cluster.command(ctx.cmd().cmd_id).is_none()) {
+                return Err(ErrorCode::CommandNotFound.into());
+            }
+            self.light_handler().invoke(ctx, reply).await
+        } else {
+            self.handler().invoke(ctx, reply).await
+        }
+    }
+    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        if self.lighting.is_some() {
+            self.light_handler().run(ctx).await
+        } else {
+            self.handler().run(ctx).await
+        }
+    }
+    fn on_off_version(&self) -> u32 {
+        self.lighting.as_ref().map_or_else(
+            || self.on_off.as_ref().unwrap().dataver(),
+            |l| l.on_off_version.get(),
+        )
+    }
+}
+struct ControlHandler<'a>(&'a Control);
+struct ColorDispatch<'a>(&'a lighting::Lighting);
+impl AsyncHandler for ColorDispatch<'_> {
+    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        if self.0.rgb() {
+            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
+                .read(ctx, reply)
+                .await
+        } else {
+            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
+                .read(ctx, reply)
+                .await
+        }
+    }
+    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+        if self.0.rgb() {
+            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
+                .write(ctx)
+                .await
+        } else {
+            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
+                .write(ctx)
+                .await
+        }
+    }
+    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
+        if self.0.rgb() {
+            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
+                .invoke(ctx, reply)
+                .await
+        } else {
+            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
+                .invoke(ctx, reply)
+                .await
+        }
+    }
+    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
+    }
+}
+impl AsyncHandler for ControlHandler<'_> {
+    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
+    }
+    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        self.0.read(ctx, reply).await
+    }
+    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+        self.0.write(ctx).await
+    }
+    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
+        self.0.invoke(ctx, reply).await
+    }
+    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        self.0.run(ctx).await
     }
 }
 impl Role {
@@ -178,7 +356,7 @@ macro_rules! dispatch {
                 &ChainedHandler::new(
                     |_, cluster| cluster == 0x39,
                     Async(bridged::HandlerAdaptor(bridged)),
-                    control.handler(),
+                    &ControlHandler(control),
                 ), $($arg),*
             ).await,
             Role::Parent { bridged, .. } => AsyncHandler::$method(
@@ -187,7 +365,7 @@ macro_rules! dispatch {
                     Async(bridged::HandlerAdaptor(bridged)),
                 ), $($arg),*
             ).await,
-            Role::Child { control, .. } => control.handler().$method($($arg),*).await,
+            Role::Child { control, .. } => control.$method($($arg),*).await,
         }
     };
 }
@@ -199,7 +377,13 @@ impl Entry {
             descriptor: self.descriptor.get(),
             groups: control.map_or(0, |control| control.groups.get()),
             identify: control.map_or(0, |control| control.identify.dataver()),
-            on_off: control.map_or(0, |control| control.on_off.dataver()),
+            on_off: control.map_or(0, Control::on_off_version),
+            level: control
+                .and_then(|c| c.lighting.as_ref())
+                .map_or(0, |l| l.level_version.get()),
+            color: control
+                .and_then(|c| c.lighting.as_ref())
+                .map_or(0, |l| l.color_version.get()),
             bridged: self
                 .role
                 .bridged()
@@ -211,7 +395,25 @@ impl Entry {
     }
     fn metadata<'a>(&'a self, tags: &'a [SemanticTag<'a>]) -> Endpoint<'a> {
         match &self.role {
-            Role::Single { .. } => Endpoint::new(self.endpoint, SINGLE_TYPES, SINGLE_CLUSTERS),
+            Role::Single { control, .. } => {
+                if let Some(light) = &control.lighting {
+                    if light.rgb() {
+                        Endpoint::new(
+                            self.endpoint,
+                            devices!(RGB_LIGHT, DEV_TYPE_BRIDGED_NODE),
+                            RGB_CLUSTERS,
+                        )
+                    } else {
+                        Endpoint::new(
+                            self.endpoint,
+                            devices!(CT_LIGHT, DEV_TYPE_BRIDGED_NODE),
+                            CT_CLUSTERS,
+                        )
+                    }
+                } else {
+                    Endpoint::new(self.endpoint, SINGLE_TYPES, SINGLE_CLUSTERS)
+                }
+            }
             Role::Parent { .. } => Endpoint::new(
                 self.endpoint,
                 devices!(DEV_TYPE_BRIDGED_NODE),
@@ -247,7 +449,19 @@ impl Entry {
                 control.identify.dataver_changed();
             }
             if cluster.is_none_or(|id| id == 6) {
-                control.on_off.dataver_changed();
+                if let Some(light) = &control.lighting {
+                    light.on_off_version.changed();
+                } else {
+                    control.on_off.as_ref().unwrap().dataver_changed();
+                }
+            }
+        }
+        if let Some(light) = self.role.control().and_then(|c| c.lighting.as_ref()) {
+            if cluster.is_none_or(|id| id == 8) {
+                light.level_version.changed();
+            }
+            if cluster.is_none_or(|id| id == 0x300) {
+                light.color_version.changed();
             }
         }
         if let Some(handler) = self.role.bridged()
@@ -357,6 +571,8 @@ impl Model {
                         identify: random.random(),
                         on_off: random.random(),
                         bridged: random.random(),
+                        level: random.random(),
+                        color: random.random(),
                     }
                 });
                 let bridged = || {
@@ -511,7 +727,7 @@ impl AsyncHandler for Model {
         if ctx.cmd().endpoint_id <= AGGREGATOR_ENDPOINT {
             self.root.invoke_awaits(ctx)
         } else {
-            ctx.cmd().cluster_id == 6
+            matches!(ctx.cmd().cluster_id, 6 | 8 | 0x300)
         }
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {

@@ -97,6 +97,20 @@ fn standard_parser_uses_capabilities_instead_of_a_model_allowlist() {
 }
 
 #[test]
+fn parser_and_cached_bindings_reject_unrepresentable_mired_ranges() {
+    let original = description("xiaomi.light.ceil04");
+    for (min, max) in [(4500, 4501), (1, 6500), (10, 6500)] {
+        let mut instance = original.clone();
+        instance["services"][1]["properties"][2]["value-range"] = json!([min, max, 1]);
+        assert!(parse_device(key(), &instance).is_err(), "{min}..{max}");
+        let parsed = parse_device(key(), &original).unwrap();
+        let mut bindings = parsed.functions[0].lighting.clone().unwrap();
+        bindings.temperature.range = NumericRange { min, max, step: 1 };
+        assert!(!bindings.valid());
+    }
+}
+
+#[test]
 fn ls2307_combines_exact_rgb_and_mode_binding_without_scene_inference() {
     let instance = description("devcea.light.ls2307");
     let parsed = parse_device_for_model(key(), "devcea.light.ls2307", &instance).unwrap();

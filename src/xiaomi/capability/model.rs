@@ -193,6 +193,7 @@ impl LightBindings {
             && self.temperature.valid(NumericUnit::Kelvin)
             && self.temperature.range.min > 0
             && self.temperature.range.max <= 1_000_000
+            && self.temperature.range.mired_bounds().is_ok()
             && match (&self.color, &self.mode) {
                 (None, None) => true,
                 (Some(color), Some(mode)) => {

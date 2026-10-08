@@ -50,6 +50,7 @@ pub(super) fn parse_light(
     if brightness.range.nonzero_bounds().is_none()
         || temperature.range.min == 0
         || temperature.range.max > 1_000_000
+        || temperature.range.mired_bounds().is_err()
     {
         return Err(CapabilityError::InvalidLight(
             "nonzero brightness and Kelvin ranges are required",

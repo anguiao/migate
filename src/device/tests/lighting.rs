@@ -101,11 +101,45 @@ fn brightness_and_temperature_matter_conversion_preserve_physical_ranges() {
         max: 5700,
         step: 100,
     };
-    let (min, max) = range.mired_bounds();
+    let (min, max) = range.mired_bounds().unwrap();
     assert_eq!((min, max), (176, 370));
     for mired in min..=max {
         let kelvin = range.kelvin_from_mireds(mired).unwrap();
         assert!(range.contains(kelvin));
     }
     assert!(range.kelvin_from_mireds(0).is_err());
+}
+
+#[test]
+fn matter_temperature_rejects_unrepresentable_ranges_without_panicking() {
+    for range in [
+        NumericRange {
+            min: 4500,
+            max: 4501,
+            step: 1,
+        },
+        NumericRange {
+            min: 10,
+            max: 6500,
+            step: 1,
+        },
+        NumericRange {
+            min: 1,
+            max: 6500,
+            step: 1,
+        },
+    ] {
+        assert!(range.mireds_from_kelvin(range.min).is_err());
+        assert!(range.kelvin_from_mireds(250).is_err());
+        let mut description = light(false);
+        description.functions[0].capabilities[2] = Capability::ColorTemperature(range);
+        assert!(!description.functions[0].valid_capabilities());
+    }
+    let range = NumericRange {
+        min: 4000,
+        max: 4001,
+        step: 1,
+    };
+    assert_eq!(range.mireds_from_kelvin(4000).unwrap(), 250);
+    assert_eq!(range.kelvin_from_mireds(250).unwrap(), 4000);
 }

@@ -1,0 +1,469 @@
+mod controllers;
+mod handlers;
+#[cfg(test)]
+mod tests;
+
+use crate::device::{
+    ActionToken, Capability, Command, CommandError, Function, LightAction, LightColorTarget,
+    LightDimension, LightMode, LightTarget, NumericRange, brightness_from_matter_level,
+    brightness_to_matter_level,
+};
+use controllers::{
+    clock::{Clock, SystemClock},
+    color::{self, ColorControlState},
+    level::{self, LevelControlState},
+};
+use futures_lite::future::or;
+pub(super) use handlers::{ColorHandler, LevelHandler, OnOffHandler};
+use rs_matter::{
+    dm::{Dataver, HandlerContext},
+    error::{Error, ErrorCode},
+};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
+
+#[derive(Clone, Copy)]
+enum Task {
+    Level(level::Task),
+    Color(color::Task),
+}
+impl Task {
+    fn dimension(self) -> LightDimension {
+        match self {
+            Self::Level(_) => LightDimension::Brightness,
+            Self::Color(_) => LightDimension::Color,
+        }
+    }
+    fn duration(self) -> u64 {
+        match self {
+            Self::Level(task) => task.duration(),
+            Self::Color(task) => task.duration(),
+        }
+    }
+    fn frame(self, elapsed: u64, range: NumericRange) -> Result<(LightTarget, bool), Error> {
+        match self {
+            Self::Level(task) => {
+                let (level, end, power) = task.frame(elapsed);
+                Ok((
+                    LightTarget {
+                        power,
+                        brightness_percent: Some(
+                            brightness_from_matter_level(level).map_err(command_error)?,
+                        ),
+                        color: None,
+                    },
+                    end,
+                ))
+            }
+            Self::Color(task) => {
+                let (target, end) = task.frame(elapsed);
+                let color = match target {
+                    color::Target::Xy(x, y) => LightColorTarget::Rgb(color::xy_to_rgb(x, y)),
+                    color::Target::Temperature(mireds) => LightColorTarget::Temperature(
+                        range.kelvin_from_mireds(mireds).map_err(command_error)?,
+                    ),
+                };
+                Ok((
+                    LightTarget {
+                        color: Some(color),
+                        ..Default::default()
+                    },
+                    end,
+                ))
+            }
+        }
+    }
+}
+struct Active {
+    task: Task,
+    token: ActionToken,
+    start: u64,
+    last: LightTarget,
+    final_submitted: bool,
+}
+#[derive(Clone, Copy, Default)]
+struct Projection {
+    power: Option<bool>,
+    level: Option<u8>,
+    xy: Option<(u16, u16)>,
+    temperature: Option<u16>,
+    mode: Option<LightMode>,
+}
+pub(super) struct Lighting {
+    function: Function,
+    endpoint: u16,
+    rgb: bool,
+    range: NumericRange,
+    bounds: (u16, u16),
+    clock: Rc<dyn Clock>,
+    level: RefCell<LevelControlState>,
+    color: RefCell<ColorControlState>,
+    active: RefCell<[Option<Active>; 2]>,
+    pub(super) on_off_version: Dataver,
+    pub(super) level_version: Dataver,
+    pub(super) color_version: Dataver,
+    observed: Cell<Projection>,
+    level_dirty: Cell<bool>,
+    color_dirty: Cell<bool>,
+    last_level_report: Cell<u64>,
+    last_color_report: Cell<u64>,
+    remaining_dirty: Cell<[bool; 2]>,
+}
+pub(super) fn command_error(error: CommandError) -> Error {
+    log::warn!("Matter lighting command failed: {error}");
+    match error {
+        CommandError::Unsupported => ErrorCode::CommandNotFound,
+        CommandError::Timeout => ErrorCode::RxTimeout,
+        CommandError::UnknownState => ErrorCode::InvalidState,
+        _ => ErrorCode::Failure,
+    }
+    .into()
+}
+impl Lighting {
+    pub(super) fn new(
+        function: Function,
+        endpoint: u16,
+        on_off: Dataver,
+        level: Dataver,
+        color: Dataver,
+    ) -> Result<Self, Error> {
+        Self::with_clock(
+            function,
+            endpoint,
+            on_off,
+            level,
+            color,
+            Rc::new(SystemClock::new()),
+        )
+    }
+    fn with_clock(
+        function: Function,
+        endpoint: u16,
+        on_off: Dataver,
+        level: Dataver,
+        color: Dataver,
+        clock: Rc<dyn Clock>,
+    ) -> Result<Self, Error> {
+        let description = function.description();
+        let range = description
+            .temperature_range()
+            .ok_or(ErrorCode::InvalidState)?;
+        let bounds = range.mired_bounds().map_err(command_error)?;
+        let rgb = description.capabilities.contains(&Capability::ColorRgb);
+        let result = Self {
+            function,
+            endpoint,
+            rgb,
+            range,
+            bounds,
+            clock,
+            level: RefCell::new(LevelControlState::default()),
+            color: RefCell::new(ColorControlState::default()),
+            active: RefCell::new([None, None]),
+            on_off_version: on_off,
+            level_version: level,
+            color_version: color,
+            observed: Cell::new(Projection::default()),
+            level_dirty: Cell::new(false),
+            color_dirty: Cell::new(false),
+            last_level_report: Cell::new(0),
+            last_color_report: Cell::new(0),
+            remaining_dirty: Cell::new([false, false]),
+        };
+        result.observed.set(result.refresh());
+        Ok(result)
+    }
+    pub(super) fn rgb(&self) -> bool {
+        self.rgb
+    }
+    fn refresh(&self) -> Projection {
+        let snapshot = self.function.snapshot();
+        let lighting = snapshot
+            .lighting
+            .as_ref()
+            .expect("lighting Function snapshot");
+        let result = Projection {
+            power: snapshot.power.value(),
+            // Observed zero is a known physical value; Matter's nonzero minimum
+            // projects it to MinLevel without inferring the independent power state.
+            level: lighting.brightness_percent.map(|value| {
+                brightness_to_matter_level(value.max(1.0)).expect("validated snapshot brightness")
+            }),
+            xy: lighting.color.and_then(color::rgb_to_xy),
+            temperature: lighting.temperature_kelvin.map(|value| {
+                self.range
+                    .mireds_from_kelvin(value)
+                    .expect("validated snapshot temperature")
+            }),
+            mode: lighting.mode,
+        };
+        self.level.borrow_mut().current_level = result.level;
+        let mut color = self.color.borrow_mut();
+        color.xy = result.xy;
+        color.color_temperature_mireds = result.temperature;
+        color.mode = result.mode;
+        result
+    }
+    fn update_remaining(&self, dimension: LightDimension, millis: u64, start: bool) {
+        let index = if dimension == LightDimension::Brightness {
+            0
+        } else {
+            1
+        };
+        let (old, new, report) = if index == 0 {
+            let mut level = self.level.borrow_mut();
+            let old = level.remaining_time.value;
+            let report = level.remaining_time.write(millis, start, u16::MAX);
+            (old, level.remaining_time.value, report)
+        } else {
+            let mut color = self.color.borrow_mut();
+            let old = color.remaining_time.value;
+            let report = color.remaining_time.write(millis, start, 0xfffe);
+            (old, color.remaining_time.value, report)
+        };
+        if old != new && !report {
+            if index == 0 {
+                self.level_version.changed();
+            } else {
+                self.color_version.changed();
+            }
+        }
+        if report {
+            let mut dirty = self.remaining_dirty.get();
+            dirty[index] = true;
+            self.remaining_dirty.set(dirty);
+        }
+    }
+    fn begin(&self, task: Task, forced_power: Option<bool>) -> Result<Rc<LightAction>, Error> {
+        let (mut target, final_frame) = task.frame(0, self.range)?;
+        if forced_power.is_some() {
+            target.power = forced_power;
+        }
+        let dimension = task.dimension();
+        let action = Rc::new(
+            self.function
+                .begin_light_action(dimension, target, final_frame)
+                .map_err(command_error)?,
+        );
+        let index = if dimension == LightDimension::Brightness {
+            0
+        } else {
+            1
+        };
+        self.active.borrow_mut()[index] = Some(Active {
+            task,
+            token: action.token(),
+            start: self.clock.now(),
+            last: target,
+            final_submitted: final_frame,
+        });
+        self.update_remaining(dimension, task.duration(), true);
+        Ok(action)
+    }
+    async fn execute_level(&self, task: Option<level::Task>) -> Result<(), Error> {
+        if let Some(task) = task {
+            self.begin(Task::Level(task), None)?
+                .accepted()
+                .await
+                .map_err(command_error)?;
+        }
+        Ok(())
+    }
+    async fn execute_color(&self, task: color::Task) -> Result<(), Error> {
+        self.begin(Task::Color(task), None)?
+            .accepted()
+            .await
+            .map_err(command_error)?;
+        Ok(())
+    }
+    async fn power(&self, command: Command) -> Result<(), Error> {
+        let projection = self.refresh();
+        let on = match command {
+            Command::On => true,
+            Command::Off => false,
+            Command::Toggle => !projection.power.ok_or(ErrorCode::InvalidState)?,
+        };
+        let on_level = self.level.borrow().on_level;
+        // Repeated On keeps the existing level. Repeated Off still cancels actions.
+        if let Some(preset) = on_level.filter(|_| projection.power != Some(on)) {
+            let target = if on { preset } else { 1 };
+            let task = level::Task::MoveToLevel {
+                with_on_off: false,
+                start: target,
+                target,
+                transition_ms: 0,
+            };
+            self.begin(Task::Level(task), Some(on))?
+                .accepted()
+                .await
+                .map_err(command_error)?;
+        } else {
+            self.function
+                .execute(if on { Command::On } else { Command::Off })
+                .await
+                .map_err(command_error)?;
+        }
+        Ok(())
+    }
+    fn stop(&self, dimension: LightDimension) -> Result<(), Error> {
+        self.function.stop_light(dimension).map_err(command_error)?;
+        let index = if dimension == LightDimension::Brightness {
+            0
+        } else {
+            1
+        };
+        self.active.borrow_mut()[index] = None;
+        self.update_remaining(dimension, 0, false);
+        Ok(())
+    }
+    fn advance(&self) {
+        let now = self.clock.now();
+        for index in 0..2 {
+            let mut actions = self.active.borrow_mut();
+            let Some(active) = actions[index].as_mut() else {
+                continue;
+            };
+            let dimension = active.task.dimension();
+            if !self.function.light_action_current(active.token) {
+                actions[index] = None;
+                drop(actions);
+                self.update_remaining(dimension, 0, false);
+                continue;
+            }
+            if active.final_submitted {
+                continue;
+            }
+            let elapsed = now.saturating_sub(active.start);
+            let (target, final_frame) = active
+                .task
+                .frame(elapsed, self.range)
+                .expect("validated controller task");
+            let mut remaining = active.task.duration().saturating_sub(elapsed);
+            if final_frame || target != active.last {
+                match self
+                    .function
+                    .submit_light_frame(active.token, target, final_frame)
+                {
+                    Ok(()) => {
+                        active.last = target;
+                        active.final_submitted = final_frame;
+                    }
+                    Err(error) => {
+                        log::warn!("Matter lighting action ended: {error}");
+                        actions[index] = None;
+                        remaining = 0;
+                    }
+                }
+            }
+            drop(actions);
+            self.update_remaining(dimension, remaining, false);
+        }
+    }
+    fn reports(&self, ctx: &impl HandlerContext) {
+        let now = self.clock.now();
+        let current = self.refresh();
+        let old = self.observed.replace(current);
+        if old.power != current.power {
+            ctx.notify_attr_changed(self.endpoint, 6, 0);
+        }
+        if old.level != current.level {
+            self.level_dirty.set(true);
+            if old.level.is_none() || current.level.is_none() {
+                self.last_level_report.set(now.saturating_sub(1000));
+            }
+        }
+        let level_end = self.active.borrow()[0]
+            .as_ref()
+            .is_none_or(|a| a.final_submitted && !self.function.light_action_current(a.token));
+        if self.level_dirty.get()
+            && (level_end
+                || now.saturating_sub(self.last_level_report.get()) >= 1000
+                || old.level.is_none()
+                || current.level.is_none())
+        {
+            ctx.notify_attr_changed(self.endpoint, 8, 0);
+            self.level_dirty.set(false);
+            self.last_level_report.set(now);
+        } else if old.level != current.level {
+            self.level_version.changed();
+        }
+        if old.temperature != current.temperature || old.xy != current.xy {
+            self.color_dirty.set(true);
+        }
+        if old.mode != current.mode {
+            ctx.notify_attr_changed(self.endpoint, 0x300, 8);
+            ctx.notify_attr_changed(self.endpoint, 0x300, 0x4001);
+        }
+        let color_end = self.active.borrow()[1]
+            .as_ref()
+            .is_none_or(|a| a.final_submitted && !self.function.light_action_current(a.token));
+        let unknown_edge = (old.temperature != current.temperature
+            && (old.temperature.is_none() || current.temperature.is_none()))
+            || (old.xy != current.xy && (old.xy.is_none() || current.xy.is_none()));
+        if self.color_dirty.get()
+            && (color_end
+                || now.saturating_sub(self.last_color_report.get()) >= 1000
+                || unknown_edge)
+        {
+            ctx.notify_attr_changed(self.endpoint, 0x300, 7);
+            if self.rgb {
+                ctx.notify_attr_changed(self.endpoint, 0x300, 3);
+                ctx.notify_attr_changed(self.endpoint, 0x300, 4);
+            }
+            self.color_dirty.set(false);
+            self.last_color_report.set(now);
+        } else if old.temperature != current.temperature || old.xy != current.xy {
+            self.color_version.changed();
+        }
+        let dirty = self.remaining_dirty.replace([false, false]);
+        if dirty[0] {
+            ctx.notify_attr_changed(self.endpoint, 8, 1);
+        }
+        if dirty[1] {
+            ctx.notify_attr_changed(self.endpoint, 0x300, 2);
+        }
+    }
+    pub(super) async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        let mut snapshots = self.function.subscribe();
+        let mut actions = self
+            .function
+            .subscribe_light_actions()
+            .expect("lighting action subscription");
+        loop {
+            self.advance();
+            self.reports(&ctx);
+            let ticking = self.active.borrow().iter().any(Option::is_some)
+                || self.level_dirty.get()
+                || self.color_dirty.get();
+            let now = self.clock.now();
+            let deadline = self
+                .active
+                .borrow()
+                .iter()
+                .flatten()
+                .filter(|a| !a.final_submitted)
+                .map(|a| a.start.saturating_add(a.task.duration()))
+                .fold(now.saturating_add(20), u64::min);
+            or(
+                or(
+                    async {
+                        snapshots.changed().await;
+                    },
+                    async {
+                        actions.changed().await;
+                    },
+                ),
+                async {
+                    if ticking {
+                        self.clock.wait_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                },
+            )
+            .await;
+        }
+    }
+}

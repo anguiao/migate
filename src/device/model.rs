@@ -184,16 +184,25 @@ impl NumericRange {
             .round() as u32;
         self.min + index.min(last) * self.step
     }
-    pub fn mired_bounds(self) -> (u16, u16) {
-        (
-            (1_000_000.0 / self.effective_max() as f64).ceil() as u16,
-            (1_000_000.0 / self.min as f64).floor() as u16,
-        )
+    pub fn mired_bounds(self) -> Result<(u16, u16), CommandError> {
+        if !self.valid() || self.min == 0 {
+            return Err(CommandError::Rejected("invalid temperature range".into()));
+        }
+        // Check the full physical range before narrowing to the Matter encoding.
+        let min = 1_000_000_u64.div_ceil(self.effective_max() as u64);
+        let max = 1_000_000_u64 / self.min as u64;
+        if min == 0 || min > max || max > 0xfeff {
+            return Err(CommandError::Rejected(
+                "temperature range cannot be represented in Matter mireds".into(),
+            ));
+        }
+        Ok((min as u16, max as u16))
     }
     pub fn kelvin_from_mireds(self, mireds: u16) -> Result<u32, CommandError> {
-        if mireds == 0 {
+        self.mired_bounds()?;
+        if !(1..=0xfeff).contains(&mireds) {
             return Err(CommandError::Rejected(
-                "color temperature must be nonzero".into(),
+                "color temperature is outside the Matter range".into(),
             ));
         }
         Ok(self.quantize(1_000_000.0 / mireds as f64))
@@ -204,7 +213,7 @@ impl NumericRange {
                 "color temperature is outside its physical range".into(),
             ));
         }
-        let (min, max) = self.mired_bounds();
+        let (min, max) = self.mired_bounds()?;
         Ok(((1_000_000.0 / kelvin as f64).round() as u16).clamp(min, max))
     }
 }
@@ -286,7 +295,7 @@ impl FunctionDescription {
                 let Some(range) = self.temperature_range() else {
                     return false;
                 };
-                range.valid()
+                range.mired_bounds().is_ok()
                     && range.min > 0
                     && range.max <= 1_000_000
                     && (self.capabilities

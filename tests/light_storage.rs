@@ -281,3 +281,85 @@ fn ls2307_cannot_publish_an_outlet_description() {
     };
     assert!(store.devices().publish_cached(&cached, "Wrong").is_err());
 }
+
+#[test]
+fn unrepresentable_mired_ranges_are_rejected_at_publication_and_cache_restore() {
+    use migate::device::NumericRange;
+    for range in [
+        NumericRange {
+            min: 4500,
+            max: 4501,
+            step: 1,
+        },
+        NumericRange {
+            min: 10,
+            max: 6500,
+            step: 1,
+        },
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let mut cached = light(
+            "xiaomi.light.ceil04",
+            include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
+        );
+        let mut description = cached.device.functions[0].description.clone();
+        description.capabilities[2] = Capability::ColorTemperature(range);
+        cached.device.functions[0].description = description;
+        cached.device.functions[0]
+            .lighting
+            .as_mut()
+            .unwrap()
+            .temperature
+            .range = range;
+        assert!(
+            store
+                .devices()
+                .publish_cached(&cached, "Bad range")
+                .is_err()
+        );
+        let description = migate::device::PhysicalDeviceDescription {
+            key: cached.device.key.clone(),
+            label: "Bad range".into(),
+            functions: vec![cached.device.functions[0].description.clone()],
+        };
+        assert!(store.devices().publish(&description).is_err());
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let cached = light(
+        "xiaomi.light.ceil04",
+        include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
+    );
+    store.devices().publish_cached(&cached, "Light").unwrap();
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    let mut functions: Value = serde_json::from_str(
+        &db.query_row("SELECT functions FROM device_cache", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    functions[0]["description"]["capabilities"][2]["color_temperature"]["min"] =
+        serde_json::json!(10);
+    functions[0]["lighting"]["temperature"]["range"]["min"] = serde_json::json!(10);
+    db.execute(
+        "UPDATE device_cache SET functions=?1",
+        [functions.to_string()],
+    )
+    .unwrap();
+    let mut capabilities: Value = serde_json::from_str(
+        &db.query_row("SELECT capabilities FROM device_function", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    capabilities[2]["color_temperature"]["min"] = serde_json::json!(10);
+    db.execute(
+        "UPDATE device_function SET capabilities=?1",
+        [capabilities.to_string()],
+    )
+    .unwrap();
+    assert!(store.devices().restore_cached("account", "home").is_err());
+}

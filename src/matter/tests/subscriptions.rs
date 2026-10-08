@@ -675,6 +675,7 @@ struct Observed {
     parts: std::collections::BTreeMap<u16, Vec<u16>>,
     versions: std::collections::BTreeMap<u16, u32>,
     unsupported: Vec<u16>,
+    lighting: std::collections::BTreeMap<(u16, u32, u32), (u32, u16)>,
 }
 impl Observed {
     fn add(&mut self, report: &ReportDataResp<'_>) {
@@ -701,6 +702,12 @@ impl Observed {
                                         .collect(),
                                 );
                                 self.versions.insert(endpoint, data.data_ver.unwrap());
+                            }
+                            (Some(cluster @ (8 | 0x300)), Some(attribute)) => {
+                                self.lighting.insert(
+                                    (endpoint, cluster, attribute),
+                                    (data.data_ver.unwrap(), data.data.u16().unwrap()),
+                                );
                             }
                             _ => panic!("unexpected dynamic attribute {data:?}"),
                         }
@@ -958,6 +965,131 @@ fn dynamic_subscription_reports_add_delete_and_restores_deleted_paths_after_rest
             let directory = tempfile::tempdir().unwrap();
             let id = dynamic_boot(directory.path(), 1, None);
             assert_eq!(dynamic_boot(directory.path(), 2, Some(id.clone())), id);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn lighting_subscription_reports_the_shared_accepted_snapshot_and_versions() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            use crate::device::{LightMode, LightPatch, Rgb};
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path()).unwrap();
+            let identity = store.load_identity().unwrap();
+            let info = basic_info(&identity);
+            let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            let protocol = StoreAdapter::new(store.matter());
+            let kv = matter.kv(protocol.clone());
+            matter.startup(&kv).unwrap();
+            let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            connect(&matter, SERVER_ID, CLIENT_ID, 31);
+            connect(&client, CLIENT_ID, SERVER_ID, 31);
+            let crypto = test_only_crypto();
+            let buffers: MatterBuffers = MatterBuffers::new();
+            let state: EthInteractionModelState =
+                EthInteractionModelState::new(EthNetwork::new_default());
+            let (device, _receiver) = super::support::light(true);
+            device.set_availability(Availability::Available);
+            let function = device.functions()[0].clone();
+            function
+                .observe_light(LightPatch {
+                    power: Some(true),
+                    brightness_percent: Some(50.0),
+                    temperature_kelvin: Some(5000),
+                    color: Some(Rgb {
+                        red: 255,
+                        green: 0,
+                        blue: 0,
+                    }),
+                    mode: Some(LightMode::Temperature),
+                })
+                .unwrap();
+            let registry = super::test_registry(&store, &device);
+            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+            let incoming = Pipe::default();
+            let outgoing = Pipe::default();
+            let responder = DefaultResponder::new(&im);
+            block_on(async {
+                im.startup().await.unwrap();
+                let services = async {
+                    or(
+                        matter.run(
+                            &crypto,
+                            SendPipe(&outgoing),
+                            ReceivePipe(&incoming),
+                            NoNetwork,
+                        ),
+                        or(
+                            client.run(
+                                &crypto,
+                                SendPipe(&incoming),
+                                ReceivePipe(&outgoing),
+                                NoNetwork,
+                            ),
+                            or(responder.run::<4, 4>(), im.run()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    panic!("lighting services exited");
+                };
+                let controller = async {
+                    let paths =
+                        [(8, 0), (0x300, 3), (0x300, 4), (0x300, 7), (0x300, 8)].map(|(c, a)| {
+                            AttrPath::from_gp(&GenericPath::new(Some(2), Some(c), Some(a)))
+                        });
+                    let (id, initial) = subscribe_paths(&client, &paths).await.unwrap();
+                    wait_committed(&state).await;
+                    assert_eq!(
+                        initial.lighting[&(2, 8, 0)].1,
+                        crate::device::brightness_to_matter_level(50.0).unwrap() as u16
+                    );
+                    function
+                        .observe_light(LightPatch {
+                            brightness_percent: Some(23.5),
+                            temperature_kelvin: Some(3333),
+                            color: Some(Rgb {
+                                red: 255,
+                                green: 128,
+                                blue: 64,
+                            }),
+                            mode: Some(LightMode::Rgb),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let report = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        report.lighting[&(2, 8, 0)].1,
+                        crate::device::brightness_to_matter_level(23.5).unwrap() as u16
+                    );
+                    assert_eq!(report.lighting[&(2, 0x300, 3)].1, 33935);
+                    assert_eq!(report.lighting[&(2, 0x300, 4)].1, 25220);
+                    assert_eq!(report.lighting[&(2, 0x300, 7)].1, 300);
+                    assert_eq!(report.lighting[&(2, 0x300, 8)].1, 1);
+                    assert_ne!(
+                        report.lighting[&(2, 8, 0)].0,
+                        initial.lighting[&(2, 8, 0)].0
+                    );
+                    assert_ne!(
+                        report.lighting[&(2, 0x300, 7)].0,
+                        initial.lighting[&(2, 0x300, 7)].0
+                    );
+                };
+                or(
+                    services,
+                    or(controller, async {
+                        async_io::Timer::after(Duration::from_secs(10)).await;
+                        panic!("lighting subscription timed out");
+                    }),
+                )
+                .await;
+            });
+            protocol.check_failure().unwrap();
         })
         .unwrap()
         .join()

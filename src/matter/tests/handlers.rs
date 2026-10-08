@@ -42,17 +42,17 @@ use std::{
 
 const DEVICE_ENDPOINT: u16 = 2;
 
-struct Context<'a, H> {
-    base: &'a H,
-    command: CmdDetails,
-    attribute: AttrDetails,
-    data: TLVElement<'a>,
-    changes: RefCell<Vec<(u16, u32, u32)>>,
-    events: RefCell<Vec<(u16, u32, u32)>>,
+pub(in crate::matter) struct Context<'a, H> {
+    pub(in crate::matter) base: &'a H,
+    pub(in crate::matter) command: CmdDetails,
+    pub(in crate::matter) attribute: AttrDetails,
+    pub(in crate::matter) data: TLVElement<'a>,
+    pub(in crate::matter) changes: RefCell<Vec<(u16, u32, u32)>>,
+    pub(in crate::matter) events: RefCell<Vec<(u16, u32, u32)>>,
 }
 
 impl<'a, H> Context<'a, H> {
-    fn new(base: &'a H, cluster_id: u32, attr_id: u32) -> Self {
+    pub(in crate::matter) fn new(base: &'a H, cluster_id: u32, attr_id: u32) -> Self {
         Self {
             base,
             command: CmdDetails::new(DEVICE_ENDPOINT, cluster_id, 1, 1, false, None),
@@ -65,7 +65,7 @@ impl<'a, H> Context<'a, H> {
 }
 
 impl<'a, H> Context<'a, H> {
-    fn at(base: &'a H, endpoint: u16, cluster: u32, attribute: u32) -> Self {
+    pub(in crate::matter) fn at(base: &'a H, endpoint: u16, cluster: u32, attribute: u32) -> Self {
         let mut context = Self::new(base, cluster, attribute);
         context.attribute.endpoint_id = endpoint;
         context.command.endpoint_id = endpoint;
@@ -841,3 +841,6 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         );
     });
 }
+
+#[path = "lighting_handlers.rs"]
+mod lighting_handlers;

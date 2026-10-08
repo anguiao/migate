@@ -1,4 +1,4 @@
-mod handlers;
+pub(in crate::matter) mod handlers;
 mod subscriptions;
 pub(crate) mod support;
 
@@ -108,6 +108,105 @@ fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
             assert!(groups.command(id).is_some());
         }
     });
+}
+
+#[test]
+fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
+    for rgb in [false, true] {
+        let (device, _receiver) = support::light(rgb);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let model = model::handler(
+            &test_registry(&store, &device),
+            &store,
+            StoreAdapter::new(store.matter()),
+            rand::rng(),
+        )
+        .unwrap();
+        model.access(|node| {
+            let endpoint = &node.endpoints[2];
+            assert!(
+                endpoint
+                    .device_types
+                    .iter()
+                    .any(|t| t.dtype == if rgb { 0x10d } else { 0x10c } && t.drev == 4)
+            );
+            let level = endpoint.clusters.iter().find(|c| c.id == 8).unwrap();
+            assert_eq!((level.feature_map, level.revision), (1, 6));
+            let attributes = |cluster: &rs_matter::dm::Cluster<'_>| {
+                cluster
+                    .attributes
+                    .iter()
+                    .filter(|a| cluster.attribute(a.id).is_some())
+                    .map(|a| a.id)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                attributes(level),
+                [0, 1, 2, 3, 15, 17, 0xfff8, 0xfff9, 0xfffb, 0xfffc, 0xfffd]
+            );
+            let commands = |cluster: &rs_matter::dm::Cluster<'_>| {
+                cluster
+                    .commands
+                    .iter()
+                    .filter(|c| cluster.command(c.id).is_some())
+                    .map(|c| c.id)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(commands(level), (0..8).collect::<Vec<_>>());
+            for id in [0, 1, 2, 3, 15, 17] {
+                assert!(level.attribute(id).is_some());
+            }
+            assert!(level.attribute(0x4000).is_none());
+            for id in 0..8 {
+                assert!(level.command(id).is_some());
+            }
+            assert!(level.command(8).is_none());
+            let color = endpoint.clusters.iter().find(|c| c.id == 0x300).unwrap();
+            assert_eq!(
+                (color.feature_map, color.revision),
+                (if rgb { 0x18 } else { 0x10 }, 9)
+            );
+            let mut expected = vec![2];
+            if rgb {
+                expected.extend([3, 4]);
+            }
+            expected.extend([
+                7, 8, 15, 16, 0x4001, 0x400a, 0x400b, 0x400c, 0x400d, 0xfff8, 0xfff9, 0xfffb,
+                0xfffc, 0xfffd,
+            ]);
+            assert_eq!(attributes(color), expected);
+            assert_eq!(
+                commands(color),
+                if rgb {
+                    vec![7, 8, 9, 10, 0x47, 0x4b, 0x4c]
+                } else {
+                    vec![10, 0x47, 0x4b, 0x4c]
+                }
+            );
+            for id in [2, 7, 8, 15, 16, 0x4001, 0x400a, 0x400b, 0x400c, 0x400d] {
+                assert!(color.attribute(id).is_some(), "{id}");
+            }
+            for id in [0, 1, 0x4000, 0x4010] {
+                assert!(color.attribute(id).is_none());
+            }
+            for id in [3, 4] {
+                assert_eq!(color.attribute(id).is_some(), rgb);
+            }
+            for id in [10, 0x47, 0x4b, 0x4c] {
+                assert!(color.command(id).is_some());
+            }
+            for id in [7, 8, 9] {
+                assert_eq!(color.command(id).is_some(), rgb);
+            }
+            for id in [0, 1, 2, 3, 4, 5, 6, 0x40, 0x44] {
+                assert!(color.command(id).is_none());
+            }
+            assert!(!endpoint.clusters.iter().any(|c| c.id == 0x62));
+            let identify = endpoint.clusters.iter().find(|c| c.id == 3).unwrap();
+            assert!(identify.command(0x40).is_none());
+        });
+    }
 }
 
 #[test]

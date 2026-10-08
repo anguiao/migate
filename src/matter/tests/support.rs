@@ -42,6 +42,25 @@ pub(crate) fn test_device() -> (PhysicalDevice, CommandReceiver) {
     device.set_label("Test Outlet".into());
     (device, receivers.remove(0))
 }
+
+pub(in crate::matter) fn light(rgb: bool) -> (PhysicalDevice, CommandReceiver) {
+    let mut description = physical("test-light", false).0.description();
+    let function = &mut description.functions[0];
+    function.category = Category::Light;
+    function.capabilities.extend([
+        Capability::Brightness,
+        Capability::ColorTemperature(crate::device::NumericRange {
+            min: 2700,
+            max: 6500,
+            step: 1,
+        }),
+    ]);
+    if rgb {
+        function.capabilities.push(Capability::ColorRgb);
+    }
+    let (device, mut receivers) = PhysicalDevice::new(description);
+    (device, receivers.remove(0))
+}
 pub(super) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Option<String> {
     use crate::{
         terminal::{self, AuthStatus},
