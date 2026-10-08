@@ -518,6 +518,85 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
 }
 
 #[test]
+fn latest_tick_withdraws_unsent_transport_frame_and_preserves_linked_power() {
+    use crate::device::{LightDimension, LightPatch, LightTarget};
+    for power in [None, Some(false)] {
+        block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
+            let wire = Rc::new(Wire::default());
+            let (_, driver) = local(&c, wire.clone());
+            let light = function(&c.context.registry, "one", "main");
+            light
+                .observe_light(LightPatch {
+                    power: Some(false),
+                    brightness_percent: Some(10.0),
+                    ..Default::default()
+                })
+                .unwrap();
+            let driving = async {
+                driver.run(|_| {}).await.unwrap();
+                panic!("driver stopped")
+            };
+            let commanding = async {
+                let action = light
+                    .begin_light_action(
+                        LightDimension::Brightness,
+                        LightTarget {
+                            power: Some(true),
+                            brightness_percent: Some(20.0),
+                            ..Default::default()
+                        },
+                        false,
+                    )
+                    .unwrap();
+                until(|| wire.polls.get() > 0).await;
+                light
+                    .submit_light_frame(
+                        action.token(),
+                        LightTarget {
+                            power,
+                            brightness_percent: Some(70.0),
+                            ..Default::default()
+                        },
+                        true,
+                    )
+                    .unwrap();
+                assert!(light.light_action_current(action.token()));
+                assert!(futures_lite::future::poll_once(action.accepted()).await.is_none());
+                wire.allow(usize::MAX);
+                until(|| !wire.written.borrow().is_empty()).await;
+                let mut frames = crate::xiaomi::central::MqttFrames::default();
+                frames.push(&wire.written.borrow()).unwrap();
+                let Packet::Publish(publish) = frames.next_packet().unwrap().unwrap() else {
+                    panic!()
+                };
+                assert!(frames.next_packet().unwrap().is_none());
+                let payload = decode_mips(&publish.payload).unwrap().payload;
+                let expected = if power == Some(false) {
+                    json!([{"did":"one","siid":2,"piid":2,"value":70}])
+                } else {
+                    json!([{"did":"one","siid":2,"piid":1,"value":true},{"did":"one","siid":2,"piid":2,"value":70}])
+                };
+                assert_eq!(payload["rpc"]["params"], expected);
+                let result = expected
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| json!({"did":"one","siid":item["siid"],"piid":item["piid"],"code":0}))
+                    .collect::<Vec<_>>();
+                wire.reply(json!({"result":result}));
+                action.accepted().await.unwrap();
+                action.ended().await.unwrap();
+                assert_eq!(
+                    light.snapshot().power,
+                    if power == Some(false) { Power::Off } else { Power::On }
+                );
+            };
+            future::or(driving, commanding).await;
+        }));
+    }
+}
+
+#[test]
 fn unsent_light_target_reselects_cloud_once_without_local_bytes() {
     use crate::device::{LightDimension, LightTarget};
     let rig = Rig::light("xiaomi.light.ceil04");

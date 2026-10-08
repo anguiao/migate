@@ -259,6 +259,14 @@ fn read_one(
         let mut cleanup = cleanup;
         let did = work.record.physical.key().id.clone();
         let generation = work.record.binding_generation.get();
+        let lighting = work
+            .record
+            .cached
+            .borrow()
+            .device
+            .functions
+            .iter()
+            .any(|function| function.description.id == read.id && function.lighting.is_some());
         let stamp = Rc::new(
             work.observations
                 .read_stamp(&work.record, &read.id, read.binding),
@@ -434,7 +442,15 @@ fn read_one(
                         work.refresh_pending.borrow_mut().push_back(read);
                     }
                 }
-                ReadResult::Failed(problem) => {
+                ReadResult::Failed(problem)
+                    if !lighting
+                        || work.observations.read_is_current(
+                            &work.record,
+                            &read.id,
+                            read.binding,
+                            &stamp,
+                        ) =>
+                {
                     if context.priority() == super::routing::PathPriority::CloudFirst {
                         work.read_problems
                             .borrow_mut()
@@ -458,6 +474,8 @@ fn read_one(
                         }
                     }
                 }
+                // Routing already classified the failure; stale work cannot consume fresh demand.
+                ReadResult::Failed(_) => {}
             }
             work.report(&context, &did);
         }

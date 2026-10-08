@@ -97,12 +97,12 @@ fn apply<E>(
         }
     }
     drop(cached);
-    work.record
-        .physical
-        .function(id)
-        .unwrap()
-        .observe_light(patch)
-        .expect("encoded light patch");
+    let function = work.record.physical.function(id).unwrap();
+    let previous_mode = function.snapshot().lighting.unwrap().mode;
+    function.observe_light(patch).expect("encoded light patch");
+    if patch.mode.is_some() {
+        super::super::lighting::refresh_missing_active(work, id, previous_mode);
+    }
 }
 fn alive(work: &DeviceWork, generation: u64) -> bool {
     !work.life.is_closed()
@@ -121,7 +121,9 @@ pub(super) async fn send_owned(
     let complete = completion.clone();
     let owner = context.clone();
     let id = id.to_owned();
+    let gate = context.light_writes.for_device(&record.physical.key().id);
     context.tasks.spawn(async move {
+        let _permit = gate.acquire().await;
         let result = send(request, owner, record, &id).await;
         complete.0.set(true);
         complete.1.notify(usize::MAX);

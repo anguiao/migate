@@ -78,6 +78,7 @@ impl XiaomiAdapter {
         let report = auth.local_status()?;
         let context = Rc::new(Context {
             commands: Rc::new(super::commands::Commands::default()),
+            light_writes: super::commands::LightWriteGates::default(),
             notifications: RefCell::new(None),
             credentials_changed: Event::new(),
             #[cfg(test)]

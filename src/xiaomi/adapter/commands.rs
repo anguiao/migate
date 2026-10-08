@@ -16,8 +16,49 @@ use futures_lite::future;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
-    rc::Rc,
+    rc::{Rc, Weak},
 };
+
+/// Outstanding lighting receipts retain their gate across immutable device replacements.
+#[derive(Default)]
+pub(super) struct LightWriteGates {
+    gates: RefCell<BTreeMap<String, Weak<LightWriteGate>>>,
+}
+impl LightWriteGates {
+    fn for_device(&self, did: &str) -> Rc<LightWriteGate> {
+        let mut gates = self.gates.borrow_mut();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(did).and_then(Weak::upgrade) {
+            return gate;
+        }
+        let gate = Rc::new(LightWriteGate::default());
+        gates.insert(did.into(), Rc::downgrade(&gate));
+        gate
+    }
+}
+#[derive(Default)]
+struct LightWriteGate {
+    busy: Cell<bool>,
+    changed: Event,
+}
+impl LightWriteGate {
+    async fn acquire(self: &Rc<Self>) -> LightWritePermit {
+        loop {
+            let changed = self.changed.listen();
+            if !self.busy.replace(true) {
+                return LightWritePermit(self.clone());
+            }
+            changed.await;
+        }
+    }
+}
+struct LightWritePermit(Rc<LightWriteGate>);
+impl Drop for LightWritePermit {
+    fn drop(&mut self) {
+        self.0.busy.set(false);
+        self.0.changed.notify(usize::MAX);
+    }
+}
 
 /// Diagnostics retain one current and one completed operation per channel, never a history.
 #[derive(Default)]

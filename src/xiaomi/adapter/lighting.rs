@@ -152,6 +152,47 @@ pub(super) enum Origin {
     Cache,
 }
 
+/// A mode change needs a fresh active value; repeated demand shares an existing read.
+pub(super) fn refresh_missing_active(
+    work: &DeviceWork,
+    id: &str,
+    previous_mode: Option<LightMode>,
+) {
+    let state = work
+        .record
+        .physical
+        .function(id)
+        .unwrap()
+        .snapshot()
+        .lighting
+        .unwrap();
+    let cached = work.record.cached.borrow();
+    let light = cached
+        .device
+        .functions
+        .iter()
+        .find(|function| function.description.id == id)
+        .unwrap()
+        .lighting
+        .as_ref()
+        .unwrap();
+    let binding = match state.mode {
+        Some(LightMode::Temperature) if state.temperature_kelvin.is_none() => {
+            Some(light.temperature.property)
+        }
+        Some(LightMode::Rgb) if state.color.is_none() => Some(light.color.unwrap().property),
+        _ => None,
+    };
+    drop(cached);
+    if let Some(binding) = binding {
+        if previous_mode != state.mode {
+            work.refresh_property(id, binding);
+        } else {
+            work.ensure_property_read(id, binding);
+        }
+    }
+}
+
 /// Validate at the MIoT boundary before counters or action ownership change.
 pub(super) fn observe(
     work: &DeviceWork,
@@ -169,7 +210,6 @@ pub(super) fn observe(
         .find(|function| function.description.id == id)
         .unwrap();
     let patch = decode(description, binding, value)?;
-    let bindings = description.lighting.as_ref().unwrap().clone();
     drop(cached);
     let function = record.physical.function(id).unwrap();
     let before = function.snapshot();
@@ -197,8 +237,8 @@ pub(super) fn observe(
                 .expect("light");
         }
         let active_color = patch.mode.is_some()
-            || (patch.temperature_kelvin.is_some() && state.mode != Some(LightMode::Rgb))
-            || (patch.color.is_some() && state.mode != Some(LightMode::Temperature));
+            || (patch.temperature_kelvin.is_some() && state.mode == Some(LightMode::Temperature))
+            || (patch.color.is_some() && state.mode == Some(LightMode::Rgb));
         if active_color {
             function
                 .take_over_light(LightDimension::Color)
@@ -211,12 +251,7 @@ pub(super) fn observe(
         .observe_light(patch)
         .expect("validated light report");
     if patch.mode.is_some() {
-        let state = function.snapshot().lighting.unwrap();
-        if state.mode == Some(LightMode::Temperature) && state.temperature_kelvin.is_none() {
-            work.refresh_property(id, bindings.temperature.property);
-        } else if state.mode == Some(LightMode::Rgb) && state.color.is_none() {
-            work.refresh_property(id, bindings.color.unwrap().property);
-        }
+        refresh_missing_active(work, id, state.mode);
     }
     Ok(())
 }

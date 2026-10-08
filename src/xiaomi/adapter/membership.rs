@@ -284,6 +284,15 @@ impl Context {
         let handle = {
             let mut live = self.live.borrow_mut();
             let slot = live.devices.remove(did).unwrap();
+            let light = slot.admitted.as_ref().is_some_and(|record| {
+                record
+                    .cached
+                    .borrow()
+                    .device
+                    .functions
+                    .iter()
+                    .any(|function| function.lighting.is_some())
+            });
             if let Some(life) = slot.loading {
                 life.close();
             }
@@ -297,7 +306,7 @@ impl Context {
                 if let Some(work) = session.devices.remove(did) {
                     work.life.close();
                 }
-                Some(session.handle.clone())
+                Some((session.handle.clone(), light))
             } else {
                 None
             }
@@ -307,8 +316,13 @@ impl Context {
         if let Some(session) = self.notifications.borrow().as_ref() {
             drop(session.handle.unsubscribe_device(did));
         }
-        if let Some(handle) = handle {
-            drop(handle.unsubscribe_device(did));
+        if let Some((handle, light)) = handle {
+            if light {
+                // Retire delivery and unsent guards while the original sent receipt keeps its gate.
+                drop(handle.unsubscribe_properties(did));
+            } else {
+                drop(handle.unsubscribe_device(did));
+            }
         }
         self.changed.notify(usize::MAX);
         Ok(())

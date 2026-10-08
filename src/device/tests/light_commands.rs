@@ -896,3 +896,49 @@ fn dequeued_startup_power_is_not_repeated_in_later_controller_ticks() {
         assert_eq!(frame(&mut receiver).await.target.power, None);
     });
 }
+
+#[test]
+fn newer_ticks_withdraw_dequeued_unsent_frames_without_ending_the_action() {
+    for power in [None, Some(false)] {
+        block_on(async {
+            let (physical, mut receiver) = ready_light(true);
+            let function = &physical.functions()[0];
+            let action = function
+                .begin_light_action(
+                    LightDimension::Brightness,
+                    LightTarget {
+                        power: Some(true),
+                        ..brightness(20.0)
+                    },
+                    false,
+                )
+                .unwrap();
+            let old = frame(&mut receiver).await;
+            function
+                .submit_light_frame(
+                    action.token(),
+                    LightTarget {
+                        power,
+                        ..brightness(70.0)
+                    },
+                    true,
+                )
+                .unwrap();
+            assert!(!old.is_current());
+            assert_eq!(old.mark_sent(), Err(CommandError::Superseded));
+            assert!(function.light_action_current(action.token()));
+            assert!(poll_once(action.accepted()).await.is_none());
+            assert!(poll_once(action.ended()).await.is_none());
+            old.reject(CommandError::Superseded);
+            let latest = frame(&mut receiver).await;
+            assert_eq!(latest.target.power, power.or(Some(true)));
+            assert_eq!(latest.target.brightness_percent, Some(70.0));
+            assert_eq!(latest.token, action.token());
+            assert!(latest.final_frame);
+            latest.mark_sent().unwrap();
+            latest.accept().unwrap();
+            action.accepted().await.unwrap();
+            action.ended().await.unwrap();
+        });
+    }
+}

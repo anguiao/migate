@@ -179,6 +179,21 @@ impl DeviceWork {
         }
         self.refresh_changed.notify(usize::MAX);
     }
+    pub(super) fn ensure_property_read(&self, id: &str, binding: PropertyBinding) {
+        if self
+            .refresh_pending
+            .borrow()
+            .iter()
+            .any(|read| read.id == id && read.binding == binding)
+            || self
+                .refresh_inflight
+                .borrow()
+                .contains_key(&super::lighting::key(id, binding))
+        {
+            return;
+        }
+        self.refresh_property(id, binding);
+    }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
         self.record
             .cached

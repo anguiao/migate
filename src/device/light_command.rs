@@ -94,6 +94,7 @@ struct Frame {
 }
 struct Flight {
     action: Arc<Action>,
+    power: Option<bool>,
     gate: Arc<Completion>,
     sent: AtomicBool,
 }
@@ -172,6 +173,14 @@ impl LightCoordinator {
         let index = action.token.dimension.index();
         if let Some(pending) = &self.pending[index] {
             target.power = target.power.or(pending.target.power);
+        }
+        if let Some(flight) = &self.flight
+            && flight.action.token == action.token
+            && !flight.sent.load(Ordering::Relaxed)
+        {
+            target.power = target.power.or(flight.power);
+            // Replacing an unsent tick releases only its frame, never the logical action.
+            flight.gate.finish(Err(CommandError::Superseded));
         }
         // Repeated ticks retain their place relative to the other dimension.
         let order = self.pending[index]
@@ -438,6 +447,7 @@ impl CommandReceiver {
                     let frame = coordinator.pending[index].take().unwrap();
                     let flight = Arc::new(Flight {
                         action: frame.action,
+                        power: frame.target.power,
                         gate: Arc::new(Completion::default()),
                         sent: AtomicBool::new(false),
                     });
