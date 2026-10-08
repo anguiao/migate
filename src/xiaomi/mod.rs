@@ -7,6 +7,7 @@ pub mod certificate;
 pub mod cloud;
 pub mod discovery;
 mod mqtt;
+pub mod property;
 
 #[cfg(test)]
 mod tests;

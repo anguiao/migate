@@ -26,6 +26,11 @@ pub enum CentralEvent {
         binding: PropertyBinding,
         value: bool,
     },
+    PropertyValue {
+        did: String,
+        binding: PropertyBinding,
+        value: serde_json::Value,
+    },
     DeviceListChanged {
         dids: Vec<String>,
     },

@@ -10,6 +10,108 @@ use std::time::Duration;
 const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
 
 #[test]
+fn numeric_property_reads_and_batch_writes_preserve_partial_acceptance() {
+    let brightness = PropertyBinding { siid: 2, piid: 2 };
+    let mode = PropertyBinding { siid: 4, piid: 2 };
+    let (base, requests) = mock_server(vec![
+        MockResponse::json(
+            200,
+            r#"{"code":0,"result":[{"did":"target","siid":2,"piid":2,"code":0,"value":65535}]}"#,
+        ),
+        MockResponse::json(
+            200,
+            r#"{"code":0,"result":[{"did":"target","siid":4,"piid":2,"code":-704},{"did":"target","siid":2,"piid":2,"code":1}]}"#,
+        ),
+    ]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(cloud.read_property_value("token", "target", brightness)).unwrap(),
+        json!(65535)
+    );
+    let result = future::block_on(cloud.set_properties(
+        "token",
+        "target",
+        &[(brightness, json!(50)), (mode, json!(1))],
+    ))
+    .unwrap();
+    assert!(!result.protocol_error);
+    assert_eq!(result.items[0], Ok(()));
+    assert_eq!(
+        result.items[1].as_ref().unwrap_err().kind(),
+        &CloudErrorKind::PropertyRejected(-704)
+    );
+    requests.recv().unwrap();
+    let request = requests.recv().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&request.body).unwrap(),
+        json!({"params":[{"did":"target","siid":2,"piid":2,"value":50},{"did":"target","siid":4,"piid":2,"value":1}]})
+    );
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn batch_property_identity_errors_keep_confirmed_items() {
+    let brightness = PropertyBinding { siid: 2, piid: 2 };
+    for invalid in [
+        json!([]),
+        json!([{"did":"target","siid":2,"piid":2,"code":0},{"did":"target","siid":2,"piid":2,"code":0}]),
+        json!([{"did":"foreign","siid":2,"piid":2,"code":0}]),
+        json!([{"did":"target","siid":2,"code":0}]),
+        json!([{"did":"target","siid":9,"piid":9,"code":0}]),
+    ] {
+        let mut items = vec![json!({"did":"target","siid":2,"piid":1,"code":0})];
+        items.extend(invalid.as_array().unwrap().iter().cloned());
+        let body = json!({"code":0,"result":items}).to_string();
+        let (base, _) = mock_server(vec![MockResponse::json(200, &body)]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let result = future::block_on(cloud.set_properties(
+            "token",
+            "target",
+            &[(POWER, json!(true)), (brightness, json!(50))],
+        ))
+        .unwrap();
+        assert!(result.protocol_error, "{body}");
+        assert_eq!(result.items[0], Ok(()), "{body}");
+        assert_eq!(
+            result.items[1].as_ref().unwrap_err().kind(),
+            &CloudErrorKind::Protocol,
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn batch_reads_correlate_numeric_and_boolean_values_in_request_order() {
+    let brightness = PropertyBinding { siid: 2, piid: 2 };
+    let (base, _) = mock_server(vec![MockResponse::json(
+        200,
+        r#"{"code":0,"result":[{"did":"target","siid":2,"piid":2,"code":0,"value":35.5},{"did":"target","siid":2,"piid":1,"code":0,"value":true}]}"#,
+    )]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let result =
+        future::block_on(cloud.read_properties("token", "target", &[POWER, brightness])).unwrap();
+    assert!(!result.protocol_error);
+    assert_eq!(result.items, vec![Ok(json!(true)), Ok(json!(35.5))]);
+}
+
+#[test]
+fn general_property_writes_reject_invalid_inputs_without_sending() {
+    let (base, requests) = mock_server(vec![MockResponse::json(200, "{}")]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    for items in [
+        vec![],
+        vec![(POWER, json!(true)), (POWER, json!(false))],
+        vec![(POWER, Value::Null)],
+        vec![(POWER, json!("1"))],
+        vec![(POWER, json!([]))],
+    ] {
+        let error = future::block_on(cloud.set_properties("token", "target", &items)).unwrap_err();
+        assert_eq!(error.kind(), &CloudErrorKind::InvalidInput);
+    }
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
 fn property_requests_use_official_paths_and_correlated_boolean_results() {
     let (base, requests) = mock_server(vec![
         MockResponse::json(

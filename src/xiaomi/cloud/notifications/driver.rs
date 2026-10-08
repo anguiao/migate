@@ -626,13 +626,22 @@ impl NotificationDriver {
                 }
                 let value = params
                     .get("value")
-                    .and_then(Value::as_bool)
+                    .filter(|value| crate::xiaomi::property::valid_value(value))
                     .ok_or(NotificationError::Protocol)?;
-                on_event(NotificationEvent::Property {
-                    did,
-                    binding,
-                    value,
-                });
+                let event = if let Some(value) = value.as_bool() {
+                    NotificationEvent::Property {
+                        did,
+                        binding,
+                        value,
+                    }
+                } else {
+                    NotificationEvent::PropertyValue {
+                        did,
+                        binding,
+                        value: value.clone(),
+                    }
+                };
+                on_event(event);
             }
             Target::Online { did } => {
                 if payload.get("device_id").and_then(Value::as_str) != Some(&did) {

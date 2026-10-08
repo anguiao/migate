@@ -245,7 +245,7 @@ fn malformed_notification_payloads_are_isolated_from_valid_notifications() {
             broker.accept(pkid).await;
             for payload in [
                 "not JSON".to_owned(),
-                json!({"params":{"siid":2,"piid":1,"value":1}}).to_string(),
+                json!({"params":{"siid":2,"piid":1,"value":"1"}}).to_string(),
                 json!({"params":{"siid":3,"piid":1,"value":true}}).to_string(),
                 json!({"params":{"did":"foreign","siid":2,"piid":1,"value":true}}).to_string(),
                 json!({"params":{"siid":"2","piid":1,"value":true}}).to_string(),
@@ -321,9 +321,115 @@ fn malformed_notification_payloads_are_isolated_from_valid_notifications() {
 
 #[test]
 fn qos2_duplicate_and_retired_subscription_messages_do_not_reapply() {
+    for numeric in [false, true] {
+        let old_value = if numeric { json!(25) } else { json!(false) };
+        let new_value = if numeric { json!(50) } else { json!(true) };
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        let (retire, retired) = flume::bounded(1);
+        let (finished, done) = flume::bounded(1);
+        future::block_on(exercise(
+            timing(),
+            move |mut broker| async move {
+                broker.setup().await;
+                let pkid = broker
+                    .subscribe("device/target/up/properties_changed/2/1")
+                    .await;
+                broker.accept(pkid).await;
+                let mut old = Publish::new(
+                    "device/target/up/properties_changed/2/1",
+                    QoS::ExactlyOnce,
+                    json!({"params":{"siid":2,"piid":1,"value":old_value}}).to_string(),
+                );
+                old.pkid = 7;
+                broker.send(Packet::Publish(old.clone())).await;
+                assert!(matches!(broker.next().await, Packet::PubRec(rec) if rec.pkid == 7));
+                old.dup = true;
+                broker.send(Packet::Publish(old)).await;
+                assert!(matches!(broker.next().await, Packet::PubRec(rec) if rec.pkid == 7));
+                retire.send(()).unwrap();
+                let Packet::Unsubscribe(unsub) = broker.next().await else {
+                    panic!();
+                };
+                broker
+                    .send(Packet::UnsubAck(UnsubAck {
+                        pkid: unsub.pkid,
+                        reasons: vec![UnsubAckReason::Success],
+                        properties: None,
+                    }))
+                    .await;
+                let pkid = broker
+                    .subscribe("device/target/up/properties_changed/2/1")
+                    .await;
+                broker.accept(pkid).await;
+                broker.send(Packet::PubRel(PubRel::new(7))).await;
+                assert!(matches!(broker.next().await, Packet::PubComp(comp) if comp.pkid == 7));
+                let mut new = Publish::new(
+                    "device/target/up/properties_changed/2/1",
+                    QoS::ExactlyOnce,
+                    json!({"params":{"siid":2,"piid":1,"value":new_value}}).to_string(),
+                );
+                new.pkid = 8;
+                broker.send(Packet::Publish(new)).await;
+                assert!(matches!(broker.next().await, Packet::PubRec(rec) if rec.pkid == 8));
+                broker.send(Packet::PubRel(PubRel::new(8))).await;
+                assert!(matches!(broker.next().await, Packet::PubComp(comp) if comp.pkid == 8));
+                broker.send(Packet::PubRel(PubRel::new(8))).await;
+                assert!(matches!(broker.next().await, Packet::PubComp(comp) if comp.pkid == 8));
+                broker.property(old_value).await;
+                done.recv_async().await.unwrap();
+            },
+            move |handle, driver| async move {
+                let stop = handle.clone();
+                let (result, ()) = future::zip(
+                    driver.run(move |event| {
+                        collected.borrow_mut().push(event);
+                        if collected.borrow().len() == 2 {
+                            finished.send(()).unwrap();
+                            stop.close();
+                        }
+                    }),
+                    async {
+                        handle.subscribe_property("target", POWER).await.unwrap();
+                        retired.recv_async().await.unwrap();
+                        handle.unsubscribe_properties("target").await.unwrap();
+                        handle.subscribe_property("target", POWER).await.unwrap();
+                    },
+                )
+                .await;
+                result.unwrap();
+            },
+        ));
+        let event = |value| {
+            if numeric {
+                NotificationEvent::PropertyValue {
+                    did: "target".into(),
+                    binding: POWER,
+                    value,
+                }
+            } else {
+                NotificationEvent::Property {
+                    did: "target".into(),
+                    binding: POWER,
+                    value: value.as_bool().unwrap(),
+                }
+            }
+        };
+        assert_eq!(
+            *events.borrow(),
+            [
+                event(if numeric { json!(50) } else { json!(true) }),
+                event(if numeric { json!(25) } else { json!(false) })
+            ]
+        );
+    }
+}
+
+#[test]
+fn numeric_notifications_preserve_payload_identity_and_values() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let collected = events.clone();
-    let (retire, retired) = flume::bounded(1);
     let (finished, done) = flume::bounded(1);
     future::block_on(exercise(
         timing(),
@@ -333,52 +439,27 @@ fn qos2_duplicate_and_retired_subscription_messages_do_not_reapply() {
                 .subscribe("device/target/up/properties_changed/2/1")
                 .await;
             broker.accept(pkid).await;
-            let mut old = Publish::new(
-                "device/target/up/properties_changed/2/1",
-                QoS::ExactlyOnce,
-                json!({"params":{"siid":2,"piid":1,"value":false}}).to_string(),
-            );
-            old.pkid = 7;
-            broker.send(Packet::Publish(old.clone())).await;
-            assert!(matches!(broker.next().await, Packet::PubRec(rec) if rec.pkid == 7));
-            old.dup = true;
-            broker.send(Packet::Publish(old)).await;
-            assert!(matches!(broker.next().await, Packet::PubRec(rec) if rec.pkid == 7));
-            retire.send(()).unwrap();
-            let Packet::Unsubscribe(unsub) = broker.next().await else {
-                panic!();
-            };
-            broker
-                .send(Packet::UnsubAck(UnsubAck {
-                    pkid: unsub.pkid,
-                    reasons: vec![UnsubAckReason::Success],
-                    properties: None,
-                }))
-                .await;
-            let pkid = broker
-                .subscribe("device/target/up/properties_changed/2/1")
-                .await;
-            broker.accept(pkid).await;
-            broker.send(Packet::PubRel(PubRel::new(7))).await;
-            assert!(matches!(broker.next().await, Packet::PubComp(comp) if comp.pkid == 7));
-            let mut new = Publish::new(
-                "device/target/up/properties_changed/2/1",
-                QoS::ExactlyOnce,
-                json!({"params":{"siid":2,"piid":1,"value":true}}).to_string(),
-            );
-            new.pkid = 8;
-            broker.send(Packet::Publish(new)).await;
-            assert!(matches!(broker.next().await, Packet::PubRec(rec) if rec.pkid == 8));
-            broker.send(Packet::PubRel(PubRel::new(8))).await;
-            assert!(matches!(broker.next().await, Packet::PubComp(comp) if comp.pkid == 8));
-            broker.send(Packet::PubRel(PubRel::new(8))).await;
-            assert!(matches!(broker.next().await, Packet::PubComp(comp) if comp.pkid == 8));
-            broker.property(json!(false)).await;
+            for payload in [
+                json!({"params":{"did":"other","siid":2,"piid":1,"value":50}}),
+                json!({"params":{"siid":2,"piid":2,"value":50}}),
+                json!({"params":{"siid":2,"piid":1,"value":null}}),
+                json!({"uid":"foreign","params":{"siid":2,"piid":1,"value":50}}),
+            ] {
+                broker
+                    .send(Packet::Publish(Publish::new(
+                        "device/target/up/properties_changed/2/1",
+                        QoS::AtMostOnce,
+                        payload.to_string(),
+                    )))
+                    .await;
+            }
+            broker.property(json!(65535)).await;
+            broker.property(json!(35.5)).await;
             done.recv_async().await.unwrap();
         },
         move |handle, driver| async move {
             let stop = handle.clone();
-            let (result, ()) = future::zip(
+            let (result, subscription) = future::zip(
                 driver.run(move |event| {
                     collected.borrow_mut().push(event);
                     if collected.borrow().len() == 2 {
@@ -386,30 +467,26 @@ fn qos2_duplicate_and_retired_subscription_messages_do_not_reapply() {
                         stop.close();
                     }
                 }),
-                async {
-                    handle.subscribe_property("target", POWER).await.unwrap();
-                    retired.recv_async().await.unwrap();
-                    handle.unsubscribe_properties("target").await.unwrap();
-                    handle.subscribe_property("target", POWER).await.unwrap();
-                },
+                handle.subscribe_property("target", POWER),
             )
             .await;
             result.unwrap();
+            subscription.unwrap();
         },
     ));
     assert_eq!(
         *events.borrow(),
-        [
-            NotificationEvent::Property {
+        vec![
+            NotificationEvent::PropertyValue {
                 did: "target".into(),
                 binding: POWER,
-                value: true,
+                value: json!(65535)
             },
-            NotificationEvent::Property {
+            NotificationEvent::PropertyValue {
                 did: "target".into(),
                 binding: POWER,
-                value: false,
-            }
+                value: json!(35.5)
+            },
         ]
     );
 }

@@ -275,7 +275,15 @@ impl SessionDriver {
                     return Ok(());
                 }
                 let result = parse_response(&request.kind, &message.payload);
-                if result.is_ok() || matches!(result, Err(CentralError::Rejected(_))) {
+                let business_result = match &result {
+                    Ok(Response::Properties(results)) => results
+                        .items
+                        .iter()
+                        .any(|item| !matches!(item, Err(CentralError::Protocol))),
+                    Ok(_) | Err(CentralError::Rejected(_)) => true,
+                    Err(_) => false,
+                };
+                if business_result {
                     request.stage = RequestStage::BusinessResult;
                 }
                 log::debug!(
@@ -307,13 +315,22 @@ impl SessionDriver {
             let value = message
                 .payload
                 .get("value")
-                .and_then(Value::as_bool)
+                .filter(|value| crate::xiaomi::property::valid_value(value))
                 .ok_or(CentralError::Protocol)?;
-            on_event(CentralEvent::Property {
-                did,
-                binding,
-                value,
-            });
+            let event = if let Some(value) = value.as_bool() {
+                CentralEvent::Property {
+                    did,
+                    binding,
+                    value,
+                }
+            } else {
+                CentralEvent::PropertyValue {
+                    did,
+                    binding,
+                    value: value.clone(),
+                }
+            };
+            on_event(event);
         }
         Ok(())
     }

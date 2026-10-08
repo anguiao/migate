@@ -1,6 +1,9 @@
 use super::super::{CentralError, wire};
 use super::{LIMIT, Timing};
-use crate::xiaomi::capability::PropertyBinding;
+use crate::xiaomi::{
+    capability::PropertyBinding,
+    property::{PropertyResults, correlate, valid_bindings, valid_value},
+};
 use event_listener::Event;
 use mqttbytes::{QoS, v5::Publish};
 use serde_json::{Value, json};
@@ -89,6 +92,8 @@ impl SendHooks {
 pub(super) enum Response {
     Devices(Vec<DeviceEntry>),
     Power(bool),
+    PropertyValue(Value),
+    Properties(PropertyResults<(), CentralError>),
     Unit,
 }
 pub(super) type ResultValue = Result<Response, CentralError>;
@@ -120,17 +125,25 @@ pub(super) enum RequestKind {
         did: String,
         binding: PropertyBinding,
     },
+    ReadValue {
+        did: String,
+        binding: PropertyBinding,
+    },
     Write {
         did: String,
         binding: PropertyBinding,
         value: bool,
+    },
+    WriteProperties {
+        did: String,
+        properties: Vec<(PropertyBinding, Value)>,
     },
 }
 impl RequestKind {
     pub(super) fn is_read_or_list(&self) -> bool {
         matches!(
             self,
-            Self::ListAll | Self::ListFiltered { .. } | Self::Read { .. }
+            Self::ListAll | Self::ListFiltered { .. } | Self::Read { .. } | Self::ReadValue { .. }
         )
     }
     pub(super) fn publication(&self, id: u32, reply_topic: &str) -> Publish {
@@ -143,7 +156,7 @@ impl RequestKind {
                 "master/proxy/getDevList",
                 json!({"filter":{"did":dids},"info":["name","model","urn","online","specV2Access","pushAvailable"]}),
             ),
-            Self::Read { did, binding } => (
+            Self::Read { did, binding } | Self::ReadValue { did, binding } => (
                 "master/proxy/get",
                 json!({"did":did,"siid":binding.siid,"piid":binding.piid}),
             ),
@@ -151,10 +164,8 @@ impl RequestKind {
                 did,
                 binding,
                 value,
-            } => (
-                "master/proxy/rpcReq",
-                json!({"did":did,"rpc":{"id":next_mips_id(),"method":"set_properties","params":[{"did":did,"siid":binding.siid,"piid":binding.piid,"value":value}]}}),
-            ),
+            } => write_payload(did, &[(*binding, json!(value))]),
+            Self::WriteProperties { did, properties } => write_payload(did, properties),
             Self::Subscribe { .. } | Self::Unsubscribe { .. } => {
                 unreachable!("subscriptions do not publish MIPS requests")
             }
@@ -171,8 +182,8 @@ impl RequestKind {
             Self::ListAll | Self::ListFiltered { .. } => "getDevList",
             Self::Subscribe { .. } => "subscribe",
             Self::Unsubscribe { .. } => "unsubscribe",
-            Self::Read { .. } => "get",
-            Self::Write { .. } => "set",
+            Self::Read { .. } | Self::ReadValue { .. } => "get",
+            Self::Write { .. } | Self::WriteProperties { .. } => "set",
         }
     }
     pub(super) fn did(&self) -> &str {
@@ -181,7 +192,9 @@ impl RequestKind {
             Self::Subscribe { did, .. }
             | Self::Unsubscribe { did }
             | Self::Read { did, .. }
-            | Self::Write { did, .. } => did,
+            | Self::ReadValue { did, .. }
+            | Self::Write { did, .. }
+            | Self::WriteProperties { did, .. } => did,
         }
     }
 
@@ -434,6 +447,97 @@ impl SessionHandle {
             on_result,
         )
     }
+    pub fn read_property_value<F: FnOnce(RequestOutcome<Value>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
+        self.read_value(did, binding, self.timing.request, None, on_result)
+    }
+    pub fn read_property_value_with_timeout<F: FnOnce(RequestOutcome<Value>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        timeout: Duration,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
+        self.read_value(did, binding, timeout, None, on_result)
+    }
+    pub fn read_property_value_with_timeout_guarded<F: FnOnce(RequestOutcome<Value>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        timeout: Duration,
+        hooks: SendHooks,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
+        self.read_value(did, binding, timeout, Some(hooks), on_result)
+    }
+    fn read_value<F: FnOnce(RequestOutcome<Value>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        timeout: Duration,
+        hooks: Option<SendHooks>,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
+        self.submit(
+            RequestKind::ReadValue {
+                did: did.into(),
+                binding,
+            },
+            timeout.min(self.timing.request),
+            hooks,
+            |response| match response {
+                Response::PropertyValue(value) => value,
+                _ => unreachable!("property read returns a supported value"),
+            },
+            on_result,
+        )
+    }
+    pub fn set_properties<
+        F: FnOnce(RequestOutcome<PropertyResults<(), CentralError>>) + 'static,
+    >(
+        &self,
+        did: &str,
+        properties: &[(PropertyBinding, Value)],
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<PropertyResults<(), CentralError>>> + use<F> {
+        self.write_properties(did, properties, None, on_result)
+    }
+    pub fn set_properties_guarded<
+        F: FnOnce(RequestOutcome<PropertyResults<(), CentralError>>) + 'static,
+    >(
+        &self,
+        did: &str,
+        properties: &[(PropertyBinding, Value)],
+        hooks: SendHooks,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<PropertyResults<(), CentralError>>> + use<F> {
+        self.write_properties(did, properties, Some(hooks), on_result)
+    }
+    fn write_properties<F: FnOnce(RequestOutcome<PropertyResults<(), CentralError>>) + 'static>(
+        &self,
+        did: &str,
+        properties: &[(PropertyBinding, Value)],
+        hooks: Option<SendHooks>,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<PropertyResults<(), CentralError>>> + use<F> {
+        self.submit(
+            RequestKind::WriteProperties {
+                did: did.into(),
+                properties: properties.to_vec(),
+            },
+            self.timing.request,
+            hooks,
+            |response| match response {
+                Response::Properties(results) => results,
+                _ => unreachable!("batch write returns property results"),
+            },
+            on_result,
+        )
+    }
     fn submit_subscription(
         &self,
         kind: RequestKind,
@@ -517,11 +621,32 @@ fn valid_request(kind: &RequestKind) -> bool {
             return !dids.is_empty() && dids.iter().all(|did| valid_identifier(did));
         }
         RequestKind::Unsubscribe { did } => (did, None),
+        RequestKind::WriteProperties { did, properties } => {
+            return valid_identifier(did)
+                && valid_bindings(
+                    &properties
+                        .iter()
+                        .map(|(binding, _)| *binding)
+                        .collect::<Vec<_>>(),
+                )
+                && properties.iter().all(|(_, value)| valid_value(value));
+        }
         RequestKind::Subscribe { did, binding }
         | RequestKind::Read { did, binding }
+        | RequestKind::ReadValue { did, binding }
         | RequestKind::Write { did, binding, .. } => (did, Some(binding)),
     };
     valid_identifier(did) && binding.is_none_or(|binding| binding.siid > 0 && binding.piid > 0)
+}
+
+fn write_payload(did: &str, properties: &[(PropertyBinding, Value)]) -> (&'static str, Value) {
+    let params: Vec<_> = properties.iter().map(|(binding, value)| {
+        json!({"did":did,"siid":binding.siid,"piid":binding.piid,"value":value})
+    }).collect();
+    (
+        "master/proxy/rpcReq",
+        json!({"did":did,"rpc":{"id":next_mips_id(),"method":"set_properties","params":params}}),
+    )
 }
 
 pub(super) fn next_mips_id() -> u32 {
@@ -568,6 +693,37 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
         ));
     }
     match kind {
+        RequestKind::ReadValue { did, binding } => {
+            validate_identity(value, did, *binding, false)?;
+            Ok(Response::PropertyValue(
+                value
+                    .get("value")
+                    .filter(|value| valid_value(value))
+                    .cloned()
+                    .ok_or(CentralError::Protocol)?,
+            ))
+        }
+        RequestKind::WriteProperties { did, properties } => {
+            let result = value
+                .get("result")
+                .and_then(Value::as_array)
+                .ok_or(CentralError::Protocol)?;
+            let bindings: Vec<_> = properties.iter().map(|(binding, _)| *binding).collect();
+            Ok(Response::Properties(correlate(
+                did,
+                &bindings,
+                result,
+                CentralError::Protocol,
+                |item| match item
+                    .get("code")
+                    .and_then(Value::as_i64)
+                    .ok_or(CentralError::Protocol)?
+                {
+                    0 | 1 => Ok(()),
+                    code => Err(CentralError::Rejected(code)),
+                },
+            )))
+        }
         RequestKind::Read { did, binding } => {
             validate_identity(value, did, *binding, false)?;
             Ok(Response::Power(

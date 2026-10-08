@@ -597,6 +597,7 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                             NotificationEvent::Online { did, online } => {
                                 events.online_event(&event_handle, &did, online)
                             }
+                            NotificationEvent::PropertyValue { .. } => {}
                         })
                         .await
                         .err();

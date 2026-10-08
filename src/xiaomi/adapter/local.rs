@@ -143,6 +143,7 @@ pub(super) async fn run(
                                 .request_filtered(dids);
                             events.request_sync();
                         }
+                        CentralEvent::PropertyValue { .. } => {}
                     })
                     .await
                     .map_err(AdapterError::Central)
