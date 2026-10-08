@@ -703,6 +703,100 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
 }
 
 #[test]
+fn version_reads_preserve_quiet_final_and_unknown_reports() {
+    use c::ClusterAsyncHandler as _;
+    use l::ClusterAsyncHandler as _;
+
+    for dimension in [LightDimension::Brightness, LightDimension::Color] {
+        setup!(false, function, receiver, light, clock, ctx);
+        function
+            .observe_light(LightPatch {
+                power: Some(true),
+                brightness_percent: Some(1.0),
+                temperature_kelvin: Some(5000),
+                ..Default::default()
+            })
+            .unwrap();
+        light.reports(&ctx);
+        let task = if dimension == LightDimension::Brightness {
+            LightingTask::Level(Task::MoveToLevel {
+                with_on_off: false,
+                start: 1,
+                target: 254,
+                transition_ms: 1500,
+            })
+        } else {
+            LightingTask::Color(ColorTask::ColorTemperatureMoveTo {
+                start: 200,
+                target_mireds: 300,
+                transition_ms: 1500,
+            })
+        };
+        let action = light.begin(task, None).unwrap();
+        block_on(async {
+            accept(&function, frame(&mut receiver).await);
+            action.accepted().await.unwrap();
+            light.reports(&ctx);
+            ctx.changes.borrow_mut().clear();
+            let (cluster, attribute) = if dimension == LightDimension::Brightness {
+                (8, 0)
+            } else {
+                (0x300, 7)
+            };
+            for now in [100, 900, 1000, 1100, 1500] {
+                clock.set(now);
+                light.advance();
+                accept(&function, frame(&mut receiver).await);
+                if dimension == LightDimension::Brightness {
+                    LevelHandler(&light).dataver();
+                } else {
+                    ColorHandler::<false>(&light).dataver();
+                }
+                assert!(ctx.changes.borrow().is_empty());
+                light.reports(&ctx);
+                assert_eq!(
+                    ctx.changes.borrow().contains(&(2, cluster, attribute)),
+                    matches!(now, 1000 | 1500)
+                );
+                ctx.changes.borrow_mut().clear();
+            }
+            action.ended().await.unwrap();
+        });
+    }
+
+    setup!(true, function, receiver, light, clock, ctx);
+    function
+        .observe_light(LightPatch {
+            color: Some(Rgb {
+                red: 255,
+                green: 0,
+                blue: 0,
+            }),
+            mode: Some(LightMode::Rgb),
+            ..Default::default()
+        })
+        .unwrap();
+    light.reports(&ctx);
+    ctx.changes.borrow_mut().clear();
+    function
+        .observe_light(LightPatch {
+            color: Some(Rgb {
+                red: 0,
+                green: 0,
+                blue: 0,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+    ColorHandler::<true>(&light).dataver();
+    assert!(ctx.changes.borrow().is_empty());
+    light.reports(&ctx);
+    assert!(ctx.changes.borrow().contains(&(2, 0x300, 3)));
+    assert!(ctx.changes.borrow().contains(&(2, 0x300, 4)));
+    assert!(block_on(poll_once(receiver.next_operation())).is_none());
+}
+
+#[test]
 fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_preset() {
     use crate::device::Command;
     setup!(false, function, receiver, light, clock, ctx);

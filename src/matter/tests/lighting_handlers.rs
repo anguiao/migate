@@ -24,6 +24,346 @@ macro_rules! setup_light {
 }
 
 #[test]
+fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
+    use crate::device::{LightMode, Rgb};
+
+    for (patch, cluster, changed_attribute) in [
+        (
+            LightPatch {
+                power: Some(false),
+                ..Default::default()
+            },
+            6,
+            0,
+        ),
+        (
+            LightPatch {
+                brightness_percent: Some(60.0),
+                ..Default::default()
+            },
+            8,
+            0,
+        ),
+        (
+            LightPatch {
+                temperature_kelvin: Some(5000),
+                ..Default::default()
+            },
+            0x300,
+            7,
+        ),
+        (
+            LightPatch {
+                color: Some(Rgb {
+                    red: 0,
+                    green: 255,
+                    blue: 0,
+                }),
+                ..Default::default()
+            },
+            0x300,
+            3,
+        ),
+        (
+            LightPatch {
+                mode: Some(LightMode::Rgb),
+                ..Default::default()
+            },
+            0x300,
+            8,
+        ),
+    ] {
+        setup_light!(true, device, receiver, registry, handler, ctx);
+        let function = device.functions()[0].clone();
+        function
+            .observe_light(LightPatch {
+                power: Some(true),
+                brightness_percent: Some(50.0),
+                temperature_kelvin: Some(4000),
+                color: Some(Rgb {
+                    red: 255,
+                    green: 0,
+                    blue: 0,
+                }),
+                mode: Some(LightMode::Temperature),
+            })
+            .unwrap();
+        block_on(async {
+            let reports = Context::new(ctx.base, 8, 0);
+            let mut run = pin!(handler.run(&reports));
+            assert!(poll_once(run.as_mut()).await.is_none());
+            reports.changes.borrow_mut().clear();
+            let mut baseline = Vec::new();
+            for (cluster, attribute) in [
+                (6, 0),
+                (8, 0),
+                (8, 2),
+                (0x300, 7),
+                (0x300, 3),
+                (0x300, 4),
+                (0x300, 8),
+                (0x300, 0x4001),
+                (0x300, 0x400b),
+            ] {
+                ctx.attribute = attr(cluster, attribute);
+                baseline.push((
+                    cluster,
+                    attribute,
+                    read_bytes(&handler, &ctx).await.unwrap(),
+                ));
+            }
+            function.observe_light(patch).unwrap();
+
+            let mut latest = None;
+            for (attribute_cluster, attribute, before) in baseline {
+                ctx.attribute = attr(attribute_cluster, attribute);
+                ctx.attribute.dataver = Some(report_dataver(&before));
+                let filtered = read_bytes(&handler, &ctx).await.unwrap();
+                if attribute_cluster == cluster {
+                    assert!(!filtered.is_empty(), "new cluster state was filtered out");
+                    let version = report_dataver(&filtered);
+                    assert_ne!(version, report_dataver(&before));
+                    if let Some(previous) = latest {
+                        assert_eq!(version, previous);
+                    }
+                    latest = Some(version);
+                    if attribute == changed_attribute {
+                        if cluster == 6 {
+                            assert_ne!(
+                                report_value(&filtered).bool().unwrap(),
+                                report_value(&before).bool().unwrap()
+                            );
+                        } else {
+                            assert_ne!(
+                                report_value(&filtered).u32().unwrap(),
+                                report_value(&before).u32().unwrap()
+                            );
+                        }
+                    }
+                    ctx.attribute.dataver = None;
+                    assert_eq!(read_bytes(&handler, &ctx).await.unwrap(), filtered);
+                    ctx.attribute.dataver = Some(version);
+                    assert!(read_bytes(&handler, &ctx).await.unwrap().is_empty());
+                } else {
+                    assert!(filtered.is_empty(), "unrelated cluster version changed");
+                }
+            }
+            assert!(reports.changes.borrow().is_empty());
+            assert!(poll_once(run.as_mut()).await.is_none());
+            assert!(
+                reports
+                    .changes
+                    .borrow()
+                    .contains(&(2, cluster, changed_attribute))
+            );
+            assert!(poll_once(receiver.next_operation()).await.is_none());
+        });
+        assert_eq!(registry.list().len(), 1);
+    }
+}
+
+#[test]
+fn light_unfiltered_reads_use_new_versions_and_encoded_equal_values_keep_versions() {
+    use crate::device::{LightMode, Rgb};
+
+    setup_light!(true, device, receiver, registry, handler, ctx);
+    let function = device.functions()[0].clone();
+    function
+        .observe_light(LightPatch {
+            power: Some(true),
+            brightness_percent: Some(50.0),
+            temperature_kelvin: Some(4000),
+            color: Some(Rgb {
+                red: 255,
+                green: 0,
+                blue: 0,
+            }),
+            mode: Some(LightMode::Rgb),
+        })
+        .unwrap();
+    block_on(async {
+        let reports = Context::new(ctx.base, 8, 0);
+        let mut run = pin!(handler.run(&reports));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        reports.changes.borrow_mut().clear();
+        let mut baseline = Vec::new();
+        for (cluster, attribute) in [(6, 0), (8, 0), (0x300, 7), (0x300, 3), (0x300, 4)] {
+            ctx.attribute = attr(cluster, attribute);
+            baseline.push((
+                cluster,
+                attribute,
+                read_bytes(&handler, &ctx).await.unwrap(),
+            ));
+        }
+        function
+            .observe_light(LightPatch {
+                brightness_percent: Some(50.01),
+                temperature_kelvin: Some(4001),
+                color: Some(Rgb {
+                    red: 128,
+                    green: 0,
+                    blue: 0,
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        for (cluster, attribute, before) in baseline {
+            ctx.attribute = attr(cluster, attribute);
+            assert_eq!(read_bytes(&handler, &ctx).await.unwrap(), before);
+            ctx.attribute.dataver = Some(report_dataver(&before));
+            assert!(read_bytes(&handler, &ctx).await.unwrap().is_empty());
+        }
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(reports.changes.borrow().is_empty());
+
+        ctx.attribute = attr(8, 0);
+        let before = read_bytes(&handler, &ctx).await.unwrap();
+        function
+            .observe_light(LightPatch {
+                brightness_percent: Some(75.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let after = read_bytes(&handler, &ctx).await.unwrap();
+        assert_ne!(report_dataver(&after), report_dataver(&before));
+        assert_eq!(report_value(&after).u8().unwrap(), 190);
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
+    assert_eq!(registry.list().len(), 1);
+}
+
+#[test]
+fn light_unknown_projection_edges_invalidate_filters_before_run() {
+    use crate::device::{LightMode, Rgb};
+
+    setup_light!(true, device, receiver, registry, handler, ctx);
+    let function = device.functions()[0].clone();
+    block_on(async {
+        let level_before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
+        ctx.attribute = attr(0x300, 0x400a);
+        let color_before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
+        function
+            .observe_light(LightPatch {
+                brightness_percent: Some(25.0),
+                temperature_kelvin: Some(4000),
+                color: Some(Rgb {
+                    red: 255,
+                    green: 0,
+                    blue: 0,
+                }),
+                mode: Some(LightMode::Rgb),
+                ..Default::default()
+            })
+            .unwrap();
+        ctx.attribute = attr(8, 0);
+        ctx.attribute.dataver = Some(level_before);
+        let level = read_bytes(&handler, &ctx).await.unwrap();
+        assert!(!level.is_empty());
+        assert_eq!(report_value(&level).u8().unwrap(), 62);
+        ctx.attribute = attr(0x300, 7);
+        ctx.attribute.dataver = Some(color_before);
+        let color = read_bytes(&handler, &ctx).await.unwrap();
+        assert!(!color.is_empty());
+        assert_eq!(report_value(&color).u16().unwrap(), 250);
+        function
+            .observe_light(LightPatch {
+                color: Some(Rgb {
+                    red: 0,
+                    green: 0,
+                    blue: 0,
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        ctx.attribute = attr(0x300, 3);
+        ctx.attribute.dataver = Some(report_dataver(&color));
+        assert_eq!(
+            read_bytes(&handler, &ctx).await.unwrap_err().code(),
+            ErrorCode::Failure
+        );
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
+    assert_eq!(registry.list().len(), 1);
+}
+
+#[test]
+fn light_remaining_time_start_and_stop_change_versions_before_run() {
+    for cluster in [8, 0x300] {
+        setup_light!(false, device, receiver, registry, handler, ctx);
+        device.set_availability(Availability::Available);
+        let function = device.functions()[0].clone();
+        function
+            .observe_light(LightPatch {
+                power: Some(true),
+                brightness_percent: Some(1.0),
+                temperature_kelvin: Some(5000),
+                ..Default::default()
+            })
+            .unwrap();
+        block_on(async {
+            let remaining_attribute = if cluster == 8 { 1 } else { 2 };
+            ctx.attribute = attr(cluster, remaining_attribute);
+            let before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
+            let mut command = Context::new(ctx.base, cluster, 0);
+            command.command.cmd_id = if cluster == 8 { 0 } else { 0xa };
+            command.data = TLVElement::new(if cluster == 8 {
+                &[
+                    0x15, 0x24, 0, 254, 0x25, 1, 20, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+                ]
+            } else {
+                &[
+                    0x15, 0x25, 0, 44, 1, 0x25, 1, 20, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+                ]
+            });
+            let mut output = [0; 128];
+            let mut invoke = pin!(handler.invoke(
+                &command,
+                InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut output))
+            ));
+            assert!(poll_once(invoke.as_mut()).await.is_none());
+            ctx.attribute.dataver = Some(before);
+            let started = read_bytes(&handler, &ctx).await.unwrap();
+            assert!(!started.is_empty(), "start RemainingTime was filtered out");
+            assert_eq!(report_value(&started).u16().unwrap(), 20);
+            let started_version = report_dataver(&started);
+            assert_ne!(started_version, before);
+
+            let DeviceRequest::Light(first) = receiver.next_operation().await.unwrap() else {
+                panic!("missing light startup")
+            };
+            first.mark_sent().unwrap();
+            first.accept().unwrap();
+            invoke.await.unwrap();
+            let mut stop = Context::new(ctx.base, cluster, 0);
+            stop.command.cmd_id = if cluster == 8 { 3 } else { 0x47 };
+            stop.data = TLVElement::new(&[0x15, 0x24, 0, 0, 0x24, 1, 0, 0x18]);
+            handler
+                .invoke(
+                    &stop,
+                    InvokeReplyInstance::new(&stop.command, WriteBuf::new(&mut [0; 128])),
+                )
+                .await
+                .unwrap();
+            ctx.attribute.dataver = Some(started_version);
+            let stopped = read_bytes(&handler, &ctx).await.unwrap();
+            assert!(!stopped.is_empty(), "Stop RemainingTime was filtered out");
+            assert_eq!(report_value(&stopped).u16().unwrap(), 0);
+            assert_ne!(report_dataver(&stopped), started_version);
+            assert!(ctx.changes.borrow().is_empty());
+            let mut run = pin!(handler.run(&ctx));
+            assert!(poll_once(run.as_mut()).await.is_none());
+            assert!(
+                ctx.changes
+                    .borrow()
+                    .contains(&(2, cluster, remaining_attribute))
+            );
+            assert!(poll_once(receiver.next_operation()).await.is_none());
+        });
+        assert_eq!(registry.list().len(), 1);
+    }
+}
+
+#[test]
 fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes() {
     for rgb in [false, true] {
         setup_light!(rgb, device, receiver, registry, handler, ctx);

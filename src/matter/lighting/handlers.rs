@@ -25,6 +25,7 @@ impl o::ClusterAsyncHandler for OnOffHandler<'_> {
             o::CommandId::Off | o::CommandId::On | o::CommandId::Toggle
         ));
     fn dataver(&self) -> u32 {
+        self.0.sync_versions();
         self.0.on_off_version.get()
     }
     fn dataver_changed(&self) {
@@ -185,6 +186,7 @@ impl l::ClusterAsyncHandler for LevelHandler<'_> {
                 | l::CommandId::StopWithOnOff
         ));
     fn dataver(&self) -> u32 {
+        self.0.sync_versions();
         self.0.level_version.get()
     }
     fn dataver_changed(&self) {
@@ -362,6 +364,7 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             ))
     };
     fn dataver(&self) -> u32 {
+        self.0.sync_versions();
         self.0.color_version.get()
     }
     fn dataver_changed(&self) {

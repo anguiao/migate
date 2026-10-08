@@ -104,6 +104,7 @@ pub(super) struct Lighting {
     pub(super) on_off_version: Dataver,
     pub(super) level_version: Dataver,
     pub(super) color_version: Dataver,
+    versioned: Cell<Projection>,
     observed: Cell<Projection>,
     level_dirty: Cell<bool>,
     color_dirty: Cell<bool>,
@@ -165,6 +166,7 @@ impl Lighting {
             on_off_version: on_off,
             level_version: level,
             color_version: color,
+            versioned: Cell::new(Projection::default()),
             observed: Cell::new(Projection::default()),
             level_dirty: Cell::new(false),
             color_dirty: Cell::new(false),
@@ -172,7 +174,9 @@ impl Lighting {
             last_color_report: Cell::new(0),
             remaining_dirty: Cell::new([false, false]),
         };
-        result.observed.set(result.refresh());
+        let projection = result.refresh();
+        result.versioned.set(projection);
+        result.observed.set(projection);
         Ok(result)
     }
     pub(super) fn rgb(&self) -> bool {
@@ -206,6 +210,25 @@ impl Lighting {
         color.mode = result.mode;
         result
     }
+    fn sync_versions(&self) -> Projection {
+        let current = self.refresh();
+        let old = self.versioned.replace(current);
+        // The generated handler filters by DataVersion before calling a getter.
+        // Version the encoded snapshot now; quiet reporting has its own cursor.
+        if old.power != current.power {
+            self.on_off_version.changed();
+        }
+        if old.level != current.level {
+            self.level_version.changed();
+        }
+        if old.xy != current.xy
+            || old.temperature != current.temperature
+            || old.mode != current.mode
+        {
+            self.color_version.changed();
+        }
+        current
+    }
     fn update_remaining(&self, dimension: LightDimension, millis: u64, start: bool) {
         let index = if dimension == LightDimension::Brightness {
             0
@@ -223,7 +246,7 @@ impl Lighting {
             let report = color.remaining_time.write(millis, start, 0xfffe);
             (old, color.remaining_time.value, report)
         };
-        if old != new && !report {
+        if old != new {
             if index == 0 {
                 self.level_version.changed();
             } else {
@@ -363,7 +386,7 @@ impl Lighting {
     }
     fn reports(&self, ctx: &impl HandlerContext) {
         let now = self.clock.now();
-        let current = self.refresh();
+        let current = self.sync_versions();
         let old = self.observed.replace(current);
         if old.power != current.power {
             ctx.notify_attr_changed(self.endpoint, 6, 0);
@@ -386,8 +409,6 @@ impl Lighting {
             ctx.notify_attr_changed(self.endpoint, 8, 0);
             self.level_dirty.set(false);
             self.last_level_report.set(now);
-        } else if old.level != current.level {
-            self.level_version.changed();
         }
         if old.temperature != current.temperature || old.xy != current.xy {
             self.color_dirty.set(true);
@@ -414,8 +435,6 @@ impl Lighting {
             }
             self.color_dirty.set(false);
             self.last_color_report.set(now);
-        } else if old.temperature != current.temperature || old.xy != current.xy {
-            self.color_version.changed();
         }
         let dirty = self.remaining_dirty.replace([false, false]);
         if dirty[0] {
