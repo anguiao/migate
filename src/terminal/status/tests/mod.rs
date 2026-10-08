@@ -184,7 +184,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
                     id: 42,
                     binding: PropertyBinding { siid: 2, piid: 1 },
                     target: crate::xiaomi::adapter::CommandTarget::Power(true),
-                    properties: vec![],
+                    properties: vec![(PropertyBinding { siid: 2, piid: 1 }, true.into())],
                     actual_path: Some(PathKind::Local),
                     result: None,
                 }),
@@ -192,7 +192,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
                     id: 41,
                     binding: PropertyBinding { siid: 2, piid: 1 },
                     target: crate::xiaomi::adapter::CommandTarget::Power(false),
-                    properties: vec![],
+                    properties: vec![(PropertyBinding { siid: 2, piid: 1 }, false.into())],
                     actual_path: Some(PathKind::Cloud),
                     result: Some(Err(CommandError::Timeout)),
                 }),
@@ -264,7 +264,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
                     id: 8,
                     binding: PropertyBinding { siid: 3, piid: 1 },
                     target: crate::xiaomi::adapter::CommandTarget::Power(false),
-                    properties: vec![],
+                    properties: vec![(PropertyBinding { siid: 3, piid: 1 }, false.into())],
                     actual_path: None,
                     result: None,
                 }),
@@ -272,7 +272,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
                     id: 7,
                     binding: PropertyBinding { siid: 3, piid: 1 },
                     target: crate::xiaomi::adapter::CommandTarget::Power(true),
-                    properties: vec![],
+                    properties: vec![(PropertyBinding { siid: 3, piid: 1 }, true.into())],
                     actual_path: Some(PathKind::Local),
                     result: Some(Ok(())),
                 }),
@@ -295,4 +295,253 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
         ),
         "{output}"
     );
+}
+
+#[test]
+fn lighting_command_records_show_explicit_targets_actual_batch_and_no_write_results() {
+    use crate::{
+        device::{CommandError, LightColorTarget, LightTarget, Rgb},
+        xiaomi::{adapter::CommandTarget, capability::PropertyBinding},
+    };
+
+    let mut command = CommandStatus {
+        id: 42,
+        binding: PropertyBinding { siid: 99, piid: 9 },
+        target: CommandTarget::Light(LightTarget {
+            power: Some(false),
+            brightness_percent: Some(12.5),
+            color: Some(LightColorTarget::Temperature(4000)),
+        }),
+        properties: vec![
+            (PropertyBinding { siid: 2, piid: 1 }, false.into()),
+            (PropertyBinding { siid: 2, piid: 2 }, 13.into()),
+            (PropertyBinding { siid: 2, piid: 3 }, 4000.into()),
+            (PropertyBinding { siid: 4, piid: 2 }, 0.into()),
+        ],
+        actual_path: Some(PathKind::Local),
+        result: Some(Ok(())),
+    };
+    assert_eq!(
+        format_command("main", "last", &command),
+        "main last command #42: target power=off, brightness=12.5%, temperature=4000 K; properties 2.1=false, 2.2=13, 2.3=4000, 4.2=0; actual path local; accepted."
+    );
+    command.target = CommandTarget::Light(LightTarget {
+        color: Some(LightColorTarget::Rgb(Rgb {
+            red: 255,
+            green: 128,
+            blue: 64,
+        })),
+        ..Default::default()
+    });
+    command.properties = vec![
+        (PropertyBinding { siid: 4, piid: 1 }, 0xff8040.into()),
+        (PropertyBinding { siid: 4, piid: 2 }, 1.into()),
+    ];
+    command.actual_path = Some(PathKind::Cloud);
+    command.result = None;
+    assert_eq!(
+        format_command("main", "in-flight", &command),
+        "main in-flight command #42: target RGB=#FF8040; properties 4.1=16744512, 4.2=1; actual path cloud; awaiting result."
+    );
+    command.properties.clear();
+    command.actual_path = None;
+    command.result = Some(Ok(()));
+    let no_write = format_command("main", "last", &command);
+    assert_eq!(
+        no_write,
+        "main last command #42: target RGB=#FF8040; properties none; actual path not sent; unchanged (no write)."
+    );
+    assert!(!no_write.contains("accepted"));
+    assert!(!no_write.contains("99.9"));
+    command.target = CommandTarget::Power(true);
+    assert_eq!(
+        format_command("main", "last", &command),
+        "main last command #42: target on; property none; actual path not sent; unchanged (no write)."
+    );
+    command.target = CommandTarget::Light(LightTarget {
+        color: Some(LightColorTarget::Temperature(4000)),
+        ..Default::default()
+    });
+    for (error, expected) in [
+        (CommandError::Superseded, "superseded"),
+        (CommandError::Stopped, "stopped"),
+        (
+            CommandError::Timeout,
+            "failed: command acceptance timed out",
+        ),
+    ] {
+        command.result = Some(Err(error));
+        assert!(format_command("main", "last", &command).ends_with(&format!("{expected}.")));
+    }
+}
+
+fn light_diagnostics_fixture() -> (crate::device::Function, crate::device::CommandReceiver) {
+    use crate::device::*;
+    let (physical, mut receivers) = PhysicalDevice::new(PhysicalDeviceDescription {
+        key: DeviceKey::new("xiaomi", "light"),
+        label: "Light".into(),
+        functions: vec![FunctionDescription {
+            id: "main".into(),
+            label: "Light".into(),
+            category: Category::Light,
+            capabilities: vec![
+                Capability::OnOff,
+                Capability::Brightness,
+                Capability::ColorTemperature(NumericRange {
+                    min: 2700,
+                    max: 6500,
+                    step: 1,
+                }),
+            ],
+        }],
+    });
+    physical.set_availability(Availability::Available);
+    (physical.functions()[0].clone(), receivers.remove(0))
+}
+
+fn action_report(function: &crate::device::Function) -> String {
+    format_device(&DeviceStatus {
+        did: "light".into(),
+        usable_control_paths: vec![PathKind::Cloud],
+        selected_control: Some(PathKind::Cloud),
+        notification_source: Some(PathKind::Local),
+        unavailable_reason: None,
+        sync_limited_reason: None,
+        last_switch_reason: None,
+        commands: vec![ChannelCommands {
+            channel: "main".into(),
+            light_actions: function.light_action_diagnostics(),
+            inflight: None,
+            last: None,
+        }],
+    })
+}
+
+#[test]
+fn lighting_actions_show_undequeued_superseded_and_stopped_independently_of_frames() {
+    use crate::device::{LightColorTarget, LightDimension, LightTarget};
+
+    let (function, _receiver) = light_diagnostics_fixture();
+    function
+        .begin_light_action(
+            LightDimension::Brightness,
+            LightTarget {
+                brightness_percent: Some(25.0),
+                ..Default::default()
+            },
+            false,
+        )
+        .unwrap();
+    function
+        .begin_light_action(
+            LightDimension::Brightness,
+            LightTarget {
+                brightness_percent: Some(50.0),
+                ..Default::default()
+            },
+            false,
+        )
+        .unwrap();
+    let superseded = action_report(&function);
+    assert!(superseded.contains("main actions: brightness active; color idle; awaiting startup receipt none; last brightness superseded."), "{superseded}");
+    assert!(!superseded.contains("command #"));
+    assert!(!superseded.contains("ActionToken"));
+    function
+        .begin_light_action(
+            LightDimension::Color,
+            LightTarget {
+                color: Some(LightColorTarget::Temperature(4000)),
+                ..Default::default()
+            },
+            false,
+        )
+        .unwrap();
+    function.stop_light(LightDimension::Brightness).unwrap();
+    let stopped = action_report(&function);
+    assert!(stopped.contains("main actions: brightness idle; color active; awaiting startup receipt none; last brightness stopped."), "{stopped}");
+}
+
+#[test]
+fn lighting_actions_distinguish_original_startup_receipt_acceptance_and_failure() {
+    use crate::device::{CommandError, DeviceRequest, LightDimension, LightTarget};
+    use futures_lite::future::block_on;
+
+    block_on(async {
+        let (function, mut receiver) = light_diagnostics_fixture();
+        let target = LightTarget {
+            brightness_percent: Some(25.0),
+            ..Default::default()
+        };
+        function
+            .begin_light_action(LightDimension::Brightness, target, false)
+            .unwrap();
+        let DeviceRequest::Light(original) = receiver.next_operation().await.unwrap() else {
+            panic!("expected startup frame")
+        };
+        original.mark_sent().unwrap();
+        assert!(
+            action_report(&function).contains("awaiting startup receipt brightness; last none.")
+        );
+        function.stop_light(LightDimension::Brightness).unwrap();
+        function
+            .begin_light_action(LightDimension::Brightness, target, false)
+            .unwrap();
+        let waiting = action_report(&function);
+        assert!(waiting.contains("brightness active; color idle; awaiting startup receipt brightness (previous action); last brightness stopped."), "{waiting}");
+        original.accept().unwrap();
+        assert!(
+            action_report(&function)
+                .contains("awaiting startup receipt none; last brightness stopped.")
+        );
+        let DeviceRequest::Light(next) = receiver.next_operation().await.unwrap() else {
+            panic!("expected replacement frame")
+        };
+        next.mark_sent().unwrap();
+        next.accept().unwrap();
+        let accepted = action_report(&function);
+        assert!(accepted.contains("brightness active; color idle; awaiting startup receipt none; last brightness accepted."), "{accepted}");
+        assert!(!accepted.contains("finished"));
+        function
+            .begin_light_action(LightDimension::Brightness, target, false)
+            .unwrap();
+        let DeviceRequest::Light(failed) = receiver.next_operation().await.unwrap() else {
+            panic!("expected failing frame")
+        };
+        failed.reject(CommandError::Rejected("denied".into()));
+        let rejected = action_report(&function);
+        assert!(rejected.contains("brightness idle; color idle; awaiting startup receipt none; last brightness failed: command rejected: denied."), "{rejected}");
+    });
+}
+
+#[test]
+fn quantized_no_write_frame_does_not_claim_action_startup_acceptance() {
+    use crate::device::{DeviceRequest, LightDimension, LightTarget};
+    use futures_lite::future::{block_on, poll_once};
+
+    block_on(async {
+        let (function, mut receiver) = light_diagnostics_fixture();
+        let action = function
+            .begin_light_action(
+                LightDimension::Brightness,
+                LightTarget {
+                    brightness_percent: Some(50.0),
+                    ..Default::default()
+                },
+                false,
+            )
+            .unwrap();
+        let DeviceRequest::Light(frame) = receiver.next_operation().await.unwrap() else {
+            panic!("expected repeated frame")
+        };
+        frame.skip_unchanged().unwrap();
+        assert!(poll_once(action.accepted()).await.is_none());
+        let report = action_report(&function);
+        assert!(
+            report.contains(
+                "brightness active; color idle; awaiting startup receipt none; last none."
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("accepted"));
+    });
 }

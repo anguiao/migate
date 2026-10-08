@@ -134,6 +134,33 @@ pub enum CommandTarget {
     Power(bool),
     Light(crate::device::LightTarget),
 }
+impl fmt::Display for CommandTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Power(value) => f.write_str(if *value { "on" } else { "off" }),
+            Self::Light(target) => {
+                use crate::device::LightColorTarget;
+                let mut fields = Vec::new();
+                if let Some(value) = target.power {
+                    fields.push(format!("power={}", if value { "on" } else { "off" }));
+                }
+                if let Some(value) = target.brightness_percent {
+                    fields.push(format!("brightness={value}%"));
+                }
+                if let Some(value) = target.color {
+                    fields.push(match value {
+                        LightColorTarget::Temperature(value) => format!("temperature={value} K"),
+                        LightColorTarget::Rgb(value) => format!(
+                            "RGB=#{:02X}{:02X}{:02X}",
+                            value.red, value.green, value.blue
+                        ),
+                    });
+                }
+                f.write_str(&fields.join(", "))
+            }
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandStatus {
     pub id: u64,
@@ -142,6 +169,34 @@ pub struct CommandStatus {
     pub properties: Vec<(PropertyBinding, serde_json::Value)>,
     pub actual_path: Option<PathKind>,
     pub result: Option<Result<(), CommandError>>,
+}
+impl CommandStatus {
+    pub(crate) fn properties_text(&self) -> String {
+        if self.properties.is_empty() {
+            return "none".into();
+        }
+        if matches!(self.target, CommandTarget::Power(_)) {
+            let binding = self.properties[0].0;
+            return format!("{}.{}", binding.siid, binding.piid);
+        }
+        self.properties
+            .iter()
+            .map(|(binding, value)| format!("{}.{}={value}", binding.siid, binding.piid))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    pub(crate) fn result_text(&self) -> String {
+        match &self.result {
+            None => "awaiting result".into(),
+            Some(Ok(())) if self.properties.is_empty() => "unchanged (no write)".into(),
+            Some(Ok(())) => "accepted".into(),
+            Some(Err(error)) if matches!(self.target, CommandTarget::Power(_)) => error.to_string(),
+            Some(Err(CommandError::Superseded)) => "superseded".into(),
+            Some(Err(CommandError::Stopped)) => "stopped".into(),
+            Some(Err(CommandError::Cancelled)) => "cancelled".into(),
+            Some(Err(error)) => format!("failed: {error}"),
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelCommands {

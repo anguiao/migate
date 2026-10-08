@@ -259,7 +259,7 @@ fn format_device(status: &DeviceStatus) -> String {
         channel,
         inflight,
         last,
-        ..
+        light_actions,
     } in &status.commands
     {
         if let Some(command) = inflight {
@@ -272,32 +272,79 @@ fn format_device(status: &DeviceStatus) -> String {
         if let Some(command) = last {
             let _ = write!(report, "\n  {}", format_command(channel, "last", command));
         }
+        if let Some(actions) = light_actions {
+            let _ = write!(report, "\n  {}", format_actions(channel, actions));
+        }
     }
     report
 }
 
 fn format_command(channel: &str, state: &str, command: &CommandStatus) -> String {
-    let result = match &command.result {
-        None => "awaiting result".into(),
-        Some(Ok(())) => "accepted".into(),
-        Some(Err(error)) => error.to_string(),
-    };
     format!(
-        "{channel} {state} command #{}: target {}; property {}.{}; actual path {}; {result}.",
+        "{channel} {state} command #{}: target {}; {} {}; actual path {}; {}.",
         command.id,
-        match &command.target {
-            crate::xiaomi::adapter::CommandTarget::Power(value) =>
-                if *value {
-                    "on".into()
-                } else {
-                    "off".into()
-                },
-            crate::xiaomi::adapter::CommandTarget::Light(target) =>
-                format!("{target:?}; properties {:?}", command.properties),
+        command.target,
+        if matches!(
+            command.target,
+            crate::xiaomi::adapter::CommandTarget::Power(_)
+        ) {
+            "property"
+        } else {
+            "properties"
         },
-        command.binding.siid,
-        command.binding.piid,
-        command.actual_path.map(path).unwrap_or("not sent")
+        command.properties_text(),
+        command.actual_path.map(path).unwrap_or("not sent"),
+        command.result_text(),
+    )
+}
+
+fn dimension(dimension: crate::device::LightDimension) -> &'static str {
+    match dimension {
+        crate::device::LightDimension::Brightness => "brightness",
+        crate::device::LightDimension::Color => "color",
+    }
+}
+fn format_actions(channel: &str, actions: &crate::device::LightActionDiagnostics) -> String {
+    use crate::device::CommandError;
+    let awaiting = actions.awaiting_startup.map_or_else(
+        || "none".into(),
+        |token| {
+            format!(
+                "{}{}",
+                dimension(token.dimension()),
+                if actions.brightness == Some(token) || actions.color == Some(token) {
+                    ""
+                } else {
+                    " (previous action)"
+                }
+            )
+        },
+    );
+    let last = actions.last.as_ref().map_or_else(
+        || "none".into(),
+        |last| {
+            let result = match &last.result {
+                Ok(()) => "accepted".into(),
+                Err(CommandError::Superseded) => "superseded".into(),
+                Err(CommandError::Stopped) => "stopped".into(),
+                Err(CommandError::Cancelled) => "cancelled".into(),
+                Err(error) => format!("failed: {error}"),
+            };
+            format!("{} {result}", dimension(last.token.dimension()))
+        },
+    );
+    format!(
+        "{channel} actions: brightness {}; color {}; awaiting startup receipt {awaiting}; last {last}.",
+        if actions.brightness.is_some() {
+            "active"
+        } else {
+            "idle"
+        },
+        if actions.color.is_some() {
+            "active"
+        } else {
+            "idle"
+        },
     )
 }
 

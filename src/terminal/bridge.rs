@@ -1,7 +1,7 @@
 use super::{AuthStatus, current_time};
 use crate::{
     RuntimeError,
-    device::{Availability, Command, DeviceKey, DeviceRegistry, Power},
+    device::{Availability, Capability, Command, DeviceKey, DeviceRegistry, LightMode, Power},
     storage::{DeviceStore, StorageError},
 };
 pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID [channel], off DID [channel], help\nUse list to find stable channel keys. A single-channel device may omit channel; channel is required for a multi-channel device.";
@@ -25,12 +25,69 @@ fn render(registry: &DeviceRegistry, did: Option<&str>) -> String {
         for function in physical.functions() {
             let id = &function.function_key().id;
             let label = &function.description().label;
-            let power = match function.snapshot().power {
+            let snapshot = function.snapshot();
+            let power = match snapshot.power {
                 Power::Unknown => "unknown",
                 Power::On => "on",
                 Power::Off => "off",
             };
             lines.push(format!("  {id} ({label}): {power}"));
+            if let Some(light) = snapshot.lighting {
+                let capabilities = function
+                    .description()
+                    .capabilities
+                    .iter()
+                    .map(|capability| match capability {
+                        Capability::OnOff => "on/off".into(),
+                        Capability::Brightness => "brightness".into(),
+                        Capability::ColorTemperature(range) => {
+                            format!("temperature {}–{} K", range.min, range.effective_max())
+                        }
+                        Capability::ColorRgb => "RGB".into(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("    Capabilities: {capabilities}."));
+                let mut values = vec![
+                    format!(
+                        "Brightness: {}",
+                        light
+                            .brightness_percent
+                            .map_or_else(|| "unknown".into(), |value| format!("{value}%"))
+                    ),
+                    format!(
+                        "temperature: {}",
+                        light
+                            .temperature_kelvin
+                            .map_or_else(|| "unknown".into(), |value| format!("{value} K"))
+                    ),
+                ];
+                if function
+                    .description()
+                    .capabilities
+                    .contains(&Capability::ColorRgb)
+                {
+                    values.push(format!(
+                        "RGB: {}",
+                        light.color.map_or_else(
+                            || "unknown".into(),
+                            |value| format!(
+                                "#{:02X}{:02X}{:02X}",
+                                value.red, value.green, value.blue
+                            )
+                        )
+                    ));
+                }
+                values.push(format!(
+                    "mode: {}",
+                    match light.mode {
+                        None => "unknown",
+                        Some(LightMode::Temperature) => "temperature",
+                        Some(LightMode::Rgb) => "RGB",
+                    }
+                ));
+                lines.push(format!("    {}.", values.join("; ")));
+            }
         }
     }
     if lines.is_empty() {

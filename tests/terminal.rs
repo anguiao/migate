@@ -152,6 +152,211 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         );
     })
 }
+
+#[test]
+fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
+    use migate::{
+        device::{LightMode, LightPatch, Rgb},
+        xiaomi::capability::parse_device_for_model,
+    };
+
+    block_on(async {
+        let (_dir, store, status, registry, _receivers) = fixture();
+        let mut lights = Vec::new();
+        for (did, model, source) in [
+            (
+                "rgb",
+                "devcea.light.ls2307",
+                include_str!("fixtures/miot/devcea-light-ls2307.json"),
+            ),
+            (
+                "ct",
+                "yeelink.light.light3",
+                include_str!("fixtures/miot/yeelink-light-light3.json"),
+            ),
+        ] {
+            let key = DeviceKey::new("xiaomi", did);
+            let parsed =
+                parse_device_for_model(key.clone(), model, &serde_json::from_str(source).unwrap())
+                    .unwrap();
+            store
+                .devices()
+                .publish(&PhysicalDeviceDescription {
+                    key: key.clone(),
+                    label: "Imported 米家 name".into(),
+                    functions: parsed
+                        .functions
+                        .into_iter()
+                        .map(|function| function.description)
+                        .collect(),
+                })
+                .unwrap();
+            store
+                .devices()
+                .set_device_label(&key, &format!("Saved {did} 名称"))
+                .unwrap();
+            let saved = store.devices().load_published(&key).unwrap().unwrap();
+            let (physical, receivers) = PhysicalDevice::new(saved.description());
+            physical.set_availability(Availability::Available);
+            registry.insert(physical.clone());
+            lights.push((physical, receivers));
+        }
+        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(list.contains("rgb (Saved rgb 名称): available"), "{list}");
+        assert!(list.contains("main (Light): unknown"), "{list}");
+        assert!(
+            list.contains("Capabilities: on/off, brightness, temperature 2700–6500 K, RGB."),
+            "{list}"
+        );
+        assert!(
+            list.contains(
+                "Brightness: unknown; temperature: unknown; RGB: unknown; mode: unknown."
+            ),
+            "{list}"
+        );
+        assert!(
+            list.contains("Brightness: unknown; temperature: unknown; mode: temperature."),
+            "{list}"
+        );
+        assert!(!list.contains("Imported 米家 name"));
+
+        lights[0].0.functions()[0]
+            .observe_light(LightPatch {
+                brightness_percent: Some(23.5),
+                temperature_kelvin: Some(4000),
+                mode: Some(LightMode::Rgb),
+                ..Default::default()
+            })
+            .unwrap();
+        let partial = handle_line(&registry, &store.devices(), &status, "status rgb", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            partial.contains("Brightness: 23.5%; temperature: 4000 K; RGB: unknown; mode: RGB."),
+            "{partial}"
+        );
+        lights[0].0.functions()[0]
+            .observe_light(LightPatch {
+                power: Some(true),
+                brightness_percent: Some(72.5),
+                temperature_kelvin: Some(4000),
+                color: Some(Rgb {
+                    red: 255,
+                    green: 128,
+                    blue: 64,
+                }),
+                mode: Some(LightMode::Rgb),
+            })
+            .unwrap();
+        lights[1].0.functions()[0]
+            .observe_light(LightPatch {
+                power: Some(true),
+                brightness_percent: Some(0.0),
+                temperature_kelvin: Some(4000),
+                ..Default::default()
+            })
+            .unwrap();
+        let rgb = handle_line(&registry, &store.devices(), &status, "status rgb", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rgb.contains("Saved rgb 名称"));
+        assert!(rgb.contains("main (Light): on"));
+        assert!(
+            rgb.contains("Brightness: 72.5%; temperature: 4000 K; RGB: #FF8040; mode: RGB."),
+            "{rgb}"
+        );
+        assert!(!rgb.contains("Saved ct 名称"));
+        assert!(!rgb.contains("name one"));
+        let ct = handle_line(&registry, &store.devices(), &status, "status ct", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ct.contains("main (Light): on"));
+        assert!(
+            ct.contains("Capabilities: on/off, brightness, temperature 2700–6500 K."),
+            "{ct}"
+        );
+        assert!(
+            ct.contains("Brightness: 0%; temperature: 4000 K; mode: temperature."),
+            "{ct}"
+        );
+        assert!(!ct.contains("RGB"));
+    });
+}
+
+#[test]
+fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
+    use migate::device::{DeviceRequest, LightMode, LightPatch, NumericRange};
+
+    block_on(async {
+        let (_dir, store, status, registry, _receivers) = fixture();
+        let (physical, mut receivers) = PhysicalDevice::new(PhysicalDeviceDescription {
+            key: DeviceKey::new("xiaomi", "light"),
+            label: "Original name".into(),
+            functions: vec![FunctionDescription {
+                id: "main".into(),
+                label: "Saved function name".into(),
+                category: Category::Light,
+                capabilities: vec![
+                    Capability::OnOff,
+                    Capability::Brightness,
+                    Capability::ColorTemperature(NumericRange {
+                        min: 2700,
+                        max: 6500,
+                        step: 1,
+                    }),
+                ],
+            }],
+        });
+        physical.set_availability(Availability::Available);
+        physical.functions()[0]
+            .observe_light(LightPatch {
+                brightness_percent: Some(23.5),
+                temperature_kelvin: Some(4000),
+                ..Default::default()
+            })
+            .unwrap();
+        store.devices().publish(&physical.description()).unwrap();
+        registry.insert(physical.clone());
+        for (line, target) in [("on light", true), ("off light main", false)] {
+            let (result, ()) = future::zip(
+                handle_line(&registry, &store.devices(), &status, line, 0),
+                async {
+                    let DeviceRequest::Power(request) =
+                        receivers[0].next_operation().await.unwrap()
+                    else {
+                        panic!("terminal power command changed lighting values")
+                    };
+                    assert_eq!(request.target, target);
+                    request.accept().unwrap();
+                },
+            )
+            .await;
+            assert_eq!(result.unwrap().unwrap(), "light: command accepted");
+            let snapshot = physical.functions()[0].snapshot().lighting.unwrap();
+            assert_eq!(snapshot.brightness_percent, Some(23.5));
+            assert_eq!(snapshot.temperature_kelvin, Some(4000));
+            assert_eq!(snapshot.mode, Some(LightMode::Temperature));
+        }
+        let invalid = handle_line(
+            &registry,
+            &store.devices(),
+            &status,
+            "brightness light 50",
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(invalid.contains("Invalid command usage."));
+        assert!(poll_once(receivers[0].next_operation()).await.is_none());
+    });
+}
 #[test]
 fn input_recovers_and_returns_at_eof() {
     block_on(async {
@@ -392,7 +597,10 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
         id: 1,
         binding: migate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
         target: migate::xiaomi::adapter::CommandTarget::Power(true),
-        properties: vec![],
+        properties: vec![(
+            migate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+            true.into(),
+        )],
         actual_path: Some(PathKind::Local),
         result: Some(Ok(())),
     });

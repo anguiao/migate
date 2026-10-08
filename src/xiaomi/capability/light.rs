@@ -74,7 +74,7 @@ pub(super) fn parse_light(
         functions: vec![ParsedFunction {
             description: FunctionDescription {
                 id: "main".into(),
-                label: "灯光".into(),
+                label: "Light".into(),
                 category: Category::Light,
                 capabilities,
             },

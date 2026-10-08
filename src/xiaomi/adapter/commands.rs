@@ -211,14 +211,14 @@ impl CommandOperation {
             entry.inflight = Some(status.clone());
         }
         log::info!(
-            "Xiaomi command start op={} did={} channel={} property={}.{} target={:?} path={}",
+            "Xiaomi command start op={} did={} channel={} property={} target={} path={} result={}",
             status.id,
             self.did,
             self.channel,
-            status.binding.siid,
-            status.binding.piid,
+            status.properties_text(),
             status.target,
-            path
+            path,
+            status.result_text(),
         );
         self.commands.changed.notify(usize::MAX);
     }
@@ -252,10 +252,7 @@ impl CommandOperation {
             PathKind::Local => "local",
             PathKind::Cloud => "cloud",
         });
-        let result = match result {
-            Ok(()) => "accepted".into(),
-            Err(error) => error.to_string(),
-        };
+        let result = status.result_text();
         let level = if status.result.as_ref().unwrap().is_ok() {
             log::Level::Info
         } else {
@@ -263,12 +260,11 @@ impl CommandOperation {
         };
         log::log!(
             level,
-            "Xiaomi command result op={} did={} channel={} property={}.{} target={:?} path={} result={}",
+            "Xiaomi command result op={} did={} channel={} property={} target={} path={} result={}",
             status.id,
             self.did,
             self.channel,
-            status.binding.siid,
-            status.binding.piid,
+            status.properties_text(),
             status.target,
             path,
             result
