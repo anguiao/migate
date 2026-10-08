@@ -12,6 +12,7 @@ pub(super) struct RuntimeState {
     pub(super) lighting: Option<super::LightSnapshot>,
     pub(super) revision: u64,
     pub(super) queue: Queue,
+    pub(super) light_commands: Option<super::light_command::LightCoordinator>,
 }
 struct PhysicalState {
     availability: Availability,
@@ -28,6 +29,7 @@ pub(super) struct Inner {
     pub(super) state: Mutex<RuntimeState>,
     changed: Event,
     pub(super) submitted: Event,
+    pub(super) light_changed: Event,
 }
 
 /// A channel's shared state and command boundary for every protocol adapter.
@@ -114,7 +116,13 @@ impl PhysicalDevice {
         self.inner.changed.notify(usize::MAX);
         if let Err(error) = result {
             for function in self.functions.iter() {
-                let completions = function.0.state.lock().unwrap().queue.drain_pending();
+                let mut state = function.0.state.lock().unwrap();
+                if let Some(coordinator) = state.light_commands.as_mut() {
+                    coordinator.cancel_all(error.clone());
+                    state.queue.invalidate_light_power(error.clone());
+                    function.notify_light_actions();
+                }
+                let completions = state.queue.drain_pending();
                 for completion in completions {
                     completion.finish(Err(error.clone()));
                 }
@@ -163,9 +171,11 @@ impl Function {
                 lighting,
                 revision: 0,
                 queue: Queue::default(),
+                light_commands: lighting.map(|_| super::light_command::LightCoordinator::new()),
             }),
             changed: Event::new(),
             submitted: Event::new(),
+            light_changed: Event::new(),
         }));
         let receiver = CommandReceiver {
             function: function.clone(),
@@ -261,7 +271,17 @@ impl Function {
     pub(super) fn close(&self) {
         let mut state = self.0.state.lock().unwrap();
         state.queue.closed = true;
-        for completion in state.queue.drain_completions() {
+        let completions = if let Some(coordinator) = state.light_commands.as_mut() {
+            coordinator.cancel_all(super::CommandError::Cancelled);
+            state
+                .queue
+                .invalidate_light_power(super::CommandError::Cancelled);
+            self.notify_light_actions();
+            state.queue.drain_pending()
+        } else {
+            state.queue.drain_completions()
+        };
+        for completion in completions {
             completion.finish(Err(super::CommandError::Cancelled));
         }
         self.0.submitted.notify(usize::MAX);

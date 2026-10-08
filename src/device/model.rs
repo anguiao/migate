@@ -97,18 +97,22 @@ pub enum CommandError {
     Rejected(String),
     SendFailed(String),
     Cancelled,
+    Superseded,
+    Stopped,
 }
 
 impl fmt::Display for CommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unsupported => formatter.write_str("device does not support on/off commands"),
+            Self::Unsupported => formatter.write_str("device does not support this command"),
             Self::Unavailable(reason) => write!(formatter, "device unavailable: {reason}"),
-            Self::UnknownState => formatter.write_str("cannot toggle an unknown power state"),
+            Self::UnknownState => formatter.write_str("required device state is unknown"),
             Self::Timeout => formatter.write_str("command acceptance timed out"),
             Self::Rejected(reason) => write!(formatter, "command rejected: {reason}"),
             Self::SendFailed(reason) => write!(formatter, "command send failed: {reason}"),
             Self::Cancelled => formatter.write_str("command cancelled"),
+            Self::Superseded => formatter.write_str("command superseded"),
+            Self::Stopped => formatter.write_str("action stopped"),
         }
     }
 }

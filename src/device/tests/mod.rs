@@ -378,3 +378,5 @@ fn preserving_acceptance_does_not_restore_a_closed_function() {
 }
 
 mod lighting;
+
+mod light_commands;

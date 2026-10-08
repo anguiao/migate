@@ -1,23 +1,52 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use event_listener::Event;
 
 use super::{
     model::{Capability, Command, CommandError, FunctionSnapshot},
-    state::Function,
+    state::{Function, RuntimeState},
 };
 
 #[derive(Default)]
 pub(super) struct Queue {
-    pending: VecDeque<PendingCommand>,
-    active: Option<Arc<Completion>>,
+    pub(super) pending: VecDeque<PendingCommand>,
+    pub(super) active: Option<Arc<Completion>>,
+    active_power: Option<Arc<PowerFlight>>,
     pub(super) closed: bool,
 }
 
 impl Queue {
+    pub(super) fn invalidate_light_on(&mut self) {
+        self.pending.retain(|pending| {
+            if pending.command == Command::On {
+                pending.completion.finish(Err(CommandError::Superseded));
+                false
+            } else {
+                true
+            }
+        });
+        if self
+            .active_power
+            .as_ref()
+            .is_some_and(|flight| flight.target)
+        {
+            self.invalidate_light_power(CommandError::Superseded);
+        }
+    }
+    pub(super) fn invalidate_light_power(&mut self, error: CommandError) {
+        if let Some(flight) = &self.active_power
+            && !flight.sent.load(Ordering::Relaxed)
+        {
+            *flight.invalid.lock().unwrap() = Some(error.clone());
+            flight.completion.finish(Err(error));
+        }
+    }
     pub(super) fn drain_pending(&mut self) -> Vec<Arc<Completion>> {
         self.pending
             .drain(..)
@@ -46,9 +75,33 @@ impl Function {
                 return Err(CommandError::Cancelled);
             }
             self.snapshot_locked(&state).availability.command_result()?;
+            let (command, order) = if state.light_commands.is_some() {
+                let target = match command {
+                    Command::On => true,
+                    Command::Off => false,
+                    Command::Toggle => state
+                        .power
+                        .value()
+                        .map(|value| !value)
+                        .ok_or(CommandError::UnknownState)?,
+                };
+                let coordinator = state.light_commands.as_mut().unwrap();
+                if !target {
+                    coordinator.cancel_all(CommandError::Superseded);
+                    self.notify_light_actions();
+                }
+                let order = coordinator.next_order();
+                if !target {
+                    state.queue.invalidate_light_on();
+                }
+                (if target { Command::On } else { Command::Off }, order)
+            } else {
+                (command, 0)
+            };
             state.queue.pending.push_back(PendingCommand {
                 command,
                 completion: completion.clone(),
+                order,
             });
         }
         let _submission = Submission {
@@ -75,7 +128,13 @@ impl Completion {
         }
     }
 
-    async fn wait(&self) -> Result<FunctionSnapshot, CommandError> {
+    pub(super) fn result(&self) -> Option<Result<FunctionSnapshot, CommandError>> {
+        self.result.lock().unwrap().clone()
+    }
+    pub(super) fn is_finished(&self) -> bool {
+        self.result.lock().unwrap().is_some()
+    }
+    pub(super) async fn wait(&self) -> Result<FunctionSnapshot, CommandError> {
         loop {
             let listener = self.changed.listen();
             if let Some(result) = self.result.lock().unwrap().clone() {
@@ -86,9 +145,10 @@ impl Completion {
     }
 }
 
-struct PendingCommand {
+pub(super) struct PendingCommand {
     command: Command,
     completion: Arc<Completion>,
+    pub(super) order: u64,
 }
 
 /// A waiting caller owns its place in the queue, until the adapter takes over.
@@ -113,43 +173,72 @@ pub struct CommandReceiver {
 }
 
 impl CommandReceiver {
-    pub async fn next(&mut self) -> Option<CommandRequest> {
+    pub(super) async fn wait_active(&self) {
         let active = self.function.0.state.lock().unwrap().queue.active.clone();
         if let Some(active) = active {
             let _ = active.wait().await;
-            self.function.0.state.lock().unwrap().queue.active = None;
+            let mut state = self.function.0.state.lock().unwrap();
+            if state
+                .queue
+                .active
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &active))
+            {
+                state.queue.active = None;
+                state.queue.active_power = None;
+            }
         }
+    }
+    pub(super) fn take_power(&self, state: &mut RuntimeState) -> Option<CommandRequest> {
+        while let Some(pending) = state.queue.pending.pop_front() {
+            let snapshot = self.function.snapshot_locked(state);
+            let target =
+                snapshot
+                    .availability
+                    .command_result()
+                    .and_then(|()| match pending.command {
+                        Command::On => Ok(true),
+                        Command::Off => Ok(false),
+                        Command::Toggle => snapshot
+                            .power
+                            .value()
+                            .map(|value| !value)
+                            .ok_or(CommandError::UnknownState),
+                    });
+            let target = match target {
+                Ok(target) => target,
+                Err(error) => {
+                    pending.completion.finish(Err(error));
+                    continue;
+                }
+            };
+            let flight = state.light_commands.as_ref().map(|_| {
+                Arc::new(PowerFlight {
+                    target,
+                    completion: pending.completion.clone(),
+                    sent: AtomicBool::new(false),
+                    invalid: Mutex::new(None),
+                })
+            });
+            state.queue.active = Some(pending.completion.clone());
+            state.queue.active_power = flight.clone();
+            return Some(CommandRequest {
+                target,
+                function: self.function.clone(),
+                completion: pending.completion,
+                flight,
+            });
+        }
+        None
+    }
+    pub async fn next(&mut self) -> Option<CommandRequest> {
+        self.wait_active().await;
         loop {
             let listener = self.function.0.submitted.listen();
             {
                 let mut state = self.function.0.state.lock().unwrap();
-                if let Some(pending) = state.queue.pending.pop_front() {
-                    let snapshot = self.function.snapshot_locked(&state);
-                    let target =
-                        snapshot.availability.command_result().and_then(|()| {
-                            match pending.command {
-                                Command::On => Ok(true),
-                                Command::Off => Ok(false),
-                                Command::Toggle => snapshot
-                                    .power
-                                    .value()
-                                    .map(|value| !value)
-                                    .ok_or(CommandError::UnknownState),
-                            }
-                        });
-                    let target = match target {
-                        Ok(target) => target,
-                        Err(error) => {
-                            pending.completion.finish(Err(error));
-                            continue;
-                        }
-                    };
-                    state.queue.active = Some(pending.completion.clone());
-                    return Some(CommandRequest {
-                        target,
-                        function: self.function.clone(),
-                        completion: pending.completion,
-                    });
+                if let Some(request) = self.take_power(&mut state) {
+                    return Some(request);
                 }
                 if state.queue.closed {
                     return None;
@@ -171,9 +260,33 @@ pub struct CommandRequest {
     pub target: bool,
     function: Function,
     completion: Arc<Completion>,
+    flight: Option<Arc<PowerFlight>>,
+}
+struct PowerFlight {
+    target: bool,
+    completion: Arc<Completion>,
+    sent: AtomicBool,
+    invalid: Mutex<Option<CommandError>>,
 }
 
 impl CommandRequest {
+    /// Lighting power writes use the same actual-send guard as numeric frames.
+    /// Outlet request ownership continues to transfer on dequeue.
+    pub fn is_current(&self) -> bool {
+        self.flight.as_ref().is_none_or(|flight| {
+            flight.invalid.lock().unwrap().is_none() && !self.completion.is_finished()
+        })
+    }
+    pub fn mark_sent(&self) -> Result<(), CommandError> {
+        let _state = self.function.0.state.lock().unwrap();
+        if let Some(flight) = &self.flight {
+            if let Some(error) = flight.invalid.lock().unwrap().as_ref() {
+                return Err(error.clone());
+            }
+            flight.sent.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
     pub fn accept(self) -> Result<FunctionSnapshot, CommandError> {
         self.complete(true)
     }
