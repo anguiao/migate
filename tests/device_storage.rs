@@ -25,6 +25,7 @@ fn cached(uid: &str) -> CachedPhysicalDevice {
                     capabilities: vec![Capability::OnOff],
                 },
                 power: PropertyBinding { siid: 12, piid: 9 },
+                lighting: None,
             }],
             refresh_trigger: None,
         },
@@ -243,7 +244,7 @@ fn version_one_storage_upgrades_without_changing_pairing_or_bridge_identity() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
 }
 

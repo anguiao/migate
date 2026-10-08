@@ -2,7 +2,10 @@ use super::{StorageError, Store};
 use crate::{
     device::{Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription},
     xiaomi::{
-        capability::{ParsedDevice, ParsedFunction, PropertyBinding, is_outlet_type},
+        capability::{
+            NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, is_light_type,
+            is_ls2307_type, is_outlet_type,
+        },
         cloud::group_id,
     },
 };
@@ -135,7 +138,7 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
     validate_text(&cached.instance_type)?;
     validate_key(&cached.device.key)?;
     if cached.device.key.source != "xiaomi"
-        || !is_outlet_type(&cached.instance_type)
+        || !(is_outlet_type(&cached.instance_type) || is_light_type(&cached.instance_type))
         || cached.device.functions.is_empty()
     {
         return Err("Stored Xiaomi device description is invalid");
@@ -146,13 +149,71 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
         validate_text(&function.description.id)?;
         if !ids.insert(&function.description.id)
             || !bindings.insert((function.power.siid, function.power.piid))
-            || function.description.category != Category::Outlet
-            || function.description.capabilities != [Capability::OnOff]
+            || !function.description.valid_capabilities()
             || function.power.siid == 0
             || function.power.piid == 0
         {
             return Err("Stored Xiaomi function description is invalid");
         }
+    }
+    if is_light_type(&cached.instance_type) {
+        if cached.device.functions.len() != 1
+            || cached.device.functions[0].description.id != "main"
+            || cached.device.refresh_trigger.is_some()
+        {
+            return Err("Stored Xiaomi light topology is invalid");
+        }
+        let function = &cached.device.functions[0];
+        let Some(lighting) = &function.lighting else {
+            return Err("Stored Xiaomi light bindings are missing");
+        };
+        if function.description.category != Category::Light
+            || !lighting.valid()
+            || function.description.temperature_range() != Some(lighting.temperature.range)
+            || function
+                .description
+                .capabilities
+                .contains(&Capability::ColorRgb)
+                != lighting.color.is_some()
+            || cached.model == "devcea.light.ls2307" && lighting.color.is_none()
+            || lighting.color.is_some() && cached.model != "devcea.light.ls2307"
+        {
+            return Err("Stored Xiaomi light bindings are invalid");
+        }
+        if cached.model == "devcea.light.ls2307" {
+            let color = lighting.color.as_ref().expect("validated color exists");
+            let mode = lighting.mode.as_ref().expect("validated mode exists");
+            if !is_ls2307_type(&cached.instance_type)
+                || function.power != (PropertyBinding { siid: 2, piid: 1 })
+                || lighting.brightness.property != (PropertyBinding { siid: 2, piid: 2 })
+                || lighting.temperature.property != (PropertyBinding { siid: 2, piid: 3 })
+                || color.property != (PropertyBinding { siid: 4, piid: 1 })
+                || color.format != NumericFormat::Uint32
+                || mode.property != (PropertyBinding { siid: 4, piid: 2 })
+                || mode.format != NumericFormat::Uint8
+                || mode.temperature_value != 0
+                || mode.rgb_value != 1
+            {
+                return Err("Stored Xiaomi ls2307 adapter is incompatible");
+            }
+        }
+        for binding in [
+            Some(lighting.brightness.property),
+            Some(lighting.temperature.property),
+            lighting.color.as_ref().map(|color| color.property),
+            lighting.mode.as_ref().map(|mode| mode.property),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !bindings.insert((binding.siid, binding.piid)) {
+                return Err("Stored Xiaomi light bindings overlap");
+            }
+        }
+    } else if cached.device.functions.iter().any(|function| {
+        function.description.category != Category::Outlet || function.lighting.is_some()
+    }) {
+        return Err("Stored Xiaomi outlet description is invalid");
     }
     if let Some(binding) = cached.device.refresh_trigger
         && (binding.siid == 0
@@ -167,24 +228,20 @@ pub(super) fn save_cached(
     connection: &Connection,
     cached: &CachedPhysicalDevice,
 ) -> rusqlite::Result<()> {
-    let functions = cached
-        .device
-        .functions
-        .iter()
-        .map(|function| CachedFunction {
-            id: function.description.id.clone(),
-            label: function.description.label.clone(),
-            siid: function.power.siid,
-            piid: function.power.piid,
-        })
-        .collect::<Vec<_>>();
-    let functions = serde_json::to_string(&functions).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let functions = serde_json::to_string(&cached.device.functions)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let category = match cached.device.functions[0].description.category {
+        Category::Outlet => "outlet",
+        Category::Light => "light",
+    };
+    let capabilities = serde_json::to_string(&cached.device.functions[0].description.capabilities)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let key = &cached.device.key;
     connection.execute(
         "INSERT INTO device_cache (
             uid, source, device_id, home_id, group_id, model, instance_type,
             category, capabilities, functions, refresh_siid, refresh_piid
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'outlet', 'on_off', ?8, ?9, ?10)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?11, ?12, ?8, ?9, ?10)
          ON CONFLICT(uid, home_id, source, device_id) DO UPDATE SET
             group_id=excluded.group_id, model=excluded.model,
             instance_type=excluded.instance_type, category=excluded.category,
@@ -200,12 +257,14 @@ pub(super) fn save_cached(
             cached.instance_type,
             functions,
             cached.device.refresh_trigger.map(|binding| binding.siid),
-            cached.device.refresh_trigger.map(|binding| binding.piid)
+            cached.device.refresh_trigger.map(|binding| binding.piid),
+            category,
+            capabilities
         ],
     )?;
     Ok(())
 }
-fn load_cached(
+pub(super) fn load_cached(
     connection: &Connection,
     uid: &str,
     home_id: &str,
@@ -244,11 +303,18 @@ fn load_cached(
     else {
         return Ok(None);
     };
-    if category != "outlet" || capabilities != "on_off" {
+    let functions: Vec<ParsedFunction> =
+        serde_json::from_str(&functions).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let first = functions.first().ok_or(rusqlite::Error::InvalidQuery)?;
+    let expected_category = match first.description.category {
+        Category::Outlet => "outlet",
+        Category::Light => "light",
+    };
+    let expected_capabilities = serde_json::to_string(&first.description.capabilities)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if category != expected_category || capabilities != expected_capabilities {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let functions: Vec<CachedFunction> =
-        serde_json::from_str(&functions).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let refresh_trigger = match (refresh_siid, refresh_piid) {
         (None, None) => None,
         (Some(siid), Some(piid)) => Some(PropertyBinding { siid, piid }),
@@ -262,24 +328,41 @@ fn load_cached(
         instance_type,
         device: ParsedDevice {
             key: key.clone(),
-            functions: functions
-                .into_iter()
-                .map(|function| ParsedFunction {
-                    description: FunctionDescription {
-                        id: function.id,
-                        label: function.label,
-                        category: Category::Outlet,
-                        capabilities: vec![Capability::OnOff],
-                    },
-                    power: PropertyBinding {
-                        siid: function.siid,
-                        piid: function.piid,
-                    },
-                })
-                .collect(),
+            functions,
             refresh_trigger,
         },
     };
     validate_cached(&cached).map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(Some(cached))
+}
+
+pub(super) fn migrate_functions_v4(functions: &str) -> rusqlite::Result<String> {
+    let functions: Vec<CachedFunction> =
+        serde_json::from_str(functions).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let functions = functions
+        .into_iter()
+        .map(|function| ParsedFunction {
+            description: FunctionDescription {
+                id: function.id,
+                label: function.label,
+                category: Category::Outlet,
+                capabilities: vec![Capability::OnOff],
+            },
+            power: PropertyBinding {
+                siid: function.siid,
+                piid: function.piid,
+            },
+            lighting: None,
+        })
+        .collect::<Vec<_>>();
+    if functions.is_empty()
+        || functions.iter().any(|function| {
+            function.description.id.is_empty()
+                || function.power.siid == 0
+                || function.power.piid == 0
+        })
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    serde_json::to_string(&functions).map_err(|_| rusqlite::Error::InvalidQuery)
 }

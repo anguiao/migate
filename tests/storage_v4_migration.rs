@@ -66,7 +66,7 @@ fn legacy_active_single_device_keeps_endpoint_uuid_and_label_and_other_blobs() {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
                 .unwrap(),
-            4
+            5
         );
     }
 }

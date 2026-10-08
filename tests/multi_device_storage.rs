@@ -42,6 +42,7 @@ fn cached(uid: &str, home: &str) -> CachedPhysicalDevice {
                         capabilities: vec![Capability::OnOff],
                     },
                     power: PropertyBinding { siid, piid: 1 },
+                    lighting: None,
                 })
                 .collect(),
             refresh_trigger: Some(PropertyBinding { siid: 2, piid: 1 }),

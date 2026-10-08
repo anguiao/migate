@@ -2,7 +2,7 @@ use super::identity;
 use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use std::{error::Error as StdError, fmt};
 
-const CURRENT_VERSION: i64 = 4;
+const CURRENT_VERSION: i64 = 5;
 
 pub(super) const SCHEMA: &str = concat!(include_str!("schema.sql"), include_str!("devices-v4.sql"));
 
@@ -57,7 +57,10 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError>
     if version < 3 {
         migrate_v2_to_v3(&transaction)?;
     }
-    migrate_v3_to_v4(&transaction)?;
+    if version < 4 {
+        migrate_v3_to_v4(&transaction)?;
+    }
+    migrate_v4_to_v5(&transaction, version == 4)?;
     transaction.commit()?;
     Ok(())
 }
@@ -168,6 +171,7 @@ fn migrate_v3_to_v4(transaction: &Transaction<'_>) -> Result<(), MigrationError>
                         capabilities: vec![Capability::OnOff],
                     },
                     power: PropertyBinding { siid, piid },
+                    lighting: None,
                 }],
                 refresh_trigger: None,
             },
@@ -302,4 +306,43 @@ fn legacy_default_label(model: &str, id: &str) -> String {
         end -= 1;
     }
     format!("{} ({suffix})", &model[..end])
+}
+
+fn migrate_v4_to_v5(
+    transaction: &Transaction<'_>,
+    legacy_cache: bool,
+) -> Result<(), MigrationError> {
+    let rows = transaction
+        .prepare("SELECT uid, home_id, source, device_id, category, capabilities, functions FROM device_cache")?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if legacy_cache {
+        for (uid, home, source, id, category, capabilities, functions) in &rows {
+            if category != "outlet" || capabilities != "on_off" {
+                return Err(MigrationError::InvalidSchema);
+            }
+            let functions = super::device::migrate_functions_v4(functions)?;
+            transaction.execute(r#"UPDATE device_cache SET functions=?5, capabilities='["on_off"]' WHERE uid=?1 AND home_id=?2 AND source=?3 AND device_id=?4"#, rusqlite::params![uid, home, source, id, functions])?;
+        }
+    }
+    for (uid, home, source, id, _, _, _) in &rows {
+        super::device::load_cached(
+            transaction,
+            uid,
+            home,
+            &crate::device::DeviceKey::new(source, id),
+        )?
+        .ok_or(MigrationError::InvalidSchema)?;
+    }
+    let invalid: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM device_function WHERE category!='outlet' OR capabilities!='on_off')", [], |row| row.get(0))?;
+    if invalid {
+        return Err(MigrationError::InvalidSchema);
+    }
+    transaction.execute_batch(
+        r#"UPDATE device_function SET capabilities='["on_off"]'; PRAGMA user_version=5;"#,
+    )?;
+    Ok(())
 }

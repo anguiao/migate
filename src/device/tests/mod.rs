@@ -376,3 +376,5 @@ fn preserving_acceptance_does_not_restore_a_closed_function() {
         assert_eq!(device.snapshot(), observed);
     });
 }
+
+mod lighting;

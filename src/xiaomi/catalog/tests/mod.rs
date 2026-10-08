@@ -444,3 +444,29 @@ async fn load_local(
     let home = select_local_home(snapshot, homes, &credentials.uid)?;
     load_device(cloud, credentials, &home, &key.id).await
 }
+
+#[test]
+fn light_catalog_uses_cloud_model_for_the_exact_ls2307_color_adapter() {
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/devcea-light-ls2307.json"
+    ))
+    .unwrap();
+    let (base, requests) = mock_server(vec![
+        MockResponse::json(200, &json!({"code":0,"result":{"list":[{"did":"target","model":"devcea.light.ls2307","spec_type":instance["type"],"name":"Bedroom light"}]}}).to_string()),
+        MockResponse::json(200, &instance.to_string()),
+    ]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let (cached, name) = block_on(load_device(
+        &cloud,
+        &credentials(),
+        &home("local", &["target"]),
+        "target",
+    ))
+    .unwrap();
+    assert_eq!(name.as_deref(), Some("Bedroom light"));
+    assert_eq!(cached.device.functions.len(), 1);
+    let lighting = cached.device.functions[0].lighting.as_ref().unwrap();
+    assert_eq!(lighting.color.as_ref().unwrap().property.siid, 4);
+    assert_eq!(lighting.mode.as_ref().unwrap().property.piid, 2);
+    assert_eq!(requests.try_iter().count(), 2);
+}

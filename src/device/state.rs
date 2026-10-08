@@ -9,6 +9,7 @@ use event_listener::Event;
 use std::sync::{Arc, Mutex};
 pub(super) struct RuntimeState {
     pub(super) power: Power,
+    pub(super) lighting: Option<super::LightSnapshot>,
     pub(super) revision: u64,
     pub(super) queue: Queue,
 }
@@ -139,12 +140,27 @@ impl Function {
         physical: Arc<PhysicalInner>,
     ) -> (Self, CommandReceiver) {
         let key = FunctionKey::new(physical_key, description.id.clone());
+        let lighting =
+            (description.category == super::Category::Light).then_some(super::LightSnapshot {
+                brightness_percent: None,
+                temperature_kelvin: None,
+                color: None,
+                mode: if description
+                    .capabilities
+                    .contains(&super::Capability::ColorRgb)
+                {
+                    None
+                } else {
+                    Some(super::LightMode::Temperature)
+                },
+            });
         let function = Self(Arc::new(Inner {
             description,
             key,
             physical,
             state: Mutex::new(RuntimeState {
                 power: Power::Unknown,
+                lighting,
                 revision: 0,
                 queue: Queue::default(),
             }),
@@ -170,6 +186,7 @@ impl Function {
         let physical = self.0.physical.state.lock().unwrap();
         FunctionSnapshot {
             power: state.power,
+            lighting: state.lighting,
             availability: physical.availability.clone(),
             revision: state.revision.wrapping_add(physical.revision),
         }
@@ -185,6 +202,61 @@ impl Function {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
+    }
+    /// Apply one validated function report and publish one shared revision.
+    pub fn observe_light(
+        &self,
+        patch: super::LightPatch,
+    ) -> Result<FunctionSnapshot, super::CommandError> {
+        use super::{Capability, CommandError, LightMode};
+        let description = self.description();
+        if description.category != super::Category::Light {
+            return Err(CommandError::Unsupported);
+        }
+        if let Some(percent) = patch.brightness_percent
+            && (!percent.is_finite() || !(0.0..=100.0).contains(&percent))
+        {
+            return Err(CommandError::Rejected(
+                "brightness is outside 0..100 percent".into(),
+            ));
+        }
+        if patch.temperature_kelvin.is_some_and(|value| {
+            !description
+                .temperature_range()
+                .is_some_and(|range| range.contains(value))
+        }) {
+            return Err(CommandError::Rejected(
+                "color temperature is outside its physical range".into(),
+            ));
+        }
+        if !description.capabilities.contains(&Capability::ColorRgb)
+            && (patch.color.is_some() || patch.mode == Some(LightMode::Rgb))
+        {
+            return Err(CommandError::Unsupported);
+        }
+        let mut state = self.0.state.lock().unwrap();
+        let before = (state.power, state.lighting);
+        if let Some(power) = patch.power {
+            state.power = power.into();
+        }
+        let lighting = state.lighting.as_mut().expect("light has lighting state");
+        if let Some(value) = patch.brightness_percent {
+            lighting.brightness_percent = Some(value);
+        }
+        if let Some(value) = patch.temperature_kelvin {
+            lighting.temperature_kelvin = Some(value);
+        }
+        if let Some(value) = patch.color {
+            lighting.color = Some(value);
+        }
+        if let Some(value) = patch.mode {
+            lighting.mode = Some(value);
+        }
+        if before != (state.power, state.lighting) {
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+        Ok(self.snapshot_locked(&state))
     }
     pub(super) fn close(&self) {
         let mut state = self.0.state.lock().unwrap();

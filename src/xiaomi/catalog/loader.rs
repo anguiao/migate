@@ -4,7 +4,7 @@ use crate::{
     device::DeviceKey,
     storage::{CachedPhysicalDevice, CachedScope, XiaomiRecord},
     xiaomi::{
-        capability::{CapabilityError, parse_device},
+        capability::{CapabilityError, parse_device_for_model},
         cloud::{CloudClient, CloudError, OwnedHome},
         discovery::DiscoverySnapshot,
     },
@@ -98,8 +98,8 @@ pub async fn load_device(
         .get_instance(&details.instance_type)
         .await
         .map_err(CatalogError::Cloud)?;
-    let device =
-        parse_device(DeviceKey::new("xiaomi", did), &instance).map_err(CatalogError::Capability)?;
+    let device = parse_device_for_model(DeviceKey::new("xiaomi", did), &details.model, &instance)
+        .map_err(CatalogError::Capability)?;
     Ok((
         CachedPhysicalDevice {
             uid: home.uid.clone(),

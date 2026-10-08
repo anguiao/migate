@@ -98,7 +98,7 @@ fn every_legacy_version_preserves_all_real_data_and_only_removes_light_identity(
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         for (table, original) in preserved {
             assert_eq!(rows(&db, table), original, "version {version}: {table}");

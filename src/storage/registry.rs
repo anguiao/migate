@@ -84,7 +84,10 @@ impl StoredDevice {
                 functions.iter().any(|function| {
                     stored.key.id == function.id
                         && stored.category == function.category
-                        && stored.capabilities == function.capabilities
+                        && stored.capabilities.len() == function.capabilities.len()
+                        && stored.capabilities.iter().zip(&function.capabilities).all(
+                            |(old, new)| std::mem::discriminant(old) == std::mem::discriminant(new),
+                        )
                 })
             })
     }
@@ -193,6 +196,20 @@ impl DeviceStore {
                         params![description.key.source, description.key.id, record.device.label],
                     )
                     .map_err(|error| self.store.database_error(operation, error))?;
+                for function in &description.functions {
+                    let capabilities =
+                        serde_json::to_string(&function.capabilities).map_err(|_| {
+                            self.invalid(operation, "Device capabilities cannot be encoded")
+                        })?;
+                    connection.execute("UPDATE device_function SET capabilities=?4 WHERE source=?1 AND device_id=?2 AND function_id=?3", params![description.key.source, description.key.id, function.id, capabilities]).map_err(|error| self.store.database_error(operation, error))?;
+                    record
+                        .device
+                        .functions
+                        .iter_mut()
+                        .find(|stored| stored.key.id == function.id)
+                        .expect("compatible function exists")
+                        .capabilities = function.capabilities.clone();
+                }
                 record.device.published = true;
                 Ok(record.device)
             }
@@ -292,8 +309,9 @@ fn validate_description(description: &PhysicalDeviceDescription) -> Result<(), &
     for function in &description.functions {
         validate_text(&function.id)?;
         if !ids.insert(&function.id)
-            || function.category != Category::Outlet
-            || function.capabilities != [Capability::OnOff]
+            || !function.valid_capabilities()
+            || function.category == Category::Light
+                && (description.functions.len() != 1 || function.id != "main")
         {
             return Err("Device function description is invalid");
         }
@@ -338,14 +356,22 @@ fn create_record(
             child
         };
         let label = import_label(&function.label);
+        let category = match function.category {
+            Category::Outlet => "outlet",
+            Category::Light => "light",
+        };
+        let capabilities = serde_json::to_string(&function.capabilities)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
         connection.execute(
-            "INSERT INTO device_function VALUES (?1,?2,?3,?4,?5,'outlet','on_off')",
+            "INSERT INTO device_function VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
                 description.key.source,
                 description.key.id,
                 function.id,
                 endpoint,
-                label
+                label,
+                category,
+                capabilities
             ],
         )?;
         functions.push(StoredFunction {
@@ -417,10 +443,24 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
                 .query_map(params![key.source, key.id], |row| {
                     let id = row.get::<_, String>(0)?;
                     let label = row.get::<_, String>(2)?;
-                    if validate_text(&id).is_err()
-                        || validate_label(&label).is_err()
-                        || row.get::<_, String>(3)? != "outlet"
-                        || row.get::<_, String>(4)? != "on_off"
+                    if validate_text(&id).is_err() || validate_label(&label).is_err() {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    let category = match row.get::<_, String>(3)?.as_str() {
+                        "outlet" => Category::Outlet,
+                        "light" => Category::Light,
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    };
+                    let capabilities: Vec<Capability> =
+                        serde_json::from_str(&row.get::<_, String>(4)?)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    if !(FunctionDescription {
+                        id: id.clone(),
+                        label: label.clone(),
+                        category,
+                        capabilities: capabilities.clone(),
+                    })
+                    .valid_capabilities()
                     {
                         return Err(rusqlite::Error::InvalidQuery);
                     }
@@ -428,8 +468,8 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
                         key: FunctionKey::new(key.clone(), id),
                         endpoint: row.get(1)?,
                         label,
-                        category: Category::Outlet,
-                        capabilities: vec![Capability::OnOff],
+                        category,
+                        capabilities,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()
