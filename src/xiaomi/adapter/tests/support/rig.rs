@@ -3,6 +3,7 @@ use super::*;
 #[derive(Default)]
 pub(in super::super) struct CloudState {
     pub(in super::super) members: Vec<String>,
+    pub(in super::super) names: BTreeMap<String, String>,
     pub(in super::super) status: u16,
     pub(in super::super) home_delay: Duration,
     pub(in super::super) home_gate: Option<flume::Receiver<()>>,
@@ -203,7 +204,7 @@ impl Rig {
                     .all(|did| info_dids.contains(did.as_str().unwrap()))
                 {
                     state.infos += 1;
-                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>(),"has_more":state.info_partial}});
+                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>(),"has_more":state.info_partial}});
                     let mut response = MockResponse::json(state.info_status, &value.to_string());
                     if let Some(gate) = state.info_gate.clone() {
                         response = response.gated(gate);
@@ -220,7 +221,7 @@ impl Rig {
                     }
                     return response;
                 }
-                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>()}})
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
                 let multi = request.target.contains("cuco-cp7pd");
                 let mut value: Value = serde_json::from_str(if multi {

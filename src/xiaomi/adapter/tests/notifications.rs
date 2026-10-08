@@ -600,7 +600,7 @@ fn exhausted_local_preparation_uses_cloud_and_diagnostic_wakes_do_not_restart_it
 }
 
 #[test]
-fn pushless_published_devices_still_read_and_control_while_new_devices_wait_for_push() {
+fn new_and_restored_pushless_devices_read_and_control_without_local_notifications() {
     for restored in [true, false] {
         block_on(Rig::new(restored, &["one"]).run(|c| async move {
             c.announce();
@@ -608,46 +608,35 @@ fn pushless_published_devices_still_read_and_control_while_new_devices_wait_for_
             local.state.borrow_mut().pushless.insert("one".into());
             let control = &c;
             c.peer(local, |local| async move {
-                if restored {
-                    until(|| {
-                        function(&control.context.registry, "one", "main")
-                            .snapshot()
-                            .power
-                            == Power::Off
-                    })
-                    .await;
-                    assert_eq!(local.count("get", "one", 2), 1);
-                    assert_eq!(local.count("subscribe", "one", 2), 0);
-                    function(&control.context.registry, "one", "main")
-                        .execute(Command::On)
-                        .await
-                        .unwrap();
-                    assert_eq!(local.count("rpcReq", "one", 2), 1);
-                    assert!(
-                        !control
-                            .context
-                            .live
-                            .borrow()
-                            .session
-                            .as_ref()
-                            .unwrap()
-                            .devices
-                            .contains_key("one")
-                    );
-                } else {
-                    until(|| {
-                        control
-                            .context
-                            .status
-                            .borrow()
-                            .pending
-                            .iter()
-                            .any(|pending| pending.did == "one" && pending.reason.contains("push"))
-                    })
-                    .await;
-                    assert!(control.context.registry.list().is_empty());
-                    assert_eq!(local.count("get", "one", 2), 0);
-                }
+                until(|| {
+                    control
+                        .context
+                        .registry
+                        .get(&DeviceKey::new("xiaomi", "one"))
+                        .is_some_and(|physical| {
+                            physical.functions()[0].snapshot().power == Power::Off
+                        })
+                })
+                .await;
+                assert_eq!(local.count("get", "one", 2), 1);
+                assert_eq!(local.count("subscribe", "one", 2), 0);
+                function(&control.context.registry, "one", "main")
+                    .execute(Command::On)
+                    .await
+                    .unwrap();
+                assert_eq!(local.count("rpcReq", "one", 2), 1);
+                assert!(control.context.local_candidate("one", true).is_none());
+                assert!(
+                    !control
+                        .context
+                        .live
+                        .borrow()
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .devices
+                        .contains_key("one")
+                );
             })
             .await;
         }));

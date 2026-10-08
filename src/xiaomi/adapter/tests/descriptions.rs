@@ -36,7 +36,7 @@ fn replacing_a_binding_clears_its_previous_subscription_failure() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some(replacement);
+                .candidate = Some((replacement, None));
             control.context.reconcile("one").unwrap();
             assert!(
                 control
@@ -111,7 +111,7 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some(changed);
+                .candidate = Some((changed, None));
             control.context.reconcile("one").unwrap();
             until(|| {
                 peer.count("subscribe", "one", 7) == 1
@@ -191,7 +191,7 @@ fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_desc
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some(incompatible);
+                .candidate = Some((incompatible, None));
             control.context.reconcile("multi").unwrap();
             let physical = control
                 .context
@@ -242,7 +242,7 @@ fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_desc
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some(original);
+                .candidate = Some((original, None));
             control.context.reconcile("multi").unwrap();
             initialized(control, &peer, &["one", "multi"]).await;
         })

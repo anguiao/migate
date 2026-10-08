@@ -5,7 +5,7 @@ use super::{
 use crate::{
     device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
     storage::{AdmissionError, CachedPhysicalDevice},
-    xiaomi::central::{DeviceAccess, DeviceEntry},
+    xiaomi::central::DeviceEntry,
 };
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 impl Context {
@@ -69,59 +69,30 @@ impl Context {
         Ok(())
     }
     pub(super) fn reconcile(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
-        let (access, cached, admitted) = {
+        let (candidate, admitted) = {
             let live = self.live.borrow();
             let slot = &live.devices[did];
-            (
-                slot.access.clone(),
-                slot.candidate.clone().or_else(|| {
-                    slot.admitted
-                        .as_ref()
-                        .map(|record| record.cached.borrow().clone())
-                }),
-                slot.admitted.clone(),
-            )
+            (slot.candidate.clone(), slot.admitted.clone())
         };
-        let access = match access {
-            Some(Ok(access)) => Some(access),
-            _ if admitted.is_some() => None,
-            Some(Err(error)) => {
-                self.problem(
-                    did,
-                    Some(format!("missing or invalid gateway information: {error}")),
-                );
-                return Ok(());
-            }
-            None => {
-                self.problem(did, Some("waiting for gateway device information".into()));
-                return Ok(());
-            }
-        };
-        let Some(cached) = cached else {
-            self.problem(
-                did,
-                Some("waiting for a complete device description".into()),
-            );
-            return Ok(());
-        };
-        if admitted.is_none()
-            && let Some(reason) = access
+        let Some((cached, name)) = candidate.or_else(|| {
+            admitted
                 .as_ref()
-                .and_then(|access| access_problem(access, &cached))
-        {
-            self.unavailable_device(did, reason.clone());
+                .map(|record| (record.cached.borrow().clone(), None))
+        }) else {
+            let reason = self.live.borrow().devices[did]
+                .blocked
+                .clone()
+                .unwrap_or_else(|| "waiting for a complete device description".into());
             self.problem(did, Some(reason));
             return Ok(());
-        }
+        };
         if let Some(record) = admitted {
             if *record.cached.borrow() != cached {
-                match self.store.devices().publish_cached(
-                    &cached,
-                    access
-                        .as_ref()
-                        .and_then(|access| access.name.as_deref())
-                        .unwrap_or(did),
-                ) {
+                match self
+                    .store
+                    .devices()
+                    .publish_cached(&cached, &record.physical.label())
+                {
                     Ok(_) => {
                         let bindings = |device: &CachedPhysicalDevice| {
                             device
@@ -158,10 +129,7 @@ impl Context {
                 }
             }
         } else {
-            let label = access
-                .as_ref()
-                .unwrap()
-                .name
+            let label = name
                 .as_deref()
                 .map(crate::storage::import_label)
                 .unwrap_or_else(|| crate::runtime::default_device_label(&cached.model, did));
@@ -276,14 +244,5 @@ impl Context {
         }
         self.changed.notify(usize::MAX);
         Ok(())
-    }
-}
-fn access_problem(access: &DeviceAccess, cached: &CachedPhysicalDevice) -> Option<String> {
-    if access.model != cached.model || access.instance_type != cached.instance_type {
-        Some("local and cloud device descriptions differ".into())
-    } else if !access.spec_v2_access || !access.push_available {
-        Some("device lacks property or push access".into())
-    } else {
-        None
     }
 }

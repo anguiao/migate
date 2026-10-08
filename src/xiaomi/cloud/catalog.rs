@@ -26,6 +26,7 @@ pub struct OwnedHomes {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CloudDevice {
     pub did: String,
+    pub name: Option<String>,
     pub model: String,
     pub instance_type: String,
 }
@@ -100,6 +101,13 @@ struct DeviceDescription {
     model: String,
     #[serde(deserialize_with = "description")]
     spec_type: String,
+}
+
+#[derive(Deserialize)]
+struct DeviceDetails {
+    #[serde(flatten)]
+    description: DeviceDescription,
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -317,13 +325,16 @@ impl CloudClient {
                 .await?;
             for record in result.list {
                 if record.did == did {
-                    let details: DeviceDescription =
+                    let details: DeviceDetails =
                         serde_json::from_value(Value::Object(record.details))
                             .map_err(|_| CloudError::protocol(operation))?;
                     found = Some(CloudDevice {
                         did: record.did,
-                        model: details.model,
-                        instance_type: details.spec_type,
+                        name: details.name.filter(|name| {
+                            !name.trim().is_empty() && !name.chars().any(char::is_control)
+                        }),
+                        model: details.description.model,
+                        instance_type: details.description.spec_type,
                     });
                 }
             }

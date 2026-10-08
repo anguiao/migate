@@ -171,7 +171,7 @@ fn a_compatible_description_reorder_preserves_a_held_write_and_its_consumer() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some(reordered);
+                .candidate = Some((reordered, None));
             control.context.reconcile("multi").unwrap();
             assert_eq!(work.record.binding_generation.get(), generation);
             assert!(Rc::ptr_eq(&work, &device_work(control, "multi")));
@@ -274,7 +274,7 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
                     .devices
                     .get_mut("multi")
                     .unwrap()
-                    .candidate = Some(candidate);
+                    .candidate = Some((candidate, None));
                 control.context.reconcile("multi").unwrap();
             }
             assert_eq!(work.record.binding_generation.get(), generation + 2);

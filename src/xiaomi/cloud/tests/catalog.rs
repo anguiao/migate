@@ -162,7 +162,7 @@ fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
         json!({"info":[{"id":"local","dids":["first"],"roomlist":[{"dids":["target"]}]},{"id":"remote","dids":["remote-extra"]}],"has_more":true,"max_id":"cursor-2"}),
         json!({"info":[{"id":"local","dids":null,"roomlist":null}],"has_more":false}),
         json!({"list":[{"did":"irrelevant","name":"private name"}],"has_more":true,"next_start_did":"device-cursor"}),
-        json!({"list":[{"did":"target","model":"vendor.plug","spec_type":"instance-type","name":"private name"}],"has_more":false}),
+        json!({"list":[{"did":"target","model":"vendor.plug","spec_type":"instance-type","name":"Target outlet"}],"has_more":false}),
     ];
     let (base, requests) = mock_server(
         responses
@@ -190,6 +190,7 @@ fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
     assert_eq!(device.did, "target");
     assert_eq!(device.model, "vendor.plug");
     assert_eq!(device.instance_type, "instance-type");
+    assert_eq!(device.name.as_deref(), Some("Target outlet"));
     assert!(!format!("{catalog:?} {device:?}").contains("private name"));
     let captured = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(captured.len(), 5);
@@ -279,6 +280,7 @@ fn device_pages_reject_missing_fields_and_repeated_cursors() {
         json!({}),
         json!({"list":{}}),
         json!({"list":[{"did":"target","model":"model"}]}),
+        json!({"list":[{"did":"target","model":"model","spec_type":"instance-type","name":17}]}),
         json!({"list":[{"did":"other"}],"has_more":true}),
     ] {
         let (base, _) = mock_server(vec![MockResponse::json(
@@ -368,11 +370,34 @@ fn device_lookup_reads_past_empty_and_overlapping_pages_without_broadening_dids(
         .unwrap()
         .unwrap();
     assert_eq!(device.did, "target");
+    assert_eq!(device.name, None);
     let requests = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(requests.len(), 4);
     for request in requests {
         let body: Value = serde_json::from_str(&request.body).unwrap();
         assert_eq!(body["dids"], json!(["target"]));
+    }
+}
+
+#[test]
+fn device_lookup_leaves_missing_or_unusable_names_unset() {
+    let home = OwnedHome {
+        uid: "account".into(),
+        home_id: "home".into(),
+        group_id: group_id("account", "home"),
+        dids: vec!["target".into()],
+    };
+    for name in [Value::Null, json!(""), json!("  "), json!("Outlet\n")] {
+        let result = json!({"list":[{"did":"target","model":"vendor.plug","spec_type":"instance-type","name":name}]});
+        let (base, _) = mock_server(vec![MockResponse::json(
+            200,
+            &json!({"code":0,"result":result}).to_string(),
+        )]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let device = future::block_on(cloud.get_device("token", &home, "target"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(device.name, None);
     }
 }
 

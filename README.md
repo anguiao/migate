@@ -2,7 +2,7 @@
 
 MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（Xiaomi/MIoT）设备映射为标准 Matter 设备，接入 Apple Home 等生态。
 
-当前在 macOS / Apple Silicon 本机前台运行，通过局域网小米主中枢接入当前米家自有家庭的受支持插座，本地路径故障时可通过云端恢复已有设备的控制与状态同步。支持 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3` 的单路主电源，以及 `cuco.plug.cp7pd` 的开关 1、开关 2、USB 三路独立控制，不设置当前样本数量上限。
+当前在 macOS / Apple Silicon 本机前台运行，首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持插座，并按本地优先选择控制与通知路径。支持 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3` 的单路主电源，以及 `cuco.plug.cp7pd` 的开关 1、开关 2、USB 三路独立控制，不设置当前样本数量上限。
 
 提供基础开关、主动通知、统一选路、断线恢复、运行中自动加入和删除、定向终端控制，以及持久化身份、名称和配对。中国大陆服务区的 OAuth 令牌与本地客户端证书独立维护；用 `status` 查看控制路径、通知来源及恢复进度。已准备账号可以先运行空网桥，再等待设备接入。云端可能仍依赖物理网关，具体边界见已知限制。
 

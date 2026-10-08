@@ -75,13 +75,14 @@ pub fn current_home(homes: &[OwnedHome], scope: &CachedScope) -> Result<OwnedHom
         .ok_or(CatalogError::NoLocalHome)
 }
 
-/// Load one member of the selected home. Persistence and availability belong to the adapter.
+/// Load a selected home's member description and optional cloud name.
+/// Persistence and availability belong to the adapter.
 pub async fn load_device(
     cloud: &CloudClient,
     credentials: &XiaomiRecord,
     home: &OwnedHome,
     did: &str,
-) -> Result<CachedPhysicalDevice, CatalogError> {
+) -> Result<(CachedPhysicalDevice, Option<String>), CatalogError> {
     if home.uid != credentials.uid {
         return Err(CatalogError::InvalidScope);
     }
@@ -99,12 +100,15 @@ pub async fn load_device(
         .map_err(CatalogError::Cloud)?;
     let device =
         parse_device(DeviceKey::new("xiaomi", did), &instance).map_err(CatalogError::Capability)?;
-    Ok(CachedPhysicalDevice {
-        uid: home.uid.clone(),
-        home_id: home.home_id.clone(),
-        group_id: home.group_id.clone(),
-        model: details.model,
-        instance_type: details.instance_type,
-        device,
-    })
+    Ok((
+        CachedPhysicalDevice {
+            uid: home.uid.clone(),
+            home_id: home.home_id.clone(),
+            group_id: home.group_id.clone(),
+            model: details.model,
+            instance_type: details.instance_type,
+            device,
+        },
+        details.name,
+    ))
 }

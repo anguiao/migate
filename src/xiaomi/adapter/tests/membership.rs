@@ -1,38 +1,195 @@
 use super::*;
 
 #[test]
-fn a_bad_candidate_remains_pending_without_blocking_good_devices() {
-    block_on(Rig::new(false, &["one", "multi"]).run(|c| async move {
+fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
+    for missing_push in [false, true] {
+        let rig = Rig::new(false, &["one", "multi"]);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.online.insert("multi".into());
+            cloud.names.insert("multi".into(), "Cloud strip".into());
+        }
+        block_on(rig.run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            {
+                let mut state = peer.state.borrow_mut();
+                state
+                    .names
+                    .insert("multi".into(), "Stale local name".into());
+                if missing_push {
+                    state.pushless.insert("multi".into());
+                } else {
+                    state.bad.insert("multi".into());
+                }
+            }
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                initialized(control, &peer, &["one"]).await;
+                until(|| control.context.cloud_candidate("multi", true)).await;
+                let strip = control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "multi"))
+                    .unwrap();
+                assert_eq!(strip.functions().len(), 3);
+                assert_eq!(strip.description().label, "Cloud strip");
+                assert_eq!(
+                    control.context.local_candidate("multi", false).is_some(),
+                    missing_push
+                );
+                assert!(control.context.local_candidate("multi", true).is_none());
+                function(&control.context.registry, "multi", "usb")
+                    .execute(Command::On)
+                    .await
+                    .unwrap();
+                let writes = control.cloud.lock().unwrap().property_writes.clone();
+                if missing_push {
+                    assert!(writes.is_empty());
+                    assert_eq!(peer.count("rpcReq", "multi", 9), 1);
+                } else {
+                    assert_eq!(writes.len(), 1);
+                    assert_eq!(
+                        (&*writes[0].0, writes[0].1, writes[0].2, writes[0].3),
+                        ("multi", 9, 1, true)
+                    );
+                    assert_eq!(peer.count("rpcReq", "multi", 0), 0);
+                }
+                assert_eq!(peer.count("subscribe", "multi", 0), 0);
+                {
+                    let mut state = peer.state.borrow_mut();
+                    state.bad.clear();
+                    state.pushless.clear();
+                }
+                peer.list_changed(&["multi"]);
+                initialized(control, &peer, &["one", "multi"]).await;
+                function(&control.context.registry, "multi", "usb")
+                    .execute(Command::Off)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    peer.count("rpcReq", "multi", 9),
+                    1 + usize::from(missing_push)
+                );
+                assert_eq!(
+                    control.cloud.lock().unwrap().property_writes.len(),
+                    writes.len()
+                );
+                assert_eq!(strip.description().label, "Cloud strip");
+            })
+            .await;
+        }));
+    }
+}
+
+#[test]
+fn a_stale_local_model_does_not_block_cloud_admission_or_commands() {
+    let rig = Rig::new(false, &["multi"]);
+    rig.cloud.lock().unwrap().online.insert("multi".into());
+    block_on(rig.run(|mut c| async move {
+        c.data
+            .iter_mut()
+            .find(|record| record.device.key.id == "multi")
+            .unwrap()
+            .model = "stale.local.model".into();
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.state.borrow_mut().bad.insert("multi".into());
         let control = &c;
-        c.peer(peer, |peer| async move {
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            until(|| {
+                peer.lists() > 0
+                    && control.context.cloud_candidate("multi", true)
+                    && control.context.live.borrow().devices["multi"]
+                        .access
+                        .is_some()
+            })
+            .await;
+            assert!(control.context.local_candidate("multi", false).is_none());
+            function(&control.context.registry, "multi", "usb")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert_eq!(control.cloud.lock().unwrap().property_writes.len(), 1);
+            assert_eq!(peer.count("rpcReq", "multi", 0), 0);
+            assert_eq!(peer.count("subscribe", "multi", 0), 0);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn supported_descriptions_and_selected_home_membership_remain_required() {
+    let rig = Rig::new(false, &["one", "multi"]);
+    rig.cloud.lock().unwrap().unsupported.insert("multi".into());
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one"]).await;
             until(|| {
+                control.context.live.borrow().devices["multi"]
+                    .blocked
+                    .is_some()
+            })
+            .await;
+            control.context.reconcile("multi").unwrap();
+            assert!(
                 control
                     .context
                     .status
                     .borrow()
                     .pending
                     .iter()
-                    .any(|pending| pending.did == "multi")
-            })
-            .await;
-            assert_eq!(control.context.registry.list().len(), 1);
-            assert!(
-                control
-                    .store
-                    .devices()
-                    .load_published(&DeviceKey::new("xiaomi", "multi"))
-                    .unwrap()
-                    .is_none()
+                    .any(|pending| {
+                        pending.did == "multi" && pending.reason.contains("missing")
+                    })
             );
-            peer.state.borrow_mut().bad.clear();
+            assert_eq!(control.context.registry.list().len(), 1);
+            for did in ["multi", "two"] {
+                assert!(
+                    control
+                        .store
+                        .devices()
+                        .load_published(&DeviceKey::new("xiaomi", did))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            control.cloud.lock().unwrap().unsupported.clear();
             peer.list_changed(&["multi"]);
             initialized(control, &peer, &["one", "multi"]).await;
+            assert!(
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "two"))
+                    .is_none()
+            );
         })
         .await;
+    }));
+}
+
+#[test]
+fn cloud_members_wait_for_local_discovery_to_select_the_first_home() {
+    let rig = Rig::new(false, &["one"]);
+    rig.cloud.lock().unwrap().online.insert("one".into());
+    block_on(rig.run(|c| async move {
+        until(|| c.context.status.borrow().catalog_problem.is_some()).await;
+        assert!(c.context.live.borrow().scope.is_none());
+        assert!(c.context.registry.list().is_empty());
+        assert_eq!(c.cloud.lock().unwrap().details, 0);
+        c.announce();
+        until(|| {
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "one"))
+                .is_some()
+        })
+        .await;
+        assert_eq!(
+            c.context.live.borrow().scope.as_ref().unwrap().home_id,
+            "local"
+        );
     }));
 }
 
@@ -329,17 +486,20 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
 fn a_complete_cloud_snapshot_remains_valid_across_a_local_reconnect() {
     let rig = Rig::new(true, &["one", "multi"]);
     let (release, gate) = flume::unbounded();
-    {
-        let mut cloud = rig.cloud.lock().unwrap();
-        cloud.members = vec!["multi".into()];
-        cloud.home_gate = Some(gate);
-    }
     block_on(rig.run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one", "multi"]).await;
-            until(|| control.cloud.lock().unwrap().homes == 1).await;
+            until(|| control.context.cloud_scope_valid.get()).await;
+            let homes = {
+                let mut cloud = control.cloud.lock().unwrap();
+                cloud.members = vec!["multi".into()];
+                cloud.home_gate = Some(gate);
+                cloud.homes
+            };
+            control.context.request_sync();
+            until(|| control.cloud.lock().unwrap().homes > homes).await;
         })
         .await;
         until(|| {

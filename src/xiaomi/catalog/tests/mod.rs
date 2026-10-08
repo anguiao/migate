@@ -66,7 +66,7 @@ fn instance() -> Value {
 }
 
 fn detail(instance: &Value) -> MockResponse {
-    MockResponse::json(200, &json!({"code":0,"result":{"list":[{"did":"target","model":"vendor.plug","spec_type":instance["type"],"name":"not retained"}]}}).to_string())
+    MockResponse::json(200, &json!({"code":0,"result":{"list":[{"did":"target","model":"vendor.plug","spec_type":instance["type"],"name":"Cloud outlet"}]}}).to_string())
 }
 
 #[test]
@@ -156,11 +156,11 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
     let records = block_on(async {
         let mut records = Vec::new();
         for did in &selected.dids {
-            records.push(
-                load_device(&cloud, &credentials(), &selected, did)
-                    .await
-                    .unwrap(),
-            );
+            let (record, name) = load_device(&cloud, &credentials(), &selected, did)
+                .await
+                .unwrap();
+            assert_eq!(name, None);
+            records.push(record);
         }
         records
     });
@@ -275,7 +275,7 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
         home("local", &["target"]),
         home("local-other", &["different"]),
     ];
-    let cached = block_on(load_local(
+    let (cached, name) = block_on(load_local(
         &snapshot(),
         &homes,
         &credentials(),
@@ -287,7 +287,7 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
     assert_eq!(cached.group_id, group_id("account", "local"));
     assert_eq!(cached.device.functions[0].power.siid, 2);
     assert_eq!(cached.device.functions[0].power.piid, 1);
-    assert!(!format!("{cached:?}").contains("not retained"));
+    assert_eq!(name.as_deref(), Some("Cloud outlet"));
     let captured = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(captured.len(), 3);
     for request in &captured[..2] {
@@ -440,7 +440,7 @@ async fn load_local(
     credentials: &XiaomiRecord,
     key: &DeviceKey,
     cloud: &CloudClient,
-) -> Result<crate::storage::CachedPhysicalDevice, CatalogError> {
+) -> Result<(crate::storage::CachedPhysicalDevice, Option<String>), CatalogError> {
     let home = select_local_home(snapshot, homes, &credentials.uid)?;
     load_device(cloud, credentials, &home, &key.id).await
 }

@@ -263,12 +263,12 @@ pub(super) async fn run(
                     .unwrap()
                     .loading = None;
                 match result {
-                    Ok(cached) => {
+                    Ok(candidate) => {
                         {
                             let mut live = current.live.borrow_mut();
                             let slot = live.devices.get_mut(&did).unwrap();
                             slot.blocked = None;
-                            slot.candidate = Some(cached);
+                            slot.candidate = Some(candidate);
                         }
                         current.reconcile(&did)?;
                         current.request_sync();

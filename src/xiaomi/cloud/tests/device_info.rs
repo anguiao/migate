@@ -22,8 +22,10 @@ fn home_device_info_skips_empty_members_without_http() {
 
 #[test]
 fn home_device_info_paginates_with_scoped_requests_and_explicit_online_state() {
+    let mut first = device("first", true);
+    first["name"] = json!(17);
     let responses = [
-        json!({"list":[device("first", true), {"did":"foreign","model":null,"isOnline":"private"}],"has_more":true,"next_start_did":"one"}),
+        json!({"list":[first, {"did":"foreign","model":null,"isOnline":"private"}],"has_more":true,"next_start_did":"one"}),
         json!({"list":[],"has_more":true,"next_start_did":"two"}),
         json!({"list":[device("second", false)],"has_more":false}),
     ];

@@ -126,7 +126,7 @@ fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_va
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some(changed);
+                .candidate = Some((changed, None));
             control.context.reconcile("one").unwrap();
             until(|| peer.count("get", "one", 7) == 1).await;
             peer.release("one", 2, accepted("one", 2, 0)).await;
@@ -195,7 +195,7 @@ fn restored_and_updated_description_order_cannot_cross_wire_channel_commands() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some(reordered);
+                .candidate = Some((reordered, None));
             control.context.reconcile("multi").unwrap();
             for (id, siid) in [("outlet_1", 3), ("outlet_2", 4), ("usb", 9)] {
                 physical

@@ -71,7 +71,7 @@ impl DeviceRecord {
 #[derive(Default)]
 pub(super) struct DeviceSlot {
     /// A description awaiting admission; accepted descriptions live only in the record.
-    pub(super) candidate: Option<CachedPhysicalDevice>,
+    pub(super) candidate: Option<(CachedPhysicalDevice, Option<String>)>,
     pub(super) admitted: Option<Rc<DeviceRecord>>,
     pub(super) work: Option<Rc<DeviceWork>>,
     pub(super) cloud_access: Option<CloudDeviceInfo>,
@@ -98,19 +98,16 @@ impl DeviceSlot {
             return false;
         }
         let differs = |cached: &CachedPhysicalDevice| {
-            self.access
-                .as_ref()
-                .and_then(|access| access.as_ref().ok())
-                .is_some_and(|access| {
-                    access.model != cached.model || access.instance_type != cached.instance_type
-                })
-                || self.cloud_access.as_ref().is_some_and(|access| {
-                    access.model != cached.model || access.instance_type != cached.instance_type
-                })
+            self.cloud_access.as_ref().is_some_and(|access| {
+                access.model != cached.model || access.instance_type != cached.instance_type
+            })
         };
         match &self.admitted {
             Some(record) => self.blocked.is_some() || differs(&record.cached.borrow()),
-            None => self.candidate.as_ref().is_none_or(differs),
+            None => self
+                .candidate
+                .as_ref()
+                .is_none_or(|(cached, _)| differs(cached)),
         }
     }
 }

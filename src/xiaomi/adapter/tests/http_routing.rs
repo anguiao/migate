@@ -181,54 +181,70 @@ fn concurrent_http_token_rejections_merge_refresh_and_never_replay_failed_writes
 }
 
 #[test]
-fn cloud_only_members_cannot_publish_new_or_deleted_devices() {
+fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_name() {
     let rig = Rig::new(true, &["one"]);
     {
         let mut cloud = rig.cloud.lock().unwrap();
-        cloud.members = vec!["one".into(), "two".into()];
-        cloud.online.extend(["one".into(), "two".into()]);
+        cloud.members.push("multi".into());
+        cloud.names.insert("multi".into(), "Cloud strip".into());
     }
     block_on(rig.run(|c| async move {
-        cloud_ready(&c, &["one"]).await;
-        until(|| {
-            c.context
-                .live
-                .borrow()
-                .devices
-                .get("two")
-                .is_some_and(|slot| slot.candidate.is_some())
-        })
-        .await;
-        assert!(
-            c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "two"))
-                .is_none()
-        );
-        assert!(
-            c.store
-                .devices()
-                .load_published(&DeviceKey::new("xiaomi", "two"))
-                .unwrap()
-                .is_none()
-        );
-        c.context.remove("one").unwrap();
+        let key = DeviceKey::new("xiaomi", "multi");
+        until(|| c.context.registry.get(&key).is_some()).await;
+        assert!(c.context.live.borrow().session.is_none());
+        let physical = c.context.registry.get(&key).unwrap();
+        assert_eq!(physical.description().label, "Cloud strip");
+        assert_eq!(physical.functions().len(), 3);
+        for function in physical.functions() {
+            assert_eq!(function.snapshot().power, Power::Unknown);
+            assert!(matches!(
+                function.snapshot().availability,
+                Availability::Unavailable(_)
+            ));
+        }
+        let usb = function(&c.context.registry, "multi", "usb");
+        assert!(matches!(
+            usb.execute(Command::On).await,
+            Err(crate::device::CommandError::Unavailable(_))
+        ));
+        assert!(c.cloud.lock().unwrap().property_writes.is_empty());
+        assert!(c.cloud.lock().unwrap().property_reads.is_empty());
+        c.cloud.lock().unwrap().online.insert("multi".into());
         c.context.request_sync();
-        until(|| {
-            c.context
-                .live
-                .borrow()
-                .devices
-                .get("one")
-                .is_some_and(|slot| slot.candidate.is_some())
-        })
-        .await;
-        assert!(
-            c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
-                .is_none()
+        until(|| usb.snapshot().availability == Availability::Available).await;
+        usb.execute(Command::On).await.unwrap();
+        assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+        c.store
+            .devices()
+            .set_device_label(&key, "Controller saved strip")
+            .unwrap();
+        let before = c.store.devices().load_published(&key).unwrap().unwrap();
+        c.cloud.lock().unwrap().members = vec!["one".into()];
+        c.context.request_sync();
+        until(|| c.context.registry.get(&key).is_none()).await;
+        assert!(c.store.devices().load_published(&key).unwrap().is_none());
+        assert_eq!(
+            usb.execute(Command::On).await,
+            Err(crate::device::CommandError::Cancelled)
         );
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.members.push("multi".into());
+            cloud.names.insert("multi".into(), "New cloud name".into());
+        }
+        c.context.request_sync();
+        until(|| c.context.registry.get(&key).is_some()).await;
+        let after = c.store.devices().load_published(&key).unwrap().unwrap();
+        assert_eq!(after.unique_id, before.unique_id);
+        assert_eq!(after.endpoint, before.endpoint);
+        assert_eq!(after.functions, before.functions);
+        assert_eq!(after.label, "Controller saved strip");
+        assert_eq!(
+            c.context.registry.get(&key).unwrap().description().label,
+            "Controller saved strip"
+        );
+        assert!(c.context.live.borrow().session.is_none());
+        assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
     }));
 }
 
@@ -416,7 +432,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
                 let mut live = c.context.live.borrow_mut();
                 let slot = live.devices.get_mut("one").unwrap();
                 slot.cloud_access.as_mut().unwrap().instance_type = changed.instance_type.clone();
-                slot.candidate = Some(changed);
+                slot.candidate = Some((changed, None));
             }
             {
                 let mut cloud = c.cloud.lock().unwrap();
