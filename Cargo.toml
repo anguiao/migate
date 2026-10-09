@@ -28,7 +28,7 @@ mdns-sd = "0.21.3"
 bytes = "1"
 async-io = "2"
 rand = "0.10"
-rs-matter = { version = "0.4.1", features = ["astro-dnssd", "groups", "persistent-subscriptions"] }
+rs-matter = { version = "=0.4.1", features = ["astro-dnssd", "groups", "persistent-subscriptions"] }
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 log = "0.4"
 blocking = "1"
@@ -42,6 +42,9 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 sha2 = "0.11"
 tempfile = "3"
 x509-parser = { version = "0.18", features = ["verify"] }
+
+[patch.crates-io]
+rs-matter = { git = "https://github.com/anguiao/rs-matter.git", rev = "e29f03cd8dde4559de137c6634585a3db16e0dff" }
 
 [profile.dev]
 debug = "line-tables-only"

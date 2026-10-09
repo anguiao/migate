@@ -2323,8 +2323,7 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c446621e934ed3b3e784cd2fd97ab7c3deb50758c8f3d1b5829c0acd245ad78"
+source = "git+https://github.com/anguiao/rs-matter.git?rev=e29f03cd8dde4559de137c6634585a3db16e0dff#e29f03cd8dde4559de137c6634585a3db16e0dff"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -2382,8 +2381,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c942ec89ad2cc6dcd5fe224e1ee879e2b2d09aca97d54f8e505db5ef03ed42c"
+source = "git+https://github.com/anguiao/rs-matter.git?rev=e29f03cd8dde4559de137c6634585a3db16e0dff#e29f03cd8dde4559de137c6634585a3db16e0dff"
 dependencies = [
  "convert_case",
  "miette",
@@ -2402,8 +2400,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0926370a531f423f8e887d84d7562d2b03727070583b5c80984d68e58a3bd961"
+source = "git+https://github.com/anguiao/rs-matter.git?rev=e29f03cd8dde4559de137c6634585a3db16e0dff#e29f03cd8dde4559de137c6634585a3db16e0dff"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
