@@ -110,6 +110,23 @@ fn alive(work: &DeviceWork, generation: u64) -> bool {
         && work.record.binding_generation.get() == generation
 }
 
+fn numeric_feedback_bindings(record: &DeviceRecord, id: &str) -> Vec<PropertyBinding> {
+    let cached = record.cached.borrow();
+    let light = cached
+        .device
+        .functions
+        .iter()
+        .find(|function| function.description.id == id)
+        .unwrap()
+        .lighting
+        .as_ref()
+        .unwrap();
+    // Mode is also an integer, but only continuous values may suppress late reports.
+    let mut bindings = vec![light.brightness.property, light.temperature.property];
+    bindings.extend(light.color.map(|color| color.property));
+    bindings
+}
+
 /// Receipt ownership outlives the consumer and the immutable function instance.
 pub(super) async fn send_owned(
     request: DeviceRequest,
@@ -121,7 +138,9 @@ pub(super) async fn send_owned(
     let complete = completion.clone();
     let owner = context.clone();
     let id = id.to_owned();
-    let gate = context.light_writes.for_device(&record.physical.key().id);
+    let gate = context
+        .light_writes
+        .for_device(&record.physical.key().id, context.clock.clone());
     context.tasks.spawn(async move {
         let _permit = gate.acquire().await;
         let result = send(request, owner, record, &id, gate).await;
@@ -216,6 +235,7 @@ pub(super) async fn send(
             reject(request, error);
             return Ok(());
         };
+        let history_bindings = numeric_feedback_bindings(&record, id);
         match path {
             ControlPath::Local(handle) => {
                 let pending = Rc::new(RefCell::new(Some(request)));
@@ -298,9 +318,13 @@ pub(super) async fn send(
                             return;
                         }
                         let request = result_pending.borrow_mut().take().unwrap();
-                        result_gate.finish_feedback();
                         let result = match outcome.result {
                             Ok(results) => {
+                                result_gate.finish_feedback(
+                                    &result_properties,
+                                    &results,
+                                    &history_bindings,
+                                );
                                 apply(
                                     &result_work,
                                     &result_id,
@@ -335,6 +359,7 @@ pub(super) async fn send(
                                 }
                             }
                             Err(error) => {
+                                result_gate.cancel_feedback();
                                 if outcome.stage == RequestStage::NotSent && !current(&request) {
                                     current_result(&request)
                                 } else {
@@ -383,9 +408,9 @@ pub(super) async fn send(
                     .cloud
                     .set_properties(&credentials.access_token, &did, &properties)
                     .await;
-                gate.finish_feedback();
                 let outcome = match &result {
                     Ok(results) => {
+                        gate.finish_feedback(&properties, results, &history_bindings);
                         apply(&work, id, &properties, &stamps, results);
                         if results.protocol_error {
                             Err(CommandError::SendFailed("invalid cloud response".into()))
@@ -397,7 +422,10 @@ pub(super) async fn send(
                             Ok(())
                         }
                     }
-                    Err(error) => Err(cloud_command_error(error)),
+                    Err(error) => {
+                        gate.cancel_feedback();
+                        Err(cloud_command_error(error))
+                    }
                 };
                 match outcome {
                     Ok(()) => operation.0.finish(accept(request)),

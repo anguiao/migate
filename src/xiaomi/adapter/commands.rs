@@ -1,4 +1,5 @@
 use super::{
+    bootstrap::Clock,
     model::{AdapterError, ChannelCommands, CommandStatus, CommandTarget, PathKind},
     routing::ControlPath,
     state::{Context, DeviceRecord},
@@ -16,34 +17,45 @@ use futures_lite::future;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
-    rc::{Rc, Weak},
+    rc::Rc,
+    sync::Arc,
 };
 
-/// Outstanding lighting receipts retain their gate across immutable device replacements.
+mod feedback;
+use feedback::LightFeedback;
+
+/// Receipts and recent numeric feedback retain their gate across device replacements.
 #[derive(Default)]
 pub(super) struct LightWriteGates {
-    gates: RefCell<BTreeMap<String, Weak<LightWriteGate>>>,
+    gates: RefCell<BTreeMap<String, Rc<LightWriteGate>>>,
 }
 impl LightWriteGates {
-    pub(super) fn for_device(&self, did: &str) -> Rc<LightWriteGate> {
+    pub(super) fn for_device(&self, did: &str, clock: Arc<dyn Clock>) -> Rc<LightWriteGate> {
         let mut gates = self.gates.borrow_mut();
-        gates.retain(|_, gate| gate.strong_count() > 0);
-        if let Some(gate) = gates.get(did).and_then(Weak::upgrade) {
-            return gate;
-        }
-        let gate = Rc::new(LightWriteGate::default());
-        gates.insert(did.into(), Rc::downgrade(&gate));
-        gate
+        gates.retain(|_, gate| {
+            Rc::strong_count(gate) > 1 || !gate.feedback.borrow_mut().is_empty(clock.now())
+        });
+        gates
+            .entry(did.into())
+            .or_insert_with(|| Rc::new(LightWriteGate::new(clock)))
+            .clone()
     }
 }
-#[derive(Default)]
 pub(super) struct LightWriteGate {
     busy: Cell<bool>,
     changed: Event,
-    // Physical feedback belongs to the outstanding receipt, independent of function instances.
-    feedback: RefCell<Vec<(PropertyBinding, serde_json::Value)>>,
+    clock: Arc<dyn Clock>,
+    feedback: RefCell<LightFeedback>,
 }
 impl LightWriteGate {
+    fn new(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            busy: Cell::new(false),
+            changed: Event::new(),
+            clock,
+            feedback: RefCell::default(),
+        }
+    }
     async fn acquire(self: &Rc<Self>) -> LightWritePermit {
         loop {
             let changed = self.changed.listen();
@@ -54,22 +66,38 @@ impl LightWriteGate {
         }
     }
     fn register_feedback(&self, properties: &[(PropertyBinding, serde_json::Value)]) {
-        *self.feedback.borrow_mut() = properties.to_vec();
+        self.feedback.borrow_mut().sent(properties);
     }
-    fn finish_feedback(&self) {
-        self.feedback.borrow_mut().clear();
+    fn finish_feedback<E>(
+        &self,
+        properties: &[(PropertyBinding, serde_json::Value)],
+        results: &crate::xiaomi::property::PropertyResults<(), E>,
+        history_bindings: &[PropertyBinding],
+    ) {
+        let accepted =
+            properties
+                .iter()
+                .zip(&results.items)
+                .filter_map(|((binding, _), result)| {
+                    (result.is_ok() && history_bindings.contains(binding)).then_some(*binding)
+                });
+        self.feedback
+            .borrow_mut()
+            .complete(accepted, self.clock.now());
+    }
+    fn cancel_feedback(&self) {
+        self.feedback.borrow_mut().cancel();
     }
     pub(super) fn is_feedback(&self, binding: PropertyBinding, value: &serde_json::Value) -> bool {
         self.feedback
-            .borrow()
-            .iter()
-            .any(|(target_binding, target)| *target_binding == binding && target == value)
+            .borrow_mut()
+            .matches(binding, value, self.clock.now())
     }
 }
 struct LightWritePermit(Rc<LightWriteGate>);
 impl Drop for LightWritePermit {
     fn drop(&mut self) {
-        self.0.finish_feedback();
+        self.0.cancel_feedback();
         self.0.busy.set(false);
         self.0.changed.notify(usize::MAX);
     }

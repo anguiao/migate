@@ -158,7 +158,7 @@ impl Context {
                     .functions
                     .iter()
                     .any(|function| function.lighting.is_some())
-                    .then(|| self.light_writes.for_device(did));
+                    .then(|| self.light_writes.for_device(did, self.clock.clone()));
                 Rc::new(DeviceWork::new(
                     record,
                     self.refresh_changed.clone(),
