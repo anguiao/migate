@@ -3,14 +3,15 @@
 // Licensed under Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0
 // Adapted from rs-matter 0.4.1 dm/clusters/app/color_control.rs,
 // commit 3f3528ef5c492b6feb0a2e043264dc47e9da4340. Apache-2.0.
-// Retains CT/XY Task interpolation, signed rates and bounded steps. HS/Scenes
-// are outside the supported profile. Accepted snapshots replace device-hook state.
-use super::RemainingTime;
+// Retains CT/XY interpolation; HS adds independent hue/saturation trajectories.
+// Accepted snapshots replace device-hook state. Scenes remain outside this profile.
+use super::{RemainingTime, hs};
 use crate::device::Rgb;
 
 pub(in crate::matter::lighting) const XY_MAX: u16 = 0xfeff;
 #[derive(Clone, Copy, Debug)]
 pub(in crate::matter::lighting) enum Task {
+    Hs(hs::HsTask),
     XyMoveTo {
         start_x: u16,
         start_y: u16,
@@ -38,6 +39,7 @@ pub(in crate::matter::lighting) enum Task {
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::matter::lighting) enum Target {
+    Hs(hs::Hs),
     Xy(u16, u16),
     Temperature(u16),
 }
@@ -62,6 +64,7 @@ fn interpolate(start: u16, target: u16, elapsed: u64, total: u64) -> u16 {
 impl Task {
     pub fn duration(self) -> u64 {
         match self {
+            Self::Hs(task) => task.duration(),
             Self::XyMoveTo {
                 start_x,
                 start_y,
@@ -106,12 +109,17 @@ impl Task {
         }
     }
     pub fn frame(self, elapsed: u64) -> (Target, bool) {
+        if let Self::Hs(task) = self {
+            let (target, end) = task.frame(elapsed);
+            return (Target::Hs(target), end);
+        }
         let end = elapsed >= self.duration();
         let moving = |start: u16, rate: i32, lo: u16, hi: u16| {
             (start as i128 + rate as i128 * elapsed as i128 / 1000).clamp(lo as i128, hi as i128)
                 as u16
         };
         let target = match self {
+            Self::Hs(_) => unreachable!(),
             Self::XyMoveTo {
                 start_x,
                 start_y,
@@ -149,6 +157,26 @@ impl Task {
         };
         (target, end)
     }
+}
+
+/// Planckian-locus approximation adapted from rs-matter's CT conversion.
+/// This projects a known white-light state when starting a color command.
+pub(in crate::matter::lighting) fn temperature_to_xy(mireds: u16) -> (u16, u16) {
+    let t = 1_000_000.0 / f64::from(mireds);
+    let t2 = t * t;
+    let u = (0.860117757 + 1.54118254e-4 * t + 1.28641212e-7 * t2)
+        / (1.0 + 8.42420235e-4 * t + 7.08145163e-7 * t2);
+    let v = (0.317398726 + 4.22806245e-5 * t + 4.20481691e-8 * t2)
+        / (1.0 - 2.89741816e-5 * t + 1.61456053e-7 * t2);
+    let denominator = 2.0 * u - 8.0 * v + 4.0;
+    (
+        (3.0 * u / denominator * 65536.0)
+            .round()
+            .clamp(0.0, f64::from(XY_MAX)) as u16,
+        (2.0 * v / denominator * 65536.0)
+            .round()
+            .clamp(0.0, f64::from(XY_MAX)) as u16,
+    )
 }
 #[derive(Default)]
 pub(in crate::matter::lighting) struct ColorControlState {

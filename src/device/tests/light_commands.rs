@@ -40,8 +40,8 @@ fn light_toggle_requires_known_state_before_entering_the_send_queue() {
 }
 
 use crate::device::{
-    DeviceRequest, LightAction, LightColorTarget, LightDimension, LightPatch, LightRequest,
-    LightTarget, Rgb,
+    DeviceRequest, LightAction, LightColorTarget, LightDimension, LightMode, LightPatch,
+    LightRequest, LightTarget, Rgb,
 };
 
 fn brightness(value: f64) -> LightTarget {
@@ -452,6 +452,536 @@ fn an_entire_unchanged_final_operation_accepts_locally_and_does_not_fabricate_va
 }
 
 #[test]
+fn state_only_startup_accepts_known_targets_without_consuming_the_frame_or_ending_the_action() {
+    let gray = Rgb {
+        red: 128,
+        green: 128,
+        blue: 128,
+    };
+    for (dimension, target, mode) in [
+        (
+            LightDimension::Color,
+            LightTarget {
+                color: Some(LightColorTarget::Rgb(gray)),
+                ..LightTarget::default()
+            },
+            LightMode::Rgb,
+        ),
+        (
+            LightDimension::Color,
+            temperature(4000),
+            LightMode::Temperature,
+        ),
+        (LightDimension::Brightness, brightness(50.0), LightMode::Rgb),
+    ] {
+        for sent in [false, true] {
+            block_on(async {
+                let (physical, mut receiver) = ready_light(true);
+                let function = &physical.functions()[0];
+                function
+                    .observe_light(LightPatch {
+                        power: Some(true),
+                        brightness_percent: Some(50.0),
+                        temperature_kelvin: Some(4000),
+                        color: Some(gray),
+                        mode: Some(mode),
+                    })
+                    .unwrap();
+                let before = function.snapshot();
+                let target = LightTarget {
+                    power: Some(true),
+                    ..target
+                };
+                let action = function
+                    .begin_light_action(dimension, target, false)
+                    .unwrap();
+                assert!(!action.accepted_while_current());
+                let mut changes = function.subscribe_light_actions().unwrap();
+                assert!(
+                    function
+                        .accept_light_state_only_startup(action.token())
+                        .unwrap()
+                );
+                assert_eq!(action.accepted().await.unwrap(), before);
+                assert!(action.accepted_while_current());
+                assert!(poll_once(action.ended()).await.is_none());
+                assert!(function.light_action_current(action.token()));
+                let accepted = changes.changed().await.last.unwrap();
+                assert_eq!(accepted.token, action.token());
+                assert_eq!(accepted.result, Ok(()));
+                assert!(
+                    !function
+                        .accept_light_state_only_startup(action.token())
+                        .unwrap()
+                );
+
+                let request = frame(&mut receiver).await;
+                assert_eq!(request.token, action.token());
+                assert_eq!(request.target, target);
+                assert!(!request.final_frame);
+                if sent {
+                    request.mark_sent().unwrap();
+                    request.accept().unwrap();
+                } else {
+                    request.skip_unchanged().unwrap();
+                }
+                assert_eq!(function.snapshot(), before);
+                assert!(poll_once(action.ended()).await.is_none());
+                function.stop_light(dimension).unwrap();
+                assert_eq!(action.accepted().await.unwrap(), before);
+                assert_eq!(action.ended().await, Err(CommandError::Stopped));
+                assert!(!function.light_action_current(action.token()));
+            });
+        }
+    }
+}
+
+#[test]
+fn state_only_startup_requires_every_explicit_target_and_its_mode_to_be_known_and_equal() {
+    let gray = Rgb {
+        red: 128,
+        green: 128,
+        blue: 128,
+    };
+    let rgb = LightTarget {
+        color: Some(LightColorTarget::Rgb(gray)),
+        ..LightTarget::default()
+    };
+    let known_rgb = LightPatch {
+        color: Some(gray),
+        mode: Some(LightMode::Rgb),
+        ..LightPatch::default()
+    };
+    for (target, observed) in [
+        (rgb, LightPatch::default()),
+        (
+            rgb,
+            LightPatch {
+                mode: Some(LightMode::Rgb),
+                ..LightPatch::default()
+            },
+        ),
+        (
+            rgb,
+            LightPatch {
+                mode: None,
+                ..known_rgb
+            },
+        ),
+        (
+            rgb,
+            LightPatch {
+                mode: Some(LightMode::Temperature),
+                ..known_rgb
+            },
+        ),
+        (
+            rgb,
+            LightPatch {
+                color: Some(Rgb { red: 129, ..gray }),
+                ..known_rgb
+            },
+        ),
+        (
+            LightTarget {
+                power: Some(true),
+                ..rgb
+            },
+            known_rgb,
+        ),
+        (
+            LightTarget {
+                power: Some(true),
+                ..rgb
+            },
+            LightPatch {
+                power: Some(false),
+                ..known_rgb
+            },
+        ),
+        (
+            temperature(4000),
+            LightPatch {
+                mode: Some(LightMode::Temperature),
+                ..LightPatch::default()
+            },
+        ),
+        (
+            temperature(4000),
+            LightPatch {
+                temperature_kelvin: Some(4000),
+                mode: Some(LightMode::Rgb),
+                ..LightPatch::default()
+            },
+        ),
+        (
+            temperature(4000),
+            LightPatch {
+                temperature_kelvin: Some(4100),
+                mode: Some(LightMode::Temperature),
+                ..LightPatch::default()
+            },
+        ),
+        (brightness(50.0), LightPatch::default()),
+        (
+            brightness(50.0),
+            LightPatch {
+                brightness_percent: Some(51.0),
+                ..LightPatch::default()
+            },
+        ),
+    ] {
+        block_on(async {
+            let (physical, _receiver) = ready_light(true);
+            let function = &physical.functions()[0];
+            function.observe_light(observed).unwrap();
+            let dimension = if target.color.is_some() {
+                LightDimension::Color
+            } else {
+                LightDimension::Brightness
+            };
+            let action = function
+                .begin_light_action(dimension, target, false)
+                .unwrap();
+            let before = function.light_action_diagnostics();
+            assert!(
+                !function
+                    .accept_light_state_only_startup(action.token())
+                    .unwrap()
+            );
+            assert_eq!(function.light_action_diagnostics(), before);
+            assert!(poll_once(action.accepted()).await.is_none());
+            assert!(poll_once(action.ended()).await.is_none());
+            assert!(function.light_action_current(action.token()));
+        });
+    }
+}
+
+#[test]
+fn state_only_startup_cannot_accept_dequeued_or_sent_work_in_place_of_its_receipt() {
+    block_on(async {
+        let (physical, mut receiver) = ready_light(true);
+        let function = &physical.functions()[0];
+        function
+            .observe_light(LightPatch {
+                brightness_percent: Some(50.0),
+                ..LightPatch::default()
+            })
+            .unwrap();
+        let action = begin(function, 50.0, false);
+        let unsent = frame(&mut receiver).await;
+        assert!(
+            !function
+                .accept_light_state_only_startup(action.token())
+                .unwrap()
+        );
+        function
+            .submit_light_frame(action.token(), brightness(50.0), false)
+            .unwrap();
+        assert!(
+            !function
+                .accept_light_state_only_startup(action.token())
+                .unwrap()
+        );
+        unsent.reject(CommandError::Superseded);
+
+        let sent = frame(&mut receiver).await;
+        sent.mark_sent().unwrap();
+        function
+            .submit_light_frame(action.token(), brightness(50.0), false)
+            .unwrap();
+        assert!(
+            !function
+                .accept_light_state_only_startup(action.token())
+                .unwrap()
+        );
+        assert!(poll_once(action.accepted()).await.is_none());
+        sent.accept().unwrap();
+        assert!(action.accepted().await.is_ok());
+        assert!(
+            !function
+                .accept_light_state_only_startup(action.token())
+                .unwrap()
+        );
+        function.stop_light(LightDimension::Brightness).unwrap();
+        assert_eq!(action.ended().await, Err(CommandError::Stopped));
+    });
+}
+
+#[test]
+fn state_only_startup_waits_for_an_old_sent_token_and_reevaluates_its_settled_snapshot() {
+    let white = Rgb {
+        red: 255,
+        green: 255,
+        blue: 255,
+    };
+    let red = Rgb {
+        red: 255,
+        green: 0,
+        blue: 0,
+    };
+    for old_receipt_changes_color in [false, true] {
+        block_on(async {
+            let (physical, mut receiver) = ready_light(true);
+            let function = &physical.functions()[0];
+            function
+                .observe_light(LightPatch {
+                    color: Some(white),
+                    mode: Some(LightMode::Rgb),
+                    ..LightPatch::default()
+                })
+                .unwrap();
+            let old = function
+                .begin_light_action(
+                    LightDimension::Color,
+                    LightTarget {
+                        color: Some(LightColorTarget::Rgb(red)),
+                        ..LightTarget::default()
+                    },
+                    false,
+                )
+                .unwrap();
+            let sent = frame(&mut receiver).await;
+            sent.mark_sent().unwrap();
+            let target = LightTarget {
+                color: Some(LightColorTarget::Rgb(white)),
+                ..LightTarget::default()
+            };
+            let new = function
+                .begin_light_action(LightDimension::Color, target, false)
+                .unwrap();
+            assert_eq!(old.ended().await, Err(CommandError::Superseded));
+            assert!(
+                !function
+                    .accept_light_state_only_startup(new.token())
+                    .unwrap()
+            );
+            assert!(poll_once(new.accepted()).await.is_none());
+            assert!(poll_once(receiver.next_operation()).await.is_none());
+
+            if old_receipt_changes_color {
+                function
+                    .observe_light(LightPatch {
+                        color: Some(red),
+                        ..LightPatch::default()
+                    })
+                    .unwrap();
+            }
+            sent.accept().unwrap();
+            old.accepted().await.unwrap();
+            if old_receipt_changes_color {
+                assert!(
+                    !function
+                        .accept_light_state_only_startup(new.token())
+                        .unwrap()
+                );
+                assert!(poll_once(new.accepted()).await.is_none());
+                function
+                    .observe_light(LightPatch {
+                        color: Some(white),
+                        ..LightPatch::default()
+                    })
+                    .unwrap();
+            }
+            let settled = function.snapshot();
+            assert!(
+                function
+                    .accept_light_state_only_startup(new.token())
+                    .unwrap()
+            );
+            assert_eq!(new.accepted().await.unwrap(), settled);
+            let pending = frame(&mut receiver).await;
+            assert_eq!(pending.token, new.token());
+            assert_eq!(pending.target, target);
+            pending.skip_unchanged().unwrap();
+            function.stop_light(LightDimension::Color).unwrap();
+            assert_eq!(new.ended().await, Err(CommandError::Stopped));
+        });
+    }
+}
+
+#[test]
+fn state_only_startup_also_waits_for_the_power_send_gate() {
+    block_on(async {
+        let (physical, mut receiver) = ready_light(true);
+        let function = &physical.functions()[0];
+        let white = Rgb {
+            red: 255,
+            green: 255,
+            blue: 255,
+        };
+        function
+            .observe_light(LightPatch {
+                power: Some(true),
+                color: Some(white),
+                mode: Some(LightMode::Rgb),
+                ..LightPatch::default()
+            })
+            .unwrap();
+        let mut on = Box::pin(function.execute(Command::On));
+        assert!(poll_once(on.as_mut()).await.is_none());
+        let sent = match receiver.next_operation().await.unwrap() {
+            DeviceRequest::Power(request) => request,
+            DeviceRequest::Light(_) => panic!("expected power"),
+        };
+        sent.mark_sent().unwrap();
+        let action = function
+            .begin_light_action(
+                LightDimension::Color,
+                LightTarget {
+                    power: Some(true),
+                    color: Some(LightColorTarget::Rgb(white)),
+                    ..LightTarget::default()
+                },
+                false,
+            )
+            .unwrap();
+        assert!(
+            !function
+                .accept_light_state_only_startup(action.token())
+                .unwrap()
+        );
+        assert!(poll_once(action.accepted()).await.is_none());
+        sent.accept().unwrap();
+        on.await.unwrap();
+        assert!(
+            function
+                .accept_light_state_only_startup(action.token())
+                .unwrap()
+        );
+        action.accepted().await.unwrap();
+        frame(&mut receiver).await.skip_unchanged().unwrap();
+        function.stop_light(LightDimension::Color).unwrap();
+        assert_eq!(action.ended().await, Err(CommandError::Stopped));
+    });
+}
+
+#[test]
+fn state_only_startup_waits_its_turn_behind_queued_brightness_and_power_operations() {
+    for queued_power in [false, true] {
+        block_on(async {
+            let (physical, mut receiver) = ready_light(true);
+            let function = &physical.functions()[0];
+            let white = Rgb {
+                red: 255,
+                green: 255,
+                blue: 255,
+            };
+            function
+                .observe_light(LightPatch {
+                    power: Some(true),
+                    brightness_percent: Some(50.0),
+                    color: Some(white),
+                    mode: Some(LightMode::Rgb),
+                    ..LightPatch::default()
+                })
+                .unwrap();
+            let mut power = Box::pin(function.execute(Command::On));
+            let brightness = if queued_power {
+                assert!(poll_once(power.as_mut()).await.is_none());
+                None
+            } else {
+                Some(begin(function, 70.0, true))
+            };
+            let color = function
+                .begin_light_action(
+                    LightDimension::Color,
+                    LightTarget {
+                        color: Some(LightColorTarget::Rgb(white)),
+                        ..LightTarget::default()
+                    },
+                    false,
+                )
+                .unwrap();
+            assert!(
+                !function
+                    .accept_light_state_only_startup(color.token())
+                    .unwrap()
+            );
+            assert!(poll_once(color.accepted()).await.is_none());
+
+            match receiver.next_operation().await.unwrap() {
+                DeviceRequest::Power(request) => {
+                    assert!(queued_power);
+                    request.mark_sent().unwrap();
+                    request.accept().unwrap();
+                }
+                DeviceRequest::Light(request) => {
+                    assert!(!queued_power);
+                    assert_eq!(request.token.dimension(), LightDimension::Brightness);
+                    request.mark_sent().unwrap();
+                    function
+                        .observe_light(LightPatch {
+                            brightness_percent: Some(70.0),
+                            ..LightPatch::default()
+                        })
+                        .unwrap();
+                    request.accept().unwrap();
+                }
+            }
+            if let Some(brightness) = brightness {
+                brightness.accepted().await.unwrap();
+            } else {
+                power.await.unwrap();
+            }
+            assert!(
+                function
+                    .accept_light_state_only_startup(color.token())
+                    .unwrap()
+            );
+            color.accepted().await.unwrap();
+            let next = frame(&mut receiver).await;
+            assert_eq!(next.token, color.token());
+            next.skip_unchanged().unwrap();
+            function.stop_light(LightDimension::Color).unwrap();
+            assert_eq!(color.ended().await, Err(CommandError::Stopped));
+        });
+    }
+}
+
+#[test]
+fn state_only_startup_rejects_stale_ended_foreign_and_unavailable_actions() {
+    let (physical, receiver) = ready_light(true);
+    let function = &physical.functions()[0];
+    function
+        .observe_light(LightPatch {
+            brightness_percent: Some(50.0),
+            ..LightPatch::default()
+        })
+        .unwrap();
+    let old = begin(function, 50.0, false);
+    let current = begin(function, 50.0, false);
+    assert_eq!(
+        function.accept_light_state_only_startup(old.token()),
+        Err(CommandError::Superseded)
+    );
+    let (other, _other_receiver) = ready_light(true);
+    let foreign = begin(&other.functions()[0], 50.0, false);
+    assert_eq!(
+        function.accept_light_state_only_startup(foreign.token()),
+        Err(CommandError::Superseded)
+    );
+    function.stop_light(LightDimension::Brightness).unwrap();
+    assert_eq!(
+        function.accept_light_state_only_startup(current.token()),
+        Err(CommandError::Superseded)
+    );
+    let unavailable = begin(function, 50.0, false);
+    physical.set_availability(Availability::Unavailable("no control path".into()));
+    assert_eq!(
+        function.accept_light_state_only_startup(unavailable.token()),
+        Err(CommandError::Unavailable("no control path".into()))
+    );
+    physical.set_availability(Availability::Available);
+    let closed = begin(function, 50.0, false);
+    drop(receiver);
+    assert_eq!(
+        function.accept_light_state_only_startup(closed.token()),
+        Err(CommandError::Cancelled)
+    );
+}
+
+#[test]
 fn tokens_cannot_cross_function_instances_and_close_invalidates_pending_without_revival() {
     block_on(async {
         let (old_physical, mut old_receiver) = ready_light(true);
@@ -805,6 +1335,56 @@ fn accepted_startup_is_reported_while_a_nonfinal_action_remains_current() {
         assert_eq!(result.token, action.token());
         assert_eq!(result.result, Ok(()));
     });
+}
+
+#[test]
+fn startup_acceptance_ownership_survives_a_later_frame_failure() {
+    block_on(async {
+        let (physical, mut receiver) = ready_light(true);
+        let function = &physical.functions()[0];
+        let action = begin(function, 20.0, false);
+        assert!(!action.accepted_while_current());
+        let first = frame(&mut receiver).await;
+        first.mark_sent().unwrap();
+        first.accept().unwrap();
+        action.accepted().await.unwrap();
+        assert!(action.accepted_while_current());
+        function
+            .submit_light_frame(action.token(), brightness(30.0), false)
+            .unwrap();
+        let later = frame(&mut receiver).await;
+        later.mark_sent().unwrap();
+        later.reject(CommandError::Timeout);
+        assert_eq!(action.ended().await, Err(CommandError::Timeout));
+        assert!(action.accepted_while_current());
+        assert!(!function.light_action_current(action.token()));
+    });
+}
+
+#[test]
+fn a_startup_receipt_after_cancellation_does_not_acquire_acceptance_ownership() {
+    for external in [false, true] {
+        block_on(async {
+            let (physical, mut receiver) = ready_light(true);
+            let function = &physical.functions()[0];
+            let action = begin(function, 20.0, false);
+            let first = frame(&mut receiver).await;
+            first.mark_sent().unwrap();
+            if external {
+                function
+                    .take_over_light(LightDimension::Brightness)
+                    .unwrap();
+            } else {
+                function.stop_light(LightDimension::Brightness).unwrap();
+            }
+            assert!(action.ended().await.is_err());
+            assert!(poll_once(action.accepted()).await.is_none());
+            assert!(!action.accepted_while_current());
+            first.accept().unwrap();
+            action.accepted().await.unwrap();
+            assert!(!action.accepted_while_current());
+        });
+    }
 }
 
 #[test]

@@ -98,6 +98,8 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
                 (6, 0),
                 (8, 0),
                 (8, 2),
+                (0x300, 0),
+                (0x300, 1),
                 (0x300, 7),
                 (0x300, 3),
                 (0x300, 4),
@@ -119,7 +121,7 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
                 ctx.attribute = attr(attribute_cluster, attribute);
                 ctx.attribute.dataver = Some(report_dataver(&before));
                 let filtered = read_bytes(&handler, &ctx).await.unwrap();
-                if attribute_cluster == cluster {
+                if attribute_cluster == cluster && patch.color.is_none() {
                     assert!(!filtered.is_empty(), "new cluster state was filtered out");
                     let version = report_dataver(&filtered);
                     assert_ne!(version, report_dataver(&before));
@@ -150,16 +152,119 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
             }
             assert!(reports.changes.borrow().is_empty());
             assert!(poll_once(run.as_mut()).await.is_none());
-            assert!(
+            assert_eq!(
                 reports
                     .changes
                     .borrow()
-                    .contains(&(2, cluster, changed_attribute))
+                    .contains(&(2, cluster, changed_attribute)),
+                patch.color.is_none(),
+                "inactive RGB cache changes do not change the active CT projection"
             );
             assert!(poll_once(receiver.next_operation()).await.is_none());
         });
         assert_eq!(registry.list().len(), 1);
     }
+}
+
+#[test]
+fn ct_projection_reads_ignore_inactive_rgb_and_rgb_keeps_its_ct_cache_readable() {
+    use crate::device::{LightMode, Rgb};
+
+    setup_light!(true, device, receiver, registry, handler, ctx);
+    let function = device.functions()[0].clone();
+    function
+        .observe_light(LightPatch {
+            power: Some(true),
+            temperature_kelvin: Some(6500),
+            color: Some(Rgb {
+                red: 255,
+                green: 0,
+                blue: 0,
+            }),
+            mode: Some(LightMode::Temperature),
+            ..Default::default()
+        })
+        .unwrap();
+    block_on(async {
+        let reports = Context::new(ctx.base, 0x300, 0);
+        let mut run = pin!(handler.run(&reports));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        reports.changes.borrow_mut().clear();
+        let mut baseline = Vec::new();
+        for (attribute, expected) in [
+            (0, 218),
+            (1, 7),
+            (3, 20554),
+            (4, 21209),
+            (7, 154),
+            (8, 2),
+            (0x4001, 2),
+        ] {
+            ctx.attribute = attr(0x300, attribute);
+            let bytes = read_bytes(&handler, &ctx).await.unwrap();
+            assert_eq!(report_value(&bytes).u16().unwrap(), expected);
+            baseline.push((attribute, bytes));
+        }
+        let blue = Rgb {
+            red: 0,
+            green: 0,
+            blue: 255,
+        };
+        function
+            .observe_light(LightPatch {
+                color: Some(blue),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(function.snapshot().lighting.unwrap().color, Some(blue));
+        for (attribute, before) in &baseline {
+            ctx.attribute = attr(0x300, *attribute);
+            assert_eq!(read_bytes(&handler, &ctx).await.unwrap(), *before);
+            ctx.attribute.dataver = Some(report_dataver(before));
+            assert!(read_bytes(&handler, &ctx).await.unwrap().is_empty());
+        }
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(reports.changes.borrow().is_empty());
+
+        function
+            .observe_light(LightPatch {
+                mode: Some(LightMode::Rgb),
+                ..Default::default()
+            })
+            .unwrap();
+        for (attribute, expected) in [
+            (0, 169),
+            (1, 254),
+            (3, 9830),
+            (4, 3932),
+            (7, 154),
+            (8, 0),
+            (0x4001, 0),
+        ] {
+            ctx.attribute = attr(0x300, attribute);
+            let bytes = read_bytes(&handler, &ctx).await.unwrap();
+            assert_eq!(report_value(&bytes).u16().unwrap(), expected);
+            assert_ne!(report_dataver(&bytes), report_dataver(&baseline[0].1));
+        }
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(!reports.changes.borrow().contains(&(2, 0x300, 7)));
+        reports.changes.borrow_mut().clear();
+        ctx.attribute = attr(0x300, 7);
+        let before = read_bytes(&handler, &ctx).await.unwrap();
+        function
+            .observe_light(LightPatch {
+                temperature_kelvin: Some(2700),
+                ..Default::default()
+            })
+            .unwrap();
+        let after = read_bytes(&handler, &ctx).await.unwrap();
+        assert_eq!(report_value(&after).u16().unwrap(), 370);
+        assert_ne!(report_dataver(&after), report_dataver(&before));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(reports.changes.borrow().is_empty());
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
+    assert_eq!(registry.list().len(), 1);
 }
 
 #[test]
@@ -380,7 +485,11 @@ fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes(
                     .null()
                     .is_ok()
             );
-            for attribute in if rgb { vec![7, 8, 0x4001] } else { vec![7] } {
+            for attribute in if rgb {
+                vec![0, 1, 7, 8, 0x4001]
+            } else {
+                vec![7]
+            } {
                 ctx.attribute = attr(0x300, attribute);
                 assert_eq!(
                     read_bytes(&handler, &ctx).await.unwrap_err().code(),
@@ -393,7 +502,7 @@ fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes(
                 (8, 8, &[0x15, 0x25, 0, 100, 0, 0x18][..]),
                 (
                     0x300,
-                    0,
+                    if rgb { 0x40 } else { 0 },
                     &[
                         0x15, 0x24, 0, 10, 0x24, 1, 0, 0x25, 2, 0, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
                     ][..],
@@ -765,6 +874,136 @@ fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_po
                 .code(),
             ErrorCode::InvalidCommand
         );
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
+    assert_eq!(registry.list().len(), 1);
+}
+
+#[test]
+fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
+    use crate::device::{LightColorTarget, LightMode};
+
+    setup_light!(true, device, receiver, registry, handler, ctx);
+    device.set_availability(Availability::Available);
+    let function = device.functions()[0].clone();
+    function.observe(true);
+    block_on(async {
+        ctx.attribute = attr(0x300, 0x400a);
+        let before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
+        assert_eq!(
+            report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                .u16()
+                .unwrap(),
+            0x19
+        );
+        for (command, data, hue, saturation) in [
+            (
+                6,
+                &[
+                    0x15, 0x24, 0, 0, 0x24, 1, 254, 0x25, 2, 0, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
+                ][..],
+                0,
+                254,
+            ),
+            (
+                0,
+                &[
+                    0x15, 0x24, 0, 85, 0x24, 1, 0, 0x25, 2, 0, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
+                ][..],
+                85,
+                254,
+            ),
+            (
+                2,
+                &[
+                    0x15, 0x24, 0, 1, 0x24, 1, 84, 0x24, 2, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
+                ][..],
+                169,
+                254,
+            ),
+            (
+                3,
+                &[
+                    0x15, 0x24, 0, 0, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+                ][..],
+                169,
+                0,
+            ),
+            (
+                5,
+                &[
+                    0x15, 0x24, 0, 1, 0x24, 1, 254, 0x24, 2, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
+                ][..],
+                169,
+                254,
+            ),
+        ] {
+            ctx.command.cluster_id = 0x300;
+            ctx.command.cmd_id = command;
+            ctx.data = TLVElement::new(data);
+            {
+                let mut output = [0; 128];
+                let mut invoke = pin!(handler.invoke(
+                    &ctx,
+                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut output)),
+                ));
+                assert!(poll_once(invoke.as_mut()).await.is_none());
+                let DeviceRequest::Light(request) = receiver.next_operation().await.unwrap() else {
+                    panic!("missing HS request")
+                };
+                let Some(LightColorTarget::Rgb(rgb)) = request.target.color else {
+                    panic!("HS command did not dispatch RGB")
+                };
+                assert!(request.final_frame);
+                assert_eq!(request.target.power, None);
+                assert_eq!(request.target.brightness_percent, None);
+                match (hue, saturation) {
+                    (0, 254) => assert_eq!((rgb.red, rgb.green, rgb.blue), (255, 0, 0)),
+                    (85, 254) => {
+                        assert_eq!((rgb.red, rgb.green), (0, 255));
+                        assert!(rgb.blue <= 3);
+                    }
+                    (169, 254) => {
+                        assert_eq!((rgb.red, rgb.blue), (0, 255));
+                        assert!(rgb.green <= 3);
+                    }
+                    (_, 0) => assert_eq!((rgb.red, rgb.green, rgb.blue), (255, 255, 255)),
+                    _ => unreachable!(),
+                }
+                request.mark_sent().unwrap();
+                function
+                    .observe_light(LightPatch {
+                        color: Some(rgb),
+                        mode: Some(LightMode::Rgb),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                request.accept().unwrap();
+                invoke.await.unwrap();
+            }
+            for (attribute, expected) in [(0, hue), (1, saturation), (8, 0), (0x4001, 0)] {
+                ctx.attribute = attr(0x300, attribute);
+                let bytes = read_bytes(&handler, &ctx).await.unwrap();
+                assert_eq!(report_value(&bytes).u8().unwrap(), expected);
+                assert_ne!(report_dataver(&bytes), before);
+            }
+        }
+        for command in [1, 4] {
+            ctx.command.cmd_id = command;
+            ctx.data =
+                TLVElement::new(&[0x15, 0x24, 0, 0, 0x24, 1, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18]);
+            handler
+                .invoke(
+                    &ctx,
+                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128])),
+                )
+                .await
+                .unwrap();
+        }
+        let mut run = pin!(handler.run(&ctx));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().contains(&(2, 0x300, 0)));
+        assert!(ctx.changes.borrow().contains(&(2, 0x300, 1)));
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
     assert_eq!(registry.list().len(), 1);

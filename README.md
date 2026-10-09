@@ -6,7 +6,7 @@ MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（X
 
 提供基础开关、灯具亮度与色温、设备支持的 RGB、软件渐变与连续控制、主动通知、统一选路、断线恢复、运行中自动加入和删除，以及持久化身份、名称和配对。单灯统一为 `main`，选择色温或颜色时自动切换模式。终端保留定向 on/off 控制，用 `list` / `status` 查看统一灯具快照、动作结果、实际批属性与路径；无写入帧与动作受理分开显示。中国大陆服务区的 OAuth 令牌与本地客户端证书独立维护。已准备账号可以先运行空网桥，再等待设备接入。云端可能仍依赖物理网关，具体边界见已知限制。
 
-单路插座在同一端点承载 Bridged Node 与 On/Off Plug-in Unit（`0x010A`，revision 3）；多路插座使用一个物理父节点和三个独立开关子节点，总控只触发内部状态刷新。每盏灯使用一个 Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`）端点，revision 4，声明 CT 或 CT + XY。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的实际呈现、固件模式联动及基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
+单路插座在同一端点承载 Bridged Node 与 On/Off Plug-in Unit（`0x010A`，revision 3）；多路插座使用一个物理父节点和三个独立开关子节点，总控只触发内部状态刷新。每盏灯使用一个 Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`）端点，revision 4，声明 CT 或 CT + XY + HS（色相／饱和度）。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的实际呈现、固件模式联动及基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
 
 ```sh
 cargo run --locked -- auth login

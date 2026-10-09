@@ -882,6 +882,13 @@ async fn subscribe_paths(
     client: &Matter<'_>,
     paths: &[AttrPath],
 ) -> Result<(u32, Observed), Error> {
+    subscribe_paths_with_min_interval(client, paths, 0).await
+}
+async fn subscribe_paths_with_min_interval(
+    client: &Matter<'_>,
+    paths: &[AttrPath],
+    min_interval: u16,
+) -> Result<(u32, Observed), Error> {
     let exchange = Exchange::initiate(
         client,
         test_only_crypto(),
@@ -895,7 +902,7 @@ async fn subscribe_paths(
             TxOutcome::BuildRequest(builder) => {
                 sender = builder
                     .keep_subs(false)?
-                    .min_int_floor(0)?
+                    .min_int_floor(min_interval)?
                     .max_int_ceil(60)?
                     .attr_requests_from(paths)?
                     .fabric_filtered(false)?
@@ -912,6 +919,31 @@ async fn subscribe_paths(
             SubscribeOutcome::Established(subscription) => {
                 return Ok((subscription.subscription_id, observed));
             }
+        }
+    }
+}
+async fn read_paths(client: &Matter<'_>, paths: &[AttrPath]) -> Result<Observed, Error> {
+    let exchange = Exchange::initiate(
+        client,
+        test_only_crypto(),
+        NonZeroU8::new(1).unwrap(),
+        SERVER_ID,
+    )
+    .await?;
+    let mut chunk = exchange
+        .read_with(|builder| {
+            builder
+                .attr_requests_from(paths)?
+                .fabric_filtered(false)?
+                .end()
+        })
+        .await?;
+    let mut observed = Observed::default();
+    loop {
+        observed.add(&chunk.response()?);
+        match chunk.complete().await? {
+            Some(next) => chunk = next,
+            None => return Ok(observed),
         }
     }
 }
@@ -1129,7 +1161,7 @@ fn dynamic_subscription_reports_add_delete_and_restores_deleted_paths_after_rest
 }
 
 #[test]
-fn lighting_subscription_reports_the_shared_accepted_snapshot_and_versions() {
+fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -1156,13 +1188,13 @@ fn lighting_subscription_reports_the_shared_accepted_snapshot_and_versions() {
                 .observe_light(LightPatch {
                     power: Some(true),
                     brightness_percent: Some(50.0),
-                    temperature_kelvin: Some(5000),
+                    temperature_kelvin: Some(6500),
                     color: Some(Rgb {
                         red: 255,
                         green: 0,
                         blue: 0,
                     }),
-                    mode: Some(LightMode::Temperature),
+                    mode: Some(LightMode::Rgb),
                 })
                 .unwrap();
             let registry = super::test_registry(&store, &device);
@@ -1196,16 +1228,155 @@ fn lighting_subscription_reports_the_shared_accepted_snapshot_and_versions() {
                     panic!("lighting services exited");
                 };
                 let controller = async {
-                    let paths =
-                        [(8, 0), (0x300, 3), (0x300, 4), (0x300, 7), (0x300, 8)].map(|(c, a)| {
-                            AttrPath::from_gp(&GenericPath::new(Some(2), Some(c), Some(a)))
-                        });
+                    let assert_colors = |report: &Observed, expected: &[(u32, u16)]| {
+                        let colors = report
+                            .lighting
+                            .iter()
+                            .filter(|((endpoint, cluster, _), _)| {
+                                *endpoint == 2 && *cluster == 0x300
+                            })
+                            .map(|((_, _, attribute), (_, value))| (*attribute, *value))
+                            .collect::<Vec<_>>();
+                        assert_eq!(colors, expected);
+                        if let Some((attribute, _)) = expected.first() {
+                            let version = report.lighting[&(2, 0x300, *attribute)].0;
+                            for (attribute, _) in expected {
+                                assert_eq!(report.lighting[&(2, 0x300, *attribute)].0, version);
+                            }
+                        }
+                    };
+                    let cool_white = [
+                        (0, 218),
+                        (1, 7),
+                        (3, 20554),
+                        (4, 21209),
+                        (7, 154),
+                        (8, 2),
+                        (0x4001, 2),
+                    ];
+                    let paths = [
+                        (8, 0),
+                        (0x300, 0),
+                        (0x300, 1),
+                        (0x300, 3),
+                        (0x300, 4),
+                        (0x300, 7),
+                        (0x300, 8),
+                        (0x300, 0x4001),
+                    ]
+                    .map(|(c, a)| AttrPath::from_gp(&GenericPath::new(Some(2), Some(c), Some(a))));
                     let (id, initial) = subscribe_paths(&client, &paths).await.unwrap();
                     wait_committed(&state).await;
                     assert_eq!(
                         initial.lighting[&(2, 8, 0)].1,
                         crate::device::brightness_to_matter_level(50.0).unwrap() as u16
                     );
+                    assert_eq!(initial.lighting[&(2, 0x300, 0)].1, 0);
+                    assert_eq!(initial.lighting[&(2, 0x300, 1)].1, 254);
+                    assert_eq!(initial.lighting[&(2, 0x300, 7)].1, 154);
+                    assert_eq!(initial.lighting[&(2, 0x300, 8)].1, 0);
+                    assert_eq!(initial.lighting[&(2, 0x300, 0x4001)].1, 0);
+
+                    // The active value must accompany a mode-only change even
+                    // when its cached value was already included in priming.
+                    function
+                        .observe_light(LightPatch {
+                            mode: Some(LightMode::Temperature),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let temperature = receive_observed(&client, id).await.unwrap();
+                    assert_colors(&temperature, &cool_white);
+                    assert_ne!(
+                        temperature.lighting[&(2, 0x300, 7)].0,
+                        initial.lighting[&(2, 0x300, 7)].0
+                    );
+                    wait_committed(&state).await;
+
+                    function
+                        .observe_light(LightPatch {
+                            mode: Some(LightMode::Rgb),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let rgb = receive_observed(&client, id).await.unwrap();
+                    let red = [
+                        (0, 0),
+                        (1, 254),
+                        (3, initial.lighting[&(2, 0x300, 3)].1),
+                        (4, initial.lighting[&(2, 0x300, 4)].1),
+                        (8, 0),
+                        (0x4001, 0),
+                    ];
+                    assert_colors(&rgb, &red);
+                    assert_ne!(
+                        rgb.lighting[&(2, 0x300, 0)].0,
+                        temperature.lighting[&(2, 0x300, 7)].0
+                    );
+                    wait_committed(&state).await;
+
+                    function
+                        .observe_light(LightPatch {
+                            temperature_kelvin: Some(2700),
+                            mode: Some(LightMode::Temperature),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let warm = receive_observed(&client, id).await.unwrap();
+                    assert_colors(
+                        &warm,
+                        &[
+                            (0, 21),
+                            (1, 165),
+                            (3, 30132),
+                            (4, 26930),
+                            (7, 370),
+                            (8, 2),
+                            (0x4001, 2),
+                        ],
+                    );
+                    wait_committed(&state).await;
+                    function
+                        .observe_light(LightPatch {
+                            temperature_kelvin: Some(6500),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let cool = receive_observed(&client, id).await.unwrap();
+                    assert_colors(&cool, &cool_white[..5]);
+                    assert_ne!(
+                        cool.lighting[&(2, 0x300, 7)].0,
+                        warm.lighting[&(2, 0x300, 7)].0
+                    );
+                    wait_committed(&state).await;
+
+                    // Both Kelvin values encode as 154 mireds. The mode edge
+                    // must still report CT, while switching away reports RGB only.
+                    function
+                        .observe_light(LightPatch {
+                            temperature_kelvin: Some(6494),
+                            mode: Some(LightMode::Rgb),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let rgb = receive_observed(&client, id).await.unwrap();
+                    assert_colors(&rgb, &red);
+                    wait_committed(&state).await;
+                    function
+                        .observe_light(LightPatch {
+                            temperature_kelvin: Some(6500),
+                            mode: Some(LightMode::Temperature),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let temperature = receive_observed(&client, id).await.unwrap();
+                    assert_colors(&temperature, &cool_white);
+                    assert_ne!(
+                        temperature.lighting[&(2, 0x300, 7)].0,
+                        rgb.lighting[&(2, 0x300, 0)].0
+                    );
+                    wait_committed(&state).await;
+
                     function
                         .observe_light(LightPatch {
                             brightness_percent: Some(23.5),
@@ -1226,15 +1397,78 @@ fn lighting_subscription_reports_the_shared_accepted_snapshot_and_versions() {
                     );
                     assert_eq!(report.lighting[&(2, 0x300, 3)].1, 33935);
                     assert_eq!(report.lighting[&(2, 0x300, 4)].1, 25220);
-                    assert_eq!(report.lighting[&(2, 0x300, 7)].1, 300);
-                    assert_eq!(report.lighting[&(2, 0x300, 8)].1, 1);
+                    assert!(!report.lighting.contains_key(&(2, 0x300, 7)));
+                    assert_eq!(report.lighting[&(2, 0x300, 0)].1, 14);
+                    assert_eq!(report.lighting[&(2, 0x300, 1)].1, 190);
+                    assert_eq!(report.lighting[&(2, 0x300, 8)].1, 0);
+                    assert_eq!(report.lighting[&(2, 0x300, 0x4001)].1, 0);
+                    for attribute in [0, 1, 8, 0x4001] {
+                        assert_eq!(
+                            report.lighting[&(2, 0x300, attribute)].0,
+                            report.lighting[&(2, 0x300, 3)].0,
+                        );
+                    }
                     assert_ne!(
                         report.lighting[&(2, 8, 0)].0,
                         initial.lighting[&(2, 8, 0)].0
                     );
                     assert_ne!(
-                        report.lighting[&(2, 0x300, 7)].0,
-                        initial.lighting[&(2, 0x300, 7)].0
+                        report.lighting[&(2, 0x300, 3)].0,
+                        initial.lighting[&(2, 0x300, 3)].0
+                    );
+                    wait_committed(&state).await;
+
+                    function
+                        .observe_light(LightPatch {
+                            temperature_kelvin: Some(6500),
+                            mode: Some(LightMode::Temperature),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let temperature = receive_observed(&client, id).await.unwrap();
+                    assert_colors(&temperature, &cool_white);
+                    wait_committed(&state).await;
+
+                    // Priming includes every requested attribute. Its HS/XY
+                    // must describe the active white light, not the RGB cache.
+                    let started = std::time::Instant::now();
+                    let (id, priming) = subscribe_paths_with_min_interval(&client, &paths, 2)
+                        .await
+                        .unwrap();
+                    assert_colors(&priming, &cool_white);
+                    wait_committed(&state).await;
+                    function
+                        .observe_light(LightPatch {
+                            color: Some(Rgb {
+                                red: 255,
+                                green: 0,
+                                blue: 0,
+                            }),
+                            mode: Some(LightMode::Rgb),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    // A read verifies the intermediate RGB state without
+                    // consuming the subscription's pending attribute changes.
+                    let intermediate = read_paths(&client, &paths).await.unwrap();
+                    assert_eq!(intermediate.lighting[&(2, 0x300, 0)].1, 0);
+                    assert_eq!(intermediate.lighting[&(2, 0x300, 1)].1, 254);
+                    assert_eq!(intermediate.lighting[&(2, 0x300, 8)].1, 0);
+                    assert!(started.elapsed() < Duration::from_secs(2));
+                    function
+                        .observe_light(LightPatch {
+                            mode: Some(LightMode::Temperature),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    // Both mode changes fall within the same report interval.
+                    // Even previously marked RGB attributes must encode the
+                    // final CT projection when the actual ReportData is built.
+                    let merged = receive_observed(&client, id).await.unwrap();
+                    assert_colors(&merged, &cool_white);
+                    assert_ne!(
+                        merged.lighting[&(2, 0x300, 7)].0,
+                        priming.lighting[&(2, 0x300, 7)].0
                     );
                 };
                 or(

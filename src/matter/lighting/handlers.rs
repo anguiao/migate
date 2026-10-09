@@ -1,8 +1,8 @@
 use super::{
     Lighting,
-    controllers::{self, color},
+    controllers::{self, color, hs},
 };
-use crate::device::{Command, LightDimension, LightMode};
+use crate::device::{Command, LightDimension};
 use rs_matter::{
     dm::{
         Cluster, HandlerContext, InvokeContext, ReadContext, WriteContext,
@@ -304,9 +304,9 @@ impl<const RGB: bool> ColorHandler<'_, RGB> {
             return Err(ErrorCode::ConstraintError.into());
         }
         let (start_x, start_y) = if transition == 0 {
-            self.0.color.borrow().xy.unwrap_or((x, y))
+            (x, y)
         } else {
-            self.0.color.borrow().xy.ok_or(ErrorCode::InvalidState)?
+            self.0.xy_start()?
         };
         Ok(color::Task::XyMoveTo {
             start_x,
@@ -339,12 +339,19 @@ impl<const RGB: bool> ColorHandler<'_, RGB> {
 impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
     const CLUSTER: Cluster<'static> = if RGB {
         c::FULL_CLUSTER
-            .with_features(0x18)
+            .with_features(0x19)
             .with_attrs(
-                |a, _, _| matches!(a.id,2..=4|7|8|15|16|0x4001|0x400a..=0x400d|0xfff8..=0xfffd),
+                |a, _, _| matches!(a.id,0..=4|7|8|15|16|0x4001|0x400a..=0x400d|0xfff8..=0xfffd),
             )
             .with_cmds(with!(
-                c::CommandId::MoveToColor
+                c::CommandId::MoveToHue
+                    | c::CommandId::MoveHue
+                    | c::CommandId::StepHue
+                    | c::CommandId::MoveToSaturation
+                    | c::CommandId::MoveSaturation
+                    | c::CommandId::StepSaturation
+                    | c::CommandId::MoveToHueAndSaturation
+                    | c::CommandId::MoveToColor
                     | c::CommandId::MoveColor
                     | c::CommandId::StepColor
                     | c::CommandId::MoveToColorTemperature
@@ -373,6 +380,20 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
     async fn remaining_time(&self, _ctx: impl ReadContext) -> Result<u16, Error> {
         Ok(self.0.color.borrow().remaining_time.value)
     }
+    async fn current_hue(&self, _ctx: impl ReadContext) -> Result<u8, Error> {
+        self.0
+            .refresh()
+            .hs
+            .map(|value| value.hue.round().clamp(0.0, 254.0) as u8)
+            .ok_or_else(|| ErrorCode::Failure.into())
+    }
+    async fn current_saturation(&self, _ctx: impl ReadContext) -> Result<u8, Error> {
+        self.0
+            .refresh()
+            .hs
+            .map(|value| value.saturation.round().clamp(0.0, 254.0) as u8)
+            .ok_or_else(|| ErrorCode::Failure.into())
+    }
     async fn current_x(&self, _ctx: impl ReadContext) -> Result<u16, Error> {
         self.0
             .refresh()
@@ -394,20 +415,22 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             .ok_or_else(|| ErrorCode::Failure.into())
     }
     async fn color_mode(&self, _ctx: impl ReadContext) -> Result<c::ColorModeEnum, Error> {
-        match self.0.refresh().mode {
-            Some(LightMode::Rgb) => Ok(c::ColorModeEnum::CurrentXAndCurrentY),
-            Some(LightMode::Temperature) => Ok(c::ColorModeEnum::ColorTemperatureMireds),
-            None => Err(ErrorCode::Failure.into()),
+        match self.0.refresh().color_mode {
+            Some(0) => Ok(c::ColorModeEnum::CurrentHueAndCurrentSaturation),
+            Some(1) => Ok(c::ColorModeEnum::CurrentXAndCurrentY),
+            Some(2) => Ok(c::ColorModeEnum::ColorTemperatureMireds),
+            _ => Err(ErrorCode::Failure.into()),
         }
     }
     async fn enhanced_color_mode(
         &self,
         _ctx: impl ReadContext,
     ) -> Result<c::EnhancedColorModeEnum, Error> {
-        match self.0.refresh().mode {
-            Some(LightMode::Rgb) => Ok(c::EnhancedColorModeEnum::CurrentXAndCurrentY),
-            Some(LightMode::Temperature) => Ok(c::EnhancedColorModeEnum::ColorTemperatureMireds),
-            None => Err(ErrorCode::Failure.into()),
+        match self.0.refresh().color_mode {
+            Some(0) => Ok(c::EnhancedColorModeEnum::CurrentHueAndCurrentSaturation),
+            Some(1) => Ok(c::EnhancedColorModeEnum::CurrentXAndCurrentY),
+            Some(2) => Ok(c::EnhancedColorModeEnum::ColorTemperatureMireds),
+            _ => Err(ErrorCode::Failure.into()),
         }
     }
     async fn options(&self, _ctx: impl ReadContext) -> Result<c::OptionsBitmap, Error> {
@@ -423,7 +446,7 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         _ctx: impl ReadContext,
     ) -> Result<c::ColorCapabilitiesBitmap, Error> {
         Ok(c::ColorCapabilitiesBitmap::from_bits_retain(if RGB {
-            0x18
+            0x19
         } else {
             0x10
         }))
@@ -454,6 +477,190 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             ctx.notify_changed();
         }
         Ok(())
+    }
+    async fn handle_move_to_hue(
+        &self,
+        _ctx: impl InvokeContext,
+        r: c::MoveToHueRequest<'_>,
+    ) -> Result<(), Error> {
+        if !RGB {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
+        let (hue, direction, duration) = (r.hue()?, r.direction()?, r.transition_time()?);
+        if hue == u8::MAX || duration == u16::MAX {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        if !self.proceed(r.options_mask()?, r.options_override()?)? {
+            return Ok(());
+        }
+        let (mut task, start) = self.0.continuing_hs()?;
+        task.hue = hs::HueAxis::move_to(start.hue, hue as f64, direction, duration as u64 * 100);
+        self.0.execute_color(color::Task::Hs(task)).await
+    }
+    async fn handle_move_hue(
+        &self,
+        _ctx: impl InvokeContext,
+        r: c::MoveHueRequest<'_>,
+    ) -> Result<(), Error> {
+        if !RGB {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
+        let (mode, rate) = (r.move_mode()?, r.rate()?);
+        if mode != c::MoveModeEnum::Stop && rate == 0 {
+            return Err(ErrorCode::InvalidCommand.into());
+        }
+        if !self.proceed(r.options_mask()?, r.options_override()?)? {
+            return Ok(());
+        }
+        if mode == c::MoveModeEnum::Stop {
+            return self.0.stop_hs();
+        }
+        let (mut task, start) = self.0.continuing_hs()?;
+        let rate = if mode == c::MoveModeEnum::Up {
+            rate as f64
+        } else {
+            -(rate as f64)
+        };
+        task.hue = hs::HueAxis::move_at(start.hue, rate);
+        self.0.execute_color(color::Task::Hs(task)).await
+    }
+    async fn handle_step_hue(
+        &self,
+        _ctx: impl InvokeContext,
+        r: c::StepHueRequest<'_>,
+    ) -> Result<(), Error> {
+        if !RGB {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
+        let (mode, size, duration) = (r.step_mode()?, r.step_size()?, r.transition_time()?);
+        if size == 0 {
+            return Err(ErrorCode::InvalidCommand.into());
+        }
+        if !self.proceed(r.options_mask()?, r.options_override()?)? {
+            return Ok(());
+        }
+        let (mut task, start) = self.0.continuing_hs()?;
+        let delta = if mode == c::StepModeEnum::Up {
+            size as f64
+        } else {
+            -(size as f64)
+        };
+        task.hue = hs::HueAxis::step(start.hue, delta, duration as u64 * 100);
+        self.0.execute_color(color::Task::Hs(task)).await
+    }
+    async fn handle_move_to_saturation(
+        &self,
+        _ctx: impl InvokeContext,
+        r: c::MoveToSaturationRequest<'_>,
+    ) -> Result<(), Error> {
+        if !RGB {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
+        let (saturation, duration) = (r.saturation()?, r.transition_time()?);
+        if saturation == u8::MAX || duration == u16::MAX {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        if !self.proceed(r.options_mask()?, r.options_override()?)? {
+            return Ok(());
+        }
+        let (mut task, start) = self.0.continuing_hs()?;
+        task.saturation =
+            hs::SaturationAxis::move_to(start.saturation, saturation as f64, duration as u64 * 100);
+        self.0.execute_color(color::Task::Hs(task)).await
+    }
+    async fn handle_move_saturation(
+        &self,
+        _ctx: impl InvokeContext,
+        r: c::MoveSaturationRequest<'_>,
+    ) -> Result<(), Error> {
+        if !RGB {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
+        let (mode, rate) = (r.move_mode()?, r.rate()?);
+        if mode != c::MoveModeEnum::Stop && rate == 0 {
+            return Err(ErrorCode::InvalidCommand.into());
+        }
+        if !self.proceed(r.options_mask()?, r.options_override()?)? {
+            return Ok(());
+        }
+        if mode == c::MoveModeEnum::Stop {
+            return self.0.stop_hs();
+        }
+        let (mut task, start) = self.0.continuing_hs()?;
+        let rate = if mode == c::MoveModeEnum::Up {
+            rate as f64
+        } else {
+            -(rate as f64)
+        };
+        task.saturation = hs::SaturationAxis::move_at(start.saturation, rate);
+        self.0.execute_color(color::Task::Hs(task)).await
+    }
+    async fn handle_step_saturation(
+        &self,
+        _ctx: impl InvokeContext,
+        r: c::StepSaturationRequest<'_>,
+    ) -> Result<(), Error> {
+        if !RGB {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
+        let (mode, size, duration) = (r.step_mode()?, r.step_size()?, r.transition_time()?);
+        if size == 0 {
+            return Err(ErrorCode::InvalidCommand.into());
+        }
+        if !self.proceed(r.options_mask()?, r.options_override()?)? {
+            return Ok(());
+        }
+        let (mut task, start) = self.0.continuing_hs()?;
+        let delta = if mode == c::StepModeEnum::Up {
+            size as f64
+        } else {
+            -(size as f64)
+        };
+        task.saturation = hs::SaturationAxis::move_to(
+            start.saturation,
+            (start.saturation + delta).clamp(0.0, 254.0),
+            duration as u64 * 100,
+        );
+        self.0.execute_color(color::Task::Hs(task)).await
+    }
+    async fn handle_move_to_hue_and_saturation(
+        &self,
+        _ctx: impl InvokeContext,
+        r: c::MoveToHueAndSaturationRequest<'_>,
+    ) -> Result<(), Error> {
+        if !RGB {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
+        let (hue, saturation, duration) = (r.hue()?, r.saturation()?, r.transition_time()?);
+        if hue == u8::MAX || saturation == u8::MAX || duration == u16::MAX {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        if !self.proceed(r.options_mask()?, r.options_override()?)? {
+            return Ok(());
+        }
+        let target = hs::Hs {
+            hue: hue as f64,
+            saturation: saturation as f64,
+        };
+        let task = if duration == 0 {
+            hs::HsTask::stationary(target)
+        } else {
+            let start = self.0.hs_start()?;
+            hs::HsTask {
+                hue: hs::HueAxis::move_to(
+                    start.hue,
+                    target.hue,
+                    c::DirectionEnum::Shortest,
+                    duration as u64 * 100,
+                ),
+                saturation: hs::SaturationAxis::move_to(
+                    start.saturation,
+                    target.saturation,
+                    duration as u64 * 100,
+                ),
+            }
+        };
+        self.0.execute_color(color::Task::Hs(task)).await
     }
     async fn handle_move_to_color_temperature(
         &self,
@@ -504,7 +711,7 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         if rate_x == 0 && rate_y == 0 {
             return self.0.stop(LightDimension::Color);
         }
-        let (start_x, start_y) = self.0.color.borrow().xy.ok_or(ErrorCode::InvalidState)?;
+        let (start_x, start_y) = self.0.xy_start()?;
         self.0
             .execute_color(color::Task::XyMove {
                 start_x,
@@ -532,7 +739,7 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         if !self.proceed(r.options_mask()?, r.options_override()?)? {
             return Ok(());
         }
-        let (start_x, start_y) = self.0.color.borrow().xy.ok_or(ErrorCode::InvalidState)?;
+        let (start_x, start_y) = self.0.xy_start()?;
         self.0
             .execute_color(self.xy_task(
                 (start_x as i32 + x as i32).clamp(0, color::XY_MAX as i32) as u16,
@@ -647,9 +854,7 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             })
             .await
     }
-    unsupported_color!(handle_move_to_hue:MoveToHueRequest,handle_move_hue:MoveHueRequest,handle_step_hue:StepHueRequest,
-        handle_move_to_saturation:MoveToSaturationRequest,handle_move_saturation:MoveSaturationRequest,handle_step_saturation:StepSaturationRequest,
-        handle_move_to_hue_and_saturation:MoveToHueAndSaturationRequest,handle_enhanced_move_to_hue:EnhancedMoveToHueRequest,
+    unsupported_color!(handle_enhanced_move_to_hue:EnhancedMoveToHueRequest,
         handle_enhanced_move_hue:EnhancedMoveHueRequest,handle_enhanced_step_hue:EnhancedStepHueRequest,
         handle_enhanced_move_to_hue_and_saturation:EnhancedMoveToHueAndSaturationRequest,handle_color_loop_set:ColorLoopSetRequest);
 }

@@ -5,6 +5,7 @@
 // commit 3f3528ef5c492b6feb0a2e043264dc47e9da4340; see adjacent LICENSE.
 pub(super) mod clock;
 pub(super) mod color;
+pub(super) mod hs;
 pub(super) mod level;
 
 use rs_matter::error::{Error, ErrorCode};

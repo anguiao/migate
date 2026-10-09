@@ -668,6 +668,8 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
+            light.reports(&ctx);
+            ctx.changes.borrow_mut().clear();
             for now in [100, 200, 300, 900] {
                 clock.set(now);
                 light.advance();
@@ -678,7 +680,7 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
                 ctx.changes
                     .borrow()
                     .iter()
-                    .filter(|(_, c, a)| *c == 0x300 && matches!(*a, 3 | 4 | 7))
+                    .filter(|(_, c, a)| *c == 0x300 && matches!(*a, 0 | 1 | 3 | 4 | 7))
                     .count(),
                 0
             );
@@ -686,12 +688,16 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
             light.advance();
             accept(&function, frame(&mut receiver).await);
             light.reports(&ctx);
-            assert!(
-                ctx.changes
-                    .borrow()
-                    .iter()
-                    .any(|(_, c, a)| *c == 0x300 && matches!(*a, 3 | 4 | 7))
-            );
+            let mut attributes: Vec<_> = ctx
+                .changes
+                .borrow()
+                .iter()
+                .filter_map(|(_, c, a)| {
+                    (*c == 0x300 && matches!(*a, 0 | 1 | 3 | 4 | 7)).then_some(*a)
+                })
+                .collect();
+            attributes.sort_unstable();
+            assert_eq!(attributes, if rgb { vec![0, 1, 3, 4] } else { vec![7] });
         });
         let old = light.color_version.get();
         light.update_remaining(LightDimension::Color, 10000, true);
@@ -1154,3 +1160,13 @@ fn ignored_ct_step_still_validates_required_bounds_before_success() {
     });
     assert_eq!(clock.now(), 0);
 }
+
+mod hs_handlers;
+
+mod hs_lifecycle;
+
+mod hs_endpoints;
+
+mod hs_async;
+
+mod color_reports;

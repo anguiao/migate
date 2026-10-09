@@ -165,12 +165,9 @@ fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
             let color = endpoint.clusters.iter().find(|c| c.id == 0x300).unwrap();
             assert_eq!(
                 (color.feature_map, color.revision),
-                (if rgb { 0x18 } else { 0x10 }, 9)
+                (if rgb { 0x19 } else { 0x10 }, 9)
             );
-            let mut expected = vec![2];
-            if rgb {
-                expected.extend([3, 4]);
-            }
+            let mut expected = if rgb { vec![0, 1, 2, 3, 4] } else { vec![2] };
             expected.extend([
                 7, 8, 15, 16, 0x4001, 0x400a, 0x400b, 0x400c, 0x400d, 0xfff8, 0xfff9, 0xfffb,
                 0xfffc, 0xfffd,
@@ -179,7 +176,7 @@ fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
             assert_eq!(
                 commands(color),
                 if rgb {
-                    vec![7, 8, 9, 10, 0x47, 0x4b, 0x4c]
+                    vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0x47, 0x4b, 0x4c]
                 } else {
                     vec![10, 0x47, 0x4b, 0x4c]
                 }
@@ -187,19 +184,19 @@ fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
             for id in [2, 7, 8, 15, 16, 0x4001, 0x400a, 0x400b, 0x400c, 0x400d] {
                 assert!(color.attribute(id).is_some(), "{id}");
             }
-            for id in [0, 1, 0x4000, 0x4010] {
+            for id in [0x4000, 0x4010] {
                 assert!(color.attribute(id).is_none());
             }
-            for id in [3, 4] {
+            for id in [0, 1, 3, 4] {
                 assert_eq!(color.attribute(id).is_some(), rgb);
             }
             for id in [10, 0x47, 0x4b, 0x4c] {
                 assert!(color.command(id).is_some());
             }
-            for id in [7, 8, 9] {
+            for id in 0..=9 {
                 assert_eq!(color.command(id).is_some(), rgb);
             }
-            for id in [0, 1, 2, 3, 4, 5, 6, 0x40, 0x44] {
+            for id in [0x40, 0x41, 0x42, 0x43, 0x44] {
                 assert!(color.command(id).is_none());
             }
             assert!(!endpoint.clusters.iter().any(|c| c.id == 0x62));
