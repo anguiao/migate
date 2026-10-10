@@ -470,3 +470,29 @@ fn light_catalog_uses_cloud_model_for_the_exact_ls2307_color_adapter() {
     assert_eq!(lighting.mode.as_ref().unwrap().property.piid, 2);
     assert_eq!(requests.try_iter().count(), 2);
 }
+
+#[test]
+fn light_catalog_rejects_virtual_groups_with_standard_light_descriptions() {
+    let mut instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/xiaomi-light-ceil04.json"
+    ))
+    .unwrap();
+    instance["type"] = json!("urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802");
+    let (base, requests) = mock_server(vec![
+        MockResponse::json(200, &json!({"code":0,"result":{"list":[{"did":"group.42","model":"mijia.light.group3","spec_type":instance["type"],"name":"Grouped lights"}]}}).to_string()),
+        MockResponse::json(200, &instance.to_string()),
+    ]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert!(matches!(
+        block_on(load_device(
+            &cloud,
+            &credentials(),
+            &home("local", &["group.42"]),
+            "group.42"
+        )),
+        Err(CatalogError::Capability(
+            crate::xiaomi::capability::CapabilityError::UnsupportedLightGroup
+        ))
+    ));
+    assert_eq!(requests.try_iter().count(), 2);
+}

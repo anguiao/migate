@@ -55,6 +55,65 @@ fn prepared_accounts_can_deliver_an_empty_registry() {
 }
 
 #[test]
+fn cached_light_groups_are_unpublished_before_restore_without_losing_identity() {
+    let rig = Rig::light("xiaomi.light.ceil04");
+    let mut groups = Vec::new();
+    for (did, model) in [
+        ("group.42", "xiaomi.light.ceil04"),
+        ("43", "mijia.light.group3"),
+    ] {
+        let mut group = rig.data[0].clone();
+        group.device.key.id = did.into();
+        group.model = model.into();
+        let stored = rig
+            .store
+            .devices()
+            .publish_cached(&group, "Saved group")
+            .unwrap();
+        groups.push((group, stored));
+    }
+    let single = rig.store.devices().list_published().unwrap()[0].clone();
+    for _ in 0..2 {
+        let (source, ready) = XiaomiAdapter::build(
+            rig.store.clone(),
+            rig.source.cloud.clone(),
+            rig.discovery.clone(),
+            rig.clock.clone(),
+        )
+        .unwrap();
+        let registry = block_on(poll_once(ready.wait())).unwrap().unwrap();
+        assert_eq!(registry.list().len(), 1);
+        assert!(registry.get(&single.key).is_some());
+        assert_eq!(
+            rig.store.devices().list_published().unwrap().as_slice(),
+            std::slice::from_ref(&single)
+        );
+        for (group, _) in &groups {
+            assert!(registry.get(&group.device.key).is_none());
+            assert_eq!(
+                rig.store
+                    .devices()
+                    .load_parsed(&group.uid, &group.home_id, &group.device.key)
+                    .unwrap(),
+                Some(group.clone())
+            );
+        }
+        drop(source);
+    }
+    // A future admission can reuse the withdrawn identity and endpoint allocation.
+    for (group, stored) in groups {
+        assert_eq!(
+            rig.store
+                .devices()
+                .publish_cached(&group, "New name")
+                .unwrap(),
+            stored
+        );
+    }
+    assert_eq!(rig.cloud.lock().unwrap().homes, 0);
+}
+
+#[test]
 fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_work() {
     block_on(
         Rig::new(false, &["one", "multi", "two"]).run(|c| async move {

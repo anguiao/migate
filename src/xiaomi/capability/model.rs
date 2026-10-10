@@ -28,6 +28,7 @@ pub struct ParsedDevice {
 pub enum CapabilityError {
     InvalidDescription(&'static str),
     UnsupportedDevice,
+    UnsupportedLightGroup,
     MissingMainPower,
     InvalidMainPowerType,
     MissingAccess(&'static str),
@@ -45,6 +46,9 @@ impl fmt::Display for CapabilityError {
                 write!(formatter, "invalid MIoT description: {field}")
             }
             Self::UnsupportedDevice => formatter.write_str("unsupported MIoT device type"),
+            Self::UnsupportedLightGroup => {
+                formatter.write_str("Xiaomi light groups are not supported")
+            }
             Self::MissingMainPower => formatter.write_str("standard outlet main power is missing"),
             Self::InvalidMainPowerType => formatter.write_str("outlet switch must be boolean"),
             Self::MissingAccess(access) => {

@@ -10,6 +10,10 @@ pub use model::{
 };
 pub(crate) use outlet::is_outlet_type;
 
+pub(crate) fn is_light_group(key: &crate::device::DeviceKey, model: &str) -> bool {
+    key.id.starts_with("group.") || model == "mijia.light.group3"
+}
+
 pub fn parse_device(
     key: crate::device::DeviceKey,
     instance: &serde_json::Value,
@@ -21,6 +25,9 @@ pub fn parse_device_for_model(
     model: &str,
     instance: &serde_json::Value,
 ) -> Result<ParsedDevice, CapabilityError> {
+    if is_light_group(&key, model) {
+        return Err(CapabilityError::UnsupportedLightGroup);
+    }
     let description = description::Description::parse(instance)?;
     if model == "devcea.light.ls2307"
         && !instance

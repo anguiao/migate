@@ -7,7 +7,9 @@ use super::{
 use crate::{
     device::{Availability, DeviceRegistry, PhysicalDevice},
     storage::Store,
-    xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
+    xiaomi::{
+        auth::AuthService, capability::is_light_group, cloud::CloudClient, discovery::Discovery,
+    },
 };
 use event_listener::Event;
 use std::{
@@ -61,6 +63,10 @@ impl XiaomiAdapter {
         let mut consumers = Vec::new();
         if let Some(scope) = &scope {
             for (metadata, stored) in store.devices().restore_cached(&scope.uid, &scope.home_id)? {
+                if is_light_group(&metadata.device.key, &metadata.model) {
+                    store.devices().remove(&metadata.device.key)?;
+                    continue;
+                }
                 let (physical, receivers) = PhysicalDevice::new(stored.description());
                 physical
                     .set_availability(Availability::Unavailable("restoring Xiaomi access".into()));
