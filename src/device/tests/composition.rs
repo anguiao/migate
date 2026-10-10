@@ -507,3 +507,42 @@ fn confirmed_version_survives_device_revisions_and_clears_on_relation_revocation
     assert_eq!(snapshot.composition.confirmed, None);
     assert_eq!(snapshot.composition.revision, 2);
 }
+
+#[test]
+fn composition_label_update_is_atomic_and_leaves_relations_untouched() {
+    let registry = DeviceRegistry::new();
+    let (first, _first_receiver) = ready_light("first", "First");
+    registry.insert(first.clone());
+    registry
+        .update_composition_versioned(7, vec![group("group", "Group", &[&first])], &[])
+        .unwrap();
+    let before = registry.snapshot();
+    let mut changes = registry.subscribe();
+
+    assert!(registry.set_composition_label(&DeviceKey::new("xiaomi", "group"), "Renamed"));
+    let after = registry.snapshot();
+    assert_eq!(after.composition.groups[0].label, "Renamed");
+    assert_eq!(
+        after.composition.groups[0].members,
+        before.composition.groups[0].members
+    );
+    assert_eq!(after.composition.confirmed, before.composition.confirmed);
+    assert_eq!(
+        after.composition.revision,
+        before.composition.revision.wrapping_add(1)
+    );
+    assert_eq!(after.revision, before.revision.wrapping_add(1));
+    assert_eq!(
+        block_on(changes.changed()).composition.groups[0].label,
+        "Renamed"
+    );
+
+    // A repeated or unknown rename never advances the revisions.
+    let after = registry.snapshot();
+    assert!(registry.set_composition_label(&DeviceKey::new("xiaomi", "group"), "Renamed"));
+    assert!(!registry.set_composition_label(&DeviceKey::new("xiaomi", "absent"), "Other"));
+    let unchanged = registry.snapshot();
+    assert_eq!(unchanged.revision, after.revision);
+    assert_eq!(unchanged.composition.revision, after.composition.revision);
+    assert_eq!(unchanged.composition.groups[0].label, "Renamed");
+}

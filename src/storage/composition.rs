@@ -18,6 +18,18 @@ pub struct StoredGroup {
     pub members: Vec<DeviceKey>,
 }
 
+/// One stored group parent identity, loaded by stable device key without
+/// re-deriving the account or home scope. The confirmed relation set is the
+/// publication authority; this lookup only resolves the reserved endpoint and
+/// the saved bridge identity and name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredGroupIdentity {
+    pub key: DeviceKey,
+    pub unique_id: String,
+    pub endpoint: u16,
+    pub label: String,
+}
+
 /// The confirmed relation version of one account/home and its published parents.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfirmedComposition {
@@ -180,6 +192,70 @@ impl DeviceStore {
             return Err(self.invalid(operation, "Group identity does not exist"));
         }
         Ok(())
+    }
+
+    /// Load one stored group parent identity by stable device key. The lookup
+    /// only resolves the reserved endpoint allocation and the saved bridge
+    /// identity and name; it never decides whether a relation may be
+    /// published.
+    pub fn load_group_identity(
+        &self,
+        key: &DeviceKey,
+    ) -> Result<Option<StoredGroupIdentity>, StorageError> {
+        let operation = "load Xiaomi group identity";
+        validate_key(key).map_err(|error| self.invalid(operation, error))?;
+        let connection = self.store.connection();
+        let row = connection
+            .query_row(
+                "SELECT unique_id, endpoint, label FROM group_identity
+                 WHERE source=?1 AND device_id=?2",
+                params![key.source, key.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u16>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| self.store.database_error(operation, error))?;
+        let Some((unique_id, endpoint, label)) = row else {
+            return Ok(None);
+        };
+        let label =
+            label.ok_or_else(|| self.invalid(operation, "Group identity has no saved label"))?;
+        if !(2..=65534).contains(&endpoint)
+            || !Uuid::parse_str(&unique_id).is_ok_and(|uuid| uuid.simple().to_string() == unique_id)
+            || validate_label(&label).is_err()
+        {
+            return Err(self.invalid(operation, "Stored group identity is invalid"));
+        }
+        let allocation = connection
+            .query_row(
+                "SELECT endpoint FROM endpoint_allocation
+                 WHERE source=?1 AND device_id=?2 AND slot='group'",
+                params![key.source, key.id],
+                |row| row.get::<_, u16>(0),
+            )
+            .optional()
+            .map_err(|error| self.store.database_error(operation, error))?;
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM endpoint_allocation WHERE source=?1 AND device_id=?2",
+                params![key.source, key.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| self.store.database_error(operation, error))?;
+        if allocation != Some(endpoint) || count != 1 {
+            return Err(self.invalid(operation, "Group endpoint allocation is inconsistent"));
+        }
+        Ok(Some(StoredGroupIdentity {
+            key: key.clone(),
+            unique_id,
+            endpoint,
+            label,
+        }))
     }
 }
 

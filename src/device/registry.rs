@@ -263,6 +263,30 @@ impl DeviceRegistry {
             revision: self.0.snapshot.lock().unwrap().revision,
         }
     }
+
+    /// Update the saved label of one published composition. The relation set
+    /// and its confirmed version stay unchanged; the revision wakes snapshot
+    /// observers so runtime readers do not keep a stale name.
+    pub fn set_composition_label(&self, key: &DeviceKey, label: impl Into<String>) -> bool {
+        let mut state = self.0.snapshot.lock().unwrap();
+        let Some(group) = state
+            .composition
+            .groups
+            .iter_mut()
+            .find(|group| &group.key == key)
+        else {
+            return false;
+        };
+        let label = label.into();
+        if group.label == label {
+            return true;
+        }
+        group.label = label;
+        state.composition.revision = state.composition.revision.wrapping_add(1);
+        state.revision = state.revision.wrapping_add(1);
+        self.0.changed.notify(usize::MAX);
+        true
+    }
 }
 
 fn validate_compositions(

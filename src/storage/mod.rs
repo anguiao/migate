@@ -10,7 +10,12 @@ mod registry;
 mod store;
 mod xiaomi;
 
-pub use composition::{CompositionCommitError, ConfirmedComposition, StoredGroup};
+#[cfg(test)]
+mod tests;
+
+pub use composition::{
+    CompositionCommitError, ConfirmedComposition, StoredGroup, StoredGroupIdentity,
+};
 pub use device::{CachedPhysicalDevice, CachedScope, DeviceStore};
 pub use error::StorageError;
 pub use identity::Identity;
