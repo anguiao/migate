@@ -41,7 +41,7 @@ mod peer;
 mod rig;
 
 pub(super) use peer::{Peer, peer_run, response, topic_key};
-pub(super) use rig::{Control, Rig};
+pub(super) use rig::{Control, GroupSpec, Rig};
 
 pub(super) fn cached(uid: &str, did: &str, multi: bool) -> CachedPhysicalDevice {
     let instance: Value = serde_json::from_str(if multi {

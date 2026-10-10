@@ -71,7 +71,10 @@ impl DeviceRecord {
 #[derive(Clone)]
 pub(super) struct GroupMeta {
     pub(super) model: String,
-    pub(super) group: CloudGroup,
+    /// The relation confirmed by the current directory read. `None` while a
+    /// read is pending or after a failed read, so only the last published
+    /// relation stays authoritative instead of a stale candidate relation.
+    pub(super) relation: Option<CloudGroup>,
 }
 /// One entry owns all preparation and admission state for a current home member.
 #[derive(Default)]

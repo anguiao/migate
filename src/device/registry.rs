@@ -134,6 +134,45 @@ impl DeviceRegistry {
         state.revision = state.revision.wrapping_add(1);
         self.0.changed.notify(usize::MAX);
     }
+    /// Atomically substitute a new physical instance under an existing key.
+    /// The published composition must stay valid for the replacement; invalid
+    /// replacements leave the registry untouched. A same-instance replacement
+    /// is a no-op and never closes the installed device.
+    pub fn replace(
+        &self,
+        device: PhysicalDevice,
+    ) -> Result<Option<PhysicalDevice>, CompositionError> {
+        let mut state = self.0.snapshot.lock().unwrap();
+        let Some(index) = state
+            .devices
+            .iter()
+            .position(|present| present.key() == device.key())
+        else {
+            if state
+                .composition
+                .groups
+                .iter()
+                .any(|group| &group.key == device.key())
+            {
+                return Err(CompositionError::GroupKeyConflict(device.key().clone()));
+            }
+            state.devices.push(device);
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+            return Ok(None);
+        };
+        if state.devices[index].same_instance(&device) {
+            return Ok(None);
+        }
+        let mut surviving = state.devices.clone();
+        surviving[index] = device.clone();
+        validate_compositions(&state.composition.groups, &surviving)?;
+        let previous = std::mem::replace(&mut state.devices[index], device);
+        previous.close();
+        state.revision = state.revision.wrapping_add(1);
+        self.0.changed.notify(usize::MAX);
+        Ok(Some(previous))
+    }
     pub fn remove(&self, key: &DeviceKey) -> Option<PhysicalDevice> {
         let mut state = self.0.snapshot.lock().unwrap();
         let index = state

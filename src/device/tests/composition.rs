@@ -286,6 +286,85 @@ fn composition_changes_keep_member_instances_commands_and_state() {
 }
 
 #[test]
+fn replacement_preserves_composition_and_rejects_unsupported_instances() {
+    let registry = DeviceRegistry::new();
+    let (first, _first_receiver) = ready_light("first", "First");
+    let (second, _second_receiver) = ready_light("second", "Second");
+    registry.insert(first.clone());
+    registry.insert(second.clone());
+    registry
+        .update_composition_versioned(3, vec![group("group", "Group", &[&first, &second])], &[])
+        .unwrap();
+
+    // A same-instance replacement is a no-op that never closes the installed device.
+    assert!(registry.replace(first.clone()).unwrap().is_none());
+    assert!(registry.get(first.key()).unwrap().same_instance(&first));
+    assert_eq!(
+        first.functions()[0].snapshot().availability,
+        Availability::Available
+    );
+
+    // A supported replacement keeps the published relation and its confirmation.
+    let (replacement, _replacement_receiver) = ready_light("first", "First");
+    let previous = registry.replace(replacement.clone()).unwrap().unwrap();
+    assert!(previous.same_instance(&first));
+    let snapshot = registry.snapshot();
+    assert!(
+        snapshot
+            .devices
+            .iter()
+            .any(|device| device.same_instance(&replacement))
+    );
+    assert_eq!(snapshot.composition.confirmed, Some(3));
+    assert_eq!(snapshot.composition.groups.len(), 1);
+    assert_eq!(
+        snapshot.composition.groups[0].members,
+        vec![
+            DeviceKey::new("xiaomi", "first"),
+            DeviceKey::new("xiaomi", "second")
+        ]
+    );
+
+    // An unsupported replacement of a published member is rejected before mutation.
+    let revision = snapshot.revision;
+    let mut unsupported = outlet();
+    unsupported.key = DeviceKey::new("xiaomi", "first");
+    let (unsupported, _unsupported_receiver) = new_device(unsupported);
+    assert!(matches!(
+        registry.replace(unsupported.clone()),
+        Err(CompositionError::UnsupportedMember(key))
+            if key == DeviceKey::new("xiaomi", "first")
+    ));
+    assert_eq!(registry.snapshot().revision, revision);
+    assert!(
+        registry
+            .get(first.key())
+            .unwrap()
+            .same_instance(&replacement)
+    );
+}
+
+#[test]
+fn replacement_into_a_group_parent_key_is_rejected() {
+    let registry = DeviceRegistry::new();
+    let (first, _first_receiver) = ready_light("first", "First");
+    registry.insert(first.clone());
+    registry
+        .update_composition(vec![group("group", "Group", &[&first])], &[])
+        .unwrap();
+    let (colliding, _receiver) = ready_light("group", "Colliding");
+    colliding.set_label("Colliding".into());
+    assert!(matches!(
+        registry.replace(colliding),
+        Err(CompositionError::GroupKeyConflict(key))
+            if key == DeviceKey::new("xiaomi", "group")
+    ));
+    let snapshot = registry.snapshot();
+    assert_eq!(snapshot.devices.len(), 1);
+    assert_eq!(snapshot.composition.groups.len(), 1);
+}
+
+#[test]
 fn confirmed_deletion_revokes_the_affected_group_and_keeps_unrelated_groups() {
     let registry = DeviceRegistry::new();
     let (first, _first_receiver) = ready_light("first", "First");

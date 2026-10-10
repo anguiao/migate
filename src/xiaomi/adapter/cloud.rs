@@ -115,7 +115,6 @@ pub(super) async fn run(
             due = context.clock.now() + MEMBER_INTERVAL;
             continue;
         }
-        let expected_scope = context.live.borrow().scope.clone();
         let selected = {
             let live = context.live.borrow();
             if let Some(scope) = &live.scope {
@@ -139,6 +138,146 @@ pub(super) async fn run(
                 continue;
             }
         };
+        // A full sync invalidates relation freshness for every known group;
+        // only a successful read in this cycle may count as a fresh confirmed
+        // replacement, while the last published relation stays authoritative.
+        {
+            let mut live = context.live.borrow_mut();
+            for slot in live.devices.values_mut() {
+                if let Some(meta) = &mut slot.group {
+                    meta.relation = None;
+                }
+            }
+        }
+        let scope = CachedScope {
+            uid: home.uid.clone(),
+            home_id: home.home_id.clone(),
+            group_id: home.group_id.clone(),
+        };
+        context.store.devices().save_scope(&scope)?;
+        let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
+        let membership_changed = context.live.borrow().devices.keys().ne(members.iter());
+        let removed_keys = {
+            let live = context.live.borrow();
+            live.devices
+                .keys()
+                .filter(|did| !members.contains(*did))
+                .map(|did| crate::device::DeviceKey::new("xiaomi", did.clone()))
+                .collect::<Vec<_>>()
+        };
+        context.live.borrow_mut().scope = Some(scope.clone());
+        context.live.borrow_mut().complete = true;
+        // Confirmed whole-home deletions are persisted and published before
+        // any device-detail read, so a failed information batch cannot keep or
+        // trim a deleted member.
+        if !removed_keys.is_empty() {
+            context.reconcile_groups_removed(&removed_keys)?;
+        }
+        for did in &members {
+            context
+                .live
+                .borrow_mut()
+                .devices
+                .entry(did.clone())
+                .or_default();
+        }
+        // Group metadata refreshes run before the ordinary access batch: one
+        // malformed or failed device-detail batch must not block unrelated
+        // group relations from being refreshed on their normal schedule.
+        for did in &members {
+            let group_identity = {
+                let live = context.live.borrow();
+                let slot = &live.devices[did];
+                // `group.*` is classified at the DID stage; a numeric group
+                // model is classified once a description read reported it.
+                slot.group.is_some() || did.starts_with("group.")
+            };
+            if !group_identity {
+                continue;
+            }
+            if context.live.borrow().devices[did].loading.is_some() {
+                // A read from a previous cycle is still outstanding; its
+                // completion owns the loading marker and freshness result.
+                continue;
+            }
+            let life = Rc::new(Lifetime::default());
+            context
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut(did)
+                .unwrap()
+                .loading = Some(life.clone());
+            let did = did.clone();
+            let current = context.clone();
+            let client = cloud.clone();
+            let credentials = credentials.clone();
+            let home = home.clone();
+            let task = async move {
+                let Some(result) = future::or(
+                    async {
+                        life.ended().await;
+                        None
+                    },
+                    async { Some(catalog::load_entry(&client, &credentials, &home, &did).await) },
+                )
+                .await
+                else {
+                    return Ok(());
+                };
+                current
+                    .live
+                    .borrow_mut()
+                    .devices
+                    .get_mut(&did)
+                    .unwrap()
+                    .loading = None;
+                match result {
+                    Ok(CatalogEntry::Group { model, group, .. }) => {
+                        {
+                            let mut live = current.live.borrow_mut();
+                            let slot = live.devices.get_mut(&did).unwrap();
+                            slot.blocked = None;
+                            slot.blocked_unsupported = false;
+                            slot.candidate = None;
+                            slot.group = Some(GroupMeta {
+                                model,
+                                relation: Some(group),
+                            });
+                        }
+                        current.reconcile_groups()?;
+                    }
+                    Ok(CatalogEntry::Device { .. }) => {
+                        // A known group identity never silently becomes an
+                        // ordinary device; the relation stays unconfirmed.
+                        current.problem(
+                            &did,
+                            Some("known group identity is no longer a confirmed group".into()),
+                        );
+                    }
+                    Err(error) => {
+                        match &error {
+                            CatalogError::Cloud(_) => current.block_device(&did, error.to_string()),
+                            CatalogError::Capability(_) => {
+                                current.block_unsupported(&did, error.to_string());
+                                current.reconcile_groups()?;
+                            }
+                            _ => current.block_device(&did, error.to_string()),
+                        }
+                        if let CatalogError::Cloud(error) = &error {
+                            current.cloud_error(
+                                &credentials.tokens.access_token,
+                                Some(&did),
+                                error,
+                            )?;
+                        }
+                    }
+                }
+                Ok(())
+            };
+            context.tasks.spawn(task);
+            context.changed.notify(usize::MAX);
+        }
         let requested = {
             let live = context.live.borrow();
             live.devices
@@ -160,7 +299,7 @@ pub(super) async fn run(
         else {
             continue;
         };
-        if !context.current_token(token) || context.live.borrow().scope != expected_scope {
+        if !context.current_token(token) || context.live.borrow().scope.as_ref() != Some(&scope) {
             continue;
         }
         let infos = match infos {
@@ -178,35 +317,6 @@ pub(super) async fn run(
                 continue;
             }
         };
-        let scope = CachedScope {
-            uid: home.uid.clone(),
-            home_id: home.home_id.clone(),
-            group_id: home.group_id.clone(),
-        };
-        context.store.devices().save_scope(&scope)?;
-        let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
-        let membership_changed = context.live.borrow().devices.keys().ne(members.iter());
-        let removed = {
-            let live = context.live.borrow();
-            live.devices
-                .keys()
-                .filter(|did| !members.contains(*did))
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        context.live.borrow_mut().scope = Some(scope.clone());
-        for did in removed {
-            context.remove(&did)?;
-        }
-        for did in &members {
-            context
-                .live
-                .borrow_mut()
-                .devices
-                .entry(did.clone())
-                .or_default();
-        }
-        context.live.borrow_mut().complete = true;
         {
             let mut live = context.live.borrow_mut();
             for (did, slot) in &mut live.devices {
@@ -227,6 +337,14 @@ pub(super) async fn run(
             super::local::refresh_access(&context);
         }
         for did in members {
+            let group_identity = {
+                let live = context.live.borrow();
+                let slot = &live.devices[&did];
+                slot.group.is_some() || did.starts_with("group.")
+            };
+            if group_identity {
+                continue;
+            }
             let prepare = context.live.borrow().devices[&did].needs_description();
             if !prepare {
                 context.reconcile(&did)?;
@@ -237,8 +355,6 @@ pub(super) async fn run(
                 let mut live = context.live.borrow_mut();
                 let slot = live.devices.get_mut(&did).unwrap();
                 slot.loading = Some(life.clone());
-                // Relation metadata is only fresh when this read succeeds.
-                slot.group = None;
             }
             let current = context.clone();
             let client = cloud.clone();
@@ -282,7 +398,10 @@ pub(super) async fn run(
                             slot.blocked = None;
                             slot.blocked_unsupported = false;
                             slot.candidate = None;
-                            slot.group = Some(GroupMeta { model, group });
+                            slot.group = Some(GroupMeta {
+                                model,
+                                relation: Some(group),
+                            });
                         }
                         current.reconcile_groups()?;
                     }
@@ -292,7 +411,8 @@ pub(super) async fn run(
                                 current.problem(&did, Some(error.to_string()))
                             }
                             CatalogError::Capability(_) => {
-                                current.block_unsupported(&did, error.to_string())
+                                current.block_unsupported(&did, error.to_string());
+                                current.reconcile_groups()?;
                             }
                             _ => current.block_device(&did, error.to_string()),
                         }

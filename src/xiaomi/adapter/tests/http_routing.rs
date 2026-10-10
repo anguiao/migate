@@ -13,7 +13,7 @@ async fn cloud_ready(c: &Control, dids: &[&str]) {
 }
 
 #[test]
-fn http_temporary_failure_pauses_the_account_until_a_complete_scoped_sync() {
+fn http_temporary_failure_pauses_the_account_and_keeps_confirmed_deletion() {
     let rig = Rig::new(true, &["one", "two"]);
     rig.cloud
         .lock()
@@ -47,12 +47,15 @@ fn http_temporary_failure_pauses_the_account_until_a_complete_scoped_sync() {
         c.clock.advance(Duration::from_secs(1));
         until(|| c.cloud.lock().unwrap().infos > infos).await;
         until(|| c.context.status.borrow().catalog_problem.is_some()).await;
-        assert!(
+        // The complete home directory confirms the deletion even though the
+        // device-information batch failed afterwards.
+        until(|| {
             c.context
                 .registry
                 .get(&DeviceKey::new("xiaomi", "two"))
-                .is_some()
-        );
+                .is_none()
+        })
+        .await;
         assert!(matches!(
             one.snapshot().availability,
             Availability::Unavailable(_)

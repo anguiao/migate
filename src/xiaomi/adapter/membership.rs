@@ -153,35 +153,43 @@ impl Context {
                                 .iter()
                                 .any(|function| function.lighting.is_some());
                         if replace {
-                            record.life.close();
-                            {
-                                let mut live = self.live.borrow_mut();
-                                if let Some(work) = live.devices.get_mut(did).unwrap().work.take() {
-                                    work.life.close();
-                                }
-                                if let Some(session) = live.session.as_mut() {
-                                    session.devices.remove(did);
-                                }
-                            }
                             let (physical, receivers) = PhysicalDevice::new(stored.description());
-                            let replacement = Rc::new(DeviceRecord {
-                                life: Lifetime::default(),
-                                binding_generation: std::cell::Cell::new(
-                                    record.binding_generation.get(),
-                                ),
-                                cached: RefCell::new(cached),
-                                physical: physical.clone(),
-                            });
-                            // Observers poll only after the complete replacement; storage identity is unchanged.
-                            self.registry.remove(physical.key());
-                            self.registry.insert(physical);
-                            self.live
-                                .borrow_mut()
-                                .devices
-                                .get_mut(did)
-                                .unwrap()
-                                .admitted = Some(replacement.clone());
-                            self.add_consumers(replacement, receivers);
+                            // Publish the new instance before retiring the old
+                            // runtime; a rejected replacement leaves the running
+                            // record untouched and blocks the confirmed shape.
+                            match self.registry.replace(physical.clone()) {
+                                Ok(_) => {
+                                    record.life.close();
+                                    {
+                                        let mut live = self.live.borrow_mut();
+                                        if let Some(work) =
+                                            live.devices.get_mut(did).unwrap().work.take()
+                                        {
+                                            work.life.close();
+                                        }
+                                        if let Some(session) = live.session.as_mut() {
+                                            session.devices.remove(did);
+                                        }
+                                    }
+                                    let replacement = Rc::new(DeviceRecord {
+                                        life: Lifetime::default(),
+                                        binding_generation: std::cell::Cell::new(
+                                            record.binding_generation.get(),
+                                        ),
+                                        cached: RefCell::new(cached),
+                                        physical,
+                                    });
+                                    // Observers poll only after the complete replacement; storage identity is unchanged.
+                                    self.live
+                                        .borrow_mut()
+                                        .devices
+                                        .get_mut(did)
+                                        .unwrap()
+                                        .admitted = Some(replacement.clone());
+                                    self.add_consumers(replacement, receivers);
+                                }
+                                Err(error) => self.block_unsupported(did, error.to_string()),
+                            }
                         } else {
                             *record.cached.borrow_mut() = cached;
                             if changed && let Some(work) = &self.live.borrow().devices[did].work {
@@ -193,6 +201,9 @@ impl Context {
                     Err(error) => {
                         if matches!(error, AdmissionError::IncompatibleFunctions) {
                             self.block_unsupported(did, error.to_string());
+                            // A confirmed unsupported description revokes its
+                            // group immediately, not on an unrelated event.
+                            self.reconcile_groups()?;
                         } else {
                             self.block_device(did, error.to_string());
                         }
@@ -209,7 +220,8 @@ impl Context {
                 Ok(stored) => stored,
                 Err(AdmissionError::Storage(error)) => return Err(error.into()),
                 Err(error) => {
-                    if matches!(error, AdmissionError::IncompatibleFunctions) {
+                    let unsupported = matches!(error, AdmissionError::IncompatibleFunctions);
+                    if unsupported {
                         self.live
                             .borrow_mut()
                             .devices
@@ -218,6 +230,9 @@ impl Context {
                             .blocked_unsupported = true;
                     }
                     self.problem(did, Some(error.to_string()));
+                    if unsupported {
+                        self.reconcile_groups()?;
+                    }
                     return Ok(());
                 }
             };
@@ -279,7 +294,10 @@ impl Context {
             let mut live = self.live.borrow_mut();
             let slot = live.devices.get_mut(did).unwrap();
             slot.blocked = Some(reason.clone());
-            slot.blocked_unsupported = unsupported;
+            // A previously confirmed unsupported description stays authoritative
+            // until a fresh supported description replaces it; an unrelated
+            // temporary failure must not silently re-admit the old record.
+            slot.blocked_unsupported |= unsupported;
             if let Some(record) = &slot.admitted {
                 record
                     .binding_generation
@@ -300,55 +318,64 @@ impl Context {
         self.unavailable_device(did, reason.clone());
         self.problem(did, Some(reason));
     }
+    #[cfg(test)]
     pub(super) fn remove(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
-        let key = DeviceKey::new("xiaomi", did);
-        self.store.devices().remove(&key)?;
-        self.registry.remove(&key);
-        let handle = {
-            let mut live = self.live.borrow_mut();
-            let slot = live.devices.remove(did).unwrap();
-            let light = slot.admitted.as_ref().is_some_and(|record| {
-                record
-                    .cached
-                    .borrow()
-                    .device
-                    .functions
-                    .iter()
-                    .any(|function| function.lighting.is_some())
-            });
-            if let Some(life) = slot.loading {
-                life.close();
+        self.reconcile_groups_removed(&[DeviceKey::new("xiaomi", did)])
+    }
+    /// Retire the runtime resources of devices whose deletion was already
+    /// persisted and published atomically. Registry physical devices were
+    /// closed by the versioned composition update.
+    pub(super) fn retire_confirmed_removed(&self, removed: &[DeviceKey]) {
+        for key in removed {
+            if key.source != "xiaomi" {
+                continue;
             }
-            if let Some(record) = slot.admitted {
-                record.life.close();
-            }
-            if let Some(work) = slot.work {
-                work.life.close();
-            }
-            if let Some(session) = live.session.as_mut() {
-                if let Some(work) = session.devices.remove(did) {
+            let did = key.id.clone();
+            let handle = {
+                let mut live = self.live.borrow_mut();
+                let Some(slot) = live.devices.remove(&did) else {
+                    continue;
+                };
+                let light = slot.admitted.as_ref().is_some_and(|record| {
+                    record
+                        .cached
+                        .borrow()
+                        .device
+                        .functions
+                        .iter()
+                        .any(|function| function.lighting.is_some())
+                });
+                if let Some(life) = slot.loading {
+                    life.close();
+                }
+                if let Some(record) = slot.admitted {
+                    record.life.close();
+                }
+                if let Some(work) = slot.work {
                     work.life.close();
                 }
-                Some((session.handle.clone(), light))
-            } else {
-                None
+                if let Some(session) = live.session.as_mut() {
+                    if let Some(work) = session.devices.remove(&did) {
+                        work.life.close();
+                    }
+                    Some((session.handle.clone(), light))
+                } else {
+                    None
+                }
+            };
+            self.problem(&did, None);
+            self.commands.remove(&did);
+            if let Some(session) = self.notifications.borrow().as_ref() {
+                drop(session.handle.unsubscribe_device(&did));
             }
-        };
-        self.problem(did, None);
-        self.commands.remove(did);
-        if let Some(session) = self.notifications.borrow().as_ref() {
-            drop(session.handle.unsubscribe_device(did));
-        }
-        if let Some((handle, light)) = handle {
-            if light {
-                // Retire delivery and unsent guards while the original sent receipt keeps its gate.
-                drop(handle.unsubscribe_properties(did));
-            } else {
-                drop(handle.unsubscribe_device(did));
+            if let Some((handle, light)) = handle {
+                if light {
+                    // Retire delivery and unsent guards while the original sent receipt keeps its gate.
+                    drop(handle.unsubscribe_properties(&did));
+                } else {
+                    drop(handle.unsubscribe_device(&did));
+                }
             }
         }
-        self.changed.notify(usize::MAX);
-        self.reconcile_groups()?;
-        Ok(())
     }
 }
