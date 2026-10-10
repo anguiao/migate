@@ -19,8 +19,7 @@ async fn settle_wire() {
 }
 
 async fn subscriptions_ready(c: &Control, dids: &[&str]) {
-    advance_to(&c.clock, Duration::from_secs(3)).await;
-    advance_to(&c.clock, Duration::from_millis(3010)).await;
+    advance_to(&c.clock, Duration::from_millis(10)).await;
     until(|| {
         let live = c.context.live.borrow();
         dids.iter().all(|did| {
@@ -36,7 +35,7 @@ async fn subscriptions_ready(c: &Control, dids: &[&str]) {
         })
     })
     .await;
-    wait_deadline(&c.clock, 3200).await;
+    wait_deadline(&c.clock, 200).await;
 }
 
 async fn trigger_burst(c: &Control, peer: &Peer) {
@@ -106,7 +105,7 @@ fn refresh_rounds_wait_for_every_did_and_trigger_bursts_keep_the_pending_deadlin
             settle_wire().await;
             assert_eq!(peer.count("get", "multi", 0), 1);
             peer.release("one", 2, json!({"value":false})).await;
-            wait_deadline(&control.clock, 3900).await;
+            wait_deadline(&control.clock, 900).await;
 
             control.clock.advance(Duration::from_millis(199));
             trigger_burst(control, &peer).await;
@@ -115,9 +114,9 @@ fn refresh_rounds_wait_for_every_did_and_trigger_bursts_keep_the_pending_deadlin
             control.clock.advance(Duration::from_millis(1));
             peer.release("multi", 4, json!({"value":false})).await;
 
-            advance_to(&control.clock, Duration::from_millis(4100)).await;
+            advance_to(&control.clock, Duration::from_millis(1100)).await;
             peer.release("multi", 9, json!({"value":false})).await;
-            advance_to(&control.clock, Duration::from_millis(4300)).await;
+            advance_to(&control.clock, Duration::from_millis(1300)).await;
             peer.release("multi", 3, json!({"value":true})).await;
             until(|| {
                 function(&control.context.registry, "multi", "outlet_1")
@@ -146,7 +145,7 @@ fn failed_properties_keep_independent_backoff_across_successes_and_triggers() {
         let control = &c;
         c.peer(peer, |peer| async move {
             subscriptions_ready(control, &["one", "multi", "two"]).await;
-            advance_to(&control.clock, Duration::from_millis(3200)).await;
+            advance_to(&control.clock, Duration::from_millis(200)).await;
             until(|| {
                 peer.count("get", "multi", 3) == 1
                     && peer.count("get", "one", 2) == 1
@@ -159,13 +158,13 @@ fn failed_properties_keep_independent_backoff_across_successes_and_triggers() {
             peer.release("one", 2, json!({"code":-7})).await;
             peer.release("two", 2, json!({"value":false})).await;
 
-            advance_to(&control.clock, Duration::from_millis(3400)).await;
-            wait_deadline(&control.clock, 3600).await;
+            advance_to(&control.clock, Duration::from_millis(400)).await;
+            wait_deadline(&control.clock, 600).await;
             control.clock.advance(Duration::from_millis(100));
             trigger_burst(control, &peer).await;
-            advance_to(&control.clock, Duration::from_millis(3600)).await;
-            advance_to(&control.clock, Duration::from_millis(3800)).await;
-            wait_deadline(&control.clock, 6200).await;
+            advance_to(&control.clock, Duration::from_millis(600)).await;
+            advance_to(&control.clock, Duration::from_millis(800)).await;
+            wait_deadline(&control.clock, 3200).await;
             assert_eq!(peer.count("get", "multi", 4), 2);
             assert_eq!(peer.count("get", "multi", 9), 1);
 
@@ -199,14 +198,14 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
         let control = &c;
         c.peer(peer, |peer| async move {
             subscriptions_ready(control, &["one"]).await;
-            advance_to(&control.clock, Duration::from_millis(3200)).await;
-            wait_deadline(&control.clock, 6200).await;
+            advance_to(&control.clock, Duration::from_millis(200)).await;
+            wait_deadline(&control.clock, 3200).await;
 
             control.clock.advance(Duration::from_millis(500));
             peer.state.borrow_mut().omit.remove("multi");
             peer.list_changed(&["multi"]);
-            advance_to(&control.clock, Duration::from_millis(3710)).await;
-            wait_deadline(&control.clock, 3900).await;
+            advance_to(&control.clock, Duration::from_millis(710)).await;
+            wait_deadline(&control.clock, 900).await;
             control.clock.advance(Duration::from_millis(189));
             settle_wire().await;
             assert_eq!(peer.count("get", "multi", 0), 0);
@@ -214,8 +213,8 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
 
             control.clock.advance(Duration::from_millis(1));
             until(|| peer.count("get", "multi", 3) == 1).await;
-            advance_to(&control.clock, Duration::from_millis(4100)).await;
-            advance_to(&control.clock, Duration::from_millis(4300)).await;
+            advance_to(&control.clock, Duration::from_millis(1100)).await;
+            advance_to(&control.clock, Duration::from_millis(1300)).await;
             initialized(control, &peer, &["multi"]).await;
 
             control.clock.advance(Duration::from_millis(1899));
@@ -245,8 +244,8 @@ fn removal_and_disconnect_cancel_pending_rounds_and_property_backoff() {
             let observing = peer.clone();
             c.peer(peer, |peer| async move {
                 subscriptions_ready(control, &["one", "multi"]).await;
-                advance_to(&control.clock, Duration::from_millis(3200)).await;
-                wait_deadline(&control.clock, 3400).await;
+                advance_to(&control.clock, Duration::from_millis(200)).await;
+                wait_deadline(&control.clock, 400).await;
                 assert_eq!(peer.count("get", "multi", 0), 1);
                 if remove {
                     control.cloud.lock().unwrap().members = vec!["one".into()];

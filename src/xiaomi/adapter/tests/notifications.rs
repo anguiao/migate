@@ -77,10 +77,11 @@ fn cloud_notifications_activate_after_subscription_and_update_cloud_only_device(
             }
         }
         until(|| {
-            function(&c.context.registry, "one", "main")
-                .snapshot()
-                .power
-                == Power::Off
+            cloud_active(&c, "one")
+                && function(&c.context.registry, "one", "main")
+                    .snapshot()
+                    .power
+                    == Power::Off
         })
         .await;
         broker.property("one", 2, true).await;
@@ -106,6 +107,7 @@ pub(super) struct CloudPeerState {
     connacks: std::collections::VecDeque<ConnectReturnCode>,
     seen: Vec<Packet>,
     held: Vec<Subscribe>,
+    peak_held: usize,
     hold: BTreeSet<String>,
     reject: BTreeMap<String, SubscribeReasonCode>,
     send: Vec<Packet>,
@@ -225,7 +227,9 @@ impl CloudPeer {
                     Packet::Subscribe(subscribe) => {
                         let path = subscribe.filters[0].path.clone();
                         if self.state.borrow().hold.contains(&path) {
-                            self.state.borrow_mut().held.push(subscribe);
+                            let mut state = self.state.borrow_mut();
+                            state.held.push(subscribe);
+                            state.peak_held = state.peak_held.max(state.held.len());
                         } else {
                             let reason = self
                                 .state
@@ -302,6 +306,263 @@ fn local_active(c: &Control, did: &str) -> bool {
                 Some(super::super::notifications::NotificationSource::Local(_))
             )
         })
+}
+
+fn startup_paths(members: &[&str]) -> Vec<String> {
+    members
+        .iter()
+        .flat_map(|did| {
+            [
+                format!("device/{did}/up/properties_changed/2/1"),
+                format!("device/{did}/state/#"),
+            ]
+        })
+        .collect()
+}
+
+async fn release_startup_subscriptions(peer: &CloudPeer, count: usize) {
+    let mut acknowledged = 0;
+    while acknowledged < count {
+        until(|| !peer.state.borrow().held.is_empty()).await;
+        let held = std::mem::take(&mut peer.state.borrow_mut().held);
+        assert!(peer.state.borrow().peak_held <= 16);
+        acknowledged += held.len();
+        for subscribe in held {
+            peer.send(Packet::SubAck(SubAck::new(
+                subscribe.pkid,
+                vec![SubscribeReasonCode::QoS2],
+            )));
+        }
+    }
+    assert_eq!(acknowledged, count);
+}
+
+#[test]
+fn many_devices_share_sixteen_cloud_startup_handshakes_without_queue_full_retries() {
+    let members = (0..80)
+        .map(|index| format!("device{index:02}"))
+        .collect::<Vec<_>>();
+    let members = members.iter().map(String::as_str).collect::<Vec<_>>();
+    let paths = startup_paths(&members);
+    let (rig, listener, peer) = with_cloud_peer(&members);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    peer.state.borrow_mut().hold.extend(paths.iter().cloned());
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| peer.state.borrow().held.len() >= 16).await;
+            for _ in 0..20 {
+                future::yield_now().await;
+            }
+            assert_eq!(peer.state.borrow().held.len(), 16);
+            release_startup_subscriptions(&peer, paths.len()).await;
+            until(|| members.iter().all(|did| cloud_active(&c, did))).await;
+            for path in &paths {
+                assert_eq!(peer.count(path), 1, "{path}");
+            }
+            assert_eq!(c.clock.now(), Duration::ZERO);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn waiting_cloud_startup_subscriptions_are_revoked_and_replaced_before_sending() {
+    let members = (0..80)
+        .map(|index| format!("device{index:02}"))
+        .collect::<Vec<_>>();
+    let members = members.iter().map(String::as_str).collect::<Vec<_>>();
+    let paths = startup_paths(&members);
+    let (rig, listener, peer) = with_cloud_peer(&members);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    peer.state.borrow_mut().hold.extend(paths.iter().cloned());
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| peer.state.borrow().held.len() == 16).await;
+            assert_eq!(peer.count("device/device79/up/properties_changed/2/1"), 0);
+            c.context
+                .block_device("device79", "test removal while queued".into());
+            let replaced = c.context.live.borrow().devices["device78"]
+                .work
+                .clone()
+                .unwrap();
+            replaced
+                .cloud_generation
+                .set(replaced.cloud_generation.get() + 1);
+            replaced.cloud_running.set(false);
+            c.context.changed.notify(usize::MAX);
+            release_startup_subscriptions(&peer, paths.len() - 2).await;
+            until(|| members[..79].iter().all(|did| cloud_active(&c, did))).await;
+            assert_eq!(peer.count("device/device79/up/properties_changed/2/1"), 0);
+            assert_eq!(peer.count("device/device79/state/#"), 0);
+            assert_eq!(peer.count("device/device78/up/properties_changed/2/1"), 1);
+            assert!(!replaced.cloud_running.get());
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn reconnect_discards_inflight_and_waiting_startup_subscription_budget() {
+    let members = (0..80)
+        .map(|index| format!("device{index:02}"))
+        .collect::<Vec<_>>();
+    let members = members.iter().map(String::as_str).collect::<Vec<_>>();
+    let paths = startup_paths(&members);
+    let (rig, listener, peer) = with_cloud_peer(&members);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    peer.state.borrow_mut().hold.extend(paths.iter().cloned());
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| peer.state.borrow().held.len() == 16).await;
+            peer.send(Packet::Disconnect(Disconnect::new()));
+            until(|| c.context.notifications.borrow().is_none()).await;
+            let due = c.clock.now() + Duration::from_secs(10);
+            until(|| c.clock.deadlines.lock().unwrap().contains(&due)).await;
+            peer.state.borrow_mut().held.clear();
+            peer.state.borrow_mut().seen.clear();
+            c.clock.advance(Duration::from_secs(10));
+            until(|| peer.state.borrow().connects.len() == 2).await;
+            until(|| peer.state.borrow().held.len() == 16).await;
+            release_startup_subscriptions(&peer, paths.len()).await;
+            until(|| members.iter().all(|did| cloud_active(&c, did))).await;
+            for path in &paths {
+                assert_eq!(peer.count(path), 1, "{path}");
+            }
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn failed_cloud_handshakes_release_capacity_during_the_retry_delay() {
+    let members = (0..20)
+        .map(|index| format!("device{index:02}"))
+        .collect::<Vec<_>>();
+    let members = members.iter().map(String::as_str).collect::<Vec<_>>();
+    let paths = startup_paths(&members);
+    let (rig, listener, peer) = with_cloud_peer(&members);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    for did in &members[..16] {
+        peer.state.borrow_mut().reject.insert(
+            format!("device/{did}/up/properties_changed/2/1"),
+            SubscribeReasonCode::QuotaExceeded,
+        );
+    }
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| paths.iter().all(|path| peer.count(path) == 1)).await;
+            until(|| members[16..].iter().all(|did| cloud_active(&c, did))).await;
+            until(|| {
+                c.clock
+                    .deadlines
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|deadline| **deadline == Duration::from_secs(1))
+                    .count()
+                    == 16
+            })
+            .await;
+            assert_eq!(c.clock.now(), Duration::ZERO);
+            assert!(members[..16].iter().all(|did| !cloud_active(&c, did)));
+            peer.state.borrow_mut().reject.clear();
+            c.clock.advance(Duration::from_secs(1));
+            until(|| members.iter().all(|did| cloud_active(&c, did))).await;
+            for (index, did) in members.iter().enumerate() {
+                assert_eq!(peer.count(&format!("device/{did}/state/#")), 1);
+                assert_eq!(
+                    peer.count(&format!("device/{did}/up/properties_changed/2/1")),
+                    if index < 16 { 2 } else { 1 }
+                );
+            }
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn cloud_unsubscribe_burst_revokes_delivery_synchronously_even_above_wire_capacity() {
+    let members = (0..80)
+        .map(|index| format!("device{index:02}"))
+        .collect::<Vec<_>>();
+    let members = members.iter().map(String::as_str).collect::<Vec<_>>();
+    let (rig, listener, peer) = with_cloud_peer(&members);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| {
+                members.iter().all(|did| {
+                    cloud_active(&c, did)
+                        && function(&c.context.registry, did, "main").snapshot().power == Power::Off
+                        && peer.count(&format!("device/{did}/state/#")) == 1
+                })
+            })
+            .await;
+            let handle = c
+                .context
+                .notifications
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .handle
+                .clone();
+            for did in &members {
+                handle.subscribe_online(did).await.unwrap();
+            }
+            // Revocation happens at call time, even if the returned future is dropped.
+            let pending = members
+                .iter()
+                .map(|did| handle.unsubscribe_properties(did))
+                .collect::<Vec<_>>();
+            let mut full = 0;
+            for request in pending {
+                if let Some(result) = poll_once(request).await {
+                    assert_eq!(
+                        result,
+                        Err(crate::xiaomi::cloud::NotificationError::QueueFull)
+                    );
+                    full += 1;
+                }
+            }
+            assert_eq!(full, 16);
+            until(|| {
+                peer.state
+                    .borrow()
+                    .seen
+                    .iter()
+                    .filter(|packet| matches!(packet, Packet::Unsubscribe(_)))
+                    .count()
+                    == 64
+            })
+            .await;
+            for did in &members {
+                peer.property(did, 2, true);
+            }
+            peer.online("device79", false);
+            until(|| {
+                !c.context.live.borrow().devices["device79"]
+                    .cloud_access
+                    .as_ref()
+                    .unwrap()
+                    .online
+            })
+            .await;
+            assert!(members.iter().all(|did| {
+                function(&c.context.registry, did, "main").snapshot().power == Power::Off
+            }));
+        })
+        .await;
+    }));
 }
 
 #[test]

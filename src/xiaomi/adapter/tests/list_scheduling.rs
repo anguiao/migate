@@ -5,10 +5,18 @@ use crate::xiaomi::{
 };
 
 #[test]
-fn full_lists_wait_three_seconds_and_pending_requests_keep_the_original_deadline() {
+fn initial_list_is_immediate_and_later_requests_keep_the_three_second_deadline() {
     block_on(async {
         let clock = TestClock::default();
         let access = AccessRefresh::default();
+        clock.advance(Duration::from_secs(30));
+        access.request_initial(clock.now());
+        access.request(clock.now());
+        assert!(matches!(
+            poll_once(access.next(&clock)).await,
+            Some(AccessRequest::Full)
+        ));
+        assert!(poll_once(access.next(&clock)).await.is_none());
         for _ in 0..3 {
             access.request(clock.now());
             assert!(poll_once(access.next(&clock)).await.is_none());
@@ -29,8 +37,7 @@ fn full_list_failure_restarts_the_three_second_delay_without_blocking_filtered_c
     block_on(async {
         let clock = TestClock::default();
         let access = AccessRefresh::default();
-        access.request(clock.now());
-        clock.advance(Duration::from_secs(3));
+        access.request_initial(clock.now());
         assert!(matches!(access.next(&clock).await, AccessRequest::Full));
         clock.advance(Duration::from_secs(1));
         access.request(clock.now());
@@ -54,6 +61,8 @@ fn changed_dids_merge_without_delaying_the_pending_full_list() {
     block_on(async {
         let clock = TestClock::default();
         let access = AccessRefresh::default();
+        access.request_initial(clock.now());
+        assert!(matches!(access.next(&clock).await, AccessRequest::Full));
         access.request(clock.now());
         clock.advance(Duration::from_secs(1));
         access.request_filtered(vec!["one".into(), "multi".into()]);
@@ -75,6 +84,91 @@ fn changed_dids_merge_without_delaying_the_pending_full_list() {
         assert!(matches!(access.next(&clock).await, AccessRequest::Full));
         assert!(poll_once(access.next(&clock)).await.is_none());
     });
+}
+
+#[test]
+fn a_new_local_session_requests_its_first_list_without_advancing_the_clock() {
+    let rig = Rig::new(true, &["one"]);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            until(|| peer.lists() == 1).await;
+            assert_eq!(control.clock.now(), Duration::ZERO);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn initial_list_waits_for_baseline_suback_and_preserves_its_timeout() {
+    for acknowledge in [true, false] {
+        let rig = Rig::new(true, &["one"]);
+        rig.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        block_on(rig.run(|c| async move {
+            c.announce();
+            let mut broker = c.accept().await;
+            let Packet::Connect(connect) = broker.next().await else {
+                panic!("CONNECT expected")
+            };
+            broker.client_id = connect.client_id;
+            broker
+                .send(Packet::ConnAck(ConnAck::new(
+                    ConnectReturnCode::Success,
+                    false,
+                )))
+                .await;
+            let Packet::Subscribe(subscription) = broker.next().await else {
+                panic!("baseline SUBSCRIBE expected")
+            };
+            c.clock.advance(Duration::from_secs(4));
+            future::or(
+                async {
+                    panic!(
+                        "business packet before baseline SUBACK: {:?}",
+                        broker.next().await
+                    )
+                },
+                async {
+                    async_io::Timer::after(Duration::from_millis(40)).await;
+                },
+            )
+            .await;
+            if acknowledge {
+                broker
+                    .send(Packet::SubAck(SubAck::new(
+                        subscription.pkid,
+                        vec![SubscribeReasonCode::QoS2; 2],
+                    )))
+                    .await;
+                let Packet::Publish(list) = broker.next().await else {
+                    panic!("initial device list expected after baseline SUBACK")
+                };
+                assert_eq!(list.topic, "master/proxy/getDevList");
+                assert_eq!(c.clock.now(), Duration::from_secs(4));
+            } else {
+                assert!(broker.next_optional().await.is_none());
+                until(|| {
+                    matches!(
+                        c.context.status.borrow().gateway,
+                        GatewayStatus::Unavailable(_)
+                    )
+                })
+                .await;
+                assert_eq!(
+                    c.context.status.borrow().gateway,
+                    GatewayStatus::Unavailable(
+                        crate::xiaomi::central::CentralError::Timeout.to_string()
+                    )
+                );
+            }
+        }));
+    }
 }
 
 pub(super) fn observation(record: &CachedPhysicalDevice, online: bool) -> DeviceEntry {

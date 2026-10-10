@@ -81,15 +81,21 @@ fn one_inflight_frame_coalesces_ticks_and_keeps_the_final_target_and_original_wa
                 .submit_light_frame(action.token(), brightness(value), false)
                 .unwrap();
         }
+        let before_final = std::time::Instant::now();
         function
             .submit_light_frame(action.token(), brightness(70.0), true)
             .unwrap();
+        let after_final = std::time::Instant::now();
         assert!(poll_once(receiver.next_operation()).await.is_none());
         assert!(poll_once(action.accepted()).await.is_none());
         first.accept().unwrap();
         assert!(action.accepted().await.is_ok());
         assert!(function.light_action_current(action.token()));
-        let last = frame(&mut receiver).await;
+        let last = receiver.next_operation().await.unwrap();
+        assert!((before_final..=after_final).contains(&last.queued_at()));
+        let DeviceRequest::Light(last) = last else {
+            panic!("expected the final lighting frame");
+        };
         assert_eq!(last.token, action.token());
         assert_eq!(last.target, brightness(70.0));
         assert!(last.final_frame);

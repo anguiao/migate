@@ -191,6 +191,7 @@ pub(super) async fn send(
             .map_or(record.binding(id), |(binding, _)| *binding),
         diagnostic_target,
         properties.clone(),
+        request.queued_at(),
     );
 
     let work = context

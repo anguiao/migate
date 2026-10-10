@@ -19,6 +19,7 @@ use std::{
     collections::BTreeMap,
     rc::Rc,
     sync::Arc,
+    time::Instant,
 };
 
 mod feedback;
@@ -117,6 +118,7 @@ impl Commands {
         channel: &str,
         binding: PropertyBinding,
         target: bool,
+        queued_at: Instant,
     ) -> CommandLease {
         self.begin_operation(
             did,
@@ -124,6 +126,7 @@ impl Commands {
             binding,
             CommandTarget::Power(target),
             vec![(binding, serde_json::Value::Bool(target))],
+            queued_at,
         )
     }
     fn begin_operation(
@@ -133,6 +136,7 @@ impl Commands {
         binding: PropertyBinding,
         target: CommandTarget,
         properties: Vec<(PropertyBinding, serde_json::Value)>,
+        queued_at: Instant,
     ) -> CommandLease {
         let id = self.next.get() + 1;
         self.next.set(id);
@@ -161,6 +165,8 @@ impl Commands {
             did: did.into(),
             channel: channel.into(),
             status: RefCell::new(status),
+            queued_at,
+            sent_at: Cell::new(None),
         }))
     }
     pub(super) fn snapshot(
@@ -195,6 +201,8 @@ struct CommandOperation {
     did: String,
     channel: String,
     status: RefCell<CommandStatus>,
+    queued_at: Instant,
+    sent_at: Cell<Option<Instant>>,
 }
 impl CommandOperation {
     fn properties(&self, properties: Vec<(PropertyBinding, serde_json::Value)>) {
@@ -226,6 +234,7 @@ impl CommandOperation {
             status.actual_path = Some(path);
             status.clone()
         };
+        self.sent_at.set(Some(Instant::now()));
         if let Some(entry) = self
             .commands
             .records
@@ -286,16 +295,27 @@ impl CommandOperation {
         } else {
             log::Level::Warn
         };
+        let now = Instant::now();
+        let (queue_ms, response_ms) = match self.sent_at.get() {
+            Some(sent) => (
+                sent.duration_since(self.queued_at).as_millis(),
+                Some(now.duration_since(sent).as_millis()),
+            ),
+            None => (now.duration_since(self.queued_at).as_millis(), None),
+        };
         log::log!(
             level,
-            "Xiaomi command result op={} did={} channel={} property={} target={} path={} result={}",
+            "Xiaomi command result op={} did={} channel={} property={} target={} path={} result={} queue_ms={} response_ms={:?} total_ms={}",
             status.id,
             self.did,
             self.channel,
             status.properties_text(),
             status.target,
             path,
-            result
+            result,
+            queue_ms,
+            response_ms,
+            now.duration_since(self.queued_at).as_millis(),
         );
         self.commands.changed.notify(usize::MAX);
     }
@@ -451,7 +471,13 @@ pub(super) async fn consume(
                 };
                 let binding = record.binding(&function_id);
                 let target = request.target;
-                let command = context.commands.begin(&did, &function_id, binding, target);
+                let command = context.commands.begin(
+                    &did,
+                    &function_id,
+                    binding,
+                    target,
+                    request.queued_at(),
+                );
                 let work = context
                     .live
                     .borrow()

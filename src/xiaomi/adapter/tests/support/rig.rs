@@ -94,6 +94,11 @@ impl Rig {
             cached(&tls.credentials.uid, "multi", true),
             cached(&tls.credentials.uid, "two", false),
         ];
+        for did in members {
+            if !data.iter().any(|record| record.device.key.id == *did) {
+                data.push(cached(&tls.credentials.uid, did, false));
+            }
+        }
         if let Some(model) = light {
             let text = light_fixture(model);
             let instance: Value = serde_json::from_str(text).unwrap();

@@ -1,7 +1,7 @@
 use super::{
     model::AdapterError,
     routing::PathPriority,
-    state::{Backoff, Context},
+    state::{Backoff, Context, Lifetime},
     tasks::TaskSet,
     work::DeviceWork,
 };
@@ -13,6 +13,7 @@ use crate::{
         cloud::{NotificationDriver, NotificationError, NotificationEvent, NotificationHandle},
     },
 };
+use event_listener::Event;
 use futures_lite::future;
 use std::{
     cell::{Cell, RefCell},
@@ -64,6 +65,45 @@ pub(super) struct CloudSession {
     key: ConnectionKey,
     tasks: TaskSet,
     online: RefCell<BTreeMap<String, Rc<OnlinePreparation>>>,
+    subscriptions: Rc<SubscriptionBudget>,
+}
+
+// Online and property handshakes share capacity, leaving transport slots for cleanup.
+const SUBSCRIPTION_LIMIT: usize = 16;
+
+#[derive(Default)]
+struct SubscriptionBudget {
+    in_flight: Cell<usize>,
+    released: Event,
+}
+struct SubscriptionPermit<'a>(&'a SubscriptionBudget);
+impl SubscriptionBudget {
+    async fn acquire(
+        &self,
+        changed: &Event,
+        life: &Lifetime,
+        current: &impl Fn() -> bool,
+    ) -> Option<SubscriptionPermit<'_>> {
+        loop {
+            let released = self.released.listen();
+            let changed = changed.listen();
+            if life.is_closed() || !current() {
+                return None;
+            }
+            if self.in_flight.get() < SUBSCRIPTION_LIMIT {
+                self.in_flight.set(self.in_flight.get() + 1);
+                return Some(SubscriptionPermit(self));
+            }
+            future::or(released, future::or(changed, life.ended())).await;
+        }
+    }
+}
+impl Drop for SubscriptionPermit<'_> {
+    fn drop(&mut self) {
+        self.0.in_flight.set(self.0.in_flight.get() - 1);
+        // A retired waiter must not consume the only wakeup for an available slot.
+        self.0.released.notify(usize::MAX);
+    }
 }
 struct OnlinePreparation {
     condition: u64,
@@ -319,6 +359,8 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
                     work.clone(),
                     handle,
                     session.key.token.clone(),
+                    session.subscriptions.clone(),
+                    work.cloud_generation.get(),
                 ));
             }
         }
@@ -374,9 +416,15 @@ fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
         let context = context.clone();
         let handle = session.handle.clone();
         let token = session.key.token.clone();
-        session
-            .tasks
-            .spawn(prepare_online(context, work, handle, token, did, state));
+        session.tasks.spawn(prepare_online(
+            context,
+            work,
+            handle,
+            token,
+            did,
+            state,
+            session.subscriptions.clone(),
+        ));
     }
 }
 async fn prepare_online(
@@ -386,6 +434,7 @@ async fn prepare_online(
     token: String,
     did: String,
     state: Rc<OnlinePreparation>,
+    subscriptions: Rc<SubscriptionBudget>,
 ) -> Result<(), AdapterError> {
     let current = || {
         context.current_notifications(&handle)
@@ -403,10 +452,17 @@ async fn prepare_online(
                 })
     };
     for attempt in 0..4 {
+        let Some(permit) = subscriptions
+            .acquire(&context.changed, &work.life, &current)
+            .await
+        else {
+            break;
+        };
         if !current() {
             break;
         }
         let result = handle.subscribe_online(&did).await;
+        drop(permit);
         if !current() {
             break;
         }
@@ -438,8 +494,9 @@ async fn prepare_properties(
     work: Rc<DeviceWork>,
     handle: NotificationHandle,
     token: String,
+    subscriptions: Rc<SubscriptionBudget>,
+    preparation: u64,
 ) -> Result<(), AdapterError> {
-    let preparation = work.cloud_generation.get();
     let did = work.record.physical.key().id.clone();
     let current = || {
         !work.life.is_closed()
@@ -461,10 +518,17 @@ async fn prepare_properties(
         let mut failed = Vec::new();
         let mut problem = None;
         for binding in pending {
+            let Some(permit) = subscriptions
+                .acquire(&context.changed, &work.life, &current)
+                .await
+            else {
+                break 'attempts;
+            };
             if !current() {
                 break 'attempts;
             }
             let result = handle.subscribe_property(&did, binding).await;
+            drop(permit);
             if !current() {
                 break 'attempts;
             }
@@ -575,6 +639,7 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     key: key.clone(),
                     tasks: TaskSet::default(),
                     online: RefCell::new(BTreeMap::new()),
+                    subscriptions: Rc::new(SubscriptionBudget::default()),
                 });
                 *context.notifications.borrow_mut() = Some(session.clone());
                 for work in context

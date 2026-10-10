@@ -4,6 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use event_listener::Event;
@@ -102,6 +103,7 @@ impl Function {
                 command,
                 completion: completion.clone(),
                 order,
+                queued_at: Instant::now(),
             });
         }
         let _submission = Submission {
@@ -149,6 +151,7 @@ pub(super) struct PendingCommand {
     command: Command,
     completion: Arc<Completion>,
     pub(super) order: u64,
+    queued_at: Instant,
 }
 
 /// A waiting caller owns its place in the queue, until the adapter takes over.
@@ -224,6 +227,7 @@ impl CommandReceiver {
             state.queue.active_power = flight.clone();
             return Some(CommandRequest {
                 target,
+                queued_at: pending.queued_at,
                 function: self.function.clone(),
                 completion: pending.completion,
                 flight,
@@ -258,6 +262,7 @@ impl Drop for CommandReceiver {
 /// A protocol-independent absolute write owned by the adapter until completion.
 pub struct CommandRequest {
     pub target: bool,
+    queued_at: Instant,
     function: Function,
     completion: Arc<Completion>,
     flight: Option<Arc<PowerFlight>>,
@@ -270,6 +275,10 @@ struct PowerFlight {
 }
 
 impl CommandRequest {
+    pub(crate) fn queued_at(&self) -> Instant {
+        self.queued_at
+    }
+
     /// Lighting power writes use the same actual-send guard as numeric frames.
     /// Outlet request ownership continues to transfer on dequeue.
     pub fn is_current(&self) -> bool {

@@ -108,7 +108,7 @@ pub(super) async fn run(
             tasks.spawn(super::refresh::local(context.clone(), handle.clone()));
 
             context.set_gateway(GatewayStatus::Connected(selected.did.clone()));
-            refresh_access(&context);
+            access.request_initial(context.clock.now());
             if reconnecting {
                 context.request_sync();
             }

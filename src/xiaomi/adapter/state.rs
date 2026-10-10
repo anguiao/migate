@@ -184,6 +184,10 @@ impl AccessRefresh {
         self.recovery.set(Recovery::Healthy);
         self.changed.notify(usize::MAX);
     }
+    pub(super) fn request_initial(&self, now: Duration) {
+        self.full_deadline.set(Some(now));
+        self.changed.notify(usize::MAX);
+    }
     pub(super) fn request(&self, now: Duration) {
         if self.is_degraded() {
             return;

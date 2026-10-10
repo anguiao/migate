@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Instant,
 };
 
 use super::{
@@ -96,6 +99,7 @@ struct Frame {
     target: LightTarget,
     final_frame: bool,
     order: u64,
+    queued_at: Instant,
 }
 struct Flight {
     action: Arc<Action>,
@@ -197,6 +201,7 @@ impl LightCoordinator {
             target,
             final_frame,
             order,
+            queued_at: Instant::now(),
         });
     }
     fn first_pending(&self) -> Option<(usize, u64)> {
@@ -508,6 +513,14 @@ pub enum DeviceRequest {
     Power(CommandRequest),
     Light(LightRequest),
 }
+impl DeviceRequest {
+    pub(crate) fn queued_at(&self) -> Instant {
+        match self {
+            Self::Power(request) => request.queued_at(),
+            Self::Light(request) => request.queued_at,
+        }
+    }
+}
 impl CommandReceiver {
     /// One gate serializes power and both lighting dimensions for this function.
     pub async fn next_operation(&mut self) -> Option<DeviceRequest> {
@@ -538,6 +551,7 @@ impl CommandReceiver {
                         token: flight.action.token,
                         target: frame.target,
                         final_frame: frame.final_frame,
+                        queued_at: frame.queued_at,
                         function: self.function.clone(),
                         flight,
                     }));
@@ -559,6 +573,7 @@ pub struct LightRequest {
     pub token: ActionToken,
     pub target: LightTarget,
     pub final_frame: bool,
+    queued_at: Instant,
     function: Function,
     flight: Arc<Flight>,
 }

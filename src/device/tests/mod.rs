@@ -120,15 +120,19 @@ fn commands_are_fifo_and_toggle_uses_snapshot_at_execution_time() {
         let first = device.execute(Command::On);
         let second = device.execute(Command::Toggle);
         futures_lite::pin!(first, second);
+        let before_queue = std::time::Instant::now();
         poll_once(first.as_mut()).await;
         poll_once(second.as_mut()).await;
+        let after_queue = std::time::Instant::now();
         let first_request = receiver.next().await.unwrap();
+        assert!((before_queue..=after_queue).contains(&first_request.queued_at()));
         assert!(poll_once(receiver.next()).await.is_none());
         first_request.accept().unwrap();
         first.await.unwrap();
         // A current observation affects Toggle when its turn arrives.
         device.observe(false);
         let second_request = receiver.next().await.unwrap();
+        assert!((before_queue..=after_queue).contains(&second_request.queued_at()));
         assert!(second_request.target);
         second_request.accept().unwrap();
         assert_eq!(second.await.unwrap().power, Power::On);
