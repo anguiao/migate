@@ -1727,21 +1727,27 @@ fn a_first_property_read_failure_does_not_block_admission_or_fabricate_state() {
 
 #[test]
 fn a_failed_device_information_batch_does_not_block_group_refresh() {
-    let rig = Rig::restored_group(
-        &["one", "two"],
-        "group.1",
-        "mijia.light.group3",
-        "Reading lamp",
-    );
+    failed_information_batch_does_not_block_group_refresh("group.1", "Reading lamp");
+}
+
+#[test]
+fn a_failed_device_information_batch_does_not_block_numeric_group_refresh() {
+    failed_information_batch_does_not_block_group_refresh("43", "Numeric lamp");
+}
+
+fn failed_information_batch_does_not_block_group_refresh(did: &str, label: &str) {
+    let rig = Rig::restored_group(&["one", "two"], did, "mijia.light.group3", label);
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.detail_failures.insert("one".into(), 503);
-        cloud.groups.get_mut("group.1").unwrap().members = vec!["two".into()];
+        cloud.groups.get_mut(did).unwrap().members = vec!["two".into()];
     }
     block_on(rig.run(|c| async move {
         c.announce();
         // The ordinary access batch fails on one malformed/missing member, but
-        // the independent group refresh still converges the relation.
+        // the independent group refresh is still requested and converges the
+        // relation.
+        until(|| c.cloud.lock().unwrap().detail_counts.contains_key(did)).await;
         until(|| {
             c.context
                 .registry
@@ -1749,9 +1755,11 @@ fn a_failed_device_information_batch_does_not_block_group_refresh() {
                 .composition
                 .groups
                 .iter()
-                .any(|group| group.key == key("group.1") && group.members == vec![key("two")])
+                .any(|group| group.key == key(did) && group.members == vec![key("two")])
         })
         .await;
+        // The failed ordinary batch must have completed before asserting.
+        until(|| c.context.status.borrow().catalog_problem.is_some()).await;
         assert!(c.context.status.borrow().catalog_problem.is_some());
         assert!(c.context.registry.get(&key("one")).is_some());
         assert!(c.context.registry.get(&key("two")).is_some());

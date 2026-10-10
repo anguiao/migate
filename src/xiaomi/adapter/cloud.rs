@@ -28,6 +28,25 @@ pub(super) enum CloudSync {
     Paused,
 }
 pub(super) const MEMBER_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Group identities are known from the DID convention, a classified relation,
+/// or an authoritative published composition restored from storage.
+fn known_group_identity(context: &Context, did: &str, published: &BTreeSet<String>) -> bool {
+    did.starts_with("group.")
+        || published.contains(did)
+        || context.live.borrow().devices[did].group.is_some()
+}
+
+fn published_group_identities(context: &Context) -> BTreeSet<String> {
+    context
+        .registry
+        .snapshot()
+        .composition
+        .groups
+        .into_iter()
+        .map(|group| group.key.id)
+        .collect()
+}
 pub(super) async fn run(
     cloud: &CloudClient,
     discovery: &Discovery,
@@ -183,15 +202,12 @@ pub(super) async fn run(
         }
         // Group metadata refreshes run before the ordinary access batch: one
         // malformed or failed device-detail batch must not block unrelated
-        // group relations from being refreshed on their normal schedule.
+        // group relations from being refreshed on their normal schedule. A
+        // restored published composition is authoritative for numeric group
+        // identities before their slot metadata is populated.
+        let published_groups = published_group_identities(&context);
         for did in &members {
-            let group_identity = {
-                let live = context.live.borrow();
-                let slot = &live.devices[did];
-                // `group.*` is classified at the DID stage; a numeric group
-                // model is classified once a description read reported it.
-                slot.group.is_some() || did.starts_with("group.")
-            };
+            let group_identity = known_group_identity(&context, did, &published_groups);
             if !group_identity {
                 continue;
             }
@@ -336,12 +352,9 @@ pub(super) async fn run(
         if membership_changed {
             super::local::refresh_access(&context);
         }
+        let published_groups = published_group_identities(&context);
         for did in members {
-            let group_identity = {
-                let live = context.live.borrow();
-                let slot = &live.devices[&did];
-                slot.group.is_some() || did.starts_with("group.")
-            };
+            let group_identity = known_group_identity(&context, &did, &published_groups);
             if group_identity {
                 continue;
             }
