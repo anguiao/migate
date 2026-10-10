@@ -1,4 +1,4 @@
-use super::{CatalogError, current_home, load_device, select_local_home};
+use super::{CatalogEntry, CatalogError, current_home, load_device, load_entry, select_local_home};
 use crate::{
     device::DeviceKey,
     storage::{CachedScope, Store, XiaomiRecord},
@@ -502,6 +502,81 @@ fn confirmed_group_metadata_is_not_parsed_as_an_ordinary_light() {
         ))
     ));
     assert_eq!(requests.try_iter().count(), 1);
+}
+
+#[test]
+fn group_entries_keep_typed_metadata_without_reading_miot() {
+    let group = json!({
+        "did":"42",
+        "model":"xiaomi.light.ceil04",
+        "spec_type":"urn:miot-spec-v2:device:light:0000A001:xiaomi:3:0000C802",
+        "name":"Grouped lights",
+        "extra":{"member_list":{
+            "group_did":"42",
+            "status":"1",
+            "member_ship":{"member-a":"1"},
+            "is_physical":true
+        }}
+    });
+    let (base, requests) = mock_server(vec![MockResponse::json(
+        200,
+        &json!({"code":0,"result":{"list":[group]}}).to_string(),
+    )]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    match block_on(load_entry(
+        &cloud,
+        &credentials(),
+        &home("local", &["42"]),
+        "42",
+    ))
+    .unwrap()
+    {
+        CatalogEntry::Group { name, model, group } => {
+            assert_eq!(name.as_deref(), Some("Grouped lights"));
+            assert_eq!(model, "xiaomi.light.ceil04");
+            assert_eq!(
+                group,
+                crate::xiaomi::cloud::CloudGroup::Confirmed {
+                    did: "42".into(),
+                    name: Some("Grouped lights".into()),
+                    physical: true,
+                    members: vec!["member-a".into()],
+                }
+            );
+        }
+        CatalogEntry::Device { .. } => panic!("confirmed group classified as an ordinary device"),
+    }
+    // Group classification stops before any MIoT instance request.
+    assert_eq!(requests.try_iter().count(), 1);
+
+    for (did, model) in [
+        ("group.42", "mijia.light.group3"),
+        ("group.42", "xiaomi.light.ceil04"),
+    ] {
+        let (base, requests) = mock_server(vec![MockResponse::json(
+            200,
+            &json!({"code":0,"result":{"list":[{"did":did,"model":model,"spec_type":"instance","name":"Grouped lights"}]}}).to_string(),
+        )]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        match block_on(load_entry(
+            &cloud,
+            &credentials(),
+            &home("local", &[did]),
+            did,
+        ))
+        .unwrap()
+        {
+            CatalogEntry::Group { group, .. } => {
+                assert_eq!(
+                    group,
+                    crate::xiaomi::cloud::CloudGroup::Unconfirmed,
+                    "{did}"
+                );
+            }
+            CatalogEntry::Device { .. } => panic!("known group classified as an ordinary device"),
+        }
+        assert_eq!(requests.try_iter().count(), 1);
+    }
 }
 
 #[test]

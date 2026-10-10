@@ -1,8 +1,16 @@
 use super::*;
 
 #[derive(Default)]
+pub(in super::super) struct GroupFixture {
+    pub(in super::super) members: Vec<String>,
+    pub(in super::super) physical: bool,
+    pub(in super::super) missing: bool,
+}
+
+#[derive(Default)]
 pub(in super::super) struct CloudState {
     pub(in super::super) members: Vec<String>,
+    pub(in super::super) groups: BTreeMap<String, GroupFixture>,
     pub(in super::super) names: BTreeMap<String, String>,
     pub(in super::super) status: u16,
     pub(in super::super) home_delay: Duration,
@@ -80,7 +88,39 @@ impl Rig {
     pub(in super::super) fn light(model: &str) -> Self {
         Self::build(true, &["one"], Some(model))
     }
+    /// A restored scope with published single-light members and one confirmed
+    /// physical group relation already committed before adapter bootstrap.
+    pub(in super::super) fn restored_group(
+        members: &[&str],
+        did: &str,
+        model: &str,
+        label: &str,
+    ) -> Self {
+        Self::build_group(
+            true,
+            members,
+            Some("yeelink.light.light3"),
+            Some((did, model, members, label)),
+        )
+    }
+    /// A live selected home whose cloud directory confirms one group relation.
+    pub(in super::super) fn group(members: &[&str], did: &str, model: &str) -> Self {
+        Self::build_group(
+            false,
+            members,
+            Some("yeelink.light.light3"),
+            Some((did, model, members, "Reading lamp")),
+        )
+    }
     fn build(restore: bool, members: &[&str], light: Option<&str>) -> Self {
+        Self::build_group(restore, members, light, None)
+    }
+    fn build_group(
+        restore: bool,
+        members: &[&str],
+        light: Option<&str>,
+        group: Option<(&str, &str, &[&str], &str)>,
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let tls = TlsFixture::new(false);
@@ -99,17 +139,31 @@ impl Rig {
                 data.push(cached(&tls.credentials.uid, did, false));
             }
         }
+        if let Some((did, model, _, _)) = group {
+            debug_assert!(!data.iter().any(|record| record.device.key.id == did));
+            // Group records are cloud metadata carriers only; never parsed as MIoT devices.
+            let mut record = cached(&tls.credentials.uid, "group-placeholder", false);
+            record.device.key = DeviceKey::new("xiaomi", did);
+            record.model = model.into();
+            data.push(record);
+        }
         if let Some(model) = light {
             let text = light_fixture(model);
             let instance: Value = serde_json::from_str(text).unwrap();
-            data[0].model = model.into();
-            data[0].instance_type = instance["type"].as_str().unwrap().into();
-            data[0].device = crate::xiaomi::capability::parse_device_for_model(
-                DeviceKey::new("xiaomi", "one"),
-                model,
-                &instance,
-            )
-            .unwrap();
+            for did in members {
+                let record = data
+                    .iter_mut()
+                    .find(|record| record.device.key.id == *did)
+                    .unwrap();
+                record.model = model.into();
+                record.instance_type = instance["type"].as_str().unwrap().into();
+                record.device = crate::xiaomi::capability::parse_device_for_model(
+                    DeviceKey::new("xiaomi", *did),
+                    model,
+                    &instance,
+                )
+                .unwrap();
+            }
         }
         if restore {
             store
@@ -124,9 +178,44 @@ impl Rig {
                         .unwrap();
                 }
             }
+            if let Some((did, _, group_members, label)) = group {
+                let composition = crate::device::Composition {
+                    key: DeviceKey::new("xiaomi", did),
+                    label: label.into(),
+                    members: group_members
+                        .iter()
+                        .map(|member| DeviceKey::new("xiaomi", *member))
+                        .collect(),
+                };
+                store
+                    .devices()
+                    .commit_composition(&scope(&tls.credentials.uid), &[composition], &[])
+                    .unwrap();
+            }
         }
+        let home = members
+            .iter()
+            .copied()
+            .chain(group.iter().map(|(did, ..)| *did))
+            .collect::<Vec<_>>();
         let cloud = Arc::new(Mutex::new(CloudState {
-            members: members.iter().map(|v| v.to_string()).collect(),
+            members: home.iter().map(|did| (*did).to_string()).collect(),
+            groups: group
+                .iter()
+                .map(|(did, _, group_members, _)| {
+                    (
+                        (*did).to_string(),
+                        GroupFixture {
+                            members: group_members
+                                .iter()
+                                .map(|member| (*member).to_string())
+                                .collect(),
+                            physical: true,
+                            missing: false,
+                        },
+                    )
+                })
+                .collect(),
             status: 200,
             home_status: 200,
             detail_status: 200,
@@ -139,8 +228,7 @@ impl Rig {
             ..Default::default()
         }));
         let info_dids = if restore {
-            members
-                .iter()
+            home.iter()
                 .map(|did| (*did).to_string())
                 .collect::<BTreeSet<_>>()
         } else {
@@ -246,7 +334,7 @@ impl Rig {
                     .all(|did| info_dids.contains(did.as_str().unwrap()))
                 {
                     state.infos += 1;
-                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>(),"has_more":state.info_partial}});
+                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|record_value(&state, record)).collect::<Vec<_>>(),"has_more":state.info_partial}});
                     let mut response = MockResponse::json(state.info_status, &value.to_string());
                     if let Some(gate) = state.info_gate.clone() {
                         response = response.gated(gate);
@@ -263,7 +351,7 @@ impl Rig {
                     }
                     return response;
                 }
-                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>()}})
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|record_value(&state, record)).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
                 let multi = request.target.contains("cuco-cp7pd");
                 let mut value: Value = serde_json::from_str(
@@ -430,6 +518,35 @@ impl Control {
         )
         .await;
     }
+}
+
+fn record_value(state: &CloudState, record: &CachedPhysicalDevice) -> Value {
+    let did = record.device.key.id.as_str();
+    let mut value = json!({
+        "did": did,
+        "name": state.names.get(did).cloned().unwrap_or_else(|| format!("name {did}")),
+        "model": record.model,
+        "spec_type": record.instance_type,
+        "isOnline": state.online.contains(did),
+    });
+    if let Some(group) = state.groups.get(did)
+        && !group.missing
+    {
+        let member_ship = group
+            .members
+            .iter()
+            .map(|member| (member.clone(), Value::String("1".into())))
+            .collect::<serde_json::Map<_, _>>();
+        value["extra"] = json!({
+            "member_list": {
+                "group_did": did,
+                "status": "1",
+                "member_ship": member_ship,
+                "is_physical": group.physical,
+            }
+        });
+    }
+    value
 }
 
 fn light_fixture(model: &str) -> &'static str {

@@ -5,7 +5,7 @@ use crate::{
     storage::{CachedPhysicalDevice, CachedScope, XiaomiRecord},
     xiaomi::{
         capability::{CapabilityError, parse_device_for_model},
-        cloud::{CloudClient, CloudError, OwnedHome},
+        cloud::{CloudClient, CloudError, CloudGroup, OwnedHome},
         discovery::DiscoverySnapshot,
     },
 };
@@ -75,14 +75,30 @@ pub fn current_home(homes: &[OwnedHome], scope: &CachedScope) -> Result<OwnedHom
         .ok_or(CatalogError::NoLocalHome)
 }
 
-/// Load a selected home's member description and optional cloud name.
+/// A selected-home member as classified by its cloud record. Group entries
+/// carry only relation metadata and never enter MIoT parsing or runtime
+/// device publication.
+#[derive(Debug)]
+pub enum CatalogEntry {
+    Device {
+        cached: CachedPhysicalDevice,
+        name: Option<String>,
+    },
+    Group {
+        name: Option<String>,
+        model: String,
+        group: CloudGroup,
+    },
+}
+
+/// Load a selected home's member classification and description.
 /// Persistence and availability belong to the adapter.
-pub async fn load_device(
+pub async fn load_entry(
     cloud: &CloudClient,
     credentials: &XiaomiRecord,
     home: &OwnedHome,
     did: &str,
-) -> Result<(CachedPhysicalDevice, Option<String>), CatalogError> {
+) -> Result<CatalogEntry, CatalogError> {
     if home.uid != credentials.uid {
         return Err(CatalogError::InvalidScope);
     }
@@ -96,10 +112,12 @@ pub async fn load_device(
         .ok_or(CatalogError::TargetMissing)?;
     // A member list marks a Xiaomi group even when its DID or model would
     // otherwise pass ordinary light parsing; never read its MIoT description.
-    if details.group.is_some() {
-        return Err(CatalogError::Capability(
-            CapabilityError::UnsupportedLightGroup,
-        ));
+    if let Some(group) = details.group {
+        return Ok(CatalogEntry::Group {
+            name: details.name,
+            model: details.model,
+            group,
+        });
     }
     let instance = cloud
         .get_instance(&details.instance_type)
@@ -107,8 +125,8 @@ pub async fn load_device(
         .map_err(CatalogError::Cloud)?;
     let device = parse_device_for_model(DeviceKey::new("xiaomi", did), &details.model, &instance)
         .map_err(CatalogError::Capability)?;
-    Ok((
-        CachedPhysicalDevice {
+    Ok(CatalogEntry::Device {
+        cached: CachedPhysicalDevice {
             uid: home.uid.clone(),
             home_id: home.home_id.clone(),
             group_id: home.group_id.clone(),
@@ -116,6 +134,22 @@ pub async fn load_device(
             instance_type: details.instance_type,
             device,
         },
-        details.name,
-    ))
+        name: details.name,
+    })
+}
+
+/// Load a selected home's ordinary member description and optional cloud name.
+/// Known group records stay rejected on this strict ordinary-device path.
+pub async fn load_device(
+    cloud: &CloudClient,
+    credentials: &XiaomiRecord,
+    home: &OwnedHome,
+    did: &str,
+) -> Result<(CachedPhysicalDevice, Option<String>), CatalogError> {
+    match load_entry(cloud, credentials, home, did).await? {
+        CatalogEntry::Device { cached, name } => Ok((cached, name)),
+        CatalogEntry::Group { .. } => Err(CatalogError::Capability(
+            CapabilityError::UnsupportedLightGroup,
+        )),
+    }
 }

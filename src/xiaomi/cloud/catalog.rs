@@ -429,6 +429,10 @@ impl CloudClient {
                 .await?;
             for record in result.list {
                 if record.did == did {
+                    if found.is_some() {
+                        // A second record for the same DID is an ambiguous relation.
+                        return Err(CloudError::protocol(operation));
+                    }
                     let details: DeviceDetails =
                         serde_json::from_value(Value::Object(record.details))
                             .map_err(|_| CloudError::protocol(operation))?;

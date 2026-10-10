@@ -191,7 +191,11 @@ impl Context {
                     }
                     Err(AdmissionError::Storage(error)) => return Err(error.into()),
                     Err(error) => {
-                        self.block_device(did, error.to_string());
+                        if matches!(error, AdmissionError::IncompatibleFunctions) {
+                            self.block_unsupported(did, error.to_string());
+                        } else {
+                            self.block_device(did, error.to_string());
+                        }
                         return Ok(());
                     }
                 }
@@ -205,6 +209,14 @@ impl Context {
                 Ok(stored) => stored,
                 Err(AdmissionError::Storage(error)) => return Err(error.into()),
                 Err(error) => {
+                    if matches!(error, AdmissionError::IncompatibleFunctions) {
+                        self.live
+                            .borrow_mut()
+                            .devices
+                            .get_mut(did)
+                            .unwrap()
+                            .blocked_unsupported = true;
+                    }
                     self.problem(did, Some(error.to_string()));
                     return Ok(());
                 }
@@ -217,12 +229,13 @@ impl Context {
                 cached: RefCell::new(cached),
                 physical,
             });
-            self.live
-                .borrow_mut()
-                .devices
-                .get_mut(did)
-                .unwrap()
-                .admitted = Some(record.clone());
+            {
+                let mut live = self.live.borrow_mut();
+                let slot = live.devices.get_mut(did).unwrap();
+                slot.admitted = Some(record.clone());
+                slot.blocked = None;
+                slot.blocked_unsupported = false;
+            }
             self.add_consumers(record, receivers);
         }
         self.live
@@ -243,6 +256,7 @@ impl Context {
             work.retry_subscriptions();
         }
         self.changed.notify(usize::MAX);
+        self.reconcile_groups()?;
         Ok(())
     }
     pub(super) fn unavailable_device(&self, did: &str, reason: String) {
@@ -253,10 +267,19 @@ impl Context {
         }
     }
     pub(super) fn block_device(&self, did: &str, reason: String) {
+        self.block(did, reason, false);
+    }
+    /// Block a member whose description is present but confirmed unsupported;
+    /// this distinction keeps temporary failures from revoking valid groups.
+    pub(super) fn block_unsupported(&self, did: &str, reason: String) {
+        self.block(did, reason, true);
+    }
+    fn block(&self, did: &str, reason: String, unsupported: bool) {
         {
             let mut live = self.live.borrow_mut();
             let slot = live.devices.get_mut(did).unwrap();
             slot.blocked = Some(reason.clone());
+            slot.blocked_unsupported = unsupported;
             if let Some(record) = &slot.admitted {
                 record
                     .binding_generation
@@ -325,6 +348,7 @@ impl Context {
             }
         }
         self.changed.notify(usize::MAX);
+        self.reconcile_groups()?;
         Ok(())
     }
 }

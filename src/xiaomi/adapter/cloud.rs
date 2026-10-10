@@ -1,12 +1,12 @@
 use super::{
     model::AdapterError,
-    state::{Backoff, Context, Lifetime},
+    state::{Backoff, Context, GroupMeta, Lifetime},
 };
 use crate::{
     storage::CachedScope,
     xiaomi::{
         auth::{AuthenticationState, FailureReason},
-        catalog::{self, CatalogError},
+        catalog::{self, CatalogEntry, CatalogError},
         cloud::CloudClient,
         discovery::Discovery,
     },
@@ -206,6 +206,7 @@ pub(super) async fn run(
                 .entry(did.clone())
                 .or_default();
         }
+        context.live.borrow_mut().complete = true;
         {
             let mut live = context.live.borrow_mut();
             for (did, slot) in &mut live.devices {
@@ -232,13 +233,13 @@ pub(super) async fn run(
                 continue;
             }
             let life = Rc::new(Lifetime::default());
-            context
-                .live
-                .borrow_mut()
-                .devices
-                .get_mut(&did)
-                .unwrap()
-                .loading = Some(life.clone());
+            {
+                let mut live = context.live.borrow_mut();
+                let slot = live.devices.get_mut(&did).unwrap();
+                slot.loading = Some(life.clone());
+                // Relation metadata is only fresh when this read succeeds.
+                slot.group = None;
+            }
             let current = context.clone();
             let client = cloud.clone();
             let credentials = credentials.clone();
@@ -249,7 +250,7 @@ pub(super) async fn run(
                         life.ended().await;
                         None
                     },
-                    async { Some(catalog::load_device(&client, &credentials, &home, &did).await) },
+                    async { Some(catalog::load_entry(&client, &credentials, &home, &did).await) },
                 )
                 .await
                 else {
@@ -263,20 +264,35 @@ pub(super) async fn run(
                     .unwrap()
                     .loading = None;
                 match result {
-                    Ok(candidate) => {
+                    Ok(CatalogEntry::Device { cached, name }) => {
                         {
                             let mut live = current.live.borrow_mut();
                             let slot = live.devices.get_mut(&did).unwrap();
                             slot.blocked = None;
-                            slot.candidate = Some(candidate);
+                            slot.blocked_unsupported = false;
+                            slot.candidate = Some((cached, name));
                         }
                         current.reconcile(&did)?;
                         current.request_sync();
+                    }
+                    Ok(CatalogEntry::Group { model, group, .. }) => {
+                        {
+                            let mut live = current.live.borrow_mut();
+                            let slot = live.devices.get_mut(&did).unwrap();
+                            slot.blocked = None;
+                            slot.blocked_unsupported = false;
+                            slot.candidate = None;
+                            slot.group = Some(GroupMeta { model, group });
+                        }
+                        current.reconcile_groups()?;
                     }
                     Err(error) => {
                         match &error {
                             CatalogError::Cloud(_) => {
                                 current.problem(&did, Some(error.to_string()))
+                            }
+                            CatalogError::Capability(_) => {
+                                current.block_unsupported(&did, error.to_string())
                             }
                             _ => current.block_device(&did, error.to_string()),
                         }

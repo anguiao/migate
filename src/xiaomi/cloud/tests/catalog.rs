@@ -380,6 +380,33 @@ fn device_lookup_reads_past_empty_and_overlapping_pages_without_broadening_dids(
 }
 
 #[test]
+fn duplicate_device_records_across_pages_are_rejected_as_ambiguous() {
+    let home = OwnedHome {
+        uid: "account".into(),
+        home_id: "home".into(),
+        group_id: group_id("account", "home"),
+        dids: vec!["target".into()],
+    };
+    let responses = [
+        json!({"list":[{"did":"target","model":"vendor.plug","spec_type":"instance-type"}],"has_more":true,"next_start_did":"one"}),
+        json!({"list":[{"did":"target","model":"vendor.plug","spec_type":"instance-type"}],"has_more":false}),
+    ];
+    let (base, _) = mock_server(
+        responses
+            .into_iter()
+            .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
+            .collect(),
+    );
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        future::block_on(cloud.get_device("token", &home, "target"))
+            .unwrap_err()
+            .kind(),
+        &CloudErrorKind::Protocol
+    );
+}
+
+#[test]
 fn device_lookup_leaves_missing_or_unusable_names_unset() {
     let home = OwnedHome {
         uid: "account".into(),

@@ -5,7 +5,7 @@ use super::{
     tasks::TaskSet,
 };
 use crate::{
-    device::{Availability, DeviceRegistry, PhysicalDevice},
+    device::{Availability, Composition, DeviceRegistry, PhysicalDevice},
     storage::Store,
     xiaomi::{
         auth::AuthService, capability::is_light_group, cloud::CloudClient, discovery::Discovery,
@@ -76,6 +76,26 @@ impl XiaomiAdapter {
                 consumers.push((slot.admitted.as_ref().unwrap().clone(), receivers));
                 devices.insert(did, slot);
             }
+            let confirmed = store.devices().restore_groups(&scope.uid, &scope.home_id)?;
+            if confirmed.version > 0 || !confirmed.groups.is_empty() {
+                // Restored parents stay known placeholders until a fresh
+                // directory read confirms their relation.
+                for group in &confirmed.groups {
+                    devices.entry(group.key.id.clone()).or_default();
+                }
+                let compositions = confirmed
+                    .groups
+                    .into_iter()
+                    .map(|group| Composition {
+                        key: group.key,
+                        label: group.label,
+                        members: group.members,
+                    })
+                    .collect::<Vec<_>>();
+                registry
+                    .update_composition_versioned(confirmed.version, compositions, &[])
+                    .map_err(|error| AdapterError::Unavailable(error.to_string()))?;
+            }
         }
         let ready = Rc::new(Ready::default());
         if scope.is_some() {
@@ -102,6 +122,7 @@ impl XiaomiAdapter {
             live: RefCell::new(Live {
                 credentials,
                 scope,
+                complete: false,
                 devices,
                 session: None,
             }),

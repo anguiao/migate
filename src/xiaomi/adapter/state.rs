@@ -13,7 +13,7 @@ use crate::{
         capability::PropertyBinding,
         central::{CentralError, DeviceAccess, SessionHandle},
         certificate::CertificateValidity,
-        cloud::{CloudClient, CloudDeviceInfo},
+        cloud::{CloudClient, CloudDeviceInfo, CloudGroup},
     },
 };
 use event_listener::Event;
@@ -67,6 +67,12 @@ impl DeviceRecord {
             .power
     }
 }
+/// Cloud relation metadata for one group identity in the selected home.
+#[derive(Clone)]
+pub(super) struct GroupMeta {
+    pub(super) model: String,
+    pub(super) group: CloudGroup,
+}
 /// One entry owns all preparation and admission state for a current home member.
 #[derive(Default)]
 pub(super) struct DeviceSlot {
@@ -79,6 +85,10 @@ pub(super) struct DeviceSlot {
     pub(super) loading: Option<Rc<Lifetime>>,
     pub(super) access: Option<Result<DeviceAccess, CentralError>>,
     pub(super) blocked: Option<String>,
+    /// The block is a confirmed unsupported capability, not a temporary failure.
+    pub(super) blocked_unsupported: bool,
+    /// Latest cloud relation metadata when this member is a known group identity.
+    pub(super) group: Option<GroupMeta>,
     pub(super) last_switch_reason: Option<String>,
 }
 impl DeviceSlot {
@@ -244,6 +254,9 @@ impl AccessRefresh {
 pub(super) struct Live {
     pub(super) credentials: Option<XiaomiRecord>,
     pub(super) scope: Option<CachedScope>,
+    /// The runtime map covers the whole current-home membership from a
+    /// complete directory read; before that, absence is not deletion evidence.
+    pub(super) complete: bool,
     pub(super) devices: BTreeMap<String, DeviceSlot>,
     pub(super) session: Option<Session>,
 }
