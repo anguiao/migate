@@ -302,3 +302,138 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
         assert_eq!(status.devices[0].selected_control, Some(PathKind::Cloud));
     }));
 }
+
+#[test]
+fn pending_group_diagnostics_classify_numeric_groups_and_use_the_relation_name() {
+    let rig = Rig::group(&["one", "two"], "43", "mijia.light.group3");
+    let (release, gate) = flume::unbounded();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.detail_gates.insert("two".into(), gate);
+        cloud.names.insert("43".into(), "Numeric group".into());
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| {
+            c.context
+                .status
+                .borrow()
+                .pending
+                .iter()
+                .any(|pending| pending.did == "43" && pending.reason.contains("two"))
+        })
+        .await;
+        let status = c.context.diagnostics();
+        let pending = status
+            .pending
+            .iter()
+            .find(|pending| pending.did == "43")
+            .unwrap();
+        assert!(pending.group, "numeric group identity stays classified");
+        assert_eq!(pending.name, "Numeric group");
+        assert!(
+            status
+                .pending
+                .iter()
+                .filter(|pending| pending.did != "43")
+                .all(|pending| !pending.group)
+        );
+        assert!(
+            c.context.registry.snapshot().composition.groups.is_empty(),
+            "an unpublished group never enters the composition registry"
+        );
+        release.send(()).unwrap();
+    }));
+}
+
+#[test]
+fn pending_group_diagnostics_keep_the_saved_name_over_a_cloud_rename() {
+    let rig = Rig::restored_group(
+        &["one", "two"],
+        "group.1",
+        "mijia.light.group3",
+        "Saved Home lamp",
+    );
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| {
+            c.cloud
+                .lock()
+                .unwrap()
+                .detail_counts
+                .get("group.1")
+                .copied()
+                .unwrap_or(0)
+                > 0
+        })
+        .await;
+        let reads = c.cloud.lock().unwrap().detail_counts["group.1"];
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.names.insert("group.1".into(), "Cloud rename".into());
+            cloud.detail_failures.insert("group.1".into(), 503);
+        }
+        c.context.request_sync();
+        until(|| c.cloud.lock().unwrap().detail_counts["group.1"] > reads).await;
+        until(|| {
+            c.context
+                .status
+                .borrow()
+                .pending
+                .iter()
+                .any(|pending| pending.did == "group.1")
+        })
+        .await;
+        let status = c.context.diagnostics();
+        let pending = status
+            .pending
+            .iter()
+            .find(|pending| pending.did == "group.1")
+            .unwrap();
+        assert!(pending.group);
+        assert_eq!(pending.name, "Saved Home lamp");
+        assert!(pending.reason.contains("503"), "{}", pending.reason);
+    }));
+}
+
+#[test]
+fn pending_restored_numeric_group_keeps_classification_before_relation_metadata() {
+    let rig = Rig::restored_group(
+        &["one", "two"],
+        "43",
+        "mijia.light.group3",
+        "Saved numeric lamp",
+    );
+    rig.cloud
+        .lock()
+        .unwrap()
+        .detail_failures
+        .insert("43".into(), 503);
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| {
+            c.context
+                .status
+                .borrow()
+                .pending
+                .iter()
+                .any(|pending| pending.did == "43")
+        })
+        .await;
+        assert!(
+            c.context.live.borrow().devices["43"].group.is_none(),
+            "relation metadata is still absent"
+        );
+        let status = c.context.diagnostics();
+        let pending = status
+            .pending
+            .iter()
+            .find(|pending| pending.did == "43")
+            .unwrap();
+        assert!(
+            pending.group,
+            "the restored composition already classifies the identity"
+        );
+        assert_eq!(pending.name, "Saved numeric lamp");
+    }));
+}

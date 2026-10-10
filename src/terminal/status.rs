@@ -69,13 +69,24 @@ impl AuthStatus {
     }
 
     pub fn render_devices(&self, now: i64, did: Option<&str>) -> String {
+        self.render_devices_matching(now, |device| did.is_none_or(|did| device.did == did))
+    }
+
+    /// Render one status block per selected member DID in adapter order.
+    pub(super) fn render_group_devices(&self, now: i64, members: &[String]) -> String {
+        self.render_devices_matching(now, |device| {
+            members.iter().any(|member| member == &device.did)
+        })
+    }
+
+    fn render_devices_matching(
+        &self,
+        now: i64,
+        selected: impl Fn(&DeviceStatus) -> bool,
+    ) -> String {
         let mut report = self.render(now);
         if let Some(adapter) = &*self.adapter.borrow() {
-            for device in adapter
-                .devices
-                .iter()
-                .filter(|device| did.is_none_or(|did| device.did == did))
-            {
+            for device in adapter.devices.iter().filter(|device| selected(device)) {
                 let _ = write!(report, "\n{}", format_device(device));
             }
         }

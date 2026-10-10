@@ -155,3 +155,61 @@ fn group_identity_lookup_rejects_inconsistent_storage() {
     }
     assert!(store.devices().load_group_identity(&key).is_err());
 }
+
+#[test]
+fn group_label_lookup_allows_unnamed_legacy_reservations_but_rejects_malformed_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let (key, _endpoint) = compose(&store);
+    assert_eq!(
+        store.devices().load_group_label(&key).unwrap().as_deref(),
+        Some("Kitchen")
+    );
+    assert!(
+        store
+            .devices()
+            .load_group_label(&DeviceKey::new("xiaomi", "absent"))
+            .unwrap()
+            .is_none()
+    );
+
+    // A revoked reservation with no saved name is a valid legacy state.
+    store
+        .devices()
+        .commit_composition(
+            &CachedScope {
+                uid: "uid".into(),
+                home_id: "local".into(),
+                group_id: group_id("uid", "local"),
+            },
+            &[],
+            &[],
+        )
+        .unwrap();
+    {
+        let connection = rusqlite::Connection::open(store.path()).unwrap();
+        connection
+            .execute(
+                "UPDATE group_identity SET label=NULL WHERE source=?1 AND device_id=?2",
+                [&key.source, &key.id],
+            )
+            .unwrap();
+    }
+    assert!(store.devices().load_group_label(&key).unwrap().is_none());
+    assert!(
+        store.devices().load_group_identity(&key).is_err(),
+        "the strict published identity lookup still requires a saved label"
+    );
+
+    {
+        let connection = rusqlite::Connection::open(store.path()).unwrap();
+        connection
+            .execute(
+                "UPDATE group_identity SET label=?3 WHERE source=?1 AND device_id=?2",
+                rusqlite::params![key.source, key.id, "x".repeat(33)],
+            )
+            .unwrap();
+    }
+    let error = store.devices().load_group_label(&key).unwrap_err();
+    assert!(error.to_string().contains("32"), "{error}");
+}

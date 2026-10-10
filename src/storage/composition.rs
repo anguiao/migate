@@ -257,6 +257,34 @@ impl DeviceStore {
             label,
         }))
     }
+
+    /// Read only the saved label of a group identity reservation.
+    ///
+    /// `None` covers both an unknown identity and a legacy reservation that
+    /// has no saved label yet; a malformed present label and database failures
+    /// are errors. Endpoint allocation consistency stays owned by
+    /// [`Self::load_group_identity`], which the published parent path uses.
+    pub fn load_group_label(&self, key: &DeviceKey) -> Result<Option<String>, StorageError> {
+        let operation = "load Xiaomi group label";
+        validate_key(key).map_err(|error| self.invalid(operation, error))?;
+        let label = self
+            .store
+            .connection()
+            .query_row(
+                "SELECT label FROM group_identity WHERE source=?1 AND device_id=?2",
+                params![key.source, key.id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| self.store.database_error(operation, error))?;
+        match label {
+            None | Some(None) => Ok(None),
+            Some(Some(label)) => {
+                validate_label(&label).map_err(|error| self.invalid(operation, error))?;
+                Ok(Some(label))
+            }
+        }
+    }
 }
 
 fn commit_in(

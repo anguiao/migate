@@ -1,100 +1,183 @@
 use super::{AuthStatus, current_time};
 use crate::{
     RuntimeError,
-    device::{Availability, Capability, Command, DeviceKey, DeviceRegistry, LightMode, Power},
+    device::{
+        Availability, Capability, Command, Composition, DeviceKey, DeviceRegistry, LightMode,
+        PhysicalDevice, Power, RegistrySnapshot,
+    },
     storage::{DeviceStore, StorageError},
+    xiaomi::adapter::PendingDevice,
 };
 pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID [channel], off DID [channel], help\nUse list to find stable channel keys. A single-channel device may omit channel; channel is required for a multi-channel device.";
 fn invalid(status: &AuthStatus, now: i64, reason: &str) -> String {
     format!("{reason}\n{COMMAND_HELP}\n{}", status.render(now))
 }
-fn render(registry: &DeviceRegistry, did: Option<&str>) -> String {
-    let mut lines = Vec::new();
-    for physical in registry
-        .list()
-        .into_iter()
-        .filter(|physical| did.is_none_or(|did| physical.key().id == did))
-    {
-        let key = physical.key();
-        let availability = match physical.availability() {
-            Availability::Initializing => "initializing".into(),
-            Availability::Available => "available".into(),
-            Availability::Unavailable(reason) => format!("unavailable ({reason})"),
+fn member_names(snapshot: &RegistrySnapshot, group: &Composition) -> String {
+    group
+        .members
+        .iter()
+        .map(|member| {
+            let device = snapshot
+                .devices
+                .iter()
+                .find(|device| device.key() == member)
+                .expect("composition member is published");
+            format!("{} ({})", member.id, device.label())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+fn group_of<'a>(snapshot: &'a RegistrySnapshot, key: &DeviceKey) -> Option<&'a Composition> {
+    snapshot
+        .composition
+        .groups
+        .iter()
+        .find(|group| group.members.iter().any(|member| member == key))
+}
+fn render_device(device: &PhysicalDevice, group: Option<&Composition>, lines: &mut Vec<String>) {
+    let key = device.key();
+    let availability = match device.availability() {
+        Availability::Initializing => "initializing".into(),
+        Availability::Available => "available".into(),
+        Availability::Unavailable(reason) => format!("unavailable ({reason})"),
+    };
+    lines.push(format!("{} ({}): {availability}", key.id, device.label()));
+    if let Some(group) = group {
+        lines.push(format!("  Group: {} ({}).", group.key.id, group.label));
+    }
+    for function in device.functions() {
+        let id = &function.function_key().id;
+        let label = &function.description().label;
+        let snapshot = function.snapshot();
+        let power = match snapshot.power {
+            Power::Unknown => "unknown",
+            Power::On => "on",
+            Power::Off => "off",
         };
-        lines.push(format!("{} ({}): {availability}", key.id, physical.label()));
-        for function in physical.functions() {
-            let id = &function.function_key().id;
-            let label = &function.description().label;
-            let snapshot = function.snapshot();
-            let power = match snapshot.power {
-                Power::Unknown => "unknown",
-                Power::On => "on",
-                Power::Off => "off",
-            };
-            lines.push(format!("  {id} ({label}): {power}"));
-            if let Some(light) = snapshot.lighting {
-                let capabilities = function
-                    .description()
-                    .capabilities
-                    .iter()
-                    .map(|capability| match capability {
-                        Capability::OnOff => "on/off".into(),
-                        Capability::Brightness => "brightness".into(),
-                        Capability::ColorTemperature(range) => {
-                            format!("temperature {}–{} K", range.min, range.effective_max())
-                        }
-                        Capability::ColorRgb => "RGB".into(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push(format!("    Capabilities: {capabilities}."));
-                let mut values = vec![
-                    format!(
-                        "Brightness: {}",
-                        light
-                            .brightness_percent
-                            .map_or_else(|| "unknown".into(), |value| format!("{value}%"))
-                    ),
-                    format!(
-                        "temperature: {}",
-                        light
-                            .temperature_kelvin
-                            .map_or_else(|| "unknown".into(), |value| format!("{value} K"))
-                    ),
-                ];
-                if function
-                    .description()
-                    .capabilities
-                    .contains(&Capability::ColorRgb)
-                {
-                    values.push(format!(
-                        "RGB: {}",
-                        light.color.map_or_else(
-                            || "unknown".into(),
-                            |value| format!(
-                                "#{:02X}{:02X}{:02X}",
-                                value.red, value.green, value.blue
-                            )
-                        )
-                    ));
-                }
-                values.push(format!(
-                    "mode: {}",
-                    match light.mode {
-                        None => "unknown",
-                        Some(LightMode::Temperature) => "temperature",
-                        Some(LightMode::Rgb) => "RGB",
+        lines.push(format!("  {id} ({label}): {power}"));
+        if let Some(light) = snapshot.lighting {
+            let capabilities = function
+                .description()
+                .capabilities
+                .iter()
+                .map(|capability| match capability {
+                    Capability::OnOff => "on/off".into(),
+                    Capability::Brightness => "brightness".into(),
+                    Capability::ColorTemperature(range) => {
+                        format!("temperature {}–{} K", range.min, range.effective_max())
                     }
+                    Capability::ColorRgb => "RGB".into(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("    Capabilities: {capabilities}."));
+            let mut values = vec![
+                format!(
+                    "Brightness: {}",
+                    light
+                        .brightness_percent
+                        .map_or_else(|| "unknown".into(), |value| format!("{value}%"))
+                ),
+                format!(
+                    "temperature: {}",
+                    light
+                        .temperature_kelvin
+                        .map_or_else(|| "unknown".into(), |value| format!("{value} K"))
+                ),
+            ];
+            if function
+                .description()
+                .capabilities
+                .contains(&Capability::ColorRgb)
+            {
+                values.push(format!(
+                    "RGB: {}",
+                    light.color.map_or_else(
+                        || "unknown".into(),
+                        |value| format!("#{:02X}{:02X}{:02X}", value.red, value.green, value.blue)
+                    )
                 ));
-                lines.push(format!("    {}.", values.join("; ")));
+            }
+            values.push(format!(
+                "mode: {}",
+                match light.mode {
+                    None => "unknown",
+                    Some(LightMode::Temperature) => "temperature",
+                    Some(LightMode::Rgb) => "RGB",
+                }
+            ));
+            lines.push(format!("    {}.", values.join("; ")));
+        }
+    }
+}
+/// Render devices and group relations from one registry snapshot. A selected
+/// group renders its member blocks; a selected member keeps its group line.
+fn render(snapshot: &RegistrySnapshot, did: Option<&str>) -> String {
+    let mut lines = Vec::new();
+    for group in snapshot
+        .composition
+        .groups
+        .iter()
+        .filter(|group| did.is_none_or(|did| group.key.id == did))
+    {
+        lines.push(format!(
+            "{} ({}): group; members: {}",
+            group.key.id,
+            group.label,
+            member_names(snapshot, group)
+        ));
+        if did.is_some() {
+            for member in &group.members {
+                let device = snapshot
+                    .devices
+                    .iter()
+                    .find(|device| device.key() == member)
+                    .expect("composition member is published");
+                render_device(device, None, &mut lines);
             }
         }
+    }
+    for device in snapshot
+        .devices
+        .iter()
+        .filter(|device| did.is_none_or(|did| device.key().id == did))
+    {
+        render_device(device, group_of(snapshot, device.key()), &mut lines);
     }
     if lines.is_empty() {
         "No devices are currently connected to the bridge.".into()
     } else {
         lines.join("\n")
     }
+}
+fn format_pending(pending: &PendingDevice, name: &str) -> String {
+    if pending.group {
+        format!(
+            "{} ({}): pending group ({})",
+            pending.did, name, pending.reason
+        )
+    } else {
+        format!("{} ({}): pending ({})", pending.did, name, pending.reason)
+    }
+}
+/// The reserved saved name outlives a revoked or renamed cloud relation; the
+/// storage error propagates to the terminal caller instead of being hidden.
+fn pending_name(store: &DeviceStore, pending: &PendingDevice) -> Result<String, StorageError> {
+    if pending.group
+        && let Some(label) = store.load_group_label(&DeviceKey::new("xiaomi", &pending.did))?
+    {
+        return Ok(label);
+    }
+    Ok(pending.name.clone())
+}
+/// A group DID names no controllable endpoint; on/off must select a member.
+fn group_command_refusal(status: &AuthStatus, now: i64, did: &str, member: Option<&str>) -> String {
+    let example = member.map_or_else(String::new, |member| format!(", for example {member}"));
+    invalid(
+        status,
+        now,
+        &format!("{did} is a light group; select a member DID for on/off{example}."),
+    )
 }
 pub async fn handle_line(
     registry: &DeviceRegistry,
@@ -104,44 +187,101 @@ pub async fn handle_line(
     now: i64,
 ) -> Result<Option<String>, StorageError> {
     let words = line.split_whitespace().collect::<Vec<_>>();
+    let snapshot = registry.snapshot();
     let text = match words.as_slice() {
         [] => return Ok(None),
         ["help"] => format!("{COMMAND_HELP}\n{}", status.render(now)),
         ["list"] => {
-            let mut text = render(registry, None);
+            let mut text = render(&snapshot, None);
             for pending in status.pending() {
-                let key = DeviceKey::new("xiaomi", &pending.did);
-                let name = match registry.get(&key) {
-                    Some(physical) => physical.label(),
-                    None => store
-                        .load_published(&key)?
-                        .map(|stored| stored.label)
-                        .unwrap_or_else(|| pending.name.clone()),
+                let name = if pending.group {
+                    pending_name(store, &pending)?
+                } else {
+                    let key = DeviceKey::new("xiaomi", &pending.did);
+                    match snapshot.devices.iter().find(|device| device.key() == &key) {
+                        Some(physical) => physical.label(),
+                        None => store
+                            .load_published(&key)?
+                            .map(|stored| stored.label)
+                            .unwrap_or_else(|| pending.name.clone()),
+                    }
                 };
-                text.push_str(&format!(
-                    "\n{} ({}): pending ({})",
-                    pending.did, name, pending.reason
-                ));
+                text.push_str(&format!("\n{}", format_pending(&pending, &name)));
             }
             text
         }
         ["status"] => format!(
             "{}\n{}",
-            render(registry, None),
+            render(&snapshot, None),
             status.render_devices(now, None)
         ),
         ["status", did] => {
-            if registry.get(&DeviceKey::new("xiaomi", *did)).is_none() {
-                invalid(status, now, "Unknown device DID.")
-            } else {
+            let group = snapshot
+                .composition
+                .groups
+                .iter()
+                .find(|group| group.key.id == *did);
+            let physical = snapshot
+                .devices
+                .iter()
+                .find(|device| device.key().id == *did);
+            let pending = status
+                .pending()
+                .into_iter()
+                .find(|pending| pending.did == *did);
+            if let Some(group) = group {
+                let members = group
+                    .members
+                    .iter()
+                    .map(|member| member.id.clone())
+                    .collect::<Vec<_>>();
+                let mut text = render(&snapshot, Some(did));
+                if let Some(pending) = &pending {
+                    text.push_str(&format!(
+                        "\n{}",
+                        format_pending(pending, &pending_name(store, pending)?)
+                    ));
+                }
+                text.push('\n');
+                text.push_str(&status.render_group_devices(now, &members));
+                text
+            } else if physical.is_some() {
+                let mut text = render(&snapshot, Some(did));
+                if let Some(pending) = &pending {
+                    text.push_str(&format!(
+                        "\n{}",
+                        format_pending(pending, &pending_name(store, pending)?)
+                    ));
+                }
+                text.push('\n');
+                text.push_str(&status.render_devices(now, Some(did)));
+                text
+            } else if let Some(pending) = &pending {
                 format!(
                     "{}\n{}",
-                    render(registry, Some(did)),
-                    status.render_devices(now, Some(did))
+                    format_pending(pending, &pending_name(store, pending)?),
+                    status.render(now)
                 )
+            } else {
+                invalid(status, now, "Unknown device DID.")
             }
         }
         [verb @ ("on" | "off"), did, channel @ ..] if channel.len() <= 1 => {
+            let group = snapshot
+                .composition
+                .groups
+                .iter()
+                .find(|group| group.key.id == *did);
+            let pending_group = status
+                .pending()
+                .into_iter()
+                .find(|pending| pending.did == *did && pending.group);
+            if group.is_some() || pending_group.is_some() {
+                let member = group
+                    .and_then(|group| group.members.first())
+                    .map(|member| member.id.as_str());
+                return Ok(Some(group_command_refusal(status, now, did, member)));
+            }
             let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
                 return Ok(Some(invalid(status, now, "Unknown device DID.")));
             };

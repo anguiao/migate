@@ -17,7 +17,7 @@
 | ColorControl（色温灯） | 9 / `0x10`（CT） | RemainingTime、ColorTemperatureMireds、ColorMode、Options、NumberOfPrimaries、EnhancedColorMode、ColorCapabilities、物理色温边界、CoupleColorTempToLevelMinMireds；MoveToColorTemperature、MoveColorTemperature、StepColorTemperature、StopMoveStep |
 | ColorControl（彩灯） | 9 / `0x19`（CT + XY + HS） | 上述属性加 CurrentHue、CurrentSaturation、CurrentX、CurrentY；上述命令加 MoveToHue、MoveHue、StepHue、MoveToSaturation、MoveSaturation、StepSaturation、MoveToHueAndSaturation、MoveToColor、MoveColor、StepColor |
 
-灯具类型为 Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`），revision 4；同端点另保留 Descriptor、Bridged Device Basic Information、Groups、Identify。各 cluster 保留标准全局属性。NumberOfPrimaries 返回标准 nullable 空值，EnhancedColorMode 反映 HS／XY／CT 模式，不表示已启用 EnhancedHue 功能。
+灯具类型为 Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`），revision 4。未分组或退出组的单灯在同一端点另保留 Descriptor、Bridged Device Basic Information、Groups、Identify；组合内的成员子端点不重复声明桥接身份，见[灯组组合边界](#灯组组合边界)。各 cluster 保留标准全局属性。NumberOfPrimaries 返回标准 nullable 空值，EnhancedColorMode 反映 HS／XY／CT 模式，不表示已启用 EnhancedHue 功能。
 
 以下是相应灯型或已选能力下的标准必需项缺口，不能视为普通可选功能。MiGate 当前不声称完整 Matter 灯型符合性或已通过认证；如果缺项阻碍约定的 Home 基础控制与互操作，在 `review` 中针对性处理。
 
@@ -43,4 +43,19 @@
 
 **没有跨客户端的全局原始发令顺序。** MiGate 排除可关联的写入反馈后按有效观察接管；普通补读、云端缓存及非当前模式缓存不视为新指令。现有通知缺少完整原始时间信息，来源切换和迟到事件仍有协议边界。
 
-灯组、复合设备、多负载开关与无线按键暂不包含在单灯接入范围内。云端及 BLE Mesh 所依赖的物理网关限制继续适用，不能因为支持灯具或切换云端便保证绕过网关。
+## 灯组组合边界
+
+灯组仅接入当前家庭内扁平、互不重叠，且全部成员均为已支持单灯的米家物理组和虚拟组。成员保留各自完整的开关、亮度、色温或彩色能力；MiGate 只发布组合关系，不提供可控制的整组开关、平均亮度、色温或颜色状态。
+
+以下情况不组合，受支持的成员继续作为独立单灯接入，终端会显示未组合原因：
+
+- 嵌套组，以及多个组声明同一成员的重叠关系。
+- 成员不是已支持单灯，包括其他组或非灯设备。
+
+成员关系未确认、读取失败或信息未就绪时不发布部分成员表：保留上一次已确认的关系，不自行裁剪旧成员表；此时组可能继续按旧关系存在，终端显示待确认原因。完整当前家庭目录确认的成员删除优先处理：受影响组没有完整有效的新关系时撤销父端点，其余受支持成员恢复为独立单灯。
+
+组合父端点只承载 Bridged Node、Descriptor 与 Bridged Device Basic Information；成员作为子端点保留原灯型与灯光 cluster，不重复声明桥接身份，因此不承诺 Apple Home 为每个子灯显示独立离线徽标。未分组或退出组的单灯沿用原有单端点结构，桥接身份与灯型在同一端点。逐成员可用性与错误继续在终端可见。
+
+Apple Home 是否自动形成每组一个入口、成员单控与整组／成员颜色控件，属于 `review` 阶段真机验收项，协议与自动化测试不能替代；验收不通过时返回设计讨论，不以手动编组、额外总灯端点或拆成独立灯作为替代方案。
+
+除上述灯组组合外，复合设备、多负载开关与无线按键暂不包含在单灯接入范围内。云端及 BLE Mesh 所依赖的物理网关限制继续适用，不能因为支持灯具或切换云端便保证绕过网关。

@@ -6,6 +6,7 @@ use super::{
     routing::PathPriority,
     state::Context,
 };
+use crate::{storage::import_label, xiaomi::cloud::CloudGroup};
 impl Context {
     pub(super) fn diagnostics(&self) -> AdapterStatus {
         self.update_routing("access conditions changed");
@@ -261,15 +262,42 @@ impl Context {
         }
     }
     pub(super) fn problem(&self, did: &str, reason: Option<String>) {
-        let name = self
-            .live
-            .borrow()
-            .devices
-            .get(did)
-            .and_then(|slot| slot.access.as_ref())
-            .and_then(|access| access.as_ref().ok())
-            .and_then(|access| access.name.clone())
-            .unwrap_or_else(|| did.into());
+        // Diagnostics never touch storage; the published composition label and
+        // the live slot carry every name available here.
+        let published_label = self
+            .registry
+            .snapshot()
+            .composition
+            .groups
+            .iter()
+            .find(|group| group.key.id == did)
+            .map(|group| group.label.clone());
+        let (slot_group, access_name, relation_name) = {
+            let live = self.live.borrow();
+            let slot = live.devices.get(did);
+            let slot_group = slot.is_some_and(|slot| slot.group.is_some());
+            let access_name = slot
+                .and_then(|slot| slot.access.as_ref())
+                .and_then(|access| access.as_ref().ok())
+                .and_then(|access| access.name.clone());
+            let relation_name =
+                slot.and_then(|slot| match slot.group.as_ref()?.relation.as_ref()? {
+                    CloudGroup::Confirmed { name, .. } => name.as_deref().map(import_label),
+                    CloudGroup::Unconfirmed => None,
+                });
+            (slot_group, access_name, relation_name)
+        };
+        // A published or restored composition is already a known group even
+        // before its relation metadata is populated.
+        let group = did.starts_with("group.") || slot_group || published_label.is_some();
+        let name = if group {
+            published_label
+                .or(relation_name)
+                .or(access_name)
+                .unwrap_or_else(|| did.into())
+        } else {
+            access_name.unwrap_or_else(|| did.into())
+        };
         let mut status = self.status.borrow_mut();
         status.pending.retain(|entry| entry.did != did);
         if let Some(reason) = reason {
@@ -277,6 +305,7 @@ impl Context {
                 did: did.into(),
                 name,
                 reason,
+                group,
             });
             status.pending.sort_by(|a, b| a.did.cmp(&b.did));
         }
