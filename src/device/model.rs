@@ -149,6 +149,15 @@ pub struct PhysicalDeviceDescription {
     pub functions: Vec<FunctionDescription>,
 }
 
+/// A confirmed Xiaomi group relation. Members are stable device identities;
+/// the value carries no MIoT bindings, commands or Matter endpoints.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Composition {
+    pub key: DeviceKey,
+    pub label: String,
+    pub members: Vec<DeviceKey>,
+}
+
 /// An integer physical range. Every accepted value lies on its declared grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NumericRange {

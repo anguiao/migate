@@ -10,12 +10,14 @@ pub use light_command::{
     LightActionResult, LightColorTarget, LightDimension, LightRequest, LightTarget,
 };
 pub use model::{
-    Availability, Capability, Category, Command, CommandError, DeviceKey, FunctionDescription,
-    FunctionKey, FunctionSnapshot, LightMode, LightPatch, LightSnapshot, NumericRange,
-    PhysicalDeviceDescription, Power, Rgb, brightness_from_matter_level,
+    Availability, Capability, Category, Command, CommandError, Composition, DeviceKey,
+    FunctionDescription, FunctionKey, FunctionSnapshot, LightMode, LightPatch, LightSnapshot,
+    NumericRange, PhysicalDeviceDescription, Power, Rgb, brightness_from_matter_level,
     brightness_to_matter_level,
 };
-pub use registry::{DeviceRegistry, RegistryChanges, RegistrySnapshot};
+pub use registry::{
+    CompositionError, CompositionSnapshot, DeviceRegistry, RegistryChanges, RegistrySnapshot,
+};
 pub use state::{AvailabilityChanges, Function, FunctionChanges, PhysicalDevice};
 
 #[cfg(test)]
