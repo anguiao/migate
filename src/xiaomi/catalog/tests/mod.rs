@@ -472,27 +472,69 @@ fn light_catalog_uses_cloud_model_for_the_exact_ls2307_color_adapter() {
 }
 
 #[test]
-fn light_catalog_rejects_virtual_groups_with_standard_light_descriptions() {
-    let mut instance: Value = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/xiaomi-light-ceil04.json"
-    ))
-    .unwrap();
-    instance["type"] = json!("urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802");
-    let (base, requests) = mock_server(vec![
-        MockResponse::json(200, &json!({"code":0,"result":{"list":[{"did":"group.42","model":"mijia.light.group3","spec_type":instance["type"],"name":"Grouped lights"}]}}).to_string()),
-        MockResponse::json(200, &instance.to_string()),
-    ]);
+fn confirmed_group_metadata_is_not_parsed_as_an_ordinary_light() {
+    let group = json!({
+        "did":"42",
+        "model":"xiaomi.light.ceil04",
+        "spec_type":"urn:miot-spec-v2:device:light:0000A001:xiaomi:3:0000C802",
+        "name":"Grouped lights",
+        "extra":{"member_list":{
+            "group_did":"42",
+            "status":"1",
+            "member_ship":{"member-a":"1"},
+            "is_physical":true
+        }}
+    });
+    let (base, requests) = mock_server(vec![MockResponse::json(
+        200,
+        &json!({"code":0,"result":{"list":[group]}}).to_string(),
+    )]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     assert!(matches!(
         block_on(load_device(
             &cloud,
             &credentials(),
-            &home("local", &["group.42"]),
-            "group.42"
+            &home("local", &["42"]),
+            "42"
         )),
         Err(CatalogError::Capability(
             crate::xiaomi::capability::CapabilityError::UnsupportedLightGroup
         ))
     ));
-    assert_eq!(requests.try_iter().count(), 2);
+    assert_eq!(requests.try_iter().count(), 1);
+}
+
+#[test]
+fn known_groups_without_member_metadata_are_not_parsed_as_ordinary_lights() {
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/xiaomi-light-ceil04.json"
+    ))
+    .unwrap();
+    for (did, model) in [
+        ("group.42", "mijia.light.group3"),
+        ("group.42", "xiaomi.light.ceil04"),
+        ("42", "mijia.light.group3"),
+    ] {
+        let (base, requests) = mock_server(vec![MockResponse::json(
+            200,
+            &json!({"code":0,"result":{"list":[{"did":did,"model":model,"spec_type":instance["type"],"name":"Grouped lights"}]}}).to_string(),
+        )]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert!(
+            matches!(
+                block_on(load_device(
+                    &cloud,
+                    &credentials(),
+                    &home("local", &[did]),
+                    did
+                )),
+                Err(CatalogError::Capability(
+                    crate::xiaomi::capability::CapabilityError::UnsupportedLightGroup
+                ))
+            ),
+            "{did} {model}"
+        );
+        // The group is rejected before any MIoT instance request.
+        assert_eq!(requests.try_iter().count(), 1);
+    }
 }

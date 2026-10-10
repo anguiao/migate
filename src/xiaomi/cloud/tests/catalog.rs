@@ -435,6 +435,76 @@ fn home_and_device_requests_are_minimal_and_bounded() {
 }
 
 #[test]
+fn device_lookup_exposes_group_metadata_and_rejects_invalid_states() {
+    let home = OwnedHome {
+        uid: "account".into(),
+        home_id: "home".into(),
+        group_id: group_id("account", "home"),
+        dids: vec!["group.42".into()],
+    };
+    let record = json!({
+        "did":"group.42",
+        "model":"mijia.light.group3",
+        "spec_type":"instance-type",
+        "name":"Grouped",
+        "extra":{"member_list":{
+            "group_did":"group.42",
+            "status":"1",
+            "member_ship":{"member-b":"1","member-a":"1"},
+            "is_physical":false
+        }}
+    });
+    let (base, _) = mock_server(vec![MockResponse::json(
+        200,
+        &json!({"code":0,"result":{"list":[record]}}).to_string(),
+    )]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let device = future::block_on(cloud.get_device("token", &home, "group.42"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(device.name.as_deref(), Some("Grouped"));
+    assert_eq!(
+        device.group,
+        Some(CloudGroup::Confirmed {
+            did: "group.42".into(),
+            name: Some("Grouped".into()),
+            physical: false,
+            members: vec!["member-a".into(), "member-b".into()],
+        })
+    );
+    for (field, value) in [
+        ("status", json!("0")),
+        ("is_physical", json!("false")),
+        ("group_did", json!("group.other")),
+    ] {
+        let mut record = record.clone();
+        record["extra"]["member_list"][field] = value;
+        let (base, _) = mock_server(vec![MockResponse::json(
+            200,
+            &json!({"code":0,"result":{"list":[record]}}).to_string(),
+        )]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(cloud.get_device("token", &home, "group.42"))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+    }
+    let mut record = record.clone();
+    record.as_object_mut().unwrap().remove("extra");
+    let (base, _) = mock_server(vec![MockResponse::json(
+        200,
+        &json!({"code":0,"result":{"list":[record]}}).to_string(),
+    )]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let device = future::block_on(cloud.get_device("token", &home, "group.42"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(device.group, Some(CloudGroup::Unconfirmed));
+}
+
+#[test]
 fn floating_point_uid_is_a_protocol_error() {
     let (base, _) = mock_server(vec![MockResponse::json(
         200,

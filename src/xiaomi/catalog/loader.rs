@@ -94,6 +94,13 @@ pub async fn load_device(
         .await
         .map_err(CatalogError::Cloud)?
         .ok_or(CatalogError::TargetMissing)?;
+    // A member list marks a Xiaomi group even when its DID or model would
+    // otherwise pass ordinary light parsing; never read its MIoT description.
+    if details.group.is_some() {
+        return Err(CatalogError::Capability(
+            CapabilityError::UnsupportedLightGroup,
+        ));
+    }
     let instance = cloud
         .get_instance(&details.instance_type)
         .await

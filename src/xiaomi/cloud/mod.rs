@@ -6,7 +6,7 @@ mod oauth;
 mod properties;
 mod response;
 
-pub use catalog::{CloudDevice, CloudDeviceInfo, OwnedHome, OwnedHomes, group_id};
+pub use catalog::{CloudDevice, CloudDeviceInfo, CloudGroup, OwnedHome, OwnedHomes, group_id};
 pub use client::{CLOUD_BASE_URL, CloudClient, HomePage, TokenResponse};
 pub use error::{CloudError, CloudErrorKind};
 pub use notifications::{

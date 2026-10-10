@@ -45,12 +45,14 @@ fn home_device_info_paginates_with_scoped_requests_and_explicit_online_state() {
                 model: "vendor.plug".into(),
                 instance_type: "instance-type".into(),
                 online: true,
+                group: None,
             },
             CloudDeviceInfo {
                 did: "second".into(),
                 model: "vendor.plug".into(),
                 instance_type: "instance-type".into(),
                 online: false,
+                group: None,
             },
         ]
     );
@@ -320,4 +322,282 @@ fn home_device_info_skips_http_for_no_requested_members() {
             .is_empty()
     );
     assert!(requests.try_recv().is_err());
+}
+
+fn group_record(did: &str, name: &str, physical: bool, members: Value) -> Value {
+    json!({
+        "did": did,
+        "model": "mijia.light.group3",
+        "spec_type": "instance-type",
+        "isOnline": true,
+        "name": name,
+        "extra": {
+            "member_list": {
+                "group_did": did,
+                "status": "1",
+                "display_member_switch": 0,
+                "member_ship": members,
+                "is_physical": physical,
+            }
+        }
+    })
+}
+
+#[test]
+fn home_device_info_parses_physical_virtual_and_empty_group_metadata() {
+    let records = [
+        group_record(
+            "group.physical",
+            "Physical group",
+            true,
+            json!({"member-b":"1","member-a":"1"}),
+        ),
+        group_record("group.virtual", "Virtual group", false, json!({"only":"1"})),
+        group_record("group.empty", "Empty group", true, json!({})),
+        device("plain", true),
+    ];
+    let (base, _) = mock_server(vec![response(json!({"list":records}))]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let devices = future::block_on(get_home_devices(
+        &cloud,
+        "token",
+        &home(["group.physical", "group.virtual", "group.empty", "plain"]),
+    ))
+    .unwrap();
+    assert_eq!(
+        devices
+            .iter()
+            .map(|device| device.group.clone())
+            .collect::<Vec<_>>(),
+        [
+            Some(CloudGroup::Confirmed {
+                did: "group.physical".into(),
+                name: Some("Physical group".into()),
+                physical: true,
+                members: vec!["member-a".into(), "member-b".into()],
+            }),
+            Some(CloudGroup::Confirmed {
+                did: "group.virtual".into(),
+                name: Some("Virtual group".into()),
+                physical: false,
+                members: vec!["only".into()],
+            }),
+            Some(CloudGroup::Confirmed {
+                did: "group.empty".into(),
+                name: Some("Empty group".into()),
+                physical: true,
+                members: Vec::new(),
+            }),
+            None,
+        ]
+    );
+}
+
+#[test]
+fn home_device_info_marks_known_groups_without_confirmed_relations() {
+    let mut missing_members = group_record("group.missing", "Grouped", true, json!({}));
+    missing_members["extra"]
+        .as_object_mut()
+        .unwrap()
+        .remove("member_list");
+    let mut null_members = group_record("group.null", "Grouped", true, json!({}));
+    null_members["extra"]["member_list"] = Value::Null;
+    let records = [
+        group_record("group.empty", "Empty group", true, json!({})),
+        group_record("group.confirmed", "Grouped", true, json!({"member":"1"})),
+        json!({
+            "did":"group.nometa",
+            "model":"xiaomi.light.ceil04",
+            "spec_type":"instance-type",
+            "isOnline":true,
+        }),
+        json!({
+            "did":"42",
+            "model":"mijia.light.group3",
+            "spec_type":"instance-type",
+            "isOnline":true,
+        }),
+        missing_members,
+        null_members,
+    ];
+    let (base, _) = mock_server(vec![response(json!({"list":records}))]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let devices = future::block_on(get_home_devices(
+        &cloud,
+        "token",
+        &home([
+            "group.empty",
+            "group.confirmed",
+            "group.nometa",
+            "42",
+            "group.missing",
+            "group.null",
+        ]),
+    ))
+    .unwrap();
+    // A confirmed empty group stays distinct from a known group without metadata.
+    assert_eq!(
+        devices[0].group,
+        Some(CloudGroup::Confirmed {
+            did: "group.empty".into(),
+            name: Some("Empty group".into()),
+            physical: true,
+            members: Vec::new(),
+        })
+    );
+    assert_eq!(
+        devices[1].group,
+        Some(CloudGroup::Confirmed {
+            did: "group.confirmed".into(),
+            name: Some("Grouped".into()),
+            physical: true,
+            members: vec!["member".into()],
+        })
+    );
+    for device in &devices[2..] {
+        assert_eq!(
+            device.group,
+            Some(CloudGroup::Unconfirmed),
+            "{}",
+            device.did
+        );
+    }
+}
+
+#[test]
+fn home_device_info_rejects_group_relations_that_contradict_their_identity() {
+    for (did, model, group_did) in [
+        ("group.42", "xiaomi.light.ceil04", "group.other"),
+        ("42", "mijia.light.group3", "group.other"),
+        ("42", "vendor.plug", "group.other"),
+    ] {
+        let mut record = group_record(did, "Grouped", true, json!({"member":"1"}));
+        record["model"] = json!(model);
+        record["extra"]["member_list"]["group_did"] = json!(group_did);
+        let (base, _) = mock_server(vec![response(json!({"list":[record]}))]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(get_home_devices(&cloud, "token", &home([did])))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+    }
+}
+
+#[test]
+fn home_device_info_rejects_unconfirmed_group_and_member_states() {
+    let invalid = [
+        ("status", json!("0")),
+        ("status", json!("2")),
+        ("status", json!("")),
+        ("status", json!(1)),
+        ("status", Value::Null),
+        ("is_physical", json!("true")),
+        ("is_physical", Value::Null),
+    ];
+    for (field, value) in invalid {
+        let mut record = group_record("group.bad", "Bad group", true, json!({"member":"1"}));
+        record["extra"]["member_list"][field] = value;
+        let (base, _) = mock_server(vec![response(json!({"list":[record]}))]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(get_home_devices(&cloud, "token", &home(["group.bad"])))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+    }
+    for (member, status) in [
+        ("member", json!("0")),
+        ("member", json!("2")),
+        ("member", json!("")),
+        ("member", json!(1)),
+        ("member", Value::Null),
+    ] {
+        let mut record = group_record("group.bad", "Bad group", true, json!({}));
+        record["extra"]["member_list"]["member_ship"][member] = status;
+        let (base, _) = mock_server(vec![response(json!({"list":[record]}))]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(get_home_devices(&cloud, "token", &home(["group.bad"])))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+    }
+}
+
+#[test]
+fn home_device_info_rejects_malformed_group_member_lists() {
+    let mut missing_members = group_record("group.bad", "Bad group", true, json!({}));
+    missing_members["extra"]["member_list"]
+        .as_object_mut()
+        .unwrap()
+        .remove("member_ship");
+    let mut missing_physical = group_record("group.bad", "Bad group", true, json!({}));
+    missing_physical["extra"]["member_list"]
+        .as_object_mut()
+        .unwrap()
+        .remove("is_physical");
+    let mut bad_did = group_record("group.bad", "Bad group", true, json!({}));
+    bad_did["extra"]["member_list"]["group_did"] = json!("");
+    let mut bad_extra = group_record("group.bad", "Bad group", true, json!({}));
+    bad_extra["extra"] = json!("unexpected");
+    let records = [
+        missing_members,
+        missing_physical,
+        bad_did,
+        bad_extra,
+        group_record("group.bad", "Bad group", true, Value::Null),
+        group_record("group.bad", "Bad group", true, json!([])),
+        group_record("group.bad", "Bad group", true, json!({"bad\n":"1"})),
+        group_record("group.bad", "Bad group", true, json!({"":"1"})),
+    ];
+    for record in records {
+        let (base, _) = mock_server(vec![response(json!({"list":[record]}))]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            future::block_on(get_home_devices(&cloud, "token", &home(["group.bad"])))
+                .unwrap_err()
+                .kind(),
+            &CloudErrorKind::Protocol
+        );
+    }
+}
+
+#[test]
+fn home_device_info_ignores_malformed_member_lists_outside_selected_members() {
+    let mut foreign = group_record("foreign", "Foreign group", true, json!({}));
+    foreign["extra"]["member_list"]["status"] = json!("0");
+    let (base, _) = mock_server(vec![response(
+        json!({"list":[foreign, device("target", true)]}),
+    )]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let devices = future::block_on(get_home_devices(&cloud, "token", &home(["target"]))).unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].did, "target");
+    assert_eq!(devices[0].group, None);
+}
+
+#[test]
+fn home_device_info_tolerates_unusable_group_names() {
+    for name in [
+        Value::Null,
+        json!(""),
+        json!("  "),
+        json!("Group\n"),
+        json!(17),
+    ] {
+        let mut record = group_record("group.named", "Named group", true, json!({}));
+        record["name"] = name;
+        let (base, _) = mock_server(vec![response(json!({"list":[record]}))]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let devices =
+            future::block_on(get_home_devices(&cloud, "token", &home(["group.named"]))).unwrap();
+        assert!(matches!(
+            &devices[0].group,
+            Some(CloudGroup::Confirmed { name: None, .. })
+        ));
+    }
 }
