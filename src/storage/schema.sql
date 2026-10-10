@@ -23,4 +23,4 @@ CREATE TABLE xiaomi_auth (
     certificate_pem TEXT NOT NULL
 ) STRICT;
 
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;

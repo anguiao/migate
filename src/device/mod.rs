@@ -15,6 +15,7 @@ pub use model::{
     NumericRange, PhysicalDeviceDescription, Power, Rgb, brightness_from_matter_level,
     brightness_to_matter_level,
 };
+pub(crate) use registry::validate_composition_structure;
 pub use registry::{
     CompositionError, CompositionSnapshot, DeviceRegistry, RegistryChanges, RegistrySnapshot,
 };

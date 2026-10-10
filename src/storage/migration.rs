@@ -2,9 +2,13 @@ use super::identity;
 use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use std::{error::Error as StdError, fmt};
 
-const CURRENT_VERSION: i64 = 5;
+const CURRENT_VERSION: i64 = 6;
 
-pub(super) const SCHEMA: &str = concat!(include_str!("schema.sql"), include_str!("devices-v4.sql"));
+pub(super) const SCHEMA: &str = concat!(
+    include_str!("schema.sql"),
+    include_str!("devices-v4.sql"),
+    include_str!("groups-v6.sql")
+);
 
 #[derive(Debug)]
 pub(super) enum MigrationError {
@@ -60,7 +64,12 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError>
     if version < 4 {
         migrate_v3_to_v4(&transaction)?;
     }
-    migrate_v4_to_v5(&transaction, version == 4)?;
+    if version < 5 {
+        migrate_v4_to_v5(&transaction, version == 4)?;
+    }
+    if version < 6 {
+        migrate_v5_to_v6(&transaction)?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -344,5 +353,100 @@ fn migrate_v4_to_v5(
     transaction.execute_batch(
         r#"UPDATE device_function SET capabilities='["on_off"]'; PRAGMA user_version=5;"#,
     )?;
+    Ok(())
+}
+
+fn migrate_v5_to_v6(transaction: &Transaction<'_>) -> Result<(), MigrationError> {
+    transaction.execute_batch(include_str!("groups-v6.sql"))?;
+    migrate_legacy_group_identities(transaction)?;
+    transaction.execute_batch("PRAGMA user_version=6;")?;
+    Ok(())
+}
+
+/// Move old Xiaomi group main-light identities into the explicit parent role.
+/// Only `group.*` keys and cached `mijia.light.group3` models are converted;
+/// ordinary devices keep their strict compatibility checks and stay unpublished
+/// parents never revive without a fresh confirmed relation.
+fn migrate_legacy_group_identities(transaction: &Transaction<'_>) -> Result<(), MigrationError> {
+    use crate::device::DeviceKey;
+    use rusqlite::params;
+    let mut group_models = std::collections::HashMap::new();
+    let models = transaction
+        .prepare("SELECT source, device_id, model FROM device_cache")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (source, device_id, model) in models {
+        let known = group_models.entry((source, device_id)).or_insert(false);
+        *known |= model == "mijia.light.group3";
+    }
+    let identities = transaction
+        .prepare("SELECT source, device_id, unique_id, endpoint, label FROM device_identity")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u16>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (source, device_id, unique_id, endpoint, label) in identities {
+        let key = DeviceKey::new(source, device_id);
+        if key.source != "xiaomi" {
+            continue;
+        }
+        let known = key.id.starts_with("group.")
+            || group_models
+                .get(&(key.source.clone(), key.id.clone()))
+                .copied()
+                .unwrap_or(false);
+        if !known {
+            continue;
+        }
+        if super::device::validate_key(&key).is_err()
+            || !(2..=65534).contains(&endpoint)
+            || !uuid::Uuid::parse_str(&unique_id)
+                .is_ok_and(|uuid| uuid.simple().to_string() == unique_id)
+            || label
+                .as_deref()
+                .is_some_and(|label| super::registry::validate_label(label).is_err())
+        {
+            return Err(MigrationError::InvalidSchema);
+        }
+        let allocations = transaction
+            .prepare(
+                "SELECT endpoint FROM endpoint_allocation WHERE source=?1 AND device_id=?2 ORDER BY endpoint",
+            )?
+            .query_map(params![key.source, key.id], |row| row.get::<_, u16>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // The legacy light topology must be exactly one root reservation.
+        // Reservations are preserved, never deleted.
+        if allocations.len() != 1 || allocations[0] != endpoint {
+            return Err(MigrationError::InvalidSchema);
+        }
+        transaction.execute(
+            "UPDATE endpoint_allocation SET slot='group' WHERE source=?1 AND device_id=?2 AND endpoint=?3",
+            params![key.source, key.id, endpoint],
+        )?;
+        transaction.execute(
+            "DELETE FROM device_function WHERE source=?1 AND device_id=?2",
+            params![key.source, key.id],
+        )?;
+        transaction.execute(
+            "INSERT INTO group_identity VALUES(?1,?2,?3,?4,?5)",
+            params![key.source, key.id, unique_id, endpoint, label],
+        )?;
+        transaction.execute(
+            "DELETE FROM device_identity WHERE source=?1 AND device_id=?2",
+            params![key.source, key.id],
+        )?;
+    }
     Ok(())
 }

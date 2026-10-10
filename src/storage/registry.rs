@@ -1,7 +1,7 @@
 use super::{
     StorageError,
     device::{
-        CachedPhysicalDevice, DeviceStore, save_cached, validate_cached, validate_key,
+        CachedPhysicalDevice, DeviceStore, load_cached, save_cached, validate_cached, validate_key,
         validate_text,
     },
 };
@@ -221,6 +221,18 @@ impl DeviceStore {
                 Ok(record.device)
             }
             None => {
+                // A reserved group parent identity is never taken over by an
+                // ordinary device; role transitions belong to composition.
+                let reserved: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM group_identity WHERE source=?1 AND device_id=?2)",
+                        params![description.key.source, description.key.id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| self.store.database_error(operation, error))?;
+                if reserved {
+                    return Err(AdmissionError::IncompatibleFunctions);
+                }
                 let required = if description.functions.len() == 1 {
                     1
                 } else {
@@ -277,16 +289,7 @@ impl DeviceStore {
             .collect()
     }
     pub fn remove(&self, key: &DeviceKey) -> Result<(), StorageError> {
-        let operation = "remove published device";
-        validate_key(key).map_err(|error| self.invalid(operation, error))?;
-        self.store
-            .connection()
-            .execute(
-                "UPDATE device_identity SET published=0 WHERE source=?1 AND device_id=?2",
-                params![key.source, key.id],
-            )
-            .map(|_| ())
-            .map_err(|error| self.store.database_error(operation, error))
+        super::composition::remove_device(self, key)
     }
     pub fn set_device_label(&self, key: &DeviceKey, label: &str) -> Result<(), StorageError> {
         let operation = "write device label";
@@ -307,6 +310,43 @@ impl DeviceStore {
         Ok(())
     }
 }
+/// A composition member is usable only when its cached description and its
+/// published identity are a compatible single main light in the same scope.
+pub(super) fn compatible_light_member(
+    connection: &Connection,
+    uid: &str,
+    home_id: &str,
+    key: &DeviceKey,
+) -> rusqlite::Result<bool> {
+    let Some(cached) = load_cached(connection, uid, home_id, key)? else {
+        return Ok(false);
+    };
+    // A legacy group cache can still look like one main light; never treat it
+    // as an ordinary member before an explicit role migration.
+    if crate::xiaomi::capability::is_light_group(key, &cached.model) {
+        return Ok(false);
+    }
+    if cached.device.functions.len() != 1
+        || cached.device.functions[0].description.id != "main"
+        || cached.device.functions[0].description.category != Category::Light
+    {
+        return Ok(false);
+    }
+    let Some(record) = load_record(connection, key)? else {
+        return Ok(false);
+    };
+    if !record.device.published {
+        return Ok(false);
+    }
+    let functions = cached.physical_description("").functions;
+    Ok(record.device.matches_functions(&functions)
+        && record.device.functions.iter().all(|stored| {
+            functions.iter().any(|function| {
+                stored.key.id == function.id && stored.capabilities == function.capabilities
+            })
+        }))
+}
+
 fn validate_description(description: &PhysicalDeviceDescription) -> Result<(), &'static str> {
     validate_key(&description.key)?;
     if description.functions.is_empty() {
@@ -398,7 +438,7 @@ fn create_record(
         published: true,
     })
 }
-fn reserve_endpoint(
+pub(super) fn reserve_endpoint(
     connection: &Connection,
     key: &DeviceKey,
     slot: &str,

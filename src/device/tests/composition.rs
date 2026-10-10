@@ -391,3 +391,40 @@ fn same_name_members_and_groups_are_distinct_by_stable_key() {
         .unwrap();
     assert_eq!(registry.snapshot().composition.revision, revision);
 }
+
+#[test]
+fn confirmed_version_survives_device_revisions_and_clears_on_relation_revocation() {
+    let registry = DeviceRegistry::new();
+    let (first, _first_receiver) = ready_light("first", "First");
+    let (second, _second_receiver) = ready_light("second", "Second");
+    let (third, _third_receiver) = ready_light("third", "Third");
+    registry.insert(first.clone());
+    registry.insert(second.clone());
+    registry
+        .update_composition_versioned(7, vec![group("group", "Group", &[&first, &second])], &[])
+        .unwrap();
+    let snapshot = registry.snapshot();
+    assert_eq!(snapshot.composition.confirmed, Some(7));
+    assert_eq!(snapshot.composition.revision, 1);
+
+    // Ordinary device revisions never touch the confirmed composition version.
+    registry.insert(third.clone());
+    assert_eq!(registry.snapshot().composition.confirmed, Some(7));
+    assert_eq!(registry.snapshot().composition.revision, 1);
+    registry.remove(third.key());
+    assert_eq!(registry.snapshot().composition.confirmed, Some(7));
+
+    // An idempotent versioned publication keeps the version without revising.
+    let revision = registry.snapshot().revision;
+    registry
+        .update_composition_versioned(7, vec![group("group", "Group", &[&second, &first])], &[])
+        .unwrap();
+    assert_eq!(registry.snapshot().revision, revision);
+
+    // Revoking a referencing group through ordinary removal clears the version.
+    registry.remove(second.key());
+    let snapshot = registry.snapshot();
+    assert!(snapshot.composition.groups.is_empty());
+    assert_eq!(snapshot.composition.confirmed, None);
+    assert_eq!(snapshot.composition.revision, 2);
+}

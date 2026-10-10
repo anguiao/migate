@@ -10,6 +10,8 @@ use std::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompositionSnapshot {
     pub revision: u64,
+    /// Storage-confirmed relation version, when published from storage.
+    pub confirmed: Option<u64>,
     pub groups: Vec<Composition>,
 }
 
@@ -91,6 +93,7 @@ impl DeviceRegistry {
                 devices: Vec::new(),
                 composition: CompositionSnapshot {
                     revision: 0,
+                    confirmed: None,
                     groups: Vec::new(),
                 },
             }),
@@ -146,6 +149,8 @@ impl DeviceRegistry {
             .retain(|group| &group.key != key && !group.members.contains(key));
         if state.composition.groups.len() != groups {
             state.composition.revision = state.composition.revision.wrapping_add(1);
+            // The stored confirmation no longer describes the visible relations.
+            state.composition.confirmed = None;
         }
         state.revision = state.revision.wrapping_add(1);
         self.0.changed.notify(usize::MAX);
@@ -157,6 +162,26 @@ impl DeviceRegistry {
     /// leave the registry unchanged.
     pub fn update_composition(
         &self,
+        compositions: Vec<Composition>,
+        removed: &[DeviceKey],
+    ) -> Result<(), CompositionError> {
+        self.update_composition_inner(None, compositions, removed)
+    }
+
+    /// Publish a relation set together with the storage-confirmed version so
+    /// the same confirmation stays identifiable in the snapshot.
+    pub fn update_composition_versioned(
+        &self,
+        version: u64,
+        compositions: Vec<Composition>,
+        removed: &[DeviceKey],
+    ) -> Result<(), CompositionError> {
+        self.update_composition_inner(Some(version), compositions, removed)
+    }
+
+    fn update_composition_inner(
+        &self,
+        confirmed: Option<u64>,
         compositions: Vec<Composition>,
         removed: &[DeviceKey],
     ) -> Result<(), CompositionError> {
@@ -173,7 +198,8 @@ impl DeviceRegistry {
             .iter()
             .any(|key| state.devices.iter().any(|device| device.key() == key));
         let composition_changed = compositions != state.composition.groups;
-        if !devices_changed && !composition_changed {
+        let confirmed_changed = state.composition.confirmed != confirmed;
+        if !devices_changed && !composition_changed && !confirmed_changed {
             return Ok(());
         }
         if devices_changed {
@@ -187,6 +213,7 @@ impl DeviceRegistry {
             state.composition.groups = compositions;
             state.composition.revision = state.composition.revision.wrapping_add(1);
         }
+        state.composition.confirmed = confirmed;
         state.revision = state.revision.wrapping_add(1);
         self.0.changed.notify(usize::MAX);
         Ok(())
@@ -203,6 +230,38 @@ fn validate_compositions(
     compositions: &[Composition],
     devices: &[PhysicalDevice],
 ) -> Result<(), CompositionError> {
+    validate_composition_structure(compositions)?;
+    if let Some(group) = compositions
+        .iter()
+        .find(|group| devices.iter().any(|device| device.key() == &group.key))
+    {
+        return Err(CompositionError::GroupKeyConflict(group.key.clone()));
+    }
+    for group in compositions {
+        for member in &group.members {
+            let Some(device) = devices.iter().find(|device| device.key() == member) else {
+                return Err(CompositionError::MissingMember(member.clone()));
+            };
+            let functions = device.functions();
+            let supported = functions.len() == 1 && {
+                let function = functions[0].description();
+                function.id == "main"
+                    && function.category == Category::Light
+                    && function.valid_capabilities()
+            };
+            if !supported {
+                return Err(CompositionError::UnsupportedMember(member.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a proposed relation set's structure independent of device presence.
+/// Device-dependent checks (key collisions, member support) remain at publication.
+pub(crate) fn validate_composition_structure(
+    compositions: &[Composition],
+) -> Result<(), CompositionError> {
     let mut group_keys = HashSet::new();
     for group in compositions {
         if group.members.is_empty() {
@@ -211,12 +270,6 @@ fn validate_compositions(
         if !group_keys.insert(group.key.clone()) {
             return Err(CompositionError::DuplicateGroup(group.key.clone()));
         }
-    }
-    if let Some(group) = compositions
-        .iter()
-        .find(|group| devices.iter().any(|device| device.key() == &group.key))
-    {
-        return Err(CompositionError::GroupKeyConflict(group.key.clone()));
     }
     let mut seen = HashSet::new();
     for group in compositions {
@@ -236,23 +289,6 @@ fn validate_compositions(
             }
             if !seen.insert(member.clone()) {
                 return Err(CompositionError::OverlappingMember(member.clone()));
-            }
-        }
-    }
-    for group in compositions {
-        for member in &group.members {
-            let Some(device) = devices.iter().find(|device| device.key() == member) else {
-                return Err(CompositionError::MissingMember(member.clone()));
-            };
-            let functions = device.functions();
-            let supported = functions.len() == 1 && {
-                let function = functions[0].description();
-                function.id == "main"
-                    && function.category == Category::Light
-                    && function.valid_capabilities()
-            };
-            if !supported {
-                return Err(CompositionError::UnsupportedMember(member.clone()));
             }
         }
     }

@@ -113,7 +113,11 @@ impl DeviceStore {
         StorageError::new(self.store.path(), operation, error)
     }
 }
-fn validate_scope(uid: &str, home_id: &str, stored_group_id: &str) -> Result<(), &'static str> {
+pub(super) fn validate_scope(
+    uid: &str,
+    home_id: &str,
+    stored_group_id: &str,
+) -> Result<(), &'static str> {
     validate_text(uid)?;
     validate_text(home_id)?;
     if stored_group_id != group_id(uid, home_id) {

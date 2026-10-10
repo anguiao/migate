@@ -25,7 +25,7 @@ fn version_four_static_cache_is_upgraded_locally_without_changing_identity_or_pa
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        5
+        6
     );
     let stored = store
         .devices()

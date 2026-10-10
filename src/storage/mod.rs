@@ -1,3 +1,4 @@
+mod composition;
 mod device;
 mod directory;
 mod error;
@@ -9,6 +10,7 @@ mod registry;
 mod store;
 mod xiaomi;
 
+pub use composition::{CompositionCommitError, ConfirmedComposition, StoredGroup};
 pub use device::{CachedPhysicalDevice, CachedScope, DeviceStore};
 pub use error::StorageError;
 pub use identity::Identity;
