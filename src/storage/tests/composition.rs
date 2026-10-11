@@ -1,11 +1,8 @@
 use crate::{
-    device::{Capability, Category, Composition, DeviceKey, FunctionDescription, NumericRange},
+    device::{Capability, Category, Composition, DeviceKey, FunctionDescription},
     storage::{CachedPhysicalDevice, CachedScope, Store},
     xiaomi::{
-        capability::{
-            BrightnessConversion, LightBindings, NumericBinding, NumericFormat, NumericUnit,
-            ParsedDevice, ParsedFunction, PropertyBinding,
-        },
+        capability::{ParsedDevice, ParsedFunction, PropertyBinding},
         cloud::group_id,
     },
 };
@@ -24,42 +21,10 @@ fn cached_light(uid: &str, did: &str) -> CachedPhysicalDevice {
                     id: "main".into(),
                     label: "Light".into(),
                     category: Category::Light,
-                    capabilities: vec![
-                        Capability::OnOff,
-                        Capability::Brightness,
-                        Capability::ColorTemperature(NumericRange {
-                            min: 2700,
-                            max: 6500,
-                            step: 1,
-                        }),
-                    ],
+                    capabilities: vec![Capability::OnOff],
                 },
                 power: Some(PropertyBinding { siid: 2, piid: 1 }),
-                lighting: Some(LightBindings {
-                    brightness: Some(NumericBinding {
-                        property: PropertyBinding { siid: 2, piid: 2 },
-                        format: NumericFormat::Uint16,
-                        unit: NumericUnit::Percentage,
-                        range: NumericRange {
-                            min: 1,
-                            max: 65535,
-                            step: 1,
-                        },
-                    }),
-                    temperature: Some(NumericBinding {
-                        property: PropertyBinding { siid: 2, piid: 3 },
-                        format: NumericFormat::Uint32,
-                        unit: NumericUnit::Kelvin,
-                        range: NumericRange {
-                            min: 2700,
-                            max: 6500,
-                            step: 1,
-                        },
-                    }),
-                    color: None,
-                    mode: None,
-                    brightness_conversion: Some(BrightnessConversion::NonzeroLinear),
-                }),
+                lighting: None,
             }],
             refresh_trigger: None,
         },

@@ -485,134 +485,58 @@ fn valid_kelvin_ranges_publish_restore_and_map_without_matter_limits() {
     }
 }
 
-fn synthetic_instance(
-    on: bool,
-    brightness: bool,
-    temperature: bool,
-    rgb: bool,
-    rgb_in_light: bool,
-) -> Value {
-    let mut light = Vec::new();
-    if on {
-        light.push(serde_json::json!({
-            "iid": 1,
-            "type": "urn:miot-spec-v2:property:on:00000006:synthetic-v1:1",
-            "format": "bool",
-            "access": ["read", "write", "notify"]
-        }));
-    }
-    if brightness {
-        light.push(serde_json::json!({
-            "iid": 2,
-            "type": "urn:miot-spec-v2:property:brightness:0000000D:synthetic-v1:1",
-            "format": "uint8",
-            "unit": "percentage",
-            "access": ["read", "write", "notify"],
-            "value-range": [1, 100, 1]
-        }));
-    }
-    if temperature {
-        light.push(serde_json::json!({
-            "iid": 3,
-            "type": "urn:miot-spec-v2:property:color-temperature:0000000F:synthetic-v1:1",
-            "format": "uint16",
-            "unit": "kelvin",
-            "access": ["read", "write", "notify"],
-            "value-range": [2700, 6500, 1]
-        }));
-    }
-    if rgb && rgb_in_light {
-        light.push(serde_json::json!({
-            "iid": 5,
-            "type": "urn:miot-spec-v2:property:color:0000000E:synthetic-v1:1",
-            "format": "uint32",
-            "unit": "rgb",
-            "access": ["read", "write", "notify"],
-            "value-range": [0, 16777215, 1]
-        }));
-    }
-    let mut services = vec![serde_json::json!({
-        "iid": 2,
-        "type": "urn:miot-spec-v2:service:light:00007802:synthetic-v1:1",
-        "properties": light
-    })];
-    if rgb && !rgb_in_light {
-        services.push(serde_json::json!({
-            "iid": 4,
-            "type": "urn:miot-spec-v2:service:ambient-light:0000789D:synthetic-v1:1",
-            "properties": [{
-                "iid": 1,
-                "type": "urn:miot-spec-v2:property:color:0000000E:synthetic-v1:1",
-                "format": "uint32",
-                "unit": "rgb",
-                "access": ["read", "write", "notify"],
-                "value-range": [0, 16777215, 1]
-            }]
-        }));
-    }
-    serde_json::json!({
-        "type": "urn:miot-spec-v2:device:light:0000A001:synthetic-v1:1",
-        "services": services
-    })
-}
-
 #[test]
 fn all_fifteen_optional_light_binding_sets_roundtrip_through_storage() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
+    let complete = light(
+        "devcea.light.ls2307",
+        include_str!("fixtures/miot/devcea-light-ls2307.json"),
+    );
     let mut expected = Vec::new();
-    let mut subsets = 0;
-    let mut index = 0;
-    for on in [false, true] {
-        for brightness in [false, true] {
-            for temperature in [false, true] {
-                for rgb in [false, true] {
-                    if !(on || brightness || temperature || rgb) {
-                        continue;
-                    }
-                    subsets += 1;
-                    let layouts: &[bool] = if rgb { &[false, true] } else { &[false] };
-                    for &rgb_in_light in layouts {
-                        let did = format!("did-{index}");
-                        index += 1;
-                        let instance =
-                            synthetic_instance(on, brightness, temperature, rgb, rgb_in_light);
-                        let cached = CachedPhysicalDevice {
-                            uid: "account".into(),
-                            home_id: "home".into(),
-                            group_id: group_id("account", "home"),
-                            model: "synthetic.light.v1".into(),
-                            instance_type: instance["type"].as_str().unwrap().into(),
-                            device: parse_device_for_model(
-                                DeviceKey::new("xiaomi", did),
-                                "synthetic.light.v1",
-                                &instance,
-                            )
-                            .unwrap(),
-                        };
-                        let identity = store
-                            .devices()
-                            .publish_cached(&cached, "Synthetic light")
-                            .unwrap();
-                        assert_eq!(
-                            store
-                                .devices()
-                                .load_parsed("account", "home", &cached.device.key)
-                                .unwrap(),
-                            Some(cached.clone())
-                        );
-                        expected.push((cached, identity));
-                    }
-                }
-            }
+    // Storage consumes normalized bindings; MIoT layout variants belong to parser tests.
+    for mask in 1..16 {
+        let enabled = |bit| mask & bit != 0;
+        let mut cached = complete.clone();
+        cached.device.key = DeviceKey::new("xiaomi", format!("did-{mask}"));
+        let function = &mut cached.device.functions[0];
+        function
+            .description
+            .capabilities
+            .retain(|capability| match capability {
+                Capability::OnOff => enabled(1),
+                Capability::Brightness => enabled(2),
+                Capability::ColorTemperature(_) => enabled(4),
+                Capability::ColorRgb => enabled(8),
+            });
+        function.power = function.power.filter(|_| enabled(1));
+        let lighting = function.lighting.as_mut().unwrap();
+        lighting.brightness = lighting.brightness.filter(|_| enabled(2));
+        lighting.brightness_conversion = lighting.brightness_conversion.filter(|_| enabled(2));
+        lighting.temperature = lighting.temperature.filter(|_| enabled(4));
+        lighting.color = lighting.color.filter(|_| enabled(8));
+        lighting.mode = None;
+        if mask == 1 {
+            function.lighting = None;
         }
+        let identity = store
+            .devices()
+            .publish_cached(&cached, "Subset light")
+            .unwrap();
+        assert_eq!(
+            store
+                .devices()
+                .load_parsed("account", "home", &cached.device.key)
+                .unwrap(),
+            Some(cached.clone())
+        );
+        expected.push((cached, identity));
     }
-    assert_eq!(subsets, 15);
-    assert_eq!(expected.len(), 23);
+    assert_eq!(expected.len(), 15);
     drop(store);
     let store = Store::open(directory.path()).unwrap();
     let restored = store.devices().restore_cached("account", "home").unwrap();
-    assert_eq!(restored.len(), 23);
+    assert_eq!(restored.len(), 15);
     for (cached, stored) in restored {
         let (expected, identity) = expected
             .iter()

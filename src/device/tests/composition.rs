@@ -1,8 +1,7 @@
 use super::{new_device, outlet};
 use crate::device::{
     Availability, Capability, Category, Command, CommandReceiver, Composition, CompositionError,
-    DeviceKey, DeviceRegistry, FunctionDescription, NumericRange, PhysicalDevice,
-    PhysicalDeviceDescription,
+    DeviceKey, DeviceRegistry, FunctionDescription, PhysicalDevice, PhysicalDeviceDescription,
 };
 use futures_lite::future::{block_on, poll_once};
 
@@ -14,15 +13,7 @@ fn light(key: &str, label: &str) -> PhysicalDeviceDescription {
             id: "main".into(),
             label: "Main light".into(),
             category: Category::Light,
-            capabilities: vec![
-                Capability::OnOff,
-                Capability::Brightness,
-                Capability::ColorTemperature(NumericRange {
-                    min: 2700,
-                    max: 6500,
-                    step: 1,
-                }),
-            ],
+            capabilities: vec![Capability::OnOff],
         }],
     }
 }

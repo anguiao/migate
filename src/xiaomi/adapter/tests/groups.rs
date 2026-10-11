@@ -4,6 +4,21 @@ fn key(did: &str) -> DeviceKey {
     DeviceKey::new("xiaomi", did)
 }
 
+fn group_members(c: &Control, did: &str) -> Option<Vec<DeviceKey>> {
+    c.context
+        .registry
+        .snapshot()
+        .composition
+        .groups
+        .iter()
+        .find(|group| group.key == key(did))
+        .map(|group| group.members.clone())
+}
+
+async fn wait_group(c: &Control, did: &str) {
+    until(|| group_members(c, did).is_some()).await;
+}
+
 #[test]
 fn bootstrap_restores_confirmed_group_without_a_group_physical_device() {
     let rig = Rig::restored_group(
@@ -41,69 +56,54 @@ fn bootstrap_restores_confirmed_group_without_a_group_physical_device() {
 }
 
 #[test]
-fn live_confirmed_group_is_published_after_members_are_admitted() {
-    let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
-    rig.cloud
-        .lock()
-        .unwrap()
-        .names
-        .insert("group.1".into(), "Reading lamp".into());
-    block_on(rig.run(|c| async move {
-        c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
+fn physical_and_virtual_groups_publish_after_members_are_admitted() {
+    for physical in [true, false] {
+        let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.names.insert("group.1".into(), "Reading lamp".into());
+            cloud.groups.get_mut("group.1").unwrap().physical = physical;
+        }
+        block_on(rig.run(|c| async move {
+            c.announce();
+            wait_group(&c, "group.1").await;
+            let snapshot = c.context.registry.snapshot();
+            let group = snapshot
                 .composition
                 .groups
                 .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
-        let snapshot = c.context.registry.snapshot();
-        let group = snapshot
-            .composition
-            .groups
-            .iter()
-            .find(|group| group.key == key("group.1"))
-            .unwrap();
-        assert_eq!(group.members, vec![key("one"), key("two")]);
-        assert_eq!(group.label, "Reading lamp");
-        assert!(snapshot.composition.confirmed.is_some());
-        assert!(c.context.registry.get(&key("group.1")).is_none());
-        for member in ["one", "two"] {
-            assert!(c.context.registry.get(&key(member)).is_some());
-        }
-        let uid = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .uid
-            .clone();
-        let stored = c
-            .store
-            .devices()
-            .load_published_group(&uid, "local", &key("group.1"))
-            .unwrap()
-            .expect("published group");
-        assert_eq!(stored.members, vec![key("one"), key("two")]);
-        let cloud = c.cloud.lock().unwrap();
-        assert!(
-            cloud
-                .property_reads
-                .iter()
-                .all(|(did, _, _)| did != "group.1")
-        );
-        assert!(
-            cloud
-                .property_writes
-                .iter()
-                .all(|write| write.0 != "group.1")
-        );
-    }));
+                .find(|group| group.key == key("group.1"))
+                .unwrap();
+            assert_eq!(group.members, vec![key("one"), key("two")]);
+            assert_eq!(group.label, "Reading lamp");
+            assert!(snapshot.composition.confirmed.is_some());
+            assert!(c.context.registry.get(&key("group.1")).is_none());
+            for member in ["one", "two"] {
+                assert!(c.context.registry.get(&key(member)).is_some());
+            }
+            let uid = c.data[0].uid.clone();
+            let stored = c
+                .store
+                .devices()
+                .load_published_group(&uid, "local", &key("group.1"))
+                .unwrap()
+                .expect("published group");
+            assert_eq!(stored.members, vec![key("one"), key("two")]);
+            let cloud = c.cloud.lock().unwrap();
+            assert!(
+                cloud
+                    .property_reads
+                    .iter()
+                    .all(|(did, _, _)| did != "group.1")
+            );
+            assert!(
+                cloud
+                    .property_writes
+                    .iter()
+                    .all(|write| write.0 != "group.1")
+            );
+        }));
+    }
 }
 
 #[test]
@@ -138,16 +138,7 @@ fn incompatible_member_description_keeps_the_published_group_and_capabilities() 
         let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
         block_on(rig.run(|c| async move {
             c.announce();
-            until(|| {
-                c.context
-                    .registry
-                    .snapshot()
-                    .composition
-                    .groups
-                    .iter()
-                    .any(|group| group.key == key("group.1"))
-            })
-            .await;
+            wait_group(&c, "group.1").await;
             let record = c.context.live.borrow().devices["one"]
                 .admitted
                 .clone()
@@ -238,16 +229,7 @@ fn an_async_unsupported_description_keeps_the_confirmed_group_and_old_capabiliti
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
+        wait_group(&c, "group.1").await;
         let before = c
             .store
             .devices()
@@ -274,15 +256,7 @@ fn an_async_unsupported_description_keeps_the_confirmed_group_and_old_capabiliti
         // removal: the last valid shape and the confirmed group stay, and the
         // member keeps its running work instead of being revoked.
         assert!(c.context.registry.get(&key("one")).is_some());
-        assert!(
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        );
+        assert!(group_members(&c, "group.1").is_some());
         assert_eq!(
             c.store
                 .devices()
@@ -313,68 +287,8 @@ fn an_async_unsupported_description_keeps_the_confirmed_group_and_old_capabiliti
                     .all(|pending| pending.did != "one")
         })
         .await;
-        assert!(
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        );
+        assert!(group_members(&c, "group.1").is_some());
         assert!(c.context.registry.get(&key("two")).is_some());
-    }));
-}
-
-#[test]
-fn confirmed_overlapping_group_candidates_are_revoked_with_diagnostics() {
-    let rig = Rig::groups(&[
-        GroupSpec {
-            did: "group.a",
-            model: "mijia.light.group3",
-            members: &["one", "two"],
-            label: "A",
-        },
-        GroupSpec {
-            did: "group.b",
-            model: "mijia.light.group3",
-            members: &["two", "three"],
-            label: "B",
-        },
-    ]);
-    block_on(rig.run(|c| async move {
-        c.announce();
-        until(|| {
-            let status = c.context.status.borrow();
-            ["group.a", "group.b"].iter().all(|did| {
-                status
-                    .pending
-                    .iter()
-                    .any(|pending| pending.did == *did && pending.reason.contains("overlap"))
-            }) && ["one", "two", "three"]
-                .iter()
-                .all(|did| c.context.registry.get(&key(did)).is_some())
-        })
-        .await;
-        let snapshot = c.context.registry.snapshot();
-        assert!(snapshot.composition.groups.is_empty());
-        for member in ["one", "two", "three"] {
-            assert!(
-                c.context.registry.get(&key(member)).is_some(),
-                "{member} stays standalone"
-            );
-        }
-        for group in ["group.a", "group.b"] {
-            assert!(c.context.registry.get(&key(group)).is_none());
-        }
-        assert!(
-            c.cloud
-                .lock()
-                .unwrap()
-                .property_reads
-                .iter()
-                .all(|(did, _, _)| !did.starts_with("group."))
-        );
     }));
 }
 
@@ -418,20 +332,12 @@ fn an_unknown_retained_group_defers_a_new_claim_while_unrelated_groups_advance()
                 .any(|pending| pending.did == "group.b" && pending.reason.contains("group.a"))
         })
         .await;
-        let snapshot = c.context.registry.snapshot();
-        let group = |did: &str| {
-            snapshot
-                .composition
-                .groups
-                .iter()
-                .find(|group| group.key == key(did))
-                .unwrap()
-                .members
-                .clone()
-        };
-        assert_eq!(group("group.a"), vec![key("one"), key("two")]);
-        assert_eq!(group("group.b"), vec![key("three")]);
-        assert_eq!(group("group.c"), vec![key("four")]);
+        assert_eq!(
+            group_members(&c, "group.a"),
+            Some(vec![key("one"), key("two")])
+        );
+        assert_eq!(group_members(&c, "group.b"), Some(vec![key("three")]));
+        assert_eq!(group_members(&c, "group.c"), Some(vec![key("four")]));
         let pending = c
             .context
             .status
@@ -486,20 +392,9 @@ fn deferred_relations_defer_other_claims_transitively() {
             pending >= 2
         })
         .await;
-        let snapshot = c.context.registry.snapshot();
-        let group = |did: &str| {
-            snapshot
-                .composition
-                .groups
-                .iter()
-                .find(|group| group.key == key(did))
-                .unwrap()
-                .members
-                .clone()
-        };
-        assert_eq!(group("group.a"), vec![key("four")]);
-        assert_eq!(group("group.b"), vec![key("one")]);
-        assert_eq!(group("group.c"), vec![key("six")]);
+        assert_eq!(group_members(&c, "group.a"), Some(vec![key("four")]));
+        assert_eq!(group_members(&c, "group.b"), Some(vec![key("one")]));
+        assert_eq!(group_members(&c, "group.c"), Some(vec![key("six")]));
         {
             let mut cloud = c.cloud.lock().unwrap();
             cloud.groups.get_mut("group.b").unwrap().missing = false;
@@ -507,17 +402,8 @@ fn deferred_relations_defer_other_claims_transitively() {
         }
         c.context.request_sync();
         until(|| {
-            let snapshot = c.context.registry.snapshot();
-            let members = |did: &str| {
-                snapshot
-                    .composition
-                    .groups
-                    .iter()
-                    .find(|group| group.key == key(did))
-                    .map(|group| group.members.clone())
-            };
-            members("group.a") == Some(vec![key("one")])
-                && members("group.c") == Some(vec![key("four")])
+            group_members(&c, "group.a") == Some(vec![key("one")])
+                && group_members(&c, "group.c") == Some(vec![key("four")])
         })
         .await;
     }));
@@ -528,16 +414,7 @@ fn a_confirmed_member_deletion_revokes_the_group_even_when_group_reads_fail() {
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
+        wait_group(&c, "group.1").await;
         {
             let mut cloud = c.cloud.lock().unwrap();
             cloud.members = vec!["group.1".into(), "two".into()];
@@ -552,15 +429,7 @@ fn a_confirmed_member_deletion_revokes_the_group_even_when_group_reads_fail() {
         assert!(c.context.registry.get(&key("one")).is_none());
         assert!(c.context.registry.get(&key("two")).is_some());
         assert!(!c.context.live.borrow().devices.contains_key("one"));
-        let uid = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .uid
-            .clone();
+        let uid = c.data[0].uid.clone();
         assert!(
             c.store
                 .devices()
@@ -580,25 +449,8 @@ fn compatible_member_binding_update_keeps_the_instance_group_and_endpoint() {
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
-        let uid = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .uid
-            .clone();
+        wait_group(&c, "group.1").await;
+        let uid = c.data[0].uid.clone();
         let endpoint = c
             .store
             .devices()
@@ -667,16 +519,7 @@ fn group_lifecycle_keeps_member_instances_work_and_consumers() {
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
+        wait_group(&c, "group.1").await;
         let record_one = c.context.live.borrow().devices["one"]
             .admitted
             .clone()
@@ -687,16 +530,6 @@ fn group_lifecycle_keeps_member_instances_work_and_consumers() {
             .unwrap();
         let work_one = c.context.live.borrow().devices["one"].work.clone().unwrap();
         let work_two = c.context.live.borrow().devices["two"].work.clone().unwrap();
-        let group_members = |c: &Control, did: &str| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .find(|group| group.key == key(did))
-                .map(|group| group.members.clone())
-        };
 
         // A member exit and a later rejoin publish role changes without
         // recreating the member instance, work controller or consumers.
@@ -774,26 +607,9 @@ fn a_transport_failure_does_not_replace_an_incompatible_member() {
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
+        wait_group(&c, "group.1").await;
         let mut incompatible = {
-            let uid = c
-                .context
-                .live
-                .borrow()
-                .credentials
-                .as_ref()
-                .unwrap()
-                .uid
-                .clone();
+            let uid = c.data[0].uid.clone();
             cached(&uid, "one", true)
         };
         incompatible.device.key = key("one");
@@ -847,15 +663,7 @@ fn confirmed_deletion_applies_before_a_failed_home_information_batch() {
         .await;
         assert!(c.context.registry.get(&key("one")).is_none());
         assert!(c.context.registry.get(&key("two")).is_some());
-        let uid = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .uid
-            .clone();
+        let uid = c.data[0].uid.clone();
         assert!(
             c.store
                 .devices()
@@ -906,32 +714,15 @@ fn a_delayed_group_read_keeps_the_retained_relation_until_it_finishes() {
         for _ in 0..50 {
             future::yield_now().await;
         }
-        let snapshot = c.context.registry.snapshot();
-        let group = |did: &str| {
-            snapshot
-                .composition
-                .groups
-                .iter()
-                .find(|group| group.key == key(did))
-                .unwrap()
-                .members
-                .clone()
-        };
-        assert_eq!(group("group.a"), vec![key("one"), key("two")]);
-        assert_eq!(group("group.b"), vec![key("three")]);
+        assert_eq!(
+            group_members(&c, "group.a"),
+            Some(vec![key("one"), key("two")])
+        );
+        assert_eq!(group_members(&c, "group.b"), Some(vec![key("three")]));
         release.send(()).unwrap();
         until(|| {
-            let snapshot = c.context.registry.snapshot();
-            let members = |did: &str| {
-                snapshot
-                    .composition
-                    .groups
-                    .iter()
-                    .find(|group| group.key == key(did))
-                    .map(|group| group.members.clone())
-            };
-            members("group.a") == Some(vec![key("one")])
-                && members("group.b") == Some(vec![key("two")])
+            group_members(&c, "group.a") == Some(vec![key("one")])
+                && group_members(&c, "group.b") == Some(vec![key("two")])
         })
         .await;
     }));
@@ -942,16 +733,7 @@ fn a_repeated_sync_does_not_duplicate_an_outstanding_group_read() {
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
+        wait_group(&c, "group.1").await;
         let reads = c.cloud.lock().unwrap().detail_counts["group.1"];
         let (release, gate) = flume::unbounded();
         c.cloud
@@ -989,16 +771,7 @@ fn a_failed_group_refresh_keeps_its_reason_and_group_classification() {
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
+        wait_group(&c, "group.1").await;
         let reads = c.cloud.lock().unwrap().detail_counts["group.1"];
         c.cloud
             .lock()
@@ -1034,13 +807,7 @@ fn a_failed_group_refresh_keeps_its_reason_and_group_classification() {
             "the generic evaluator reason must not erase the transport failure"
         );
         assert!(
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1")),
+            group_members(&c, "group.1").is_some(),
             "the last published relation stays authoritative"
         );
     }));
@@ -1083,14 +850,7 @@ fn confirmed_overlap_revokes_even_while_a_member_is_pending_and_unrelated_groups
                     .pending
                     .iter()
                     .any(|pending| pending.did == *did && pending.reason.contains("overlap"))
-            }) && c
-                .context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.c"))
+            }) && group_members(&c, "group.c").is_some()
         })
         .await;
         let snapshot = c.context.registry.snapshot();
@@ -1099,69 +859,41 @@ fn confirmed_overlap_revokes_even_while_a_member_is_pending_and_unrelated_groups
         assert!(c.context.live.borrow().devices["one"].admitted.is_some());
         assert!(c.context.live.borrow().devices["two"].admitted.is_none());
         release.send(()).unwrap();
-        until(|| c.context.live.borrow().devices["two"].admitted.is_some()).await;
-        for _ in 0..50 {
-            future::yield_now().await;
-        }
+        until(|| {
+            c.context.live.borrow().devices["two"].admitted.is_some()
+                && ["group.a", "group.b"].iter().all(|did| {
+                    c.context
+                        .status
+                        .borrow()
+                        .pending
+                        .iter()
+                        .any(|pending| pending.did == *did && pending.reason.contains("overlap"))
+                })
+        })
+        .await;
         let snapshot = c.context.registry.snapshot();
         assert_eq!(snapshot.composition.groups.len(), 1);
         assert_eq!(snapshot.composition.groups[0].key, key("group.c"));
-        assert!(c.context.registry.get(&key("one")).is_some());
-        assert!(c.context.registry.get(&key("two")).is_some());
-    }));
-}
-
-#[test]
-fn physical_and_virtual_groups_publish_with_the_same_rules() {
-    let rig = Rig::groups(&[
-        GroupSpec {
-            did: "group.a",
-            model: "mijia.light.group3",
-            members: &["one", "two"],
-            label: "A",
-        },
-        GroupSpec {
-            did: "group.b",
-            model: "mijia.light.group3",
-            members: &["three"],
-            label: "B",
-        },
-    ]);
-    rig.cloud
-        .lock()
-        .unwrap()
-        .groups
-        .get_mut("group.b")
-        .unwrap()
-        .physical = false;
-    block_on(rig.run(|c| async move {
-        c.announce();
-        until(|| c.context.registry.snapshot().composition.groups.len() == 2).await;
-        let snapshot = c.context.registry.snapshot();
-        let members = |did: &str| {
-            snapshot
-                .composition
-                .groups
-                .iter()
-                .find(|group| group.key == key(did))
-                .unwrap()
-                .members
-                .clone()
-        };
-        assert_eq!(members("group.a"), vec![key("one"), key("two")]);
-        assert_eq!(members("group.b"), vec![key("three")]);
-        let cloud = c.cloud.lock().unwrap();
+        for member in ["one", "two", "three"] {
+            assert!(c.context.registry.get(&key(member)).is_some());
+        }
+        let status = c.context.status.borrow();
+        for did in ["group.a", "group.b"] {
+            assert!(
+                status
+                    .pending
+                    .iter()
+                    .any(|pending| { pending.did == did && pending.reason.contains("overlap") })
+            );
+            assert!(c.context.registry.get(&key(did)).is_none());
+        }
         assert!(
-            cloud
+            c.cloud
+                .lock()
+                .unwrap()
                 .property_reads
                 .iter()
                 .all(|(did, _, _)| !did.starts_with("group."))
-        );
-        assert!(
-            cloud
-                .property_writes
-                .iter()
-                .all(|write| !write.0.starts_with("group."))
         );
     }));
 }
@@ -1179,13 +911,7 @@ fn heterogeneous_ct_and_rgb_members_keep_independent_capabilities() {
     block_on(rig.run(|c| async move {
         c.announce();
         until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
+            group_members(&c, "group.1").is_some()
                 && c.context.live.borrow().devices["one"].admitted.is_some()
                 && c.context.live.borrow().devices["two"].admitted.is_some()
         })
@@ -1291,16 +1017,7 @@ fn an_unpublished_numeric_group_refreshes_metadata_each_sync_until_members_are_k
         })
         .await;
         release.send(()).unwrap();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("43"))
-        })
-        .await;
+        wait_group(&c, "43").await;
         // Published groups are still refreshed on the normal member interval.
         let reads = c.cloud.lock().unwrap().detail_counts["43"];
         c.context.request_sync();
@@ -1314,30 +1031,13 @@ fn a_composition_commit_failure_keeps_the_previous_topology_and_members() {
     let store = rig.store.clone();
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
+        wait_group(&c, "group.1").await;
         let record = c.context.live.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
         let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
-        let uid = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .uid
-            .clone();
+        let uid = c.data[0].uid.clone();
         let endpoint = c
             .store
             .devices()
@@ -1409,13 +1109,7 @@ fn offline_members_do_not_block_admission_and_failures_stay_independent() {
     block_on(rig.run(|c| async move {
         c.announce();
         until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
+            group_members(&c, "group.1").is_some()
                 && function(&c.context.registry, "one", "main")
                     .snapshot()
                     .availability
@@ -1484,14 +1178,7 @@ fn group_members_can_use_distinct_local_and_cloud_routes() {
             until(|| {
                 power("one") == Some(Power::Off)
                     && power("two") == Some(Power::Off)
-                    && control
-                        .context
-                        .registry
-                        .snapshot()
-                        .composition
-                        .groups
-                        .iter()
-                        .any(|group| group.key == key("group.1"))
+                    && group_members(control, "group.1").is_some()
             })
             .await;
             // Two keeps its cloud access while the local session supplies one.
@@ -1555,14 +1242,7 @@ fn external_notifications_change_only_the_addressed_group_member() {
                 power("one") == Some(Power::Off)
                     && power("two") == Some(Power::Off)
                     && control.context.active_notification("one") == Some(PathKind::Local)
-                    && control
-                        .context
-                        .registry
-                        .snapshot()
-                        .composition
-                        .groups
-                        .iter()
-                        .any(|group| group.key == key("group.1"))
+                    && group_members(control, "group.1").is_some()
             })
             .await;
             peer.notify("one", 2, true);
@@ -1660,14 +1340,7 @@ fn empty_and_nested_group_confirmations_are_rejected_with_reasons() {
                 pending.did == "group.empty" && pending.reason.contains("no confirmed members")
             }) && status.pending.iter().any(|pending| {
                 pending.did == "group.outer" && pending.reason.contains("contains group")
-            }) && c
-                .context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.inner"))
+            }) && group_members(&c, "group.inner").is_some()
         })
         .await;
         let snapshot = c.context.registry.snapshot();
@@ -1715,16 +1388,7 @@ fn a_missing_member_description_is_retried_until_the_group_publishes() {
         );
         c.cloud.lock().unwrap().missing_records.remove("two");
         c.context.request_sync();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
+        wait_group(&c, "group.1").await;
         assert!(c.context.registry.get(&key("one")).is_some());
         assert!(c.context.registry.get(&key("two")).is_some());
     }));
@@ -1736,16 +1400,7 @@ fn a_failed_confirmed_deletion_commit_keeps_the_relation_and_member_runtime() {
     let store = rig.store.clone();
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
+        wait_group(&c, "group.1").await;
         let record = c.context.live.borrow().devices["one"]
             .admitted
             .clone()
@@ -1785,15 +1440,7 @@ fn a_failed_confirmed_deletion_commit_keeps_the_relation_and_member_runtime() {
         ));
         assert!(!record.life.is_closed());
         drop(live);
-        let uid = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .uid
-            .clone();
+        let uid = c.data[0].uid.clone();
         let stored = c
             .store
             .devices()
@@ -1822,13 +1469,7 @@ fn a_first_property_read_failure_does_not_block_admission_or_fabricate_state() {
     block_on(rig.run(|c| async move {
         c.announce();
         until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
+            group_members(&c, "group.1").is_some()
                 && c.cloud
                     .lock()
                     .unwrap()

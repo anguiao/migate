@@ -9,7 +9,7 @@ use rs_matter::{
     MATTER_PORT, Matter,
     crypto::default_crypto,
     dm::{
-        AsyncHandler, HandlerContext, ReadReplyInstance,
+        AsyncHandler,
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
         networks::eth::EthNetwork,
     },
@@ -27,30 +27,6 @@ fn persisted_version(store: &Store) -> Option<u32> {
             .unwrap()
             .configuration_version,
     )
-}
-
-async fn read_attribute(
-    handler: &impl AsyncHandler,
-    ctx: &Context<'_, impl HandlerContext>,
-) -> Result<Vec<u8>, rs_matter::error::Error> {
-    let mut buffer = [0; 4096];
-    let mut write = WriteBuf::new(&mut buffer);
-    handler
-        .read(ctx, ReadReplyInstance::new(&ctx.attribute, &mut write))
-        .await?;
-    Ok(write.as_slice().to_vec())
-}
-
-fn report_value(bytes: &[u8]) -> TLVElement<'_> {
-    TLVElement::new(bytes)
-        .structure()
-        .unwrap()
-        .find_ctx(1)
-        .unwrap()
-        .structure()
-        .unwrap()
-        .find_ctx(2)
-        .unwrap()
 }
 
 macro_rules! setup_rig {
@@ -202,7 +178,7 @@ fn removed_and_readded_instance_reports_reachability_without_configuration_bump(
         assert_eq!(persisted_version(&rig.store), Some(baseline));
         assert!(
             !report_value(
-                &read_attribute(&handler, &Context::at(&im, endpoint, 0x39, 17))
+                &read_bytes(&handler, &Context::at(&im, endpoint, 0x39, 17))
                     .await
                     .unwrap()
             )
@@ -219,7 +195,7 @@ fn removed_and_readded_instance_reports_reachability_without_configuration_bump(
         assert_eq!(persisted_version(&rig.store), Some(baseline));
         assert!(
             report_value(
-                &read_attribute(&handler, &Context::at(&im, endpoint, 0x39, 17))
+                &read_bytes(&handler, &Context::at(&im, endpoint, 0x39, 17))
                     .await
                     .unwrap()
             )

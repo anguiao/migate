@@ -138,10 +138,9 @@ fn parser_keeps_valid_kelvin_ranges_beyond_matter_mired_mapping() {
         instance["services"][1]["properties"][2]["value-range"] = json!([min, max, 1]);
         let parsed =
             parse_device(key(), &instance).unwrap_or_else(|error| panic!("{min}..{max}: {error}"));
-        assert_eq!(
-            parsed.functions[0].description.temperature_range(),
-            Some(NumericRange { min, max, step: 1 })
-        );
+        let range = parsed.functions[0].description.temperature_range().unwrap();
+        assert_eq!(range, NumericRange { min, max, step: 1 });
+        assert!(range.mired_bounds().is_err(), "{min}..{max}");
         let mut bindings = parsed.functions[0].lighting.clone().unwrap();
         assert!(bindings.valid());
         bindings.temperature.as_mut().unwrap().range = NumericRange {
@@ -150,6 +149,11 @@ fn parser_keeps_valid_kelvin_ranges_beyond_matter_mired_mapping() {
             step: 1,
         };
         assert!(!bindings.valid());
+    }
+    for (min, max) in [(0, 6500), (2700, 1_000_001)] {
+        let mut instance = original.clone();
+        instance["services"][1]["properties"][2]["value-range"] = json!([min, max, 1]);
+        assert!(parse_device(key(), &instance).is_err(), "{min}..{max}");
     }
 }
 
@@ -730,23 +734,4 @@ fn light_binding_validation_requires_consistent_brightness_and_dual_color_mode()
     assert!(without_temperature.valid());
     without_temperature.brightness_conversion = None;
     assert!(!without_temperature.valid());
-}
-
-#[test]
-fn valid_kelvin_ranges_are_accepted_even_when_matter_mireds_cannot_represent_them() {
-    let original = description("xiaomi.light.ceil04");
-    for (min, max) in [(4500, 4501), (1, 6500), (10, 6500)] {
-        let mut instance = original.clone();
-        instance["services"][1]["properties"][2]["value-range"] = json!([min, max, 1]);
-        let parsed =
-            parse_device(key(), &instance).unwrap_or_else(|error| panic!("{min}..{max}: {error}"));
-        let range = parsed.functions[0].description.temperature_range().unwrap();
-        assert_eq!(range, NumericRange { min, max, step: 1 });
-        assert!(range.mired_bounds().is_err(), "{min}..{max}");
-    }
-    for (min, max) in [(0, 6500), (2700, 1_000_001)] {
-        let mut instance = original.clone();
-        instance["services"][1]["properties"][2]["value-range"] = json!([min, max, 1]);
-        assert!(parse_device(key(), &instance).is_err(), "{min}..{max}");
-    }
 }

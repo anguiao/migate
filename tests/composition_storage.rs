@@ -87,7 +87,7 @@ fn incompatible_member_description_preserves_confirmed_groups() {
 }
 
 #[test]
-fn commit_publishes_confirmed_group_and_restores_it() {
+fn committed_group_restores_after_restart_without_a_main_light_identity() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     for did in ["a", "b"] {
@@ -95,23 +95,16 @@ fn commit_publishes_confirmed_group_and_restores_it() {
     }
     let confirmed = store
         .devices()
-        .commit_composition(
-            &scope(),
-            &[Composition {
-                key: DeviceKey::new("xiaomi", "group.1"),
-                label: "Ceiling".into(),
-                members: vec![DeviceKey::new("xiaomi", "a"), DeviceKey::new("xiaomi", "b")],
-            }],
-            &[],
-        )
+        .commit_composition(&scope(), &[group("group.1", "Ceiling", &["a", "b"])], &[])
         .unwrap();
     assert_eq!(confirmed.version, 1);
     assert_eq!(confirmed.groups.len(), 1);
+    assert_eq!(confirmed.groups[0].key, key("group.1"));
     assert_eq!(confirmed.groups[0].label, "Ceiling");
-    assert_eq!(
-        confirmed.groups[0].members,
-        [DeviceKey::new("xiaomi", "a"), DeviceKey::new("xiaomi", "b")]
-    );
+    assert_eq!(confirmed.groups[0].members, [key("a"), key("b")]);
+
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
     assert_eq!(
         store.devices().restore_groups("account", "home").unwrap(),
         confirmed
@@ -119,10 +112,25 @@ fn commit_publishes_confirmed_group_and_restores_it() {
     assert_eq!(
         store
             .devices()
-            .load_published_group("account", "home", &DeviceKey::new("xiaomi", "group.1"))
+            .load_published_group("account", "home", &key("group.1"))
             .unwrap()
             .as_ref(),
         Some(&confirmed.groups[0])
+    );
+    assert!(
+        store
+            .devices()
+            .load_published(&key("group.1"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .devices()
+            .restore_cached("account", "home")
+            .unwrap()
+            .iter()
+            .all(|(_, stored)| stored.key != key("group.1"))
     );
 }
 
@@ -181,33 +189,6 @@ fn commit_rejects_invalid_sets_without_touching_storage() {
         ),
         Err(CompositionCommitError::Invalid(
             CompositionError::EmptyGroup(_)
-        ))
-    ));
-    assert!(matches!(
-        store.devices().commit_composition(
-            &scope,
-            &[group("one", "One", &["a"]), group("two", "Two", &["a"])],
-            &[],
-        ),
-        Err(CompositionCommitError::Invalid(
-            CompositionError::OverlappingMember(_)
-        ))
-    ));
-    assert!(matches!(
-        store.devices().commit_composition(
-            &scope,
-            &[
-                Composition {
-                    key: key("nested-one"),
-                    label: "Nested".into(),
-                    members: vec![key("nested-two")],
-                },
-                group("nested-two", "Nested", &["a"]),
-            ],
-            &[],
-        ),
-        Err(CompositionCommitError::Invalid(
-            CompositionError::NestedGroup(_)
         ))
     ));
     assert!(matches!(
@@ -734,24 +715,6 @@ fn removing_a_member_revokes_the_group_and_republishing_does_not_resurrect_it() 
 }
 
 #[test]
-fn restart_restores_the_confirmed_version() {
-    let dir = tempfile::tempdir().unwrap();
-    {
-        let store = Store::open(dir.path()).unwrap();
-        store.devices().publish_cached(&light("a"), "A").unwrap();
-        store
-            .devices()
-            .commit_composition(&scope(), &[group("g", "G", &["a"])], &[])
-            .unwrap();
-    }
-    let store = Store::open(dir.path()).unwrap();
-    let confirmed = store.devices().restore_groups("account", "home").unwrap();
-    assert_eq!(confirmed.version, 1);
-    assert_eq!(confirmed.groups.len(), 1);
-    assert_eq!(confirmed.groups[0].key, key("g"));
-}
-
-#[test]
 fn restore_groups_propagates_corrupt_member_descriptions() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -826,38 +789,6 @@ fn load_confirmed_rejects_corrupt_group_identity_and_orphan_relations() {
         )
         .unwrap();
     assert!(store.devices().restore_groups("account", "home").is_err());
-}
-
-#[test]
-fn stored_group_exposes_identity_without_a_main_light_function() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    store.devices().publish_cached(&light("a"), "A").unwrap();
-    store
-        .devices()
-        .commit_composition(&scope(), &[group("g", "G", &["a"])], &[])
-        .unwrap();
-    let group = store
-        .devices()
-        .load_published_group("account", "home", &key("g"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(group.members, [key("a")]);
-    assert!(
-        store
-            .devices()
-            .load_published(&group.key)
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
-            .devices()
-            .restore_cached("account", "home")
-            .unwrap()
-            .iter()
-            .all(|(_, stored)| stored.key != group.key)
-    );
 }
 
 #[test]

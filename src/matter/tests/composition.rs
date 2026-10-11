@@ -13,7 +13,7 @@ use rs_matter::{
     MATTER_PORT, Matter,
     crypto::default_crypto,
     dm::{
-        AsyncHandler, HandlerContext, InvokeReplyInstance, ReadReplyInstance,
+        AsyncHandler, HandlerContext, InvokeReplyInstance,
         devices::{
             DEV_TYPE_BRIDGED_NODE,
             test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_VID},
@@ -244,30 +244,6 @@ macro_rules! setup_group {
         let mut $rig = GroupRig::new($members);
         setup_model!($rig, $handler, $im);
     };
-}
-
-async fn read_bytes(
-    handler: &impl AsyncHandler,
-    ctx: &Context<'_, impl HandlerContext>,
-) -> Result<Vec<u8>, Error> {
-    let mut buffer = [0; 8192];
-    let mut write = WriteBuf::new(&mut buffer);
-    handler
-        .read(ctx, ReadReplyInstance::new(&ctx.attribute, &mut write))
-        .await?;
-    Ok(write.as_slice().to_vec())
-}
-
-fn report_value(bytes: &[u8]) -> TLVElement<'_> {
-    TLVElement::new(bytes)
-        .structure()
-        .unwrap()
-        .find_ctx(1)
-        .unwrap()
-        .structure()
-        .unwrap()
-        .find_ctx(2)
-        .unwrap()
 }
 
 fn report_parts(bytes: &[u8]) -> Vec<u16> {
