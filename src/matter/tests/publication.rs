@@ -22,14 +22,14 @@ fn light(capabilities: Vec<Capability>) -> FunctionDescription {
 #[test]
 fn every_real_on_off_combination_selects_its_published_surface() {
     for (brightness, temperature, rgb, expected) in [
-        (false, false, false, LightDeviceType::OnOffLight),
-        (false, true, false, LightDeviceType::OnOffLight),
-        (false, false, true, LightDeviceType::OnOffLight),
-        (false, true, true, LightDeviceType::OnOffLight),
-        (true, false, false, LightDeviceType::DimmableLight),
-        (true, false, true, LightDeviceType::DimmableLight),
-        (true, true, false, LightDeviceType::ColorTemperatureLight),
-        (true, true, true, LightDeviceType::ExtendedColorLight),
+        (false, false, false, LightDeviceType::OnOff),
+        (false, true, false, LightDeviceType::OnOff),
+        (false, false, true, LightDeviceType::OnOff),
+        (false, true, true, LightDeviceType::OnOff),
+        (true, false, false, LightDeviceType::Dimmable),
+        (true, false, true, LightDeviceType::Dimmable),
+        (true, true, false, LightDeviceType::ColorTemperature),
+        (true, true, true, LightDeviceType::ExtendedColor),
     ] {
         let mut capabilities = vec![Capability::OnOff];
         if brightness {

@@ -161,10 +161,10 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
         if function.power.is_some() != on_off {
             return Err("Stored Xiaomi power binding does not match its capability");
         }
-        if let Some(power) = function.power {
-            if power.siid == 0 || power.piid == 0 || !bindings.insert((power.siid, power.piid)) {
-                return Err("Stored Xiaomi function description is invalid");
-            }
+        if let Some(power) = function.power
+            && (power.siid == 0 || power.piid == 0 || !bindings.insert((power.siid, power.piid)))
+        {
+            return Err("Stored Xiaomi function description is invalid");
         }
         let (brightness, temperature, color, mode) = match &function.lighting {
             Some(lighting) => {

@@ -16,31 +16,31 @@ use rs_matter::dm::DeviceType;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LightDeviceType {
     /// On/Off Light (`0x0100`).
-    OnOffLight,
+    OnOff,
     /// Dimmable Light (`0x0101`).
-    DimmableLight,
+    Dimmable,
     /// Color Temperature Light (`0x010C`).
-    ColorTemperatureLight,
+    ColorTemperature,
     /// Extended Color Light (`0x010D`).
-    ExtendedColorLight,
+    ExtendedColor,
 }
 
 impl LightDeviceType {
     pub(crate) const fn matter_device_type(self) -> DeviceType {
         match self {
-            Self::OnOffLight => DeviceType {
+            Self::OnOff => DeviceType {
                 dtype: 0x0100,
                 drev: 3,
             },
-            Self::DimmableLight => DeviceType {
+            Self::Dimmable => DeviceType {
                 dtype: 0x0101,
                 drev: 3,
             },
-            Self::ColorTemperatureLight => DeviceType {
+            Self::ColorTemperature => DeviceType {
                 dtype: 0x010c,
                 drev: 4,
             },
-            Self::ExtendedColorLight => DeviceType {
+            Self::ExtendedColor => DeviceType {
                 dtype: 0x010d,
                 drev: 4,
             },
@@ -120,10 +120,10 @@ pub(crate) fn map_light(
         None => None,
     };
     let device_type = match (brightness, temperature.is_some(), rgb) {
-        (true, true, true) => LightDeviceType::ExtendedColorLight,
-        (true, true, false) => LightDeviceType::ColorTemperatureLight,
-        (true, false, _) => LightDeviceType::DimmableLight,
-        (false, _, _) => LightDeviceType::OnOffLight,
+        (true, true, true) => LightDeviceType::ExtendedColor,
+        (true, true, false) => LightDeviceType::ColorTemperature,
+        (true, false, _) => LightDeviceType::Dimmable,
+        (false, _, _) => LightDeviceType::OnOff,
     };
     Ok(LightPublication {
         device_type,

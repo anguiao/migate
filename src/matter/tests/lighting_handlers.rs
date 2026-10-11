@@ -6,7 +6,7 @@ macro_rules! setup_light {
         setup_light!(@source crate::matter::tests::support::light($rgb),$device,$receiver,$registry,$handler,$ctx);
     };
     (@caps $capabilities:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
-        setup_light!(@source crate::matter::tests::support::light_caps("test-light", &$capabilities),$device,$receiver,$registry,$handler,$ctx);
+        setup_light!(@source crate::matter::tests::support::light_caps("test-light", $capabilities),$device,$receiver,$registry,$handler,$ctx);
     };
     (@source $source:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
         let dir = tempfile::tempdir().unwrap();
@@ -987,7 +987,7 @@ fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
 #[test]
 fn on_off_only_light_rejects_absent_dimensions_and_keeps_real_power_control() {
     setup_light!(
-        @caps vec![crate::device::Capability::OnOff],
+        @caps &[crate::device::Capability::OnOff],
         device,
         receiver,
         registry,
@@ -1082,7 +1082,7 @@ fn on_off_only_light_rejects_absent_dimensions_and_keeps_real_power_control() {
 #[test]
 fn color_temperature_without_brightness_controls_color_and_rejects_level_and_rgb() {
     setup_light!(
-        @caps vec![
+        @caps &[
             crate::device::Capability::OnOff,
             crate::device::Capability::ColorTemperature(crate::device::NumericRange {
                 min: 2700,
@@ -1171,7 +1171,7 @@ fn rgb_without_temperature_or_brightness_controls_hue_and_rejects_ct_and_level()
     use crate::device::{LightMode, Rgb};
 
     setup_light!(
-        @caps vec![
+        @caps &[
             crate::device::Capability::OnOff,
             crate::device::Capability::ColorRgb,
         ],
