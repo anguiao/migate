@@ -288,6 +288,47 @@ pub struct LightPatch {
     pub color: Option<Rgb>,
     pub mode: Option<LightMode>,
 }
+impl Capability {
+    fn index(self) -> usize {
+        match self {
+            Self::OnOff => 0,
+            Self::Brightness => 1,
+            Self::ColorTemperature(_) => 2,
+            Self::ColorRgb => 3,
+        }
+    }
+
+    /// Physical well-formedness only; Matter representability belongs to the
+    /// publication mapping and does not restrict the generic model.
+    fn well_formed(self) -> bool {
+        match self {
+            Self::ColorTemperature(range) => {
+                range.valid() && range.min > 0 && range.max <= 1_000_000
+            }
+            Self::OnOff | Self::Brightness | Self::ColorRgb => true,
+        }
+    }
+}
+
+/// Light capabilities are independent: any nonempty subset of the four kinds
+/// is valid, each kind appears at most once, and declared temperature ranges
+/// only need to be physically well formed.
+fn valid_light_capabilities(capabilities: &[Capability]) -> bool {
+    if capabilities.is_empty() {
+        return false;
+    }
+    let mut seen = [false; 4];
+    for capability in capabilities {
+        if !capability.well_formed() {
+            return false;
+        }
+        if std::mem::replace(&mut seen[capability.index()], true) {
+            return false;
+        }
+    }
+    true
+}
+
 impl FunctionDescription {
     pub fn temperature_range(&self) -> Option<NumericRange> {
         self.capabilities
@@ -300,27 +341,7 @@ impl FunctionDescription {
     pub fn valid_capabilities(&self) -> bool {
         match self.category {
             Category::Outlet => self.capabilities == [Capability::OnOff],
-            Category::Light => {
-                let Some(range) = self.temperature_range() else {
-                    return false;
-                };
-                range.mired_bounds().is_ok()
-                    && range.min > 0
-                    && range.max <= 1_000_000
-                    && (self.capabilities
-                        == [
-                            Capability::OnOff,
-                            Capability::Brightness,
-                            Capability::ColorTemperature(range),
-                        ]
-                        || self.capabilities
-                            == [
-                                Capability::OnOff,
-                                Capability::Brightness,
-                                Capability::ColorTemperature(range),
-                                Capability::ColorRgb,
-                            ])
-            }
+            Category::Light => valid_light_capabilities(&self.capabilities),
         }
     }
 }

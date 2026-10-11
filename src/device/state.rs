@@ -1,12 +1,39 @@
 use super::{
     command::{CommandReceiver, Queue},
     model::{
-        Availability, FunctionDescription, FunctionKey, FunctionSnapshot,
-        PhysicalDeviceDescription, Power,
+        Availability, Capability, Category, FunctionDescription, FunctionKey, FunctionSnapshot,
+        LightMode, LightSnapshot, PhysicalDeviceDescription, Power,
     },
 };
 use event_listener::Event;
 use std::sync::{Arc, Mutex};
+/// Lighting state exists only for lights with at least one controllable light
+/// dimension. A single color capability determines its mode; a dual
+/// temperature/RGB light starts with an unknown mode until it is observed.
+fn initial_lighting(description: &FunctionDescription) -> Option<LightSnapshot> {
+    if description.category != Category::Light {
+        return None;
+    }
+    let brightness = description.capabilities.contains(&Capability::Brightness);
+    let temperature = description.temperature_range().is_some();
+    let rgb = description.capabilities.contains(&Capability::ColorRgb);
+    if !brightness && !temperature && !rgb {
+        return None;
+    }
+    let mode = match (temperature, rgb) {
+        (true, true) => None,
+        (true, false) => Some(LightMode::Temperature),
+        (false, true) => Some(LightMode::Rgb),
+        (false, false) => None,
+    };
+    Some(LightSnapshot {
+        brightness_percent: None,
+        temperature_kelvin: None,
+        color: None,
+        mode,
+    })
+}
+
 pub(super) struct RuntimeState {
     pub(super) power: Power,
     pub(super) lighting: Option<super::LightSnapshot>,
@@ -148,20 +175,7 @@ impl Function {
         physical: Arc<PhysicalInner>,
     ) -> (Self, CommandReceiver) {
         let key = FunctionKey::new(physical_key, description.id.clone());
-        let lighting =
-            (description.category == super::Category::Light).then_some(super::LightSnapshot {
-                brightness_percent: None,
-                temperature_kelvin: None,
-                color: None,
-                mode: if description
-                    .capabilities
-                    .contains(&super::Capability::ColorRgb)
-                {
-                    None
-                } else {
-                    Some(super::LightMode::Temperature)
-                },
-            });
+        let lighting = initial_lighting(&description);
         let function = Self(Arc::new(Inner {
             description,
             key,
@@ -214,14 +228,39 @@ impl Function {
         }
     }
     /// Apply one validated function report and publish one shared revision.
+    /// Fields whose capability is absent are rejected as a whole so an
+    /// irrelevant report can never partially mutate the snapshot.
     pub fn observe_light(
         &self,
         patch: super::LightPatch,
     ) -> Result<FunctionSnapshot, super::CommandError> {
-        use super::{Capability, CommandError, LightMode};
+        use super::CommandError;
         let description = self.description();
-        if description.category != super::Category::Light {
+        if description.category != Category::Light {
             return Err(CommandError::Unsupported);
+        }
+        let has_on_off = description.capabilities.contains(&Capability::OnOff);
+        let has_brightness = description.capabilities.contains(&Capability::Brightness);
+        let has_rgb = description.capabilities.contains(&Capability::ColorRgb);
+        let temperature_range = description.temperature_range();
+        if patch.power.is_some() && !has_on_off {
+            return Err(CommandError::Unsupported);
+        }
+        if patch.brightness_percent.is_some() && !has_brightness {
+            return Err(CommandError::Unsupported);
+        }
+        if patch.temperature_kelvin.is_some() && temperature_range.is_none() {
+            return Err(CommandError::Unsupported);
+        }
+        if patch.color.is_some() && !has_rgb {
+            return Err(CommandError::Unsupported);
+        }
+        match patch.mode {
+            Some(LightMode::Temperature) if temperature_range.is_none() => {
+                return Err(CommandError::Unsupported);
+            }
+            Some(LightMode::Rgb) if !has_rgb => return Err(CommandError::Unsupported),
+            _ => {}
         }
         if let Some(percent) = patch.brightness_percent
             && (!percent.is_finite() || !(0.0..=100.0).contains(&percent))
@@ -230,37 +269,32 @@ impl Function {
                 "brightness is outside 0..100 percent".into(),
             ));
         }
-        if patch.temperature_kelvin.is_some_and(|value| {
-            !description
-                .temperature_range()
-                .is_some_and(|range| range.contains(value))
-        }) {
+        if patch
+            .temperature_kelvin
+            .is_some_and(|value| !temperature_range.is_some_and(|range| range.contains(value)))
+        {
             return Err(CommandError::Rejected(
                 "color temperature is outside its physical range".into(),
             ));
-        }
-        if !description.capabilities.contains(&Capability::ColorRgb)
-            && (patch.color.is_some() || patch.mode == Some(LightMode::Rgb))
-        {
-            return Err(CommandError::Unsupported);
         }
         let mut state = self.0.state.lock().unwrap();
         let before = (state.power, state.lighting);
         if let Some(power) = patch.power {
             state.power = power.into();
         }
-        let lighting = state.lighting.as_mut().expect("light has lighting state");
-        if let Some(value) = patch.brightness_percent {
-            lighting.brightness_percent = Some(value);
-        }
-        if let Some(value) = patch.temperature_kelvin {
-            lighting.temperature_kelvin = Some(value);
-        }
-        if let Some(value) = patch.color {
-            lighting.color = Some(value);
-        }
-        if let Some(value) = patch.mode {
-            lighting.mode = Some(value);
+        if let Some(lighting) = state.lighting.as_mut() {
+            if let Some(value) = patch.brightness_percent {
+                lighting.brightness_percent = Some(value);
+            }
+            if let Some(value) = patch.temperature_kelvin {
+                lighting.temperature_kelvin = Some(value);
+            }
+            if let Some(value) = patch.color {
+                lighting.color = Some(value);
+            }
+            if let Some(value) = patch.mode {
+                lighting.mode = Some(value);
+            }
         }
         if before != (state.power, state.lighting) {
             state.revision = state.revision.wrapping_add(1);

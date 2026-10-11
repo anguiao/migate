@@ -111,7 +111,7 @@ fn brightness_and_temperature_matter_conversion_preserve_physical_ranges() {
 }
 
 #[test]
-fn matter_temperature_rejects_unrepresentable_ranges_without_panicking() {
+fn matter_temperature_mapping_rejects_unrepresentable_ranges_without_panicking() {
     for range in [
         NumericRange {
             min: 4500,
@@ -131,9 +131,6 @@ fn matter_temperature_rejects_unrepresentable_ranges_without_panicking() {
     ] {
         assert!(range.mireds_from_kelvin(range.min).is_err());
         assert!(range.kelvin_from_mireds(250).is_err());
-        let mut description = light(false);
-        description.functions[0].capabilities[2] = Capability::ColorTemperature(range);
-        assert!(!description.functions[0].valid_capabilities());
     }
     let range = NumericRange {
         min: 4000,
