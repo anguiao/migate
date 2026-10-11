@@ -17,18 +17,12 @@ use std::{
 /// the per-group diagnostics that explain deferred or revoked relations.
 struct Evaluated {
     compositions: Vec<Composition>,
-    /// Confirmed member deletions still referenced by the published set.
-    removed: Vec<DeviceKey>,
     problems: Vec<(String, Option<String>)>,
 }
 
 /// Freshness of one identity's cloud relation in this directory read.
 enum Fresh {
-    /// No relation metadata is currently available for this identity.
-    None,
-    /// The read succeeded but carried no confirmed member relation.
-    Unknown,
-    /// A confirmed relation that cannot be published yet.
+    /// A relation that cannot be published yet, with its latest diagnostic.
     Pending(String),
     /// A complete relation whose members are all supported single lights.
     Ready(Vec<DeviceKey>),
@@ -66,23 +60,24 @@ impl Context {
             self.problem(did, reason.clone());
         }
         let published = self.registry.snapshot().composition.groups;
-        if evaluated.compositions == published && evaluated.removed.is_empty() {
+        if evaluated.compositions == published && removed.is_empty() {
             return Ok(());
         }
-        let confirmed = match self.store.devices().commit_composition(
-            &scope,
-            &evaluated.compositions,
-            &evaluated.removed,
-        ) {
-            Ok(confirmed) => confirmed,
-            Err(CompositionCommitError::Storage(error)) => return Err(error.into()),
-            Err(error) => {
-                if let Some(group) = evaluated.compositions.first() {
-                    self.problem(&group.key.id, Some(error.to_string()));
+        let confirmed =
+            match self
+                .store
+                .devices()
+                .commit_composition(&scope, &evaluated.compositions, removed)
+            {
+                Ok(confirmed) => confirmed,
+                Err(CompositionCommitError::Storage(error)) => return Err(error.into()),
+                Err(error) => {
+                    if let Some(group) = evaluated.compositions.first() {
+                        self.problem(&group.key.id, Some(error.to_string()));
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-        };
+            };
         let compositions = confirmed
             .groups
             .into_iter()
@@ -93,9 +88,9 @@ impl Context {
             })
             .collect::<Vec<_>>();
         self.registry
-            .update_composition_versioned(confirmed.version, compositions, &evaluated.removed)
+            .update_composition_versioned(confirmed.version, compositions, removed)
             .map_err(|error| AdapterError::Unavailable(error.to_string()))?;
-        self.retire_confirmed_removed(&evaluated.removed);
+        self.retire_confirmed_removed(removed);
         self.changed.notify(usize::MAX);
         Ok(())
     }
@@ -119,6 +114,8 @@ impl Context {
             }
         }
         let mut relations = BTreeMap::<String, Relation>::new();
+        let mut claims = HashMap::<&str, &str>::new();
+        let mut overlapping = BTreeSet::new();
         for id in &identities {
             let retained = published.iter().find(|group| &group.key.id == id).cloned();
             let fresh = if deleted.contains(id.as_str()) {
@@ -130,16 +127,37 @@ impl Context {
                     .and_then(|slot| slot.group.as_ref())
                     .and_then(|meta| meta.relation.as_ref())
                 {
-                    None => Fresh::None,
-                    Some(CloudGroup::Unconfirmed) => Fresh::Unknown,
-                    Some(CloudGroup::Confirmed { members, .. }) => fresh_relation(
-                        id,
-                        members,
+                    None => Fresh::Pending(freshness_problem(
                         &live.devices,
-                        &deleted,
-                        &identities,
-                        live.complete,
-                    ),
+                        id,
+                        "waits for a complete device description",
+                    )),
+                    Some(CloudGroup::Unconfirmed) => Fresh::Pending(freshness_problem(
+                        &live.devices,
+                        id,
+                        "waits for a confirmed member relation",
+                    )),
+                    Some(CloudGroup::Confirmed { members, .. }) => {
+                        // Raw claims count even when a member makes the group
+                        // unsupported. Deleted parents never reach this branch;
+                        // repeated members within one group are not overlaps.
+                        for member in members {
+                            if let Some(owner) = claims.insert(member.as_str(), id.as_str())
+                                && owner != id.as_str()
+                            {
+                                overlapping.insert(owner.to_owned());
+                                overlapping.insert(id.clone());
+                            }
+                        }
+                        fresh_relation(
+                            id,
+                            members,
+                            &live.devices,
+                            &deleted,
+                            &identities,
+                            live.complete,
+                        )
+                    }
                 }
             };
             relations.insert(
@@ -150,45 +168,6 @@ impl Context {
                     deferred: None,
                 },
             );
-        }
-
-        // Overlap is established by the raw confirmed membership, before any
-        // member capability validation may reject a relation: a supported
-        // group must not publish while another confirmed group claims the same
-        // member, even if that other relation is otherwise unsupported. A
-        // deleted parent identity is no longer a claim.
-        let mut confirmed = Vec::new();
-        for id in &identities {
-            if deleted.contains(id.as_str()) {
-                continue;
-            }
-            let Some(CloudGroup::Confirmed { members, .. }) = live
-                .devices
-                .get(id)
-                .and_then(|slot| slot.group.as_ref())
-                .and_then(|meta| meta.relation.as_ref())
-            else {
-                continue;
-            };
-            confirmed.push((
-                id,
-                members
-                    .iter()
-                    .map(|member| DeviceKey::new("xiaomi", member))
-                    .collect::<Vec<_>>(),
-            ));
-        }
-        let mut overlapping = BTreeSet::new();
-        for (index, (left_id, left_members)) in confirmed.iter().enumerate() {
-            for (right_id, right_members) in &confirmed[index + 1..] {
-                if left_members
-                    .iter()
-                    .any(|member| right_members.contains(member))
-                {
-                    overlapping.insert((*left_id).clone());
-                    overlapping.insert((*right_id).clone());
-                }
-            }
         }
 
         // Relations that stay authoritative reserve every member they still
@@ -269,16 +248,6 @@ impl Context {
                 }
                 _ => relation.deferred.clone().or_else(|| match &relation.fresh {
                     Fresh::Pending(reason) => Some(reason.clone()),
-                    Fresh::Unknown => Some(freshness_problem(
-                        &live.devices,
-                        &id,
-                        "waits for a confirmed member relation",
-                    )),
-                    Fresh::None => Some(freshness_problem(
-                        &live.devices,
-                        &id,
-                        "waits for a complete device description",
-                    )),
                     _ => None,
                 }),
             };
@@ -321,7 +290,6 @@ impl Context {
         }
         Evaluated {
             compositions,
-            removed: removed.to_vec(),
             problems,
         }
     }

@@ -225,30 +225,10 @@ impl DeviceStore {
         };
         let label =
             label.ok_or_else(|| self.invalid(operation, "Group identity has no saved label"))?;
-        if !(2..=65534).contains(&endpoint)
-            || !Uuid::parse_str(&unique_id).is_ok_and(|uuid| uuid.simple().to_string() == unique_id)
-            || validate_label(&label).is_err()
+        if let Some(problem) = group_identity_problem(connection, key, &unique_id, endpoint, &label)
+            .map_err(|error| self.store.database_error(operation, error))?
         {
-            return Err(self.invalid(operation, "Stored group identity is invalid"));
-        }
-        let allocation = connection
-            .query_row(
-                "SELECT endpoint FROM endpoint_allocation
-                 WHERE source=?1 AND device_id=?2 AND slot='group'",
-                params![key.source, key.id],
-                |row| row.get::<_, u16>(0),
-            )
-            .optional()
-            .map_err(|error| self.store.database_error(operation, error))?;
-        let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM endpoint_allocation WHERE source=?1 AND device_id=?2",
-                params![key.source, key.id],
-                |row| row.get(0),
-            )
-            .map_err(|error| self.store.database_error(operation, error))?;
-        if allocation != Some(endpoint) || count != 1 {
-            return Err(self.invalid(operation, "Group endpoint allocation is inconsistent"));
+            return Err(self.invalid(operation, problem));
         }
         Ok(Some(StoredGroupIdentity {
             key: key.clone(),
@@ -525,6 +505,37 @@ fn legacy_group_identity(connection: &Connection, key: &DeviceKey) -> rusqlite::
     )
 }
 
+fn group_identity_problem(
+    connection: &Connection,
+    key: &DeviceKey,
+    unique_id: &str,
+    endpoint: u16,
+    label: &str,
+) -> rusqlite::Result<Option<&'static str>> {
+    if validate_key(key).is_err()
+        || !(2..=65534).contains(&endpoint)
+        || !Uuid::parse_str(unique_id).is_ok_and(|uuid| uuid.simple().to_string() == unique_id)
+        || validate_label(label).is_err()
+    {
+        return Ok(Some("Stored group identity is invalid"));
+    }
+    let allocation = connection
+        .query_row(
+            "SELECT endpoint FROM endpoint_allocation
+             WHERE source=?1 AND device_id=?2 AND slot='group'",
+            params![key.source, key.id],
+            |row| row.get::<_, u16>(0),
+        )
+        .optional()?;
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM endpoint_allocation WHERE source=?1 AND device_id=?2",
+        params![key.source, key.id],
+        |row| row.get(0),
+    )?;
+    Ok((allocation != Some(endpoint) || count != 1)
+        .then_some("Group endpoint allocation is inconsistent"))
+}
+
 fn load_confirmed(
     connection: &Connection,
     scope: &CachedScope,
@@ -568,26 +579,7 @@ fn load_confirmed(
     for (source, device_id, unique_id, endpoint, label) in groups {
         let key = DeviceKey::new(source, device_id);
         let label = label.ok_or(rusqlite::Error::InvalidQuery)?;
-        if validate_key(&key).is_err()
-            || !(2..=65534).contains(&endpoint)
-            || !Uuid::parse_str(&unique_id).is_ok_and(|uuid| uuid.simple().to_string() == unique_id)
-            || validate_label(&label).is_err()
-        {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let allocation = connection
-            .query_row(
-                "SELECT endpoint FROM endpoint_allocation WHERE source=?1 AND device_id=?2 AND slot='group'",
-                params![key.source, key.id],
-                |row| row.get::<_, u16>(0),
-            )
-            .optional()?;
-        let count: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM endpoint_allocation WHERE source=?1 AND device_id=?2",
-            params![key.source, key.id],
-            |row| row.get(0),
-        )?;
-        if allocation != Some(endpoint) || count != 1 {
+        if group_identity_problem(connection, &key, &unique_id, endpoint, &label)?.is_some() {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let members = load_members(connection, scope, &key)?;
@@ -729,7 +721,8 @@ pub(super) fn remove_device(store: &DeviceStore, key: &DeviceKey) -> Result<(), 
     let affected = transaction
         .prepare(
             "SELECT DISTINCT uid, home_id, source, device_id FROM group_relation
-             WHERE member_source=?1 AND member_id=?2",
+             WHERE (member_source=?1 AND member_id=?2)
+                OR (source=?1 AND device_id=?2)",
         )
         .and_then(|mut statement| {
             statement
@@ -749,27 +742,6 @@ pub(super) fn remove_device(store: &DeviceStore, key: &DeviceKey) -> Result<(), 
             .execute(
                 "DELETE FROM group_relation WHERE uid=?1 AND home_id=?2 AND source=?3 AND device_id=?4",
                 params![uid, home_id, source, device_id],
-            )
-            .map_err(database)?;
-        scopes.insert((uid, home_id));
-    }
-    let parent_scopes = transaction
-        .prepare(
-            "SELECT DISTINCT uid, home_id FROM group_relation WHERE source=?1 AND device_id=?2",
-        )
-        .and_then(|mut statement| {
-            statement
-                .query_map(params![key.source, key.id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .map_err(database)?;
-    for (uid, home_id) in parent_scopes {
-        transaction
-            .execute(
-                "DELETE FROM group_relation WHERE uid=?1 AND home_id=?2 AND source=?3 AND device_id=?4",
-                params![uid, home_id, key.source, key.id],
             )
             .map_err(database)?;
         scopes.insert((uid, home_id));

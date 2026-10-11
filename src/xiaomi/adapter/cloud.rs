@@ -271,15 +271,8 @@ pub(super) async fn run(
                         );
                     }
                     Err(error) => {
-                        match &error {
-                            CatalogError::Cloud(_) => current.block_device(&did, error.to_string()),
-                            CatalogError::Capability(_) => {
-                                // A malformed group-image description keeps the
-                                // last confirmed relation instead of revoking.
-                                current.block_device(&did, error.to_string());
-                            }
-                            _ => current.block_device(&did, error.to_string()),
-                        }
+                        // A failed group refresh keeps the last confirmed relation.
+                        current.block_device(&did, error.to_string());
                         if let CatalogError::Cloud(error) = &error {
                             current.cloud_error(
                                 &credentials.tokens.access_token,

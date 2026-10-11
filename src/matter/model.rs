@@ -234,31 +234,25 @@ impl Control {
             .chain(|_, cluster| cluster == 8, LevelDispatch(light))
             .chain(|_, cluster| cluster == 0x300, ColorDispatch(light))
     }
+    fn on_off_version(&self) -> u32 {
+        self.lighting.as_ref().map_or_else(
+            || self.on_off.as_ref().unwrap().dataver(),
+            |l| l.on_off_version.get(),
+        )
+    }
+}
+impl AsyncHandler for Control {
+    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
+    }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        if let Some(light) = &self.lighting {
-            let publication = light.publication();
-            match ctx.attr().cluster_id {
-                8 if !publication.brightness => return Err(ErrorCode::ClusterNotFound.into()),
-                0x300 if !publication.has_color_control() => {
-                    return Err(ErrorCode::ClusterNotFound.into());
-                }
-                _ => {}
-            }
+        if self.lighting.is_some() {
             self.light_handler().read(ctx, reply).await
         } else {
             self.handler().read(ctx, reply).await
         }
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        if let Some(light) = &self.lighting {
-            let publication = light.publication();
-            match ctx.attr().cluster_id {
-                8 if !publication.brightness => return Err(ErrorCode::ClusterNotFound.into()),
-                0x300 if !publication.has_color_control() => {
-                    return Err(ErrorCode::ClusterNotFound.into());
-                }
-                _ => {}
-            }
+        if self.lighting.is_some() {
             self.light_handler().write(ctx).await
         } else {
             self.handler().write(ctx).await
@@ -291,12 +285,6 @@ impl Control {
         } else {
             self.handler().run(ctx).await
         }
-    }
-    fn on_off_version(&self) -> u32 {
-        self.lighting.as_ref().map_or_else(
-            || self.on_off.as_ref().unwrap().dataver(),
-            |l| l.on_off_version.get(),
-        )
     }
 }
 /// Dispatch only the real brightness dimension; a light without brightness has
@@ -379,9 +367,6 @@ impl AsyncHandler for ColorDispatch<'_> {
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
         let publication = self.mapped();
-        if !publication.has_color_control() {
-            return Err(ErrorCode::ClusterNotFound.into());
-        }
         match (publication.temperature.is_some(), publication.rgb) {
             (true, true) => {
                 color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, true>(self.0))
@@ -403,9 +388,6 @@ impl AsyncHandler for ColorDispatch<'_> {
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
         let publication = self.mapped();
-        if !publication.has_color_control() {
-            return Err(ErrorCode::ClusterNotFound.into());
-        }
         match (publication.temperature.is_some(), publication.rgb) {
             (true, true) => {
                 color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, true>(self.0))
@@ -427,9 +409,6 @@ impl AsyncHandler for ColorDispatch<'_> {
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         let publication = self.mapped();
-        if !publication.has_color_control() {
-            return std::future::pending().await;
-        }
         match (publication.temperature.is_some(), publication.rgb) {
             (true, true) => {
                 color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, true>(self.0))
@@ -502,23 +481,6 @@ fn static_types(types: &[DeviceType]) -> Box<[DeviceType]> {
 fn static_clusters(clusters: &[Cluster<'static>]) -> Box<[Cluster<'static>]> {
     clusters.to_vec().into_boxed_slice()
 }
-struct ControlHandler<'a>(&'a Control);
-impl AsyncHandler for ControlHandler<'_> {
-    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
-    }
-    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        self.0.read(ctx, reply).await
-    }
-    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        self.0.write(ctx).await
-    }
-    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        self.0.invoke(ctx, reply).await
-    }
-    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        self.0.run(ctx).await
-    }
-}
 impl Role {
     fn control(&self) -> Option<&Control> {
         match self {
@@ -559,7 +521,7 @@ macro_rules! dispatch {
                 &ChainedHandler::new(
                     |_, cluster| cluster == 0x39,
                     Async(bridged::HandlerAdaptor(bridged.as_ref())),
-                    &ControlHandler(control),
+                    control.as_ref(),
                 ), $($arg),*
             ).await,
             Role::Parent { bridged, .. } => AsyncHandler::$method(
@@ -720,14 +682,7 @@ fn same_instance(entry: &Entry, device: &PhysicalDevice) -> bool {
         .as_ref()
         .is_some_and(|present| present.same_instance(device))
 }
-fn same_control(left: &Option<Rc<Control>>, right: &Option<Rc<Control>>) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => Rc::ptr_eq(left, right),
-        _ => false,
-    }
-}
-fn same_bridge(left: &Option<Rc<BridgedHandler>>, right: &Option<Rc<BridgedHandler>>) -> bool {
+fn same_rc<T>(left: &Option<Rc<T>>, right: &Option<Rc<T>>) -> bool {
     match (left, right) {
         (None, None) => true,
         (Some(left), Some(right)) => Rc::ptr_eq(left, right),
@@ -1247,11 +1202,11 @@ impl Model {
                 report.state_refresh.push(entry.endpoint);
             }
             let control = entry.role.control_rc();
-            if !same_control(&control, &previous.role.control_rc()) {
+            if !same_rc(&control, &previous.role.control_rc()) {
                 report.controls.push((entry.endpoint, control));
             }
             let bridged = entry.role.bridged_rc();
-            if !same_bridge(&bridged, &previous.role.bridged_rc()) {
+            if !same_rc(&bridged, &previous.role.bridged_rc()) {
                 report.bridges.push((entry.endpoint, bridged));
             }
         }
@@ -1297,7 +1252,7 @@ impl Model {
     ) -> AbortHandle {
         let (handle, registration) = AbortHandle::new_pair();
         tasks.push(Box::pin(Abortable::new(
-            async move { ControlHandler(&control).run(ctx).await },
+            async move { control.run(ctx).await },
             registration,
         )));
         handle
