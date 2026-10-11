@@ -266,7 +266,10 @@ fn read_one(
             .device
             .functions
             .iter()
-            .any(|function| function.description.id == read.id && function.lighting.is_some());
+            .any(|function| {
+                function.description.id == read.id
+                    && function.description.category == crate::device::Category::Light
+            });
         let stamp = Rc::new(
             work.observations
                 .read_stamp(&work.record, &read.id, read.binding),

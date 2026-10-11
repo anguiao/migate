@@ -34,9 +34,9 @@ fn cached_light(uid: &str, did: &str) -> CachedPhysicalDevice {
                         }),
                     ],
                 },
-                power: PropertyBinding { siid: 2, piid: 1 },
+                power: Some(PropertyBinding { siid: 2, piid: 1 }),
                 lighting: Some(LightBindings {
-                    brightness: NumericBinding {
+                    brightness: Some(NumericBinding {
                         property: PropertyBinding { siid: 2, piid: 2 },
                         format: NumericFormat::Uint16,
                         unit: NumericUnit::Percentage,
@@ -45,8 +45,8 @@ fn cached_light(uid: &str, did: &str) -> CachedPhysicalDevice {
                             max: 65535,
                             step: 1,
                         },
-                    },
-                    temperature: NumericBinding {
+                    }),
+                    temperature: Some(NumericBinding {
                         property: PropertyBinding { siid: 2, piid: 3 },
                         format: NumericFormat::Uint32,
                         unit: NumericUnit::Kelvin,
@@ -55,10 +55,10 @@ fn cached_light(uid: &str, did: &str) -> CachedPhysicalDevice {
                             max: 6500,
                             step: 1,
                         },
-                    },
+                    }),
                     color: None,
                     mode: None,
-                    brightness_conversion: BrightnessConversion::NonzeroLinear,
+                    brightness_conversion: Some(BrightnessConversion::NonzeroLinear),
                 }),
             }],
             refresh_trigger: None,

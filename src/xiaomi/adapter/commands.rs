@@ -455,8 +455,9 @@ pub(super) async fn consume(
                             .iter()
                             .find(|function| function.description.id == function_id)
                             .unwrap()
-                            .lighting
-                            .is_some() =>
+                            .description
+                            .category
+                            == crate::device::Category::Light =>
                     {
                         lighting::send_owned(
                             crate::device::DeviceRequest::Power(request),

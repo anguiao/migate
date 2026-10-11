@@ -174,8 +174,8 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
             .iter()
             .map(|function| (
                 function.description.id.as_str(),
-                function.power.siid,
-                function.power.piid
+                function.power.unwrap().siid,
+                function.power.unwrap().piid
             ))
             .collect::<Vec<_>>(),
         [("outlet_1", 3, 1), ("outlet_2", 4, 1), ("usb", 9, 1)]
@@ -285,8 +285,8 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
     .unwrap();
     assert_eq!(cached.home_id, "local");
     assert_eq!(cached.group_id, group_id("account", "local"));
-    assert_eq!(cached.device.functions[0].power.siid, 2);
-    assert_eq!(cached.device.functions[0].power.piid, 1);
+    assert_eq!(cached.device.functions[0].power.unwrap().siid, 2);
+    assert_eq!(cached.device.functions[0].power.unwrap().piid, 1);
     assert_eq!(name.as_deref(), Some("Cloud outlet"));
     let captured = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(captured.len(), 3);

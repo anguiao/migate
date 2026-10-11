@@ -1,0 +1,29 @@
+{
+    "type": "urn:miot-spec-v2:device:light:0000A001:synthetic-rgb:1",
+    "description": "Synthetic RGB light without brightness or color temperature",
+    "services": [
+        {
+            "iid": 2,
+            "type": "urn:miot-spec-v2:service:light:00007802:synthetic-rgb:1",
+            "description": "Light",
+            "properties": [
+                {
+                    "iid": 1,
+                    "type": "urn:miot-spec-v2:property:on:00000006:synthetic-rgb:1",
+                    "description": "Power",
+                    "format": "bool",
+                    "access": ["read", "write", "notify"]
+                },
+                {
+                    "iid": 5,
+                    "type": "urn:miot-spec-v2:property:color:0000000E:synthetic-rgb:1",
+                    "description": "Color",
+                    "format": "uint32",
+                    "unit": "rgb",
+                    "access": ["read", "write", "notify"],
+                    "value-range": [0, 16777215, 1]
+                }
+            ]
+        }
+    ]
+}

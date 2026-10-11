@@ -157,7 +157,7 @@ impl Context {
                     .device
                     .functions
                     .iter()
-                    .any(|function| function.lighting.is_some())
+                    .any(|function| function.description.category == crate::device::Category::Light)
                     .then(|| self.light_writes.for_device(did, self.clock.clone()));
                 Rc::new(DeviceWork::new(
                     record,

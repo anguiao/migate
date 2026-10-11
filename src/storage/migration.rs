@@ -179,7 +179,7 @@ fn migrate_v3_to_v4(transaction: &Transaction<'_>) -> Result<(), MigrationError>
                         category: Category::Outlet,
                         capabilities: vec![Capability::OnOff],
                     },
-                    power: PropertyBinding { siid, piid },
+                    power: Some(PropertyBinding { siid, piid }),
                     lighting: None,
                 }],
                 refresh_trigger: None,

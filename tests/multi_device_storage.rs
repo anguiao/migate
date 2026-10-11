@@ -41,7 +41,7 @@ fn cached(uid: &str, home: &str) -> CachedPhysicalDevice {
                         category: Category::Outlet,
                         capabilities: vec![Capability::OnOff],
                     },
-                    power: PropertyBinding { siid, piid: 1 },
+                    power: Some(PropertyBinding { siid, piid: 1 }),
                     lighting: None,
                 })
                 .collect(),
@@ -190,7 +190,7 @@ fn canonical_cache_and_selected_scope_are_account_and_home_scoped() {
     let store = Store::open(dir.path()).unwrap();
     let first = cached("account", "home-one");
     let mut second = cached("account", "home-two");
-    second.device.functions[0].power.siid = 30;
+    second.device.functions[0].power.as_mut().unwrap().siid = 30;
     store.devices().publish_cached(&first, "Outlet").unwrap();
     store.devices().publish_cached(&second, "Outlet").unwrap();
     store

@@ -28,7 +28,7 @@ fn replacing_a_binding_clears_its_previous_subscription_failure() {
                 .cached
                 .borrow()
                 .clone();
-            replacement.device.functions[0].power.siid = 7;
+            replacement.device.functions[0].power.as_mut().unwrap().siid = 7;
             control
                 .context
                 .live
@@ -103,7 +103,7 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                 .cached
                 .borrow()
                 .clone();
-            changed.device.functions[0].power.siid = 7;
+            changed.device.functions[0].power.as_mut().unwrap().siid = 7;
             control
                 .context
                 .live
@@ -159,6 +159,7 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                     .device
                     .functions[0]
                     .power
+                    .unwrap()
                     .siid,
                 7
             );

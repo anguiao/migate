@@ -56,15 +56,31 @@ pub(super) struct DeviceRecord {
     pub(super) physical: PhysicalDevice,
 }
 impl DeviceRecord {
+    /// A diagnostic/primary binding for one function. Every valid function has
+    /// at least one controllable binding: power for outlets and On/Off lights,
+    /// or the first present light dimension otherwise.
     pub(super) fn binding(&self, id: &str) -> PropertyBinding {
-        self.cached
-            .borrow()
+        let cached = self.cached.borrow();
+        let function = cached
             .device
             .functions
             .iter()
             .find(|function| function.description.id == id)
-            .unwrap()
+            .expect("function exists");
+        function
             .power
+            .or_else(|| {
+                function.lighting.as_ref().and_then(|light| {
+                    light
+                        .brightness
+                        .as_ref()
+                        .map(|binding| binding.property)
+                        .or_else(|| light.temperature.as_ref().map(|binding| binding.property))
+                        .or_else(|| light.color.as_ref().map(|binding| binding.property))
+                        .or_else(|| light.mode.as_ref().map(|binding| binding.property))
+                })
+            })
+            .expect("valid device function has a binding")
     }
 }
 /// Cloud relation metadata for one group identity in the selected home.

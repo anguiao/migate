@@ -357,7 +357,8 @@ impl Rig {
                 let items = body["params"].as_array().unwrap();
                 let light = records.iter().any(|record| {
                     record.device.key.id == items[0]["did"].as_str().unwrap()
-                        && record.device.functions[0].lighting.is_some()
+                        && record.device.functions[0].description.category
+                            == crate::device::Category::Light
                 });
                 if light {
                     state
@@ -473,11 +474,9 @@ impl Rig {
                 let multi = request.target.contains("cuco-cp7pd");
                 let light = records.iter().find(|record| {
                     record.instance_type == requested
-                        && record
-                            .device
-                            .functions
-                            .first()
-                            .is_some_and(|function| function.lighting.is_some())
+                        && record.device.functions.first().is_some_and(|function| {
+                            function.description.category == crate::device::Category::Light
+                        })
                 });
                 let mut value: Value = serde_json::from_str(if let Some(record) = light {
                     light_fixture(&record.model)
@@ -704,6 +703,18 @@ fn light_fixture(model: &str) -> &'static str {
         }
         "lemesh.light.wy0c15" => {
             include_str!("../../../../../tests/fixtures/miot/lemesh-light-wy0c15.json")
+        }
+        "synthetic.light.onoff" => {
+            include_str!("../../../../../tests/fixtures/miot/synthetic-onoff-light.json")
+        }
+        "synthetic.light.ct" => {
+            include_str!("../../../../../tests/fixtures/miot/synthetic-ct-light.json")
+        }
+        "synthetic.light.rgb" => {
+            include_str!("../../../../../tests/fixtures/miot/synthetic-rgb-light.json")
+        }
+        "synthetic.light.rgbonly" => {
+            include_str!("../../../../../tests/fixtures/miot/synthetic-rgbonly-light.json")
         }
         _ => panic!("unknown light fixture"),
     }

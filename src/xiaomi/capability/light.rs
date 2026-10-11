@@ -36,39 +36,99 @@ pub(super) fn parse_light(
             ));
         }
     };
-    let power = power_binding(service.iid, standard_property(service, "on", 6)?)?;
-    let brightness = numeric_binding(
-        service.iid,
-        standard_property(service, "brightness", 0x0d)?,
-        NumericUnit::Percentage,
-    )?;
-    let temperature = numeric_binding(
-        service.iid,
-        standard_property(service, "color-temperature", 0x0f)?,
-        NumericUnit::Kelvin,
-    )?;
-    if brightness.range.nonzero_bounds().is_none()
-        || temperature.range.min == 0
-        || temperature.range.max > 1_000_000
-        || temperature.range.mired_bounds().is_err()
+    let power = select_control(
+        controls(std::iter::once(service), "on", 0x00000006)?,
+        "multiple controllable power properties",
+    )?
+    .map(|(siid, property)| power_binding(siid, property))
+    .transpose()?;
+    let brightness = select_control(
+        controls(std::iter::once(service), "brightness", 0x0000000d)?,
+        "multiple controllable brightness properties",
+    )?
+    .map(|(siid, property)| numeric_binding(siid, property, NumericUnit::Percentage))
+    .transpose()?;
+    if brightness
+        .as_ref()
+        .is_some_and(|binding| binding.range.nonzero_bounds().is_none())
     {
         return Err(CapabilityError::InvalidLight(
-            "nonzero brightness and Kelvin ranges are required",
+            "nonzero brightness range is required",
         ));
     }
-    let (color, mode) = if model == "devcea.light.ls2307" {
-        ls2307(instance, service, power, brightness, temperature)?
+    let temperature = select_control(
+        controls(std::iter::once(service), "color-temperature", 0x0000000f)?,
+        "multiple controllable color temperature properties",
+    )?
+    .map(|(siid, property)| numeric_binding(siid, property, NumericUnit::Kelvin))
+    .transpose()?;
+    if temperature
+        .as_ref()
+        .is_some_and(|binding| binding.range.min == 0 || binding.range.max > 1_000_000)
+    {
+        return Err(CapabilityError::InvalidLight("Kelvin range is required"));
+    }
+    // A standard color property is admitted wherever it is declared in the
+    // standard namespace, including the ambient-light service used by vendor
+    // adapters; its declared encoding must be packed 24-bit RGB.
+    let color = select_control(
+        controls(instance.services.iter(), "color", 0x0000000e)?,
+        "multiple controllable color properties",
+    )?
+    .map(|(siid, property)| numeric_binding(siid, property, NumericUnit::Rgb))
+    .transpose()?;
+    if color.as_ref().is_some_and(|binding| {
+        binding.format != NumericFormat::Uint32
+            || binding.range
+                != (NumericRange {
+                    min: 0,
+                    max: 0xffffff,
+                    step: 1,
+                })
+    }) {
+        return Err(CapabilityError::InvalidLight("RGB encoding is required"));
+    }
+    let mode = if model == "devcea.light.ls2307" {
+        Some(ls2307(
+            instance,
+            service,
+            power,
+            brightness.as_ref(),
+            temperature.as_ref(),
+            color.as_ref(),
+        )?)
     } else {
-        (None, None)
+        None
     };
-    let mut capabilities = vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(temperature.range),
-    ];
+    let mut capabilities = Vec::new();
+    if power.is_some() {
+        capabilities.push(Capability::OnOff);
+    }
+    if brightness.is_some() {
+        capabilities.push(Capability::Brightness);
+    }
+    if let Some(temperature) = &temperature {
+        capabilities.push(Capability::ColorTemperature(temperature.range));
+    }
     if color.is_some() {
         capabilities.push(Capability::ColorRgb);
     }
+    if capabilities.is_empty() {
+        return Err(CapabilityError::InvalidLight(
+            "at least one controllable property is required",
+        ));
+    }
+    let lighting = (brightness.is_some() || temperature.is_some() || color.is_some()).then_some(
+        LightBindings {
+            brightness_conversion: brightness
+                .is_some()
+                .then_some(BrightnessConversion::NonzeroLinear),
+            brightness,
+            temperature,
+            color,
+            mode,
+        },
+    );
     Ok(ParsedDevice {
         key,
         functions: vec![ParsedFunction {
@@ -79,34 +139,62 @@ pub(super) fn parse_light(
                 capabilities,
             },
             power,
-            lighting: Some(LightBindings {
-                brightness,
-                temperature,
-                color,
-                mode,
-                brightness_conversion: BrightnessConversion::NonzeroLinear,
-            }),
+            lighting,
         }],
         refresh_trigger: None,
     })
 }
-fn standard_property<'a>(
-    service: &'a Service<'a>,
+
+/// A property declares control only when it has write access. Read-only or
+/// fixed parameters are not capabilities. Declared control missing read or
+/// notify is malformed and never silently downgraded.
+fn control_declared(property: &Property<'_>) -> Result<bool, CapabilityError> {
+    let access = array(property.value, "access")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or(CapabilityError::InvalidDescription("access"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !access.contains(&"write") {
+        return Ok(false);
+    }
+    for permission in ["read", "notify"] {
+        if !access.contains(&permission) {
+            return Err(CapabilityError::MissingAccess(permission));
+        }
+    }
+    Ok(true)
+}
+
+fn controls<'a>(
+    services: impl Iterator<Item = &'a Service<'a>>,
     name: &str,
     type_id: u32,
-) -> Result<&'a Property<'a>, CapabilityError> {
-    let properties = service
-        .properties
-        .iter()
-        .filter(|property| property.urn.standard("property", name, type_id))
-        .collect::<Vec<_>>();
-    match properties.as_slice() {
-        [property] => Ok(*property),
-        _ => Err(CapabilityError::InvalidLight(
-            "required standard property is missing or ambiguous",
-        )),
+) -> Result<Vec<(u32, &'a Property<'a>)>, CapabilityError> {
+    let mut controls = Vec::new();
+    for service in services {
+        for property in &service.properties {
+            if property.urn.standard("property", name, type_id) && control_declared(property)? {
+                controls.push((service.iid, property));
+            }
+        }
+    }
+    Ok(controls)
+}
+
+fn select_control<'a>(
+    controls: Vec<(u32, &'a Property<'a>)>,
+    ambiguous: &'static str,
+) -> Result<Option<(u32, &'a Property<'a>)>, CapabilityError> {
+    match controls.as_slice() {
+        [] => Ok(None),
+        [candidate] => Ok(Some(*candidate)),
+        _ => Err(CapabilityError::InvalidLight(ambiguous)),
     }
 }
+
 fn format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
     match string(property.value, "format")? {
         "uint8" => Ok(NumericFormat::Uint8),
@@ -118,27 +206,30 @@ fn format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
         _ => Err(CapabilityError::InvalidLight("unsupported numeric format")),
     }
 }
-fn access(property: &Property<'_>) -> Result<(), CapabilityError> {
-    let access = array(property.value, "access")?;
+
+fn require_full_access(property: &Property<'_>) -> Result<(), CapabilityError> {
+    let access = array(property.value, "access")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or(CapabilityError::InvalidDescription("access"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     for permission in ["read", "write", "notify"] {
-        if !access
-            .iter()
-            .any(|value| value.as_str() == Some(permission))
-        {
+        if !access.contains(&permission) {
             return Err(CapabilityError::MissingAccess(permission));
         }
     }
-    if access.iter().any(|value| value.as_str().is_none()) {
-        return Err(CapabilityError::InvalidDescription("access"));
-    }
     Ok(())
 }
+
 fn numeric_binding(
     siid: u32,
     property: &Property<'_>,
     unit: NumericUnit,
 ) -> Result<NumericBinding, CapabilityError> {
-    access(property)?;
+    require_full_access(property)?;
     let format = format(property)?;
     let expected = match unit {
         NumericUnit::Percentage => "percentage",
@@ -178,22 +269,30 @@ fn numeric_binding(
     }
     Ok(binding)
 }
+
+/// The private ls2307 adapter validates its exact source layout and mode enum.
+/// Generic parsing already admitted the standard RGB property; this function
+/// only adds the vendor-specific mode semantics for the known model.
 fn ls2307(
     instance: &Description<'_>,
     main: &Service<'_>,
-    power: PropertyBinding,
-    brightness: NumericBinding,
-    temperature: NumericBinding,
-) -> Result<(Option<NumericBinding>, Option<ModeBinding>), CapabilityError> {
+    power: Option<PropertyBinding>,
+    brightness: Option<&NumericBinding>,
+    temperature: Option<&NumericBinding>,
+    color: Option<&NumericBinding>,
+) -> Result<ModeBinding, CapabilityError> {
     let incompatible = || CapabilityError::IncompatibleModel("devcea.light.ls2307");
     let exact =
         |urn: &Urn<'_>| urn.vendor == "devcea-ls2307" && urn.version == 1 && urn.suffix.is_none();
     if !exact(&instance.urn)
         || main.iid != 2
         || !exact(&main.urn)
-        || power != (PropertyBinding { siid: 2, piid: 1 })
-        || brightness.property != (PropertyBinding { siid: 2, piid: 2 })
-        || temperature.property != (PropertyBinding { siid: 2, piid: 3 })
+        || power != Some(PropertyBinding { siid: 2, piid: 1 })
+        || brightness
+            .is_none_or(|binding| binding.property != (PropertyBinding { siid: 2, piid: 2 }))
+        || temperature
+            .is_none_or(|binding| binding.property != (PropertyBinding { siid: 2, piid: 3 }))
+        || color.is_none_or(|binding| binding.property != (PropertyBinding { siid: 4, piid: 1 }))
     {
         return Err(incompatible());
     }
@@ -205,27 +304,11 @@ fn ls2307(
     if !ambient.urn.standard("service", "ambient-light", 0x0000789d) || !exact(&ambient.urn) {
         return Err(incompatible());
     }
-    let color_property = standard_property(ambient, "color", 0x0e)?;
     let mode_property = standard_property(ambient, "mode", 8)?;
-    if color_property.iid != 1
-        || mode_property.iid != 2
-        || !exact(&color_property.urn)
-        || !exact(&mode_property.urn)
-    {
+    if mode_property.iid != 2 || !exact(&mode_property.urn) {
         return Err(incompatible());
     }
-    let color = numeric_binding(4, color_property, NumericUnit::Rgb)?;
-    if color.format != NumericFormat::Uint32
-        || color.range
-            != (NumericRange {
-                min: 0,
-                max: 0xffffff,
-                step: 1,
-            })
-    {
-        return Err(incompatible());
-    }
-    access(mode_property)?;
+    require_full_access(mode_property)?;
     if format(mode_property)? != NumericFormat::Uint8 {
         return Err(incompatible());
     }
@@ -240,13 +323,28 @@ fn ls2307(
     {
         return Err(incompatible());
     }
-    Ok((
-        Some(color),
-        Some(ModeBinding {
-            property: PropertyBinding { siid: 4, piid: 2 },
-            format: NumericFormat::Uint8,
-            temperature_value: 0,
-            rgb_value: 1,
-        }),
-    ))
+    Ok(ModeBinding {
+        property: PropertyBinding { siid: 4, piid: 2 },
+        format: NumericFormat::Uint8,
+        temperature_value: 0,
+        rgb_value: 1,
+    })
+}
+
+fn standard_property<'a>(
+    service: &'a Service<'a>,
+    name: &str,
+    type_id: u32,
+) -> Result<&'a Property<'a>, CapabilityError> {
+    let properties = service
+        .properties
+        .iter()
+        .filter(|property| property.urn.standard("property", name, type_id))
+        .collect::<Vec<_>>();
+    match properties.as_slice() {
+        [property] => Ok(*property),
+        _ => Err(CapabilityError::InvalidLight(
+            "required standard property is missing or ambiguous",
+        )),
+    }
 }

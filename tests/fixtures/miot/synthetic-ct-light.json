@@ -1,0 +1,29 @@
+{
+    "type": "urn:miot-spec-v2:device:light:0000A001:synthetic-ct:1",
+    "description": "Synthetic color temperature light without brightness",
+    "services": [
+        {
+            "iid": 2,
+            "type": "urn:miot-spec-v2:service:light:00007802:synthetic-ct:1",
+            "description": "Light",
+            "properties": [
+                {
+                    "iid": 1,
+                    "type": "urn:miot-spec-v2:property:on:00000006:synthetic-ct:1",
+                    "description": "Power",
+                    "format": "bool",
+                    "access": ["read", "write", "notify"]
+                },
+                {
+                    "iid": 3,
+                    "type": "urn:miot-spec-v2:property:color-temperature:0000000F:synthetic-ct:1",
+                    "description": "Color temperature",
+                    "format": "uint16",
+                    "unit": "kelvin",
+                    "access": ["read", "write", "notify"],
+                    "value-range": [2700, 6500, 1]
+                }
+            ]
+        }
+    ]
+}

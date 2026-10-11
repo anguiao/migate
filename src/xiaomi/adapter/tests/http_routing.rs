@@ -429,7 +429,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
                     record.binding_generation.get(),
                 )
             };
-            changed.device.functions[0].power.siid = 7;
+            changed.device.functions[0].power.as_mut().unwrap().siid = 7;
             changed.instance_type = "urn:miot-spec-v2:device:outlet:0000A002:cuco-v3:2".into();
             {
                 let mut live = c.context.live.borrow_mut();

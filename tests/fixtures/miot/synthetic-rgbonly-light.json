@@ -1,0 +1,28 @@
+{
+    "type": "urn:miot-spec-v2:device:light:0000A001:synthetic-rgbonly:1",
+    "description": "Synthetic RGB-only light without power",
+    "services": [
+        {
+            "iid": 2,
+            "type": "urn:miot-spec-v2:service:light:00007802:synthetic-rgbonly:1",
+            "description": "Light",
+            "properties": []
+        },
+        {
+            "iid": 4,
+            "type": "urn:miot-spec-v2:service:ambient-light:0000789D:synthetic-rgbonly:1",
+            "description": "Ambient light",
+            "properties": [
+                {
+                    "iid": 1,
+                    "type": "urn:miot-spec-v2:property:color:0000000E:synthetic-rgbonly:1",
+                    "description": "Color",
+                    "format": "uint32",
+                    "unit": "rgb",
+                    "access": ["read", "write", "notify"],
+                    "value-range": [0, 16777215, 1]
+                }
+            ]
+        }
+    ]
+}

@@ -504,7 +504,7 @@ fn compatible_member_replacement_keeps_the_published_group_and_endpoint() {
             .unwrap();
         let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
         let mut changed = record.cached.borrow().clone();
-        changed.device.functions[0].power.siid = 7;
+        changed.device.functions[0].power.as_mut().unwrap().siid = 7;
         c.context
             .live
             .borrow_mut()

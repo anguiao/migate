@@ -265,6 +265,8 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
                 .find(|function| function.description.id == "outlet_1")
                 .unwrap()
                 .power
+                .as_mut()
+                .unwrap()
                 .siid = 7;
             for candidate in [changed, original] {
                 control

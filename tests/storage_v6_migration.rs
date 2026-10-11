@@ -24,7 +24,7 @@ fn outlet_functions() -> String {
             category: Category::Outlet,
             capabilities: vec![Capability::OnOff],
         },
-        power: PropertyBinding { siid: 12, piid: 9 },
+        power: Some(PropertyBinding { siid: 12, piid: 9 }),
         lighting: None,
     }])
     .unwrap()

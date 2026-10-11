@@ -41,7 +41,7 @@ fn version_four_static_cache_is_upgraded_locally_without_changing_identity_or_pa
     );
     let restored = store.devices().restore_cached("account", "home").unwrap();
     assert_eq!(restored.len(), 1);
-    assert_eq!(restored[0].0.device.functions[0].power.siid, 2);
+    assert_eq!(restored[0].0.device.functions[0].power.unwrap().siid, 2);
     let functions: String = db
         .query_row("SELECT functions FROM device_cache", [], |row| row.get(0))
         .unwrap();

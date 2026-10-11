@@ -15,12 +15,12 @@ impl Context {
         receivers: Vec<CommandReceiver>,
     ) {
         for (function, receiver) in record.physical.functions().iter().zip(receivers) {
-            if function.description().category == crate::device::Category::Light {
-                let function = function.clone();
+            if function.description().category == crate::device::Category::Light
+                && let Some(mut changes) = function.subscribe_light_actions()
+            {
                 let context = self.clone();
                 let life = record.clone();
                 self.tasks.spawn(async move {
-                    let mut changes = function.subscribe_light_actions().expect("light");
                     futures_lite::future::or(
                         async {
                             life.life.ended().await;
@@ -147,11 +147,9 @@ impl Context {
                                 .set(record.binding_generation.get() + 1);
                         }
                         let replace = changed
-                            && cached
-                                .device
-                                .functions
-                                .iter()
-                                .any(|function| function.lighting.is_some());
+                            && cached.device.functions.iter().any(|function| {
+                                function.description.category == crate::device::Category::Light
+                            });
                         if replace {
                             let (physical, receivers) = PhysicalDevice::new(stored.description());
                             // Publish the new instance before retiring the old
@@ -343,7 +341,9 @@ impl Context {
                         .device
                         .functions
                         .iter()
-                        .any(|function| function.lighting.is_some())
+                        .any(|function| {
+                            function.description.category == crate::device::Category::Light
+                        })
                 });
                 if let Some(life) = slot.loading {
                     life.close();

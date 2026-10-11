@@ -13,7 +13,7 @@ pub struct PropertyBinding {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ParsedFunction {
     pub description: FunctionDescription,
-    pub power: PropertyBinding,
+    pub power: Option<PropertyBinding>,
     pub lighting: Option<LightBindings>,
 }
 
@@ -181,40 +181,54 @@ impl ModeBinding {
             _ => Err(CapabilityError::InvalidValue("mode")),
         }
     }
+    fn valid(&self) -> bool {
+        self.property.siid > 0
+            && self.property.piid > 0
+            && self.temperature_value != self.rgb_value
+            && self.temperature_value <= self.format.maximum()
+            && self.rgb_value <= self.format.maximum()
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LightBindings {
-    pub brightness: NumericBinding,
-    pub temperature: NumericBinding,
+    pub brightness: Option<NumericBinding>,
+    pub temperature: Option<NumericBinding>,
     pub color: Option<NumericBinding>,
     pub mode: Option<ModeBinding>,
-    pub brightness_conversion: BrightnessConversion,
+    /// Brightness conversion exists only with the brightness binding. Old
+    /// caches always stored the enum and deserialize it as `Some`.
+    pub brightness_conversion: Option<BrightnessConversion>,
 }
 impl LightBindings {
+    pub(crate) fn has_dimensions(&self) -> bool {
+        self.brightness.is_some() || self.temperature.is_some() || self.color.is_some()
+    }
     pub(crate) fn valid(&self) -> bool {
-        self.brightness.valid(NumericUnit::Percentage)
-            && self.brightness.range.nonzero_bounds().is_some()
-            && self.temperature.valid(NumericUnit::Kelvin)
-            && self.temperature.range.min > 0
-            && self.temperature.range.max <= 1_000_000
-            && self.temperature.range.mired_bounds().is_ok()
-            && match (&self.color, &self.mode) {
-                (None, None) => true,
-                (Some(color), Some(mode)) => {
-                    color.valid(NumericUnit::Rgb)
-                        && color.range
-                            == NumericRange {
-                                min: 0,
-                                max: 0xffffff,
-                                step: 1,
-                            }
-                        && mode.property.siid > 0
-                        && mode.property.piid > 0
-                        && mode.temperature_value != mode.rgb_value
-                        && mode.temperature_value <= mode.format.maximum()
-                        && mode.rgb_value <= mode.format.maximum()
-                }
-                _ => false,
-            }
+        self.has_dimensions()
+            && (self.brightness_conversion.is_some() == self.brightness.is_some())
+            && self.brightness.as_ref().is_none_or(|brightness| {
+                brightness.valid(NumericUnit::Percentage)
+                    && brightness.range.nonzero_bounds().is_some()
+            })
+            && self.temperature.as_ref().is_none_or(|temperature| {
+                temperature.valid(NumericUnit::Kelvin)
+                    && temperature.range.min > 0
+                    && temperature.range.max <= 1_000_000
+            })
+            && self.color.as_ref().is_none_or(|color| {
+                color.valid(NumericUnit::Rgb)
+                    && color.format == NumericFormat::Uint32
+                    && color.range
+                        == NumericRange {
+                            min: 0,
+                            max: 0xffffff,
+                            step: 1,
+                        }
+            })
+            && self.mode.as_ref().is_none_or(|mode| {
+                // A CT/RGB switch only exists on a dual-color light; single
+                // capability lights keep their mode intrinsic.
+                self.temperature.is_some() && self.color.is_some() && mode.valid()
+            })
     }
 }

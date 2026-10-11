@@ -19,13 +19,13 @@ fn all_light_samples_read_and_subscribe_every_property() {
             let bindings = c.data[0].device.functions[0].lighting.as_ref().unwrap();
             peer.value(
                 "one",
-                bindings.brightness.property,
-                json!(bindings.brightness.range.max),
+                bindings.brightness.as_ref().unwrap().property,
+                json!(bindings.brightness.as_ref().unwrap().range.max),
             );
             peer.value(
                 "one",
-                bindings.temperature.property,
-                json!(bindings.temperature.range.min),
+                bindings.temperature.as_ref().unwrap().property,
+                json!(bindings.temperature.as_ref().unwrap().range.min),
             );
             if let Some(color) = bindings.color {
                 peer.value("one", color.property, json!(0x123456));
@@ -107,19 +107,21 @@ const TEMPERATURE: PropertyBinding = PropertyBinding { siid: 2, piid: 3 };
 const COLOR: PropertyBinding = PropertyBinding { siid: 4, piid: 1 };
 const MODE: PropertyBinding = PropertyBinding { siid: 4, piid: 2 };
 const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
+/// Standard color declared inside the light service, not the ambient-light one.
+const LIGHT_COLOR: PropertyBinding = PropertyBinding { siid: 2, piid: 5 };
 fn peer_values(c: &Control) -> Rc<Peer> {
     let peer = Rc::new(Peer::default());
     let bindings = c.data[0].device.functions[0].lighting.as_ref().unwrap();
     peer.value("one", POWER, json!(true));
     peer.value(
         "one",
-        bindings.brightness.property,
-        json!(bindings.brightness.range.min),
+        bindings.brightness.as_ref().unwrap().property,
+        json!(bindings.brightness.as_ref().unwrap().range.min),
     );
     peer.value(
         "one",
-        bindings.temperature.property,
-        json!(bindings.temperature.range.min),
+        bindings.temperature.as_ref().unwrap().property,
+        json!(bindings.temperature.as_ref().unwrap().range.min),
     );
     if let Some(color) = bindings.color {
         peer.value("one", color.property, json!(0x123456));
@@ -502,6 +504,8 @@ fn range_change_preserves_feedback_until_accepted_history_expires() {
                 .as_mut()
                 .unwrap()
                 .temperature
+                .as_mut()
+                .unwrap()
                 .range;
             range.max = 5600;
             changed.device.functions[0].description.capabilities[2] =
@@ -625,6 +629,8 @@ fn retired_work_preserves_accepted_feedback_until_history_expires() {
                 .as_mut()
                 .unwrap()
                 .temperature
+                .as_mut()
+                .unwrap()
                 .range;
             range.max = 5600;
             changed.device.functions[0].description.capabilities[2] =
@@ -1930,9 +1936,9 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
             .borrow()
             .clone();
         let light = changed.device.functions[0].lighting.as_mut().unwrap();
-        light.temperature.range.max = 5600;
+        light.temperature.as_mut().unwrap().range.max = 5600;
         changed.device.functions[0].description.capabilities[2] =
-            crate::device::Capability::ColorTemperature(light.temperature.range);
+            crate::device::Capability::ColorTemperature(light.temperature.as_ref().unwrap().range);
         c.context
             .live
             .borrow_mut()
@@ -2033,4 +2039,227 @@ fn unknown_mode_color_values_update_only_cache_until_the_mode_changes() {
             .await;
         }));
     }
+}
+
+#[test]
+fn onoff_only_light_reads_subscribes_and_writes_power_without_a_light_snapshot() {
+    block_on(Rig::light("synthetic.light.onoff").run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.value("one", POWER, json!(true));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            let light = function(&control.context.registry, "one", "main");
+            until(|| {
+                light.snapshot().power == Power::On
+                    && control.context.active_notification("one") == Some(PathKind::Local)
+            })
+            .await;
+            assert!(light.snapshot().lighting.is_none());
+            let work = control.context.live.borrow().devices["one"]
+                .work
+                .clone()
+                .unwrap();
+            assert_eq!(work.bindings(), vec![POWER]);
+            assert_eq!(peer.count("subscribe", "one", 0), 1);
+            assert!(light.light_action_diagnostics().is_none());
+            assert_eq!(light.execute(Command::Off).await.unwrap().power, Power::Off);
+            let seen = peer.state.borrow();
+            let (_, last) = seen
+                .seen
+                .iter()
+                .rev()
+                .find(|(op, _)| op == "rpcReq")
+                .unwrap();
+            let params = last["rpc"]["params"].as_array().unwrap();
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0]["piid"], 1);
+            assert_eq!(params[0]["value"], false);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn color_temperature_works_without_brightness_and_stays_a_light_action() {
+    block_on(Rig::light("synthetic.light.ct").run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.value("one", POWER, json!(true));
+        peer.value("one", TEMPERATURE, json!(4000));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            let light = function(&control.context.registry, "one", "main");
+            until(|| {
+                control.context.active_notification("one") == Some(PathKind::Local)
+                    && light
+                        .snapshot()
+                        .lighting
+                        .is_some_and(|snapshot| snapshot.temperature_kelvin == Some(4000))
+            })
+            .await;
+            let work = control.context.live.borrow().devices["one"]
+                .work
+                .clone()
+                .unwrap();
+            assert_eq!(work.bindings(), vec![POWER, TEMPERATURE]);
+            assert_eq!(peer.count("subscribe", "one", 0), 2);
+            let snapshot = light.snapshot().lighting.unwrap();
+            assert_eq!(snapshot.brightness_percent, None);
+            assert_eq!(snapshot.mode, Some(LightMode::Temperature));
+            assert_eq!(
+                light
+                    .begin_light_action(LightDimension::Brightness, brightness(50.0), true)
+                    .map(|_| ())
+                    .unwrap_err(),
+                crate::device::CommandError::Unsupported
+            );
+            let action = light
+                .begin_light_action(
+                    LightDimension::Color,
+                    color_target(LightColorTarget::Temperature(5000)),
+                    true,
+                )
+                .unwrap();
+            action.accepted().await.unwrap();
+            assert_eq!(
+                light.snapshot().lighting.unwrap().temperature_kelvin,
+                Some(5000)
+            );
+            let seen = peer.state.borrow();
+            let (_, last) = seen
+                .seen
+                .iter()
+                .rev()
+                .find(|(op, _)| op == "rpcReq")
+                .unwrap();
+            let params = last["rpc"]["params"].as_array().unwrap();
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0]["piid"], 3);
+            assert_eq!(params[0]["value"], 5000);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn rgb_works_without_color_temperature_or_brightness_with_intrinsic_mode() {
+    block_on(Rig::light("synthetic.light.rgb").run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.value("one", POWER, json!(true));
+        peer.value("one", LIGHT_COLOR, json!(0x123456));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            let light = function(&control.context.registry, "one", "main");
+            until(|| {
+                control.context.active_notification("one") == Some(PathKind::Local)
+                    && light
+                        .snapshot()
+                        .lighting
+                        .is_some_and(|snapshot| snapshot.color == Rgb::from_packed(0x123456))
+            })
+            .await;
+            let work = control.context.live.borrow().devices["one"]
+                .work
+                .clone()
+                .unwrap();
+            assert_eq!(work.bindings(), vec![POWER, LIGHT_COLOR]);
+            assert_eq!(peer.count("subscribe", "one", 0), 2);
+            let snapshot = light.snapshot().lighting.unwrap();
+            assert_eq!(snapshot.brightness_percent, None);
+            assert_eq!(snapshot.temperature_kelvin, None);
+            assert_eq!(snapshot.mode, Some(LightMode::Rgb));
+            assert_eq!(
+                light
+                    .begin_light_action(LightDimension::Brightness, brightness(50.0), true)
+                    .map(|_| ())
+                    .unwrap_err(),
+                crate::device::CommandError::Unsupported
+            );
+            assert_eq!(
+                light
+                    .begin_light_action(
+                        LightDimension::Color,
+                        color_target(LightColorTarget::Temperature(4000)),
+                        true,
+                    )
+                    .map(|_| ())
+                    .unwrap_err(),
+                crate::device::CommandError::Unsupported
+            );
+            let action = light
+                .begin_light_action(
+                    LightDimension::Color,
+                    color_target(LightColorTarget::Rgb(Rgb::from_packed(0xff0044).unwrap())),
+                    true,
+                )
+                .unwrap();
+            action.accepted().await.unwrap();
+            assert_eq!(
+                light.snapshot().lighting.unwrap().color,
+                Rgb::from_packed(0xff0044)
+            );
+            let seen = peer.state.borrow();
+            let (_, last) = seen
+                .seen
+                .iter()
+                .rev()
+                .find(|(op, _)| op == "rpcReq")
+                .unwrap();
+            let params = last["rpc"]["params"].as_array().unwrap();
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0]["piid"], 5);
+            assert_eq!(params[0]["value"], 0xff0044);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn light_without_onoff_has_no_power_reads_subscriptions_or_commands() {
+    block_on(Rig::light("synthetic.light.rgbonly").run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.value("one", COLOR, json!(0xabcdef));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            let light = function(&control.context.registry, "one", "main");
+            until(|| {
+                control.context.active_notification("one") == Some(PathKind::Local)
+                    && light
+                        .snapshot()
+                        .lighting
+                        .is_some_and(|snapshot| snapshot.color == Rgb::from_packed(0xabcdef))
+            })
+            .await;
+            assert_eq!(light.snapshot().power, Power::Unknown);
+            let work = control.context.live.borrow().devices["one"]
+                .work
+                .clone()
+                .unwrap();
+            assert_eq!(work.bindings(), vec![COLOR]);
+            assert_eq!(peer.count("subscribe", "one", 0), 1);
+            assert_eq!(
+                light.execute(Command::On).await.map(|_| ()).unwrap_err(),
+                crate::device::CommandError::Unsupported
+            );
+            for _ in 0..10 {
+                future::yield_now().await;
+            }
+            assert_eq!(peer.count("rpcReq", "one", 0), 0);
+            assert_eq!(light.snapshot().power, Power::Unknown);
+            let action = light
+                .begin_light_action(
+                    LightDimension::Color,
+                    color_target(LightColorTarget::Rgb(Rgb::from_packed(0xff0044).unwrap())),
+                    true,
+                )
+                .unwrap();
+            action.accepted().await.unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 0), 1);
+            assert_eq!(light.snapshot().power, Power::Unknown);
+        })
+        .await;
+    }));
 }
