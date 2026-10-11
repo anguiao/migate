@@ -1169,3 +1169,5 @@ mod hs_endpoints;
 mod hs_async;
 
 mod color_reports;
+
+mod lifecycle;

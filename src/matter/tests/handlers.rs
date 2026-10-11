@@ -449,7 +449,7 @@ fn report_dataver(bytes: &[u8]) -> u32 {
 }
 
 #[test]
-fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
+fn rebuilt_topology_channels_and_coalesced_rejoin_share_canonical_state() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -466,7 +466,7 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         let ctx = Context::new(&im, 6, 0);
-        let mut run = pin!(handler.run(&ctx));
+        let mut run = Box::pin(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(
             handler.access(|node| node
@@ -476,8 +476,6 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                 .collect::<Vec<_>>()),
             [0, 1]
         );
-        let root = Context::at(&im, 0, 0x1d, 3);
-        let root_before = report_dataver(&read_bytes(&handler, &root).await.unwrap());
         let (single, mut single_receivers) = super::physical("single", false);
         let single_stored = store.devices().publish(&single.description()).unwrap();
         assert_eq!(single_stored.endpoint, 2);
@@ -485,6 +483,15 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         let (multi, mut receivers) = super::physical("multi", true);
         let stored = store.devices().publish(&multi.description()).unwrap();
         registry.insert(multi.clone());
+        poll_once(run.as_mut()).await.unwrap().unwrap();
+        assert!(handler.needs_rebuild());
+        drop(run);
+        drop(im);
+        drop(handler);
+        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+        let ctx = Context::new(&im, 6, 0);
+        let mut run = Box::pin(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(
             handler.access(|node| node
@@ -493,10 +500,6 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                 .map(|endpoint| endpoint.id)
                 .collect::<Vec<_>>()),
             [0, 1, 2, 3, 4, 5, 6]
-        );
-        assert_eq!(
-            report_dataver(&read_bytes(&handler, &root).await.unwrap()),
-            root_before.wrapping_add(1)
         );
         for (endpoint, expected) in [
             (0, vec![1, 2, 3, 4, 5, 6]),
@@ -568,9 +571,9 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                 ErrorCode::Failure
             );
             let mut out = [0; 128];
-            let mut invoke = pin!(handler.invoke(
+            let mut invoke = Box::pin(handler.invoke(
                 &command,
-                InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
+                InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out)),
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
             receivers[index].next().await.unwrap().accept().unwrap();
@@ -629,9 +632,9 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         let mut command = Context::at(&im, 2, 6, 0);
         command.command.cmd_id = 1;
         let mut out = [0; 128];
-        let mut invoke = pin!(handler.invoke(
+        let mut invoke = Box::pin(handler.invoke(
             &command,
-            InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
+            InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out)),
         ));
         assert!(poll_once(invoke.as_mut()).await.is_none());
         replacement_receivers[0]
@@ -649,6 +652,15 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         );
         store.devices().remove(&stored.key).unwrap();
         registry.remove(&stored.key);
+        poll_once(run.as_mut()).await.unwrap().unwrap();
+        assert!(handler.needs_rebuild());
+        drop(run);
+        drop(im);
+        drop(handler);
+        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+        let ctx = Context::new(&im, 6, 0);
+        let mut run = Box::pin(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(
             read_bytes(&handler, &Context::at(&im, 4, 6, 0))
@@ -670,6 +682,15 @@ fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
             store.devices().publish(&device.description()).unwrap();
             registry.insert(device);
         }
+        poll_once(run.as_mut()).await.unwrap().unwrap();
+        assert!(handler.needs_rebuild());
+        drop(run);
+        drop(im);
+        drop(handler);
+        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+        let ctx = Context::new(&im, 6, 0);
+        let mut run = Box::pin(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(handler.access(|node| node.endpoints.len()), 23);
         protocol.check_failure().unwrap();

@@ -1,4 +1,5 @@
 mod composition;
+mod config_version;
 pub(in crate::matter) mod handlers;
 mod publication;
 mod subscriptions;

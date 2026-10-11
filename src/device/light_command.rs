@@ -432,6 +432,16 @@ impl Function {
             .as_ref()
             .is_some_and(|coordinator| coordinator.current(token).is_some())
     }
+    /// Release only the action owned by a controller that is being destroyed.
+    pub(crate) fn cancel_light_action(&self, token: ActionToken) {
+        let mut state = self.0.state.lock().unwrap();
+        if let Some(coordinator) = state.light_commands.as_mut()
+            && coordinator.current(token).is_some()
+        {
+            coordinator.cancel(token.dimension, CommandError::Cancelled);
+            self.notify_light_actions();
+        }
+    }
     pub fn stop_light(&self, dimension: LightDimension) -> Result<FunctionSnapshot, CommandError> {
         self.cancel_light_dimension(dimension, CommandError::Stopped)
     }

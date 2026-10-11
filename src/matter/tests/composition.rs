@@ -3,7 +3,7 @@ use super::*;
 use crate::{
     device::{
         Availability, CommandReceiver, Composition, DeviceKey, DeviceRegistry, DeviceRequest,
-        LightDimension, LightMode, LightPatch, PhysicalDevice,
+        LightMode, LightPatch, PhysicalDevice,
     },
     storage::{CachedPhysicalDevice, CachedScope, Store},
     xiaomi::{capability::parse_device_for_model, cloud::group_id},
@@ -71,15 +71,19 @@ pub(in crate::matter) struct GroupRig {
 impl GroupRig {
     pub(in crate::matter) fn new(members: &[(&str, &str, &str)]) -> Self {
         let all = members.iter().map(|(did, _, _)| *did).collect::<Vec<_>>();
-        Self::build(members, Some(&all))
+        Self::build(members, Some(&all), &[])
     }
 
     /// Published members without any composition relation yet.
     pub(in crate::matter) fn standalone(members: &[(&str, &str, &str)]) -> Self {
-        Self::build(members, None)
+        Self::build(members, None, &[])
     }
 
-    fn build(members: &[(&str, &str, &str)], group: Option<&[&str]>) -> Self {
+    fn build(
+        members: &[(&str, &str, &str)],
+        group: Option<&[&str]>,
+        capabilities: &[(&str, Vec<Capability>)],
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let registry = DeviceRegistry::new();
@@ -87,7 +91,13 @@ impl GroupRig {
         for (did, model, name) in members {
             let cached = cached_light("uid", did, model);
             let stored = store.devices().publish_cached(&cached, name).unwrap();
-            let (device, mut receivers) = PhysicalDevice::new(stored.description());
+            let mut description = stored.description();
+            if let Some((_, capabilities)) = capabilities.iter().find(|(id, _)| id == did) {
+                description.functions[0]
+                    .capabilities
+                    .clone_from(capabilities);
+            }
+            let (device, mut receivers) = PhysicalDevice::new(description);
             registry.insert(device.clone());
             collected.push(Member {
                 key: device.key().clone(),
@@ -123,31 +133,6 @@ impl GroupRig {
             .iter_mut()
             .find(|member| member.key.id == did)
             .unwrap()
-    }
-
-    /// Replace one published member with the same stable key but different real
-    /// capabilities, as a later capability update would. The confirmed group
-    /// relation and the reserved identity are untouched.
-    pub(in crate::matter) fn set_member_capabilities(
-        &mut self,
-        did: &str,
-        capabilities: Vec<Capability>,
-    ) {
-        let index = self
-            .members
-            .iter()
-            .position(|member| member.key.id == did)
-            .unwrap();
-        let mut description = self.members[index].device.description();
-        description.functions[0].capabilities = capabilities;
-        let (device, mut receivers) = PhysicalDevice::new(description);
-        device.set_availability(Availability::Available);
-        self.registry
-            .replace(device.clone())
-            .expect("capability replacement stays a supported single light");
-        let member = &mut self.members[index];
-        member.device = device;
-        member.receiver = receivers.remove(0);
     }
 
     pub(in crate::matter) fn scope(&self) -> CachedScope {
@@ -232,8 +217,24 @@ macro_rules! setup_model {
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new($rig.store.matter()));
+        matter.startup(&kv).unwrap();
         let $handler = $rig.model();
         let $im = InteractionModel::new(&matter, &crypto, &buffers, &$handler, &kv, &state);
+    };
+}
+
+// Handler-only tests stop the old runner before constructing the new surface.
+macro_rules! rebuild_model {
+    ($rig:expr, $handler:ident, $im:ident, $ctx:ident, $run:ident, $endpoint:expr) => {
+        poll_once($run.as_mut()).await.unwrap().unwrap();
+        assert!($handler.needs_rebuild());
+        drop($run);
+        drop($im);
+        drop($handler);
+        setup_model!($rig, $handler, $im);
+        let $ctx = Context::at(&$im, $endpoint, 0x39, 17);
+        let mut $run = Box::pin($handler.run(&$ctx));
+        assert!(poll_once($run.as_mut()).await.is_none());
     };
 }
 
@@ -266,20 +267,6 @@ fn report_value(bytes: &[u8]) -> TLVElement<'_> {
         .structure()
         .unwrap()
         .find_ctx(2)
-        .unwrap()
-}
-
-fn report_dataver(bytes: &[u8]) -> u32 {
-    TLVElement::new(bytes)
-        .structure()
-        .unwrap()
-        .find_ctx(1)
-        .unwrap()
-        .structure()
-        .unwrap()
-        .find_ctx(0)
-        .unwrap()
-        .u32()
         .unwrap()
 }
 
@@ -557,23 +544,27 @@ async fn reachable(handler: &impl AsyncHandler, base: &impl HandlerContext, endp
 
 #[test]
 fn group_parent_reachable_tracks_any_member_and_starts_jobs_on_first_run() {
-    setup_group!(
-        &[
-            ("ct-one", "yeelink.light.light3", "Ceiling One"),
-            ("rgb-one", "devcea.light.ls2307", "Bedside One"),
-        ],
-        rig,
-        handler,
-        im
-    );
+    let mut rig = GroupRig::new(&[
+        ("ct-one", "yeelink.light.light3", "Ceiling One"),
+        ("rgb-one", "devcea.light.ls2307", "Bedside One"),
+    ]);
     let parent = rig.parent;
     let ct_endpoint = rig.member("ct-one").endpoint;
     let rgb_endpoint = rig.member("rgb-one").endpoint;
     block_on(async {
+        setup_model!(rig, handler, im);
         let ctx = Context::at(&im, parent, 0x39, 17);
-        let mut run = pin!(handler.run(&ctx));
+        let mut run = Box::pin(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(!reachable(&handler, &im, parent).await);
+        // Establishing the shape boundary reports exactly the root
+        // configuration version; nothing else may notify at startup.
+        assert_eq!(
+            ctx.changes.borrow().clone(),
+            vec![(0, 0x28, 0x18)],
+            "startup may only report the baseline configuration version"
+        );
+        ctx.changes.borrow_mut().clear();
         assert!(ctx.changes.borrow().is_empty());
         // The first loop seeds jobs from the already reconciled topology: a
         // member state report must be visible without any registry change.
@@ -626,7 +617,21 @@ fn group_parent_reachable_tracks_any_member_and_starts_jobs_on_first_run() {
                 .any(|change| change.0 != rgb_endpoint)
         );
 
-        rig.member_mut("rgb-one")
+        // Rebuilding after removal seeds the new group from its remaining member.
+        ctx.changes.borrow_mut().clear();
+        rig.recompose(&["ct-one"]);
+        rebuild_model!(rig, handler, im, ctx, run, parent);
+        assert!(!reachable(&handler, &im, parent).await);
+        rig.member_mut("ct-one")
+            .device
+            .set_availability(Availability::Available);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(reachable(&handler, &im, parent).await);
+        assert!(ctx.changes.borrow().contains(&(parent, 0x39, 17)));
+        ctx.changes.borrow_mut().clear();
+        ctx.events.borrow_mut().clear();
+
+        rig.member_mut("ct-one")
             .device
             .set_availability(Availability::Unavailable("offline".into()));
         assert!(poll_once(run.as_mut()).await.is_none());
@@ -634,374 +639,6 @@ fn group_parent_reachable_tracks_any_member_and_starts_jobs_on_first_run() {
         assert!(ctx.changes.borrow().contains(&(parent, 0x39, 17)));
         assert!(ctx.events.borrow().contains(&(parent, 0x39, 3)));
         assert_eq!(ct_endpoint, rig.member("ct-one").endpoint);
-    });
-}
-
-async fn version(
-    handler: &impl AsyncHandler,
-    base: &impl HandlerContext,
-    endpoint: u16,
-    cluster: u32,
-    attribute: u32,
-) -> u32 {
-    report_dataver(
-        &read_bytes(handler, &Context::at(base, endpoint, cluster, attribute))
-            .await
-            .unwrap(),
-    )
-}
-
-#[test]
-fn membership_change_reports_descriptor_and_bridge_presence_and_keeps_control_versions() {
-    let mut rig = GroupRig::standalone(&[
-        ("ct-one", "yeelink.light.light3", "Ceiling One"),
-        ("rgb-one", "devcea.light.ls2307", "Bedside One"),
-    ]);
-    let ct_endpoint = rig.member("ct-one").endpoint;
-    let rgb_endpoint = rig.member("rgb-one").endpoint;
-    for did in ["ct-one", "rgb-one"] {
-        let member = rig.member_mut(did);
-        member.device.set_availability(Availability::Available);
-        member.device.functions()[0]
-            .observe_light(LightPatch {
-                power: Some(true),
-                brightness_percent: Some(50.0),
-                temperature_kelvin: Some(4000),
-                mode: Some(LightMode::Temperature),
-                ..Default::default()
-            })
-            .unwrap();
-    }
-    setup_model!(rig, handler, im);
-    block_on(async {
-        let ctx = Context::at(&im, ct_endpoint, 0x1d, 3);
-        let mut run = pin!(handler.run(&ctx));
-        assert!(poll_once(run.as_mut()).await.is_none());
-        let ct_descriptor = version(&handler, &im, ct_endpoint, 0x1d, 0).await;
-        let ct_onoff = version(&handler, &im, ct_endpoint, 6, 0).await;
-        let ct_level = version(&handler, &im, ct_endpoint, 8, 0).await;
-        let rgb_descriptor = version(&handler, &im, rgb_endpoint, 0x1d, 0).await;
-        let rgb_onoff = version(&handler, &im, rgb_endpoint, 6, 0).await;
-        let rgb_level = version(&handler, &im, rgb_endpoint, 8, 0).await;
-        let rgb_color = version(&handler, &im, rgb_endpoint, 0x300, 7).await;
-        let rgb_bridged = version(&handler, &im, rgb_endpoint, 0x39, 17).await;
-        let root_parts = version(&handler, &im, 0, 0x1d, 3).await;
-        let aggregator_parts = version(&handler, &im, 1, 0x1d, 3).await;
-        ctx.changes.borrow_mut().clear();
-
-        // Join: both members lose their BDBI cluster. Every affected endpoint
-        // reports Descriptor and the 0x39 presence change; light control
-        // versions and the endpoint set stay untouched.
-        let parent = rig.recompose(&["ct-one", "rgb-one"]);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert_eq!(
-            report_parts(
-                &read_bytes(&handler, &Context::at(&im, parent, 0x1d, 3))
-                    .await
-                    .unwrap()
-            ),
-            [ct_endpoint, rgb_endpoint]
-        );
-        assert_eq!(
-            read_bytes(&handler, &Context::at(&im, rgb_endpoint, 0x39, 17))
-                .await
-                .unwrap_err()
-                .code(),
-            ErrorCode::EndpointNotFound
-        );
-        assert!(
-            ctx.changes.borrow().contains(&(parent, u32::MAX, u32::MAX)),
-            "a new parent endpoint reports endpoint-wide"
-        );
-        for endpoint in [ct_endpoint, rgb_endpoint] {
-            assert!(ctx.changes.borrow().contains(&(endpoint, 0x1d, u32::MAX)));
-            assert!(ctx.changes.borrow().contains(&(endpoint, 0x39, u32::MAX)));
-        }
-        assert_ne!(
-            version(&handler, &im, rgb_endpoint, 0x1d, 0).await,
-            rgb_descriptor
-        );
-        assert_ne!(
-            version(&handler, &im, ct_endpoint, 0x1d, 0).await,
-            ct_descriptor
-        );
-        for (endpoint, onoff, level) in [
-            (ct_endpoint, ct_onoff, ct_level),
-            (rgb_endpoint, rgb_onoff, rgb_level),
-        ] {
-            assert_eq!(version(&handler, &im, endpoint, 6, 0).await, onoff);
-            assert_eq!(version(&handler, &im, endpoint, 8, 0).await, level);
-        }
-        assert_eq!(
-            version(&handler, &im, rgb_endpoint, 0x300, 7).await,
-            rgb_color
-        );
-        // The parent endpoint is new, so the canonical ancestor PartsLists
-        // change even though no light member version does.
-        assert_ne!(version(&handler, &im, 0, 0x1d, 3).await, root_parts);
-        assert_ne!(version(&handler, &im, 1, 0x1d, 3).await, aggregator_parts);
-        let root_parts = version(&handler, &im, 0, 0x1d, 3).await;
-        let aggregator_parts = version(&handler, &im, 1, 0x1d, 3).await;
-
-        // Leave: only the leaving member changes; its BDBI reappears with a
-        // new version and reports, while the still-composed member and all
-        // light control versions stay untouched.
-        ctx.changes.borrow_mut().clear();
-        let parent_parts = version(&handler, &im, parent, 0x1d, 3).await;
-        let ct_descriptor = version(&handler, &im, ct_endpoint, 0x1d, 0).await;
-        let rgb_descriptor = version(&handler, &im, rgb_endpoint, 0x1d, 0).await;
-        rig.recompose(&["ct-one"]);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert_eq!(
-            report_parts(
-                &read_bytes(&handler, &Context::at(&im, parent, 0x1d, 3))
-                    .await
-                    .unwrap()
-            ),
-            [ct_endpoint]
-        );
-        assert_ne!(
-            version(&handler, &im, rgb_endpoint, 0x39, 17).await,
-            rgb_bridged
-        );
-        assert_ne!(version(&handler, &im, parent, 0x1d, 3).await, parent_parts);
-        assert_ne!(
-            version(&handler, &im, rgb_endpoint, 0x1d, 0).await,
-            rgb_descriptor
-        );
-        assert!(ctx.changes.borrow().contains(&(parent, 0x1d, u32::MAX)));
-        assert!(
-            ctx.changes
-                .borrow()
-                .contains(&(rgb_endpoint, 0x1d, u32::MAX))
-        );
-        assert!(
-            ctx.changes
-                .borrow()
-                .contains(&(rgb_endpoint, 0x39, u32::MAX))
-        );
-        assert_eq!(
-            version(&handler, &im, ct_endpoint, 0x1d, 0).await,
-            ct_descriptor
-        );
-        assert!(
-            !ctx.changes
-                .borrow()
-                .contains(&(ct_endpoint, 0x39, u32::MAX))
-        );
-        for (endpoint, onoff, level) in [
-            (ct_endpoint, ct_onoff, ct_level),
-            (rgb_endpoint, rgb_onoff, rgb_level),
-        ] {
-            assert_eq!(version(&handler, &im, endpoint, 6, 0).await, onoff);
-            assert_eq!(version(&handler, &im, endpoint, 8, 0).await, level);
-        }
-        assert_eq!(
-            version(&handler, &im, rgb_endpoint, 0x300, 7).await,
-            rgb_color
-        );
-        assert_eq!(version(&handler, &im, 0, 0x1d, 3).await, root_parts);
-        assert_eq!(version(&handler, &im, 1, 0x1d, 3).await, aggregator_parts);
-    });
-}
-
-#[test]
-fn membership_change_keeps_running_member_transition_across_leave_join_and_dissolve() {
-    setup_group!(
-        &[
-            ("ct-one", "yeelink.light.light3", "Ceiling One"),
-            ("rgb-one", "devcea.light.ls2307", "Bedside One"),
-        ],
-        rig,
-        handler,
-        im
-    );
-    let ct_endpoint = rig.member("ct-one").endpoint;
-    let ct_function = rig.member("ct-one").device.functions()[0].clone();
-    rig.member_mut("ct-one")
-        .device
-        .set_availability(Availability::Available);
-    ct_function
-        .observe_light(LightPatch {
-            power: Some(true),
-            brightness_percent: Some(1.0),
-            temperature_kelvin: Some(4000),
-            mode: Some(LightMode::Temperature),
-            ..Default::default()
-        })
-        .unwrap();
-    block_on(async {
-        let ctx = Context::at(&im, ct_endpoint, 8, 0);
-        let mut run = pin!(handler.run(&ctx));
-        assert!(poll_once(run.as_mut()).await.is_none());
-        let mut command = Context::at(&im, ct_endpoint, 8, 0);
-        command.command.cmd_id = 0;
-        command.data = TLVElement::new(&[
-            0x15, 0x24, 0, 254, 0x25, 1, 2, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
-        ]);
-        let mut out = [0; 128];
-        let mut invoke = pin!(handler.invoke(
-            &command,
-            InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
-        ));
-        assert!(poll_once(invoke.as_mut()).await.is_none());
-        let DeviceRequest::Light(first) = rig
-            .member_mut("ct-one")
-            .receiver
-            .next_operation()
-            .await
-            .unwrap()
-        else {
-            panic!("missing light startup")
-        };
-        let token = first.token;
-        assert!(!first.final_frame);
-        first.skip_unchanged().unwrap();
-        assert!(poll_once(invoke.as_mut()).await.is_none());
-        assert!(ct_function.light_action_current(token));
-
-        // Topology changes never abort or replay the running member action:
-        // leave, join again, then dissolve while the transition is active.
-        rig.recompose(&["rgb-one"]);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(ct_function.light_action_current(token));
-        handler.access(|node| {
-            let ct = node.endpoint(ct_endpoint).unwrap();
-            assert!(ct.cluster(0x39).is_some());
-            assert!(
-                ct.device_types
-                    .iter()
-                    .any(|kind| kind.dtype == DEV_TYPE_BRIDGED_NODE.dtype)
-            );
-        });
-        rig.recompose(&["ct-one", "rgb-one"]);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(ct_function.light_action_current(token));
-        handler.access(|node| {
-            let ct = node.endpoint(ct_endpoint).unwrap();
-            assert!(ct.cluster(0x39).is_none());
-        });
-        rig.recompose(&[]);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(ct_function.light_action_current(token));
-        handler.access(|node| {
-            let ct = node.endpoint(ct_endpoint).unwrap();
-            assert!(ct.cluster(0x39).is_some());
-        });
-
-        // The original transition still completes on the same controller and
-        // every frame belongs to the original action token.
-        let mut final_seen = false;
-        futures_lite::future::or(
-            async {
-                loop {
-                    let DeviceRequest::Light(request) = rig
-                        .member_mut("ct-one")
-                        .receiver
-                        .next_operation()
-                        .await
-                        .unwrap()
-                    else {
-                        panic!("unexpected power frame")
-                    };
-                    assert_eq!(request.token, token);
-                    assert_eq!(request.target.power, None);
-                    let final_frame = request.final_frame;
-                    request.mark_sent().unwrap();
-                    ct_function
-                        .observe_light(LightPatch {
-                            brightness_percent: request.target.brightness_percent,
-                            ..Default::default()
-                        })
-                        .unwrap();
-                    request.accept().unwrap();
-                    if final_frame {
-                        final_seen = true;
-                        break;
-                    }
-                }
-            },
-            async {
-                run.as_mut().await.unwrap();
-            },
-        )
-        .await;
-        assert!(final_seen);
-        invoke.await.unwrap();
-
-        // Step survives topology changes; takeover stays dimension scoped.
-        let mut step = Context::at(&im, ct_endpoint, 8, 0);
-        step.command.cmd_id = rs_matter::dm::clusters::app::level_control::CommandId::Step as u32;
-        step.data = TLVElement::new(&[
-            0x15, 0x24, 0, 1, 0x24, 1, 20, 0x25, 2, 2, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
-        ]);
-        let mut step_out = [0; 128];
-        let mut invoke = pin!(handler.invoke(
-            &step,
-            InvokeReplyInstance::new(&step.command, WriteBuf::new(&mut step_out))
-        ));
-        assert!(poll_once(invoke.as_mut()).await.is_none());
-        let DeviceRequest::Light(request) = rig
-            .member_mut("ct-one")
-            .receiver
-            .next_operation()
-            .await
-            .unwrap()
-        else {
-            panic!("step is not a light frame")
-        };
-        let step_token = request.token;
-        assert!(!request.final_frame);
-        request.skip_unchanged().unwrap();
-        assert!(ct_function.light_action_current(step_token));
-        rig.recompose(&["ct-one"]);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(ct_function.light_action_current(step_token));
-        ct_function
-            .take_over_light(LightDimension::Brightness)
-            .unwrap();
-        assert!(!ct_function.light_action_current(step_token));
-        assert_eq!(invoke.await.unwrap_err().code(), ErrorCode::Failure);
-
-        // Stop reaches the same retained controller after another change.
-        let mut step = Context::at(&im, ct_endpoint, 8, 0);
-        step.command.cmd_id = rs_matter::dm::clusters::app::level_control::CommandId::Step as u32;
-        step.data = TLVElement::new(&[
-            0x15, 0x24, 0, 1, 0x24, 1, 20, 0x25, 2, 2, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
-        ]);
-        let mut out2 = [0; 128];
-        let mut invoke = pin!(handler.invoke(
-            &step,
-            InvokeReplyInstance::new(&step.command, WriteBuf::new(&mut out2))
-        ));
-        assert!(poll_once(invoke.as_mut()).await.is_none());
-        let DeviceRequest::Light(request) = rig
-            .member_mut("ct-one")
-            .receiver
-            .next_operation()
-            .await
-            .unwrap()
-        else {
-            panic!("step is not a light frame")
-        };
-        let stop_token = request.token;
-        request.skip_unchanged().unwrap();
-        assert!(ct_function.light_action_current(stop_token));
-        rig.recompose(&[]);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(ct_function.light_action_current(stop_token));
-        let mut stop = Context::at(&im, ct_endpoint, 8, 0);
-        stop.command.cmd_id = 3;
-        stop.data = TLVElement::new(&[0x15, 0x24, 0, 0, 0x24, 1, 0, 0x18]);
-        handler
-            .invoke(
-                &stop,
-                InvokeReplyInstance::new(&stop.command, WriteBuf::new(&mut [0; 128])),
-            )
-            .await
-            .unwrap();
-        assert!(!ct_function.light_action_current(stop_token));
-        assert_eq!(invoke.await.unwrap_err().code(), ErrorCode::Failure);
     });
 }
 
@@ -1065,20 +702,16 @@ async fn write_label(
 
 #[test]
 fn member_tags_use_saved_names_and_stay_stable_across_reorder_and_removal() {
-    setup_group!(
-        &[
-            ("ct-a", "yeelink.light.light3", "Shared Name"),
-            ("ct-b", "yeelink.light.light3", "Shared Name"),
-            ("rgb-c", "devcea.light.ls2307", "Bedside"),
-        ],
-        rig,
-        handler,
-        im
-    );
+    let rig = GroupRig::new(&[
+        ("ct-a", "yeelink.light.light3", "Shared Name"),
+        ("ct-b", "yeelink.light.light3", "Shared Name"),
+        ("rgb-c", "devcea.light.ls2307", "Bedside"),
+    ]);
     let parent = rig.parent;
     block_on(async {
+        setup_model!(rig, handler, im);
         let ctx = Context::at(&im, parent, 0x1d, 3);
-        let mut run = pin!(handler.run(&ctx));
+        let mut run = Box::pin(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         let expected = |did: &str| {
             let member = rig.member(did);
@@ -1113,7 +746,7 @@ fn member_tags_use_saved_names_and_stay_stable_across_reorder_and_removal() {
         }
         // Removing one member must not renumber the others.
         rig.recompose(&["ct-a", "rgb-c"]);
-        assert!(poll_once(run.as_mut()).await.is_none());
+        rebuild_model!(rig, handler, im, ctx, run, parent);
         for (did, tags) in initial.iter().filter(|(did, _)| *did != "ct-b") {
             assert_eq!(
                 member_tags(&handler, &im, rig.member(did).endpoint).await,
@@ -1122,7 +755,7 @@ fn member_tags_use_saved_names_and_stay_stable_across_reorder_and_removal() {
         }
         // Leaving the group keeps the saved member name as its NodeLabel.
         rig.recompose(&[]);
-        assert!(poll_once(run.as_mut()).await.is_none());
+        rebuild_model!(rig, handler, im, ctx, run, parent);
         assert_eq!(
             node_label(&handler, &im, rig.member("ct-a").endpoint).await,
             "Shared Name"
@@ -1136,10 +769,10 @@ fn group_and_member_saved_names_survive_rename_join_leave_and_restart() {
     let ct_endpoint = rig.member("ct-one").endpoint;
     let mut parent = 0;
     {
-        setup_model!(rig, handler, im);
         block_on(async {
+            setup_model!(rig, handler, im);
             let ctx = Context::at(&im, ct_endpoint, 0x39, 5);
-            let mut run = pin!(handler.run(&ctx));
+            let mut run = Box::pin(handler.run(&ctx));
             assert!(poll_once(run.as_mut()).await.is_none());
             write_label(&handler, &im, ct_endpoint, "Renamed Lamp")
                 .await
@@ -1154,7 +787,7 @@ fn group_and_member_saved_names_survive_rename_join_leave_and_restart() {
                 "Renamed Lamp"
             );
             parent = rig.recompose(&["ct-one"]);
-            assert!(poll_once(run.as_mut()).await.is_none());
+            rebuild_model!(rig, handler, im, ctx, run, ct_endpoint);
             assert_eq!(
                 member_tags(&handler, &im, ct_endpoint).await[0]
                     .3
@@ -1213,11 +846,11 @@ fn group_and_member_saved_names_survive_rename_join_leave_and_restart() {
             // Dissolving the group restores the member's own saved name; a
             // later rejoin reuses the reserved parent endpoint and name.
             rig.recompose(&[]);
-            assert!(poll_once(run.as_mut()).await.is_none());
+            rebuild_model!(rig, handler, im, ctx, run, ct_endpoint);
             assert_eq!(rig.member("ct-one").endpoint, ct_endpoint);
             assert_eq!(node_label(&handler, &im, ct_endpoint).await, "Renamed Lamp");
             let rejoined = rig.recompose(&["ct-one"]);
-            assert!(poll_once(run.as_mut()).await.is_none());
+            rebuild_model!(rig, handler, im, ctx, run, ct_endpoint);
             assert_eq!(rejoined, parent);
             assert_eq!(node_label(&handler, &im, parent).await, "Kitchen Group");
             assert_eq!(
@@ -1227,20 +860,20 @@ fn group_and_member_saved_names_survive_rename_join_leave_and_restart() {
                 Some("Renamed Lamp")
             );
             rig.recompose(&[]);
-            assert!(poll_once(run.as_mut()).await.is_none());
+            rebuild_model!(rig, handler, im, ctx, run, ct_endpoint);
         });
     }
     // Restarting the model from the same storage keeps the member name; the
     // group name still wins over a fresh relation proposal.
     {
-        setup_model!(rig, handler, im);
         block_on(async {
+            setup_model!(rig, handler, im);
             assert_eq!(node_label(&handler, &im, ct_endpoint).await, "Renamed Lamp");
             let ctx = Context::at(&im, ct_endpoint, 0x39, 5);
-            let mut run = pin!(handler.run(&ctx));
+            let mut run = Box::pin(handler.run(&ctx));
             assert!(poll_once(run.as_mut()).await.is_none());
             let rejoined = rig.recompose(&["ct-one"]);
-            assert!(poll_once(run.as_mut()).await.is_none());
+            rebuild_model!(rig, handler, im, ctx, run, ct_endpoint);
             assert_eq!(rejoined, parent);
             assert_eq!(node_label(&handler, &im, parent).await, "Kitchen Group");
             assert_eq!(
@@ -1354,76 +987,6 @@ fn more_than_255_members_keep_collision_free_tags_and_complete_parts() {
 }
 
 #[test]
-fn group_reachable_tracks_membership_and_member_instance_replacement() {
-    setup_group!(
-        &[
-            ("ct-one", "yeelink.light.light3", "Ceiling One"),
-            ("rgb-one", "devcea.light.ls2307", "Bedside One"),
-        ],
-        rig,
-        handler,
-        im
-    );
-    let parent = rig.parent;
-    block_on(async {
-        let ctx = Context::at(&im, parent, 0x39, 17);
-        let mut run = pin!(handler.run(&ctx));
-        assert!(poll_once(run.as_mut()).await.is_none());
-        rig.member_mut("ct-one")
-            .device
-            .set_availability(Availability::Unavailable("offline".into()));
-        rig.member_mut("rgb-one")
-            .device
-            .set_availability(Availability::Available);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(reachable(&handler, &im, parent).await);
-        ctx.changes.borrow_mut().clear();
-        ctx.events.borrow_mut().clear();
-
-        // A compatible replacement keeps key and endpoint but retires the
-        // running instance; the parent must watch the new one.
-        let replacement = {
-            let stored = rig
-                .store
-                .devices()
-                .load_published(&DeviceKey::new("xiaomi", "rgb-one"))
-                .unwrap()
-                .unwrap();
-            let (device, _receivers) = PhysicalDevice::new(stored.description());
-            device.set_availability(Availability::Unavailable("replaced".into()));
-            rig.registry.replace(device.clone()).unwrap().unwrap();
-            device
-        };
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(!reachable(&handler, &im, parent).await);
-        assert!(ctx.changes.borrow().contains(&(parent, 0x39, 17)));
-        assert!(ctx.events.borrow().contains(&(parent, 0x39, 3)));
-        ctx.changes.borrow_mut().clear();
-        ctx.events.borrow_mut().clear();
-
-        replacement.set_availability(Availability::Available);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(reachable(&handler, &im, parent).await);
-        assert!(ctx.changes.borrow().contains(&(parent, 0x39, 17)));
-        assert!(ctx.events.borrow().contains(&(parent, 0x39, 3)));
-        ctx.changes.borrow_mut().clear();
-        ctx.events.borrow_mut().clear();
-
-        // Membership changes rebind the watched set; only the retained member
-        // decides the aggregate here.
-        rig.recompose(&["ct-one"]);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(!reachable(&handler, &im, parent).await);
-        rig.member_mut("ct-one")
-            .device
-            .set_availability(Availability::Available);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(reachable(&handler, &im, parent).await);
-        assert!(ctx.changes.borrow().contains(&(parent, 0x39, 17)));
-    });
-}
-
-#[test]
 fn member_external_reports_and_command_failures_stay_isolated() {
     setup_group!(
         &[
@@ -1438,7 +1001,7 @@ fn member_external_reports_and_command_failures_stay_isolated() {
     let rgb_endpoint = rig.member("rgb-one").endpoint;
     block_on(async {
         let ctx = Context::at(&im, ct_endpoint, 6, 0);
-        let mut run = pin!(handler.run(&ctx));
+        let mut run = Box::pin(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         rig.member_mut("ct-one")
             .device
@@ -1552,8 +1115,6 @@ fn group_child_metadata_matches_every_real_on_off_combination() {
         (true, true, false),
         (true, true, true),
     ] {
-        let mut rig = GroupRig::new(&[("member-a", "yeelink.light.light3", "Member")]);
-        let child_endpoint = rig.member("member-a").endpoint;
         let mut capabilities = vec![Capability::OnOff];
         if brightness {
             capabilities.push(Capability::Brightness);
@@ -1564,7 +1125,12 @@ fn group_child_metadata_matches_every_real_on_off_combination() {
         if rgb {
             capabilities.push(Capability::ColorRgb);
         }
-        rig.set_member_capabilities("member-a", capabilities);
+        let rig = GroupRig::build(
+            &[("member-a", "yeelink.light.light3", "Member")],
+            Some(&["member-a"]),
+            &[("member-a", capabilities)],
+        );
+        let child_endpoint = rig.member("member-a").endpoint;
         let model = rig.model();
         let combo = (true, brightness, temperature, rgb);
         model.access(|node| {
@@ -1580,14 +1146,17 @@ fn group_child_metadata_matches_every_real_on_off_combination() {
 
 #[test]
 fn group_with_unmappable_member_is_not_published_and_others_fall_back_to_standalone() {
-    let mut rig = GroupRig::new(&[
-        ("member-a", "yeelink.light.light3", "Ceiling"),
-        ("member-b", "devcea.light.ls2307", "Bedside"),
-    ]);
+    let rig = GroupRig::build(
+        &[
+            ("member-a", "yeelink.light.light3", "Ceiling"),
+            ("member-b", "devcea.light.ls2307", "Bedside"),
+        ],
+        Some(&["member-a", "member-b"]),
+        &[("member-a", vec![Capability::Brightness])],
+    );
     let parent = rig.parent;
     let unmappable = rig.member("member-a").endpoint;
     let mappable = rig.member("member-b").endpoint;
-    rig.set_member_capabilities("member-a", vec![Capability::Brightness]);
     let model = rig.model();
     model.access(|node| {
         let ids = node

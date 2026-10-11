@@ -44,12 +44,16 @@ use rs_matter::{
     utils::sync::DynBase,
 };
 use std::{
-    cell::RefCell,
-    collections::{BTreeMap, HashMap},
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet, HashMap},
     rc::Rc,
 };
 
 const AGGREGATOR_ENDPOINT: u16 = 1;
+/// Vendor blob key for the canonical published-shape boundary. The first
+/// vendor key is reserved for the migrated legacy label, so the shape uses the
+/// next one. The value is MiGate-owned and private to this module.
+const MATTER_SHAPE_KEY: u16 = rs_matter::persist::VENDOR_KEYS_START + 1;
 const ROOT: Endpoint<'static> = root_endpoint!(eth);
 const AGGREGATOR: Endpoint<'static> = Endpoint::new(
     AGGREGATOR_ENDPOINT,
@@ -71,8 +75,8 @@ const SINGLE_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::DescHandler::CLUSTER,
     groups::GroupsHandler::CLUSTER,
     identify::IdentifyHandler::<()>::CLUSTER,
-    BridgedHandler::CLUSTER,
-    OnOffHandler::CLUSTER
+    OnOffHandler::CLUSTER,
+    BridgedHandler::CLUSTER
 );
 const LIGHT_IDENTIFY: rs_matter::dm::Cluster<'static> = identify::IdentifyHandler::<()>::CLUSTER
     .with_cmds(rs_matter::with!(identify::CommandId::Identify));
@@ -150,9 +154,6 @@ enum Role {
     Child {
         control: Rc<Control>,
         tags: ChildTags,
-        /// The bridge version is retained while the cluster is hidden so a
-        /// member that leaves its group resumes its previous identity version.
-        bridged_version: Dataver,
     },
 }
 struct Control {
@@ -482,15 +483,16 @@ fn light_clusters(publication: LightPublication, single: bool) -> Box<[Cluster<'
         groups::GroupsHandler::CLUSTER,
         LIGHT_IDENTIFY,
     ];
-    if single {
-        clusters.push(BridgedHandler::CLUSTER);
-    }
     clusters.push(lighting::OnOffHandler::CLUSTER);
     if publication.brightness {
         clusters.push(<lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER);
     }
     if publication.has_color_control() {
         clusters.push(color_cluster(publication));
+    }
+    // Bridge metadata follows the control clusters in the published server list.
+    if single {
+        clusters.push(BridgedHandler::CLUSTER);
     }
     clusters.into_boxed_slice()
 }
@@ -545,9 +547,7 @@ impl Role {
     fn bridged_version(&self) -> u32 {
         match self {
             Self::Single { bridged, .. } | Self::Parent { bridged, .. } => bridged.dataver(),
-            Self::Child {
-                bridged_version, ..
-            } => bridged_version.get(),
+            Self::Child { .. } => 0,
         }
     }
 }
@@ -665,21 +665,16 @@ impl desc::PartsMatcher for Entry {
     }
 }
 
+struct Prepared {
+    entries: Vec<Rc<Entry>>,
+    member_updates: Vec<(Rc<GroupBridge>, Vec<PhysicalDevice>)>,
+}
+
 #[derive(Default)]
 struct Reconcile {
-    added: Vec<u16>,
-    removed: Vec<u16>,
-    /// Existing endpoints whose descriptor metadata changed.
-    metadata: Vec<u16>,
-    /// Existing endpoints where the Bridged Device Basic Information cluster
-    /// appeared or disappeared, so its subscriptions must be re-evaluated.
-    bridged_presence: Vec<u16>,
-    /// Existing endpoints whose device instance was replaced; their whole
-    /// control surface may differ, so every cluster version is reported.
-    replaced: Vec<u16>,
-    /// Restart one control job; `None` stops it.
+    /// A replacement instance needs fresh state reports without changing its shape.
+    state_refresh: Vec<u16>,
     controls: Vec<(u16, Option<Rc<Control>>)>,
-    /// Restart one bridge job; `None` stops it.
     bridges: Vec<(u16, Option<Rc<BridgedHandler>>)>,
 }
 
@@ -691,8 +686,8 @@ pub(super) struct Model {
     store: Store,
     protocol: StoreAdapter,
     root: RootHandler,
+    rebuild: Cell<bool>,
     entries: RefCell<Vec<Rc<Entry>>>,
-    versions: RefCell<BTreeMap<u16, Versions>>,
 }
 pub(super) fn handler(
     registry: &DeviceRegistry,
@@ -712,9 +707,10 @@ pub(super) fn handler(
                 Async(desc::DescHandler::new_aggregator(Dataver::new_rand(&mut random)).adapt()),
             ),
         entries: RefCell::new(Vec::new()),
-        versions: RefCell::new(BTreeMap::new()),
+        rebuild: Cell::new(false),
     };
-    model.reconcile(&registry.snapshot())?;
+    let prepared = model.prepare(&registry.snapshot())?;
+    *model.entries.borrow_mut() = prepared.entries;
     Ok(model)
 }
 
@@ -738,31 +734,165 @@ fn same_bridge(left: &Option<Rc<BridgedHandler>>, right: &Option<Rc<BridgedHandl
         _ => false,
     }
 }
-fn same_metadata(previous: &Entry, desired: &Entry) -> bool {
-    let same_device = match (&previous.device, &desired.device) {
-        (Some(left), Some(right)) => left.same_instance(right),
-        (None, None) => true,
-        _ => false,
-    };
-    if !same_device {
-        return false;
+fn encode_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+fn encode_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+fn encode_len(out: &mut Vec<u8>, len: usize) {
+    out.extend_from_slice(&(len as u64).to_le_bytes());
+}
+fn encode_str(out: &mut Vec<u8>, value: &str) {
+    encode_len(out, value.len());
+    out.extend_from_slice(value.as_bytes());
+}
+fn encode_tag(
+    out: &mut Vec<u8>,
+    mfg_code: Option<u16>,
+    namespace: u8,
+    tag: u8,
+    label: Option<&str>,
+) {
+    match mfg_code {
+        Some(mfg_code) => {
+            out.push(1);
+            encode_u16(out, mfg_code);
+        }
+        None => out.push(0),
     }
-    match (&previous.role, &desired.role) {
-        (Role::Single { .. }, Role::Single { .. }) => true,
-        (
-            Role::Parent {
-                children: left,
-                bridged: left_bridge,
-                ..
-            },
-            Role::Parent {
-                children: right,
-                bridged: right_bridge,
-                ..
-            },
-        ) => left == right && left_bridge.group_key() == right_bridge.group_key(),
-        (Role::Child { tags: left, .. }, Role::Child { tags: right, .. }) => left == right,
-        _ => false,
+    out.push(namespace);
+    out.push(tag);
+    match label {
+        Some(label) => {
+            out.push(1);
+            encode_str(out, label);
+        }
+        None => out.push(0),
+    }
+}
+/// Encode one advertised cluster exactly as the Descriptor and subscription
+/// surfaces see it: id, features, revision and the real attribute/command IDs.
+fn encode_cluster(out: &mut Vec<u8>, cluster: &Cluster<'_>) {
+    encode_u32(out, cluster.id);
+    encode_u32(out, cluster.feature_map);
+    encode_u16(out, cluster.revision);
+    let mut attributes = cluster
+        .attributes
+        .iter()
+        .filter(|attribute| cluster.attribute(attribute.id).is_some())
+        .map(|attribute| attribute.id)
+        .collect::<Vec<_>>();
+    attributes.sort_unstable();
+    encode_len(out, attributes.len());
+    for attribute in attributes {
+        encode_u32(out, attribute);
+    }
+    let mut commands = cluster
+        .commands
+        .iter()
+        .filter(|command| cluster.command(command.id).is_some())
+        .map(|command| command.id)
+        .collect::<Vec<_>>();
+    commands.sort_unstable();
+    encode_len(out, commands.len());
+    for command in commands {
+        encode_u32(out, command);
+    }
+}
+fn encode_metadata(out: &mut Vec<u8>, id: u16, types: &[DeviceType], clusters: &[Cluster<'_>]) {
+    encode_u16(out, id);
+    let mut types = types
+        .iter()
+        .map(|device_type| (device_type.dtype, device_type.drev))
+        .collect::<Vec<_>>();
+    types.sort_unstable();
+    encode_len(out, types.len());
+    for (dtype, drev) in types {
+        encode_u16(out, dtype);
+        encode_u16(out, drev);
+    }
+    let mut clusters = clusters.iter().collect::<Vec<_>>();
+    clusters.sort_by_key(|cluster| cluster.id);
+    encode_len(out, clusters.len());
+    for cluster in clusters {
+        encode_cluster(out, cluster);
+    }
+}
+fn encode_light(out: &mut Vec<u8>, control: &Control) {
+    match control.lighting.as_ref().map(|light| light.publication()) {
+        None => out.push(0),
+        Some(publication) => {
+            out.push(1);
+            out.push(u8::from(publication.brightness));
+            out.push(u8::from(publication.rgb));
+            match publication.temperature {
+                Some(temperature) => {
+                    out.push(1);
+                    encode_u16(out, temperature.bounds.0);
+                    encode_u16(out, temperature.bounds.1);
+                }
+                None => out.push(0),
+            }
+        }
+    }
+}
+/// Canonical per-endpoint shape. Order-insensitive collections are sorted so a
+/// pure reorder never looks like a structural change; real attribute/command,
+/// feature, revision, device-type and CT-bound changes do.
+fn encode_entry(out: &mut Vec<u8>, entry: &Entry) {
+    encode_metadata(out, entry.endpoint, &entry.types, &entry.clusters);
+    out.push(u8::from(entry.role.bridged_rc().is_some()));
+    match &entry.role {
+        Role::Single { control, .. } => {
+            out.push(1);
+            encode_len(out, 0);
+            encode_len(out, 0);
+            encode_light(out, control);
+            out.push(0);
+        }
+        Role::Parent { children, bridged } => {
+            out.push(2);
+            let mut children = children.clone();
+            children.sort_unstable();
+            encode_len(out, children.len());
+            for child in children {
+                encode_u16(out, child);
+            }
+            encode_len(out, 0);
+            out.push(0);
+            match bridged.group_key() {
+                Some(key) => {
+                    out.push(1);
+                    encode_str(out, &key.source);
+                    encode_str(out, &key.id);
+                }
+                None => out.push(0),
+            }
+        }
+        Role::Child { control, tags, .. } => {
+            out.push(3);
+            encode_len(out, 0);
+            match tags {
+                ChildTags::Outlet { index, label } => {
+                    encode_len(out, 1);
+                    encode_tag(out, None, NS_COMMON_NUMBER, *index, Some(label));
+                }
+                ChildTags::Light { endpoint, label } => {
+                    encode_len(out, 2);
+                    encode_tag(
+                        out,
+                        Some(TEST_VID),
+                        (*endpoint >> 8) as u8,
+                        *endpoint as u8,
+                        Some(label),
+                    );
+                    encode_tag(out, None, NS_COMMON_NUMBER, 0, None);
+                }
+            }
+            encode_light(out, control);
+            out.push(0);
+        }
     }
 }
 
@@ -779,7 +909,6 @@ impl Model {
         previous
             .get(&endpoint)
             .map(|entry| entry.versions())
-            .or_else(|| self.versions.borrow().get(&endpoint).copied())
             .unwrap_or_else(|| {
                 let mut random = rand::rng();
                 Versions {
@@ -793,7 +922,27 @@ impl Model {
                 }
             })
     }
-    fn reconcile(&self, snapshot: &RegistrySnapshot) -> Result<Reconcile, StorageError> {
+    /// Canonical bytes of the whole published surface, including the static
+    /// root and aggregator metadata so protocol or app upgrades that change
+    /// them are detected too. Dynamic NodeLabel and source values are excluded.
+    fn shape_bytes(&self) -> Vec<u8> {
+        Self::encode_shape(&self.entries.borrow())
+    }
+    fn encode_shape(entries: &[Rc<Entry>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_metadata(&mut out, ROOT.id, ROOT.device_types, ROOT.clusters);
+        encode_metadata(
+            &mut out,
+            AGGREGATOR.id,
+            AGGREGATOR.device_types,
+            AGGREGATOR.clusters,
+        );
+        for entry in entries {
+            encode_entry(&mut out, entry);
+        }
+        out
+    }
+    fn prepare(&self, snapshot: &RegistrySnapshot) -> Result<Prepared, StorageError> {
         let previous = self.entries.borrow().clone();
         let previous_by_endpoint = previous
             .iter()
@@ -823,11 +972,7 @@ impl Model {
             |key: &DeviceKey| light_publication.get(key).is_some_and(Result::is_ok);
         let mut member_group = HashMap::<DeviceKey, DeviceKey>::new();
         for group in &snapshot.composition.groups {
-            if group
-                .members
-                .iter()
-                .all(|member| member_publishable(member))
-            {
+            if group.members.iter().all(&member_publishable) {
                 for member in &group.members {
                     member_group.insert(member.clone(), group.key.clone());
                 }
@@ -899,7 +1044,6 @@ impl Model {
                                 index: index as u8 + 1,
                                 label: function.label.clone(),
                             },
-                            bridged_version: Dataver::new(versions.bridged),
                         },
                         types: static_types(CHILD_TYPES),
                         clusters: static_clusters(CHILD_CLUSTERS),
@@ -946,7 +1090,6 @@ impl Model {
                                 endpoint,
                                 label: identity.label.clone(),
                             },
-                            bridged_version: Dataver::new(versions.bridged),
                         },
                         types: light_types(publication, false),
                         clusters: light_clusters(publication, false),
@@ -982,11 +1125,7 @@ impl Model {
         }
 
         for group in &snapshot.composition.groups {
-            if !group
-                .members
-                .iter()
-                .all(|member| member_publishable(member))
-            {
+            if !group.members.iter().all(&member_publishable) {
                 continue;
             }
             let group_identity = self
@@ -1082,66 +1221,71 @@ impl Model {
                 return Err(self.invalid("Reconciled endpoints are duplicated"));
             }
         }
-        for (bridge, members) in member_updates {
-            bridge.set_members(members);
+        Ok(Prepared {
+            entries: desired,
+            member_updates,
+        })
+    }
+
+    fn reconcile(&self, snapshot: &RegistrySnapshot) -> Result<Option<Reconcile>, StorageError> {
+        let Prepared {
+            entries,
+            member_updates,
+        } = self.prepare(snapshot)?;
+        // Nothing shared with the current model is changed until this check.
+        // A new service instance will publish the latest confirmed topology.
+        if Self::encode_shape(&entries) != self.shape_bytes() {
+            self.rebuild.set(true);
+            return Ok(None);
         }
-        let endpoints = desired
-            .iter()
-            .map(|entry| entry.endpoint)
-            .collect::<Vec<_>>();
+        let previous = self.entries.borrow();
         let mut report = Reconcile::default();
-        for entry in &desired {
-            let previous = previous_by_endpoint.get(&entry.endpoint);
-            match previous {
-                None => report.added.push(entry.endpoint),
-                Some(previous) if !same_metadata(previous, entry) => {
-                    let replaced = match (&previous.device, &entry.device) {
-                        (Some(previous), Some(desired)) => !previous.same_instance(desired),
-                        _ => false,
-                    };
-                    if replaced {
-                        report.replaced.push(entry.endpoint);
-                    } else {
-                        report.metadata.push(entry.endpoint);
-                        if previous.role.bridged_rc().is_some() != entry.role.bridged_rc().is_some()
-                        {
-                            report.bridged_presence.push(entry.endpoint);
-                        }
-                    }
-                }
-                Some(_) => {}
+        for (entry, previous) in entries.iter().zip(previous.iter()) {
+            if let (Some(old), Some(new)) = (&previous.device, &entry.device)
+                && !old.same_instance(new)
+            {
+                report.state_refresh.push(entry.endpoint);
             }
             let control = entry.role.control_rc();
-            if !same_control(
-                &control,
-                &previous.and_then(|entry| entry.role.control_rc()),
-            ) {
+            if !same_control(&control, &previous.role.control_rc()) {
                 report.controls.push((entry.endpoint, control));
             }
             let bridged = entry.role.bridged_rc();
-            if !same_bridge(
-                &bridged,
-                &previous.and_then(|entry| entry.role.bridged_rc()),
-            ) {
+            if !same_bridge(&bridged, &previous.role.bridged_rc()) {
                 report.bridges.push((entry.endpoint, bridged));
             }
         }
-        for entry in &previous {
-            if !endpoints.contains(&entry.endpoint) {
-                report.removed.push(entry.endpoint);
-                if entry.role.control_rc().is_some() {
-                    report.controls.push((entry.endpoint, None));
-                }
-                if entry.role.bridged_rc().is_some() {
-                    report.bridges.push((entry.endpoint, None));
-                }
-                self.versions
-                    .borrow_mut()
-                    .insert(entry.endpoint, entry.versions());
-            }
+        drop(previous);
+        for (bridge, members) in member_updates {
+            bridge.set_members(members);
         }
-        *self.entries.borrow_mut() = desired;
-        Ok(report)
+        *self.entries.borrow_mut() = entries;
+        Ok(Some(report))
+    }
+
+    pub(super) fn needs_rebuild(&self) -> bool {
+        self.rebuild.get()
+    }
+
+    /// Establish the complete persisted shape/version boundary before serving
+    /// exchanges or resumed subscriptions. Repeating this is a no-op.
+    pub(super) fn initialize(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        let shape = self.shape_bytes();
+        let stored = self
+            .protocol
+            .record(self.store.matter().get(MATTER_SHAPE_KEY))?;
+        if stored.as_deref() != Some(shape.as_slice()) {
+            if let Err(error) = ctx.matter().bump_configuration_version(ctx.kv(), &ctx) {
+                self.protocol.record::<()>(Err(StorageError::new(
+                    self.store.path(),
+                    "persist Matter configuration version",
+                    error,
+                )))?;
+            }
+            self.protocol
+                .record(self.store.matter().put(MATTER_SHAPE_KEY, &shape))?;
+        }
+        Ok(())
     }
     fn invalid(&self, reason: &'static str) -> StorageError {
         StorageError::new(self.store.path(), "build Matter topology", reason)
@@ -1170,14 +1314,29 @@ impl Model {
         )));
         handle
     }
+    async fn job_failure(tasks: &mut JobFutures<'_>) -> Error {
+        while let Some(result) = tasks.next().await {
+            match result {
+                Ok(Err(error)) => return error,
+                Ok(Ok(())) => return ErrorCode::InvalidState.into(),
+                Err(_) => {}
+            }
+        }
+        std::future::pending().await
+    }
+
     async fn run_devices(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         let mut changes = self.registry.subscribe();
         let mut control_jobs = BTreeMap::<u16, AbortHandle>::new();
         let mut bridge_jobs = BTreeMap::<u16, AbortHandle>::new();
         let mut tasks = JobFutures::new();
-        let mut snapshot = self.registry.snapshot();
         loop {
-            let report = self.protocol.record(self.reconcile(&snapshot))?;
+            let Some(report) = self
+                .protocol
+                .record(self.reconcile(&self.registry.snapshot()))?
+            else {
+                return Ok(());
+            };
             for (endpoint, control) in report.controls {
                 if let Some(job) = control_jobs.remove(&endpoint) {
                     job.abort();
@@ -1213,47 +1372,56 @@ impl Model {
                         .insert(entry.endpoint, Self::start_bridge(&ctx, &mut tasks, bridge));
                 }
             }
-            for endpoint in &report.metadata {
-                ctx.notify_cluster_changed(*endpoint, 0x1d);
-            }
-            // A role change adds or removes Bridged Device Basic Information
-            // on an existing endpoint. Report that cluster explicitly so
-            // Reachable/NodeLabel subscriptions are not left stale, while no
-            // light or control cluster version changes.
-            for endpoint in &report.bridged_presence {
-                ctx.notify_cluster_changed(*endpoint, 0x39);
-            }
-            for endpoint in &report.replaced {
-                ctx.notify_endpoint_changed(*endpoint);
-            }
-            for endpoint in &report.added {
-                ctx.notify_endpoint_changed(*endpoint);
-            }
-            for endpoint in &report.removed {
-                ctx.notify_endpoint_changed(*endpoint);
-            }
-            if !report.added.is_empty() || !report.removed.is_empty() {
-                ctx.notify_attr_changed(0, 0x1d, desc::AttributeId::PartsList as _);
-                ctx.notify_attr_changed(
-                    AGGREGATOR_ENDPOINT,
-                    0x1d,
-                    desc::AttributeId::PartsList as _,
-                );
-            }
-            let result = futures_lite::future::or(
-                async { Ok::<_, Error>(changes.changed().await) },
-                async {
-                    while let Some(result) = tasks.next().await {
-                        if let Ok(result) = result {
-                            result?;
-                            return Err(ErrorCode::InvalidState.into());
+            let mut cluster_notifications = BTreeMap::<u16, BTreeSet<u32>>::new();
+            let mut reachable_refresh = BTreeSet::new();
+            // A rejoined device starts from the current source snapshot; its
+            // control clusters may now be unknown or reset. The published
+            // surface itself is unchanged, so this is not a configuration
+            // change and must not bump the configuration version.
+            for endpoint in &report.state_refresh {
+                let entry = self.entry(*endpoint)?;
+                if let Some(control) = entry.role.control() {
+                    let clusters = cluster_notifications.entry(*endpoint).or_default();
+                    clusters.insert(6);
+                    if let Some(light) = &control.lighting {
+                        let publication = light.publication();
+                        if publication.brightness {
+                            clusters.insert(8);
+                        }
+                        if publication.has_color_control() {
+                            clusters.insert(0x300);
                         }
                     }
-                    std::future::pending().await
+                }
+                // A device-backed bridge keeps its BDBI, but the replacement
+                // seeds `reported` from the new instance's availability, so
+                // its run loop stays silent. Report Reachable explicitly; the
+                // retained group-parent aggregator keeps tracking its own
+                // reported value.
+                if entry
+                    .role
+                    .bridged_rc()
+                    .is_some_and(|bridged| bridged.group_key().is_none())
+                {
+                    reachable_refresh.insert(*endpoint);
+                }
+            }
+            for (endpoint, clusters) in cluster_notifications {
+                for cluster in clusters {
+                    ctx.notify_cluster_changed(endpoint, cluster);
+                }
+            }
+            for endpoint in reachable_refresh {
+                ctx.notify_attr_changed(endpoint, 0x39, 17);
+            }
+            futures_lite::future::or(
+                async {
+                    changes.changed().await;
+                    Ok(())
                 },
+                async { Err(Self::job_failure(&mut tasks).await) },
             )
             .await?;
-            snapshot = result;
         }
     }
 }
@@ -1347,6 +1515,7 @@ impl AsyncHandler for Model {
         self.root.lifecycle(ctx, op)
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        self.initialize(&ctx)?;
         futures_lite::future::or(self.root.run(&ctx), self.run_devices(&ctx)).await
     }
 }

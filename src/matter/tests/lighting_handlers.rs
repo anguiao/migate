@@ -629,48 +629,6 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
 }
 
 #[test]
-fn light_rebuild_retains_endpoint_and_refreshes_temperature_bounds_and_versions() {
-    setup_light!(false, device, receiver, registry, handler, ctx);
-    device.set_availability(Availability::Available);
-    block_on(async {
-        ctx.attribute = attr(0x300, 0x400b);
-        let mut run = pin!(handler.run(&ctx));
-        assert!(poll_once(run.as_mut()).await.is_none());
-        let before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
-        assert_eq!(
-            report_value(&read_bytes(&handler, &ctx).await.unwrap())
-                .u16()
-                .unwrap(),
-            154
-        );
-        let mut description = device.description();
-        description.functions[0].capabilities[2] =
-            crate::device::Capability::ColorTemperature(crate::device::NumericRange {
-                min: 3000,
-                max: 4000,
-                step: 1,
-            });
-        let (replacement, _receivers) = crate::device::PhysicalDevice::new(description);
-        replacement.set_availability(Availability::Available);
-        registry.remove(device.key()).unwrap();
-        registry.insert(replacement);
-        assert!(poll_once(run.as_mut()).await.is_none());
-        assert_eq!(
-            report_value(&read_bytes(&handler, &ctx).await.unwrap())
-                .u16()
-                .unwrap(),
-            250
-        );
-        assert_ne!(
-            report_dataver(&read_bytes(&handler, &ctx).await.unwrap()),
-            before
-        );
-        handler.access(|node| assert!(node.endpoints.iter().any(|e| e.id == 2)));
-        assert!(receiver.next_operation().await.is_none());
-    });
-}
-
-#[test]
 fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_temperature_range() {
     for fixture in [
         include_str!("../../../tests/fixtures/miot/yeelink-light-light3.json"),

@@ -57,6 +57,19 @@ impl<'a> Bridge<'a> {
         port: u16,
         report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
     ) -> Result<(), RuntimeError> {
+        loop {
+            self.run_instance(port, &report_pairing).await?;
+            log::info!("Matter structure changed; rebuilding protocol services");
+        }
+    }
+
+    // Returning drops the whole instance, including its responder, exchanges,
+    // model controllers and socket, before the next instance can start.
+    async fn run_instance(
+        &self,
+        port: u16,
+        report_pairing: &impl Fn(PairingEvent) -> std::io::Result<()>,
+    ) -> Result<(), RuntimeError> {
         self.check_failure()?;
         let store = &self.store;
         let missing_basic_info = !store
@@ -83,6 +96,7 @@ impl<'a> Bridge<'a> {
             "initialize the default Matter node label",
             initialize_basic_info(&matter, &kv, missing_basic_info),
         )?;
+        store.with_context("initialize Matter topology", handler.initialize(&im))?;
         log::info!("Matter UDP listening on port {bound_port}");
         let responder = DefaultResponder::new(&im);
         let opened = !matter.has_fabrics();
@@ -131,6 +145,10 @@ impl<'a> Bridge<'a> {
         .await;
         // A protocol task may return an error before the storage watcher is polled again.
         self.check_failure()?;
-        result
+        result?;
+        if !handler.needs_rebuild() {
+            return Err("Matter services ended without a requested rebuild".into());
+        }
+        Ok(())
     }
 }

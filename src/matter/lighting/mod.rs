@@ -132,6 +132,13 @@ pub(super) struct Lighting {
     last_color_report: Cell<u64>,
     remaining_dirty: Cell<[bool; 2]>,
 }
+impl Drop for Lighting {
+    fn drop(&mut self) {
+        for active in self.active.get_mut().iter().flatten() {
+            self.function.cancel_light_action(active.token);
+        }
+    }
+}
 pub(super) fn command_error(error: CommandError) -> Error {
     log::warn!("Matter lighting command failed: {error}");
     match error {
