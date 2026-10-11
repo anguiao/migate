@@ -133,57 +133,108 @@ fn restored_group_survives_a_local_reconcile_before_the_first_home_sync() {
 }
 
 #[test]
-fn a_confirmed_unsupported_replacement_revokes_even_with_an_admitted_record() {
-    let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
-    block_on(rig.run(|c| async move {
-        c.announce();
-        until(|| {
-            c.context
-                .registry
-                .snapshot()
-                .composition
-                .groups
-                .iter()
-                .any(|group| group.key == key("group.1"))
-        })
-        .await;
-        let uid = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .uid
-            .clone();
-        let mut incompatible = cached(&uid, "one", true);
-        incompatible.device.key = key("one");
-        c.context
-            .live
-            .borrow_mut()
-            .devices
-            .get_mut("one")
-            .unwrap()
-            .candidate = Some((incompatible, None));
-        // The confirmed incompatibility alone must revoke the group; no
-        // unrelated event or manual re-evaluation is allowed.
-        c.context.reconcile("one").unwrap();
-        until(|| c.context.registry.snapshot().composition.groups.is_empty()).await;
-        assert!(c.context.live.borrow().devices["one"].blocked_unsupported);
-        assert!(c.context.registry.get(&key("one")).is_some());
-        assert!(c.context.registry.get(&key("two")).is_some());
-        assert!(
-            c.store
+fn incompatible_member_description_keeps_the_published_group_and_capabilities() {
+    for change_range in [false, true] {
+        let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
+        block_on(rig.run(|c| async move {
+            c.announce();
+            until(|| {
+                c.context
+                    .registry
+                    .snapshot()
+                    .composition
+                    .groups
+                    .iter()
+                    .any(|group| group.key == key("group.1"))
+            })
+            .await;
+            let record = c.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let original = record.cached.borrow().clone();
+            let before = c.context.registry.snapshot();
+            let stored = c
+                .store
                 .devices()
-                .load_published_group(&uid, "local", &key("group.1"))
+                .load_published(&key("one"))
                 .unwrap()
-                .is_none()
-        );
-    }));
+                .unwrap();
+            let mut incompatible = original.clone();
+            let function = &mut incompatible.device.functions[0];
+            if change_range {
+                let range = &mut function
+                    .lighting
+                    .as_mut()
+                    .unwrap()
+                    .temperature
+                    .as_mut()
+                    .unwrap()
+                    .range;
+                range.max += range.step;
+                for capability in &mut function.description.capabilities {
+                    if let crate::device::Capability::ColorTemperature(value) = capability {
+                        *value = *range;
+                    }
+                }
+            } else {
+                function.power = None;
+                function
+                    .description
+                    .capabilities
+                    .retain(|capability| !matches!(capability, crate::device::Capability::OnOff));
+            }
+            c.context
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut("one")
+                .unwrap()
+                .candidate = Some((incompatible, None));
+            c.context.reconcile("one").unwrap();
+            c.context.reconcile_groups().unwrap();
+            let after = c.context.registry.snapshot();
+            assert_eq!(after.revision, before.revision);
+            assert_eq!(after.composition, before.composition);
+            assert!(
+                record
+                    .physical
+                    .same_instance(&c.context.registry.get(&key("one")).unwrap())
+            );
+            assert!(matches!(
+                record.physical.availability(),
+                Availability::Unavailable(_)
+            ));
+            assert!(!record.life.is_closed());
+            assert_eq!(*record.cached.borrow(), original);
+            assert_eq!(
+                c.store
+                    .devices()
+                    .load_published(&key("one"))
+                    .unwrap()
+                    .unwrap(),
+                stored
+            );
+            assert_eq!(
+                c.store
+                    .devices()
+                    .load_parsed(&original.uid, "local", &key("one"))
+                    .unwrap()
+                    .unwrap(),
+                original
+            );
+            assert!(
+                c.context.live.borrow().devices["one"]
+                    .blocked
+                    .as_ref()
+                    .is_some_and(|reason| reason.contains("incompatible"))
+            );
+        }));
+    }
 }
 
 #[test]
-fn an_async_unsupported_description_revokes_the_group_without_an_unrelated_event() {
+fn an_async_unsupported_description_keeps_the_confirmed_group_and_old_capabilities() {
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
@@ -197,6 +248,12 @@ fn an_async_unsupported_description_revokes_the_group_without_an_unrelated_event
                 .any(|group| group.key == key("group.1"))
         })
         .await;
+        let before = c
+            .store
+            .devices()
+            .load_published(&key("one"))
+            .unwrap()
+            .unwrap();
         let reads = c.cloud.lock().unwrap().detail_counts["one"];
         c.cloud.lock().unwrap().unsupported.insert("one".into());
         // Force the cloud member description through a fresh read.
@@ -210,10 +267,61 @@ fn an_async_unsupported_description_revokes_the_group_without_an_unrelated_event
         c.context.request_sync();
         until(|| {
             c.cloud.lock().unwrap().detail_counts["one"] > reads
-                && c.context.live.borrow().devices["one"].blocked_unsupported
-                && c.context.registry.snapshot().composition.groups.is_empty()
+                && c.context.live.borrow().devices["one"].blocked.is_some()
         })
         .await;
+        // A parse failure is temporary evidence, not a confirmed capability
+        // removal: the last valid shape and the confirmed group stay, and the
+        // member keeps its running work instead of being revoked.
+        assert!(c.context.registry.get(&key("one")).is_some());
+        assert!(
+            c.context
+                .registry
+                .snapshot()
+                .composition
+                .groups
+                .iter()
+                .any(|group| group.key == key("group.1"))
+        );
+        assert_eq!(
+            c.store
+                .devices()
+                .load_published(&key("one"))
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert!(c.context.live.borrow().devices["one"].work.is_some());
+
+        // A valid description returns and the same member recovers in place.
+        c.cloud.lock().unwrap().unsupported.remove("one");
+        c.context
+            .live
+            .borrow_mut()
+            .devices
+            .get_mut("one")
+            .unwrap()
+            .blocked = None;
+        c.context.reconcile("one").unwrap();
+        until(|| {
+            c.context.live.borrow().devices["one"].work.is_some()
+                && c.context
+                    .status
+                    .borrow()
+                    .pending
+                    .iter()
+                    .all(|pending| pending.did != "one")
+        })
+        .await;
+        assert!(
+            c.context
+                .registry
+                .snapshot()
+                .composition
+                .groups
+                .iter()
+                .any(|group| group.key == key("group.1"))
+        );
         assert!(c.context.registry.get(&key("two")).is_some());
     }));
 }
@@ -468,7 +576,7 @@ fn a_confirmed_member_deletion_revokes_the_group_even_when_group_reads_fail() {
 }
 
 #[test]
-fn compatible_member_replacement_keeps_the_published_group_and_endpoint() {
+fn compatible_member_binding_update_keeps_the_instance_group_and_endpoint() {
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
@@ -531,12 +639,24 @@ fn compatible_member_replacement_keeps_the_published_group_and_endpoint() {
         assert_eq!(stored.endpoint, endpoint);
         assert_eq!(stored.members, vec![key("one"), key("two")]);
         let live = c.context.live.borrow();
-        let replacement = live.devices["one"].admitted.clone().unwrap();
-        assert!(!Rc::ptr_eq(&record, &replacement));
-        assert!(record.life.is_closed());
+        let current = live.devices["one"].admitted.clone().unwrap();
+        assert!(Rc::ptr_eq(&record, &current));
+        assert!(!record.life.is_closed());
+        assert!(!work.life.is_closed());
+        assert!(Rc::ptr_eq(
+            &work,
+            live.devices["one"].work.as_ref().unwrap()
+        ));
+        assert_eq!(
+            record.cached.borrow().device.functions[0]
+                .power
+                .unwrap()
+                .siid,
+            7
+        );
         assert!(
             live.devices["one"].work.is_some(),
-            "the member keeps a work controller after replacement"
+            "the member resumes work with the new bindings"
         );
         drop(work);
     }));
@@ -650,7 +770,7 @@ fn group_lifecycle_keeps_member_instances_work_and_consumers() {
 }
 
 #[test]
-fn a_transport_failure_does_not_readmit_a_confirmed_unsupported_member() {
+fn a_transport_failure_does_not_replace_an_incompatible_member() {
     let rig = Rig::group(&["one", "two"], "group.1", "mijia.light.group3");
     block_on(rig.run(|c| async move {
         c.announce();
@@ -687,8 +807,8 @@ fn a_transport_failure_does_not_readmit_a_confirmed_unsupported_member() {
         c.context.reconcile("one").unwrap();
         until(|| {
             let snapshot = c.context.registry.snapshot();
-            snapshot.composition.groups.is_empty()
-                && c.context.live.borrow().devices["one"].blocked_unsupported
+            snapshot.composition.groups.len() == 1
+                && c.context.live.borrow().devices["one"].blocked.is_some()
         })
         .await;
         let reads = c.cloud.lock().unwrap().detail_counts["one"];
@@ -697,8 +817,8 @@ fn a_transport_failure_does_not_readmit_a_confirmed_unsupported_member() {
         until(|| c.cloud.lock().unwrap().detail_counts["one"] > reads).await;
         c.context.reconcile_groups().unwrap();
         let snapshot = c.context.registry.snapshot();
-        assert!(snapshot.composition.groups.is_empty());
-        assert!(c.context.live.borrow().devices["one"].blocked_unsupported);
+        assert_eq!(snapshot.composition.groups.len(), 1);
+        assert!(c.context.live.borrow().devices["one"].blocked.is_some());
     }));
 }
 

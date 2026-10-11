@@ -365,25 +365,13 @@ fn fresh_relation(
             pending.push(member.clone());
             continue;
         };
-        // A newly confirmed incompatible description outranks any older
-        // admitted record that is no longer current.
-        if slot.blocked_unsupported {
-            return Fresh::Rejected(format!(
-                "group {id} member {member} has an unsupported description"
-            ));
-        }
-        // An uncertain replacement is not fresh evidence; keep the last
-        // confirmed relation instead of publishing assumptions.
-        if slot.loading.is_some() || slot.candidate.is_some() {
-            pending.push(member.clone());
-            continue;
-        }
         match &slot.admitted {
-            Some(record) if supported_member(record) => {}
-            Some(_) => {
-                return Fresh::Rejected(format!(
-                    "group {id} member {member} is not a supported single light"
-                ));
+            Some(record) => {
+                if let Some(problem) = member_problem(record) {
+                    return Fresh::Rejected(format!(
+                        "group {id} member {member} cannot be published standalone: {problem}"
+                    ));
+                }
             }
             None => pending.push(member.clone()),
         }
@@ -399,7 +387,7 @@ fn fresh_relation(
 }
 
 /// A retained relation stops being authoritative once it references a member
-/// that is confirmed deleted or confirmed unsupported.
+/// that is confirmed deleted or cannot be published as a standalone light.
 fn retained_invalid(
     retained: &Composition,
     devices: &BTreeMap<String, DeviceSlot>,
@@ -412,13 +400,10 @@ fn retained_invalid(
         }
         match devices.get(&member.id) {
             None => complete,
-            Some(slot) => {
-                slot.blocked_unsupported
-                    || slot
-                        .admitted
-                        .as_ref()
-                        .is_some_and(|record| !supported_member(record))
-            }
+            Some(slot) => slot
+                .admitted
+                .as_ref()
+                .is_some_and(|record| member_problem(record).is_some()),
         }
     })
 }
@@ -439,13 +424,20 @@ fn freshness_problem(devices: &BTreeMap<String, DeviceSlot>, id: &str, fallback:
         .unwrap_or_else(|| format!("group {id} {fallback}"))
 }
 
-/// A supported group member is exactly one valid main light function and is
-/// never a known group identity, matching the storage compatibility rule.
-fn supported_member(record: &DeviceRecord) -> bool {
+/// The reason a device record cannot be published as a standalone group
+/// member. A valid but Matter-unmappable light is distinct from a temporary
+/// transport or parse failure, which keeps the last valid record.
+fn member_problem(record: &DeviceRecord) -> Option<String> {
     let cached = record.cached.borrow();
-    !crate::xiaomi::capability::is_light_group(&cached.device.key, &cached.model)
-        && cached.device.functions.len() == 1
-        && cached.device.functions[0].description.id == "main"
-        && cached.device.functions[0].description.category == Category::Light
-        && cached.device.functions[0].description.valid_capabilities()
+    if crate::xiaomi::capability::is_light_group(&cached.device.key, &cached.model) {
+        return Some("is a light-group identity".into());
+    }
+    if cached.device.functions.len() != 1
+        || cached.device.functions[0].description.id != "main"
+        || cached.device.functions[0].description.category != Category::Light
+        || !cached.device.functions[0].description.valid_capabilities()
+    {
+        return Some("is not a supported single light".into());
+    }
+    super::membership::publication_problem(&cached.device)
 }

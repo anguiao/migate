@@ -167,15 +167,15 @@ fn freeze_light_clock(c: &Control) {
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
-async fn ready_replacement_light(c: &Control) -> crate::device::Function {
+async fn ready_resumed_light(c: &Control) -> crate::device::Function {
     future::or(ready_light(c), async {
-        // Replacement waits 10 ms for subscriptions, then reads one property
+        // Resumed binding work waits 10 ms for subscriptions, then reads one property
         // per 200 ms round. Bound recovery below the accepted feedback window.
         for _ in 0..100 {
             async_io::Timer::after(Duration::from_millis(1)).await;
             c.clock.advance(Duration::from_millis(10));
         }
-        panic!("replacement light did not become ready within one simulated second");
+        panic!("light did not resume within one simulated second");
     })
     .await
 }
@@ -473,7 +473,7 @@ fn retained_old_color_cannot_block_an_accepted_current_target() {
 }
 
 #[test]
-fn range_change_preserves_feedback_until_accepted_history_expires() {
+fn binding_change_preserves_feedback_until_accepted_history_expires() {
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
@@ -499,17 +499,16 @@ fn range_change_preserves_feedback_until_accepted_history_expires() {
                 .cached
                 .borrow()
                 .clone();
-            let range = &mut changed.device.functions[0]
+            let temperature = PropertyBinding { siid: 2, piid: 9 };
+            changed.device.functions[0]
                 .lighting
                 .as_mut()
                 .unwrap()
                 .temperature
                 .as_mut()
                 .unwrap()
-                .range;
-            range.max = 5600;
-            changed.device.functions[0].description.capabilities[2] =
-                crate::device::Capability::ColorTemperature(*range);
+                .property = temperature;
+            peer.value("one", temperature, json!(2700));
             control
                 .context
                 .live
@@ -519,8 +518,11 @@ fn range_change_preserves_feedback_until_accepted_history_expires() {
                 .unwrap()
                 .candidate = Some((changed, None));
             control.context.reconcile("one").unwrap();
-            let new = ready_replacement_light(control).await;
-            assert_eq!(new.description().temperature_range().unwrap().max, 5600);
+            let new = ready_resumed_light(control).await;
+            assert_eq!(
+                new.description(),
+                &control.data[0].device.functions[0].description
+            );
             assert!(!old.light_action_current(action.token()));
             let next = new
                 .begin_light_action(LightDimension::Brightness, brightness(70.0), false)
@@ -624,17 +626,16 @@ fn retired_work_preserves_accepted_feedback_until_history_expires() {
                 .cached
                 .borrow()
                 .clone();
-            let range = &mut changed.device.functions[0]
+            let temperature = PropertyBinding { siid: 2, piid: 9 };
+            changed.device.functions[0]
                 .lighting
                 .as_mut()
                 .unwrap()
                 .temperature
                 .as_mut()
                 .unwrap()
-                .range;
-            range.max = 5600;
-            changed.device.functions[0].description.capabilities[2] =
-                crate::device::Capability::ColorTemperature(*range);
+                .property = temperature;
+            peer.value("one", temperature, json!(2700));
 
             // There is no outstanding receipt and no test-owned strong work
             // reference to accidentally keep the old feedback gate alive.
@@ -642,7 +643,7 @@ fn retired_work_preserves_accepted_feedback_until_history_expires() {
                 .context
                 .block_device("one", "retiring old lighting bindings".into());
             // Wake the idle refresh scheduler so it releases its snapshot of
-            // the retired work before the replacement is installed.
+            // the retired work before new binding work is installed.
             control.context.refresh_changed.notify(usize::MAX);
             until(|| retired_work.strong_count() == 0).await;
             {
@@ -652,8 +653,11 @@ fn retired_work_preserves_accepted_feedback_until_history_expires() {
                 slot.candidate = Some((changed, None));
             }
             control.context.reconcile("one").unwrap();
-            let new = ready_replacement_light(control).await;
-            assert_eq!(new.description().temperature_range().unwrap().max, 5600);
+            let new = ready_resumed_light(control).await;
+            assert_eq!(
+                new.description(),
+                &control.data[0].device.functions[0].description
+            );
             assert!(retired_work.upgrade().is_none());
             let next = new
                 .begin_light_action(LightDimension::Brightness, brightness(70.0), false)
@@ -736,7 +740,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
                 .devices
                 .insert("one".into(), slot);
             control.context.reconcile("one").unwrap();
-            let new = ready_replacement_light(control).await;
+            let new = ready_resumed_light(control).await;
             let next = new
                 .begin_light_action(LightDimension::Brightness, brightness(70.0), false)
                 .unwrap();
@@ -1904,7 +1908,7 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
 }
 
 #[test]
-fn a_new_light_instance_waits_for_the_original_http_receipt() {
+fn updated_light_bindings_wait_for_the_original_http_receipt() {
     let rig = Rig::light("xiaomi.light.ceil04");
     {
         let mut cloud = rig.cloud.lock().unwrap();
@@ -1935,10 +1939,19 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
             .cached
             .borrow()
             .clone();
-        let light = changed.device.functions[0].lighting.as_mut().unwrap();
-        light.temperature.as_mut().unwrap().range.max = 5600;
-        changed.device.functions[0].description.capabilities[2] =
-            crate::device::Capability::ColorTemperature(light.temperature.as_ref().unwrap().range);
+        changed.device.functions[0]
+            .lighting
+            .as_mut()
+            .unwrap()
+            .temperature
+            .as_mut()
+            .unwrap()
+            .property = PropertyBinding { siid: 2, piid: 9 };
+        c.cloud
+            .lock()
+            .unwrap()
+            .raw_values
+            .insert(("one".into(), 2, 9), json!(2700));
         c.context
             .live
             .borrow_mut()
@@ -2217,48 +2230,67 @@ fn rgb_works_without_color_temperature_or_brightness_with_intrinsic_mode() {
 }
 
 #[test]
-fn light_without_onoff_has_no_power_reads_subscriptions_or_commands() {
+fn light_without_onoff_keeps_its_identity_and_bindings_without_publishing() {
     block_on(Rig::light("synthetic.light.rgbonly").run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());
-        peer.value("one", COLOR, json!(0xabcdef));
         let control = &c;
         c.peer(peer, |peer| async move {
-            let light = function(&control.context.registry, "one", "main");
-            until(|| {
-                control.context.active_notification("one") == Some(PathKind::Local)
-                    && light
-                        .snapshot()
-                        .lighting
-                        .is_some_and(|snapshot| snapshot.color == Rgb::from_packed(0xabcdef))
-            })
-            .await;
-            assert_eq!(light.snapshot().power, Power::Unknown);
-            let work = control.context.live.borrow().devices["one"]
-                .work
+            let key = DeviceKey::new("xiaomi", "one");
+            let admitted = control.context.live.borrow().devices["one"]
+                .admitted
                 .clone()
                 .unwrap();
-            assert_eq!(work.bindings(), vec![COLOR]);
-            assert_eq!(peer.count("subscribe", "one", 0), 1);
-            assert_eq!(
-                light.execute(Command::On).await.map(|_| ()).unwrap_err(),
-                crate::device::CommandError::Unsupported
-            );
+            let before = control
+                .store
+                .devices()
+                .load_published(&key)
+                .unwrap()
+                .unwrap();
+            until(|| {
+                control
+                    .context
+                    .status
+                    .borrow()
+                    .pending
+                    .iter()
+                    .any(|pending| pending.did == "one" && pending.reason.contains("on/off"))
+            })
+            .await;
             for _ in 0..10 {
                 future::yield_now().await;
             }
+            // No Matter endpoint and no read, subscription or write reaches
+            // a light that cannot be published.
+            assert!(control.context.registry.get(&key).is_none());
+            assert!(
+                control.context.live.borrow().devices["one"]
+                    .unpublished
+                    .is_some()
+            );
+            assert_eq!(peer.count("get", "one", 0), 0);
+            assert_eq!(peer.count("subscribe", "one", 0), 0);
             assert_eq!(peer.count("rpcReq", "one", 0), 0);
-            assert_eq!(light.snapshot().power, Power::Unknown);
-            let action = light
-                .begin_light_action(
-                    LightDimension::Color,
-                    color_target(LightColorTarget::Rgb(Rgb::from_packed(0xff0044).unwrap())),
-                    true,
-                )
+            // The reservation, saved name and actual bindings survive with
+            // their original identity.
+            let stored = control
+                .store
+                .devices()
+                .load_published(&key)
+                .unwrap()
                 .unwrap();
-            action.accepted().await.unwrap();
-            assert_eq!(peer.count("rpcReq", "one", 0), 1);
-            assert_eq!(light.snapshot().power, Power::Unknown);
+            assert_eq!(stored.unique_id, before.unique_id);
+            assert_eq!(stored.endpoint, before.endpoint);
+            assert_eq!(stored.label, before.label);
+            let uid = control.data[0].uid.clone();
+            let cached = control
+                .store
+                .devices()
+                .load_parsed(&uid, "local", &key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(cached, control.data[0]);
+            assert_eq!(admitted.binding_generation.get(), 0);
         })
         .await;
     }));

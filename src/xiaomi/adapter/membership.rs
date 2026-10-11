@@ -5,7 +5,7 @@ use super::{
 use crate::{
     device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
     storage::{AdmissionError, CachedPhysicalDevice},
-    xiaomi::central::DeviceEntry,
+    xiaomi::{capability::ParsedDevice, central::DeviceEntry},
 };
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 impl Context {
@@ -107,149 +107,21 @@ impl Context {
             self.problem(did, Some(reason));
             return Ok(());
         };
-        if let Some(record) = admitted {
-            if *record.cached.borrow() != cached {
-                match self
-                    .store
-                    .devices()
-                    .publish_cached(&cached, &record.physical.label())
-                {
-                    Ok(stored) => {
-                        let bindings = |device: &CachedPhysicalDevice| {
-                            device
-                                .device
-                                .functions
-                                .iter()
-                                .map(|function| {
-                                    (
-                                        function.description.id.clone(),
-                                        (
-                                            function.power,
-                                            function.lighting.clone(),
-                                            function.description.capabilities.clone(),
-                                        ),
-                                    )
-                                })
-                                .collect::<BTreeMap<_, _>>()
-                        };
-                        let changed = bindings(&record.cached.borrow()) != bindings(&cached)
-                            || record.cached.borrow().device.refresh_trigger
-                                != cached.device.refresh_trigger;
-                        if changed {
-                            if let Some(session) = &self.live.borrow().session {
-                                drop(session.handle.unsubscribe_properties(did));
-                            }
-                            if let Some(session) = self.notifications.borrow().as_ref() {
-                                drop(session.handle.unsubscribe_properties(did));
-                            }
-                            record
-                                .binding_generation
-                                .set(record.binding_generation.get() + 1);
-                        }
-                        let replace = changed
-                            && cached.device.functions.iter().any(|function| {
-                                function.description.category == crate::device::Category::Light
-                            });
-                        if replace {
-                            let (physical, receivers) = PhysicalDevice::new(stored.description());
-                            // Publish the new instance before retiring the old
-                            // runtime; a rejected replacement leaves the running
-                            // record untouched and blocks the confirmed shape.
-                            match self.registry.replace(physical.clone()) {
-                                Ok(_) => {
-                                    record.life.close();
-                                    {
-                                        let mut live = self.live.borrow_mut();
-                                        if let Some(work) =
-                                            live.devices.get_mut(did).unwrap().work.take()
-                                        {
-                                            work.life.close();
-                                        }
-                                        if let Some(session) = live.session.as_mut() {
-                                            session.devices.remove(did);
-                                        }
-                                    }
-                                    let replacement = Rc::new(DeviceRecord {
-                                        life: Lifetime::default(),
-                                        binding_generation: std::cell::Cell::new(
-                                            record.binding_generation.get(),
-                                        ),
-                                        cached: RefCell::new(cached),
-                                        physical,
-                                    });
-                                    // Observers poll only after the complete replacement; storage identity is unchanged.
-                                    self.live
-                                        .borrow_mut()
-                                        .devices
-                                        .get_mut(did)
-                                        .unwrap()
-                                        .admitted = Some(replacement.clone());
-                                    self.add_consumers(replacement, receivers);
-                                }
-                                Err(error) => self.block_unsupported(did, error.to_string()),
-                            }
-                        } else {
-                            *record.cached.borrow_mut() = cached;
-                            if changed && let Some(work) = &self.live.borrow().devices[did].work {
-                                work.bindings_changed();
-                            }
-                        }
-                    }
-                    Err(AdmissionError::Storage(error)) => return Err(error.into()),
-                    Err(error) => {
-                        if matches!(error, AdmissionError::IncompatibleFunctions) {
-                            self.block_unsupported(did, error.to_string());
-                            // A confirmed unsupported description revokes its
-                            // group immediately, not on an unrelated event.
-                            self.reconcile_groups()?;
-                        } else {
-                            self.block_device(did, error.to_string());
-                        }
-                        return Ok(());
-                    }
-                }
+        let proceed = match &admitted {
+            Some(record) if !same_cache_semantics(&record.cached.borrow(), &cached) => {
+                self.admit_update(did, record, &cached)?
             }
-        } else {
-            let label = name
-                .as_deref()
-                .map(crate::storage::import_label)
-                .unwrap_or_else(|| crate::runtime::default_device_label(&cached.model, did));
-            let stored = match self.store.devices().publish_cached(&cached, &label) {
-                Ok(stored) => stored,
-                Err(AdmissionError::Storage(error)) => return Err(error.into()),
-                Err(error) => {
-                    let unsupported = matches!(error, AdmissionError::IncompatibleFunctions);
-                    if unsupported {
-                        self.live
-                            .borrow_mut()
-                            .devices
-                            .get_mut(did)
-                            .unwrap()
-                            .blocked_unsupported = true;
-                    }
-                    self.problem(did, Some(error.to_string()));
-                    if unsupported {
-                        self.reconcile_groups()?;
-                    }
-                    return Ok(());
-                }
-            };
-            let (physical, receivers) = PhysicalDevice::new(stored.description());
-            self.registry.insert(physical.clone());
-            let record = Rc::new(DeviceRecord {
-                life: Lifetime::default(),
-                binding_generation: std::cell::Cell::new(0),
-                cached: RefCell::new(cached),
-                physical,
-            });
-            {
-                let mut live = self.live.borrow_mut();
-                let slot = live.devices.get_mut(did).unwrap();
-                slot.admitted = Some(record.clone());
-                slot.blocked = None;
-                slot.blocked_unsupported = false;
+            Some(_) => true,
+            None => {
+                let label = name
+                    .as_deref()
+                    .map(crate::storage::import_label)
+                    .unwrap_or_else(|| crate::runtime::default_device_label(&cached.model, did));
+                self.admit_new(did, &cached, &label)?
             }
-            self.add_consumers(record, receivers);
+        };
+        if !proceed {
+            return Ok(());
         }
         self.live
             .borrow_mut()
@@ -257,14 +129,19 @@ impl Context {
             .get_mut(did)
             .unwrap()
             .candidate = None;
-        self.install_work(did);
+        if self.live.borrow().devices[did].unpublished.is_none() {
+            self.install_work(did);
+        }
         self.update_availability(did);
-        let live = self.live.borrow();
-        let slot = &live.devices[did];
-        let diagnostic = slot.work.as_ref().and_then(|work| work.diagnostic());
-        let problem = slot.blocked.clone().or(diagnostic);
-        drop(live);
-        self.problem(did, problem);
+        let (problem, diagnostic) = {
+            let live = self.live.borrow();
+            let slot = &live.devices[did];
+            (
+                slot.blocked.clone().or_else(|| slot.unpublished.clone()),
+                slot.work.as_ref().and_then(|work| work.diagnostic()),
+            )
+        };
+        self.problem(did, problem.or(diagnostic));
         if let Some(work) = self.live.borrow().devices[did].work.as_ref() {
             work.retry_subscriptions();
         }
@@ -272,6 +149,88 @@ impl Context {
         self.reconcile_groups()?;
         Ok(())
     }
+
+    fn admit_update(
+        self: &Rc<Self>,
+        did: &str,
+        record: &Rc<DeviceRecord>,
+        cached: &CachedPhysicalDevice,
+    ) -> Result<bool, AdapterError> {
+        match self
+            .store
+            .devices()
+            .publish_cached(cached, &record.physical.label())
+        {
+            Ok(_) => {
+                let changed = !same_device_behavior(&record.cached.borrow().device, &cached.device);
+                if changed {
+                    // Invalidate old operations without replacing the physical
+                    // instance, published capabilities or command consumers.
+                    record
+                        .binding_generation
+                        .set(record.binding_generation.get() + 1);
+                    if let Some(session) = self.live.borrow().session.as_ref() {
+                        drop(session.handle.unsubscribe_properties(did));
+                    }
+                    if let Some(session) = self.notifications.borrow().as_ref() {
+                        drop(session.handle.unsubscribe_properties(did));
+                    }
+                    self.unavailable_device(did, "device bindings changed".into());
+                }
+                *record.cached.borrow_mut() = cached.clone();
+                if changed && let Some(work) = &self.live.borrow().devices[did].work {
+                    work.bindings_changed();
+                }
+                self.live.borrow_mut().devices.get_mut(did).unwrap().blocked = None;
+                Ok(true)
+            }
+            Err(AdmissionError::Storage(error)) => Err(error.into()),
+            Err(error) => {
+                self.block_device(did, error.to_string());
+                Ok(false)
+            }
+        }
+    }
+
+    fn admit_new(
+        self: &Rc<Self>,
+        did: &str,
+        cached: &CachedPhysicalDevice,
+        label: &str,
+    ) -> Result<bool, AdapterError> {
+        let stored = match self.store.devices().publish_cached(cached, label) {
+            Ok(stored) => stored,
+            Err(AdmissionError::Storage(error)) => return Err(error.into()),
+            Err(error) => {
+                self.problem(did, Some(error.to_string()));
+                return Ok(false);
+            }
+        };
+        let problem = publication_problem(&cached.device);
+        let (physical, receivers) = PhysicalDevice::new(stored.description());
+        let record = Rc::new(DeviceRecord {
+            life: Lifetime::default(),
+            binding_generation: std::cell::Cell::new(0),
+            cached: RefCell::new(cached.clone()),
+            physical: physical.clone(),
+        });
+        {
+            let mut live = self.live.borrow_mut();
+            let slot = live.devices.get_mut(did).unwrap();
+            slot.admitted = Some(record.clone());
+            slot.blocked = None;
+            slot.unpublished = problem.clone();
+        }
+        if let Some(reason) = problem {
+            physical.set_availability(Availability::Unavailable(reason));
+            drop(receivers);
+        } else {
+            self.registry.insert(physical);
+            self.add_consumers(record, receivers);
+        }
+        Ok(true)
+    }
+
     pub(super) fn unavailable_device(&self, did: &str, reason: String) {
         if let Some(record) = &self.live.borrow().devices[did].admitted {
             record
@@ -280,22 +239,10 @@ impl Context {
         }
     }
     pub(super) fn block_device(&self, did: &str, reason: String) {
-        self.block(did, reason, false);
-    }
-    /// Block a member whose description is present but confirmed unsupported;
-    /// this distinction keeps temporary failures from revoking valid groups.
-    pub(super) fn block_unsupported(&self, did: &str, reason: String) {
-        self.block(did, reason, true);
-    }
-    fn block(&self, did: &str, reason: String, unsupported: bool) {
         {
             let mut live = self.live.borrow_mut();
             let slot = live.devices.get_mut(did).unwrap();
             slot.blocked = Some(reason.clone());
-            // A previously confirmed unsupported description stays authoritative
-            // until a fresh supported description replaces it; an unrelated
-            // temporary failure must not silently re-admit the old record.
-            slot.blocked_unsupported |= unsupported;
             if let Some(record) = &slot.admitted {
                 record
                     .binding_generation
@@ -378,4 +325,48 @@ impl Context {
             }
         }
     }
+}
+
+/// The Matter publication problem of one admitted Xiaomi device description.
+/// Outlets are always publishable; a light must pass the shared mapping.
+pub(super) fn publication_problem(device: &ParsedDevice) -> Option<String> {
+    device.functions.iter().find_map(|function| {
+        if function.description.category != crate::device::Category::Light {
+            return None;
+        }
+        crate::matter::publication::map_light(&function.description)
+            .err()
+            .map(|reason| reason.as_str().to_string())
+    })
+}
+
+/// Cache equality that treats an equivalent capability reordering as no
+/// change, so a redundant description never restarts a device.
+fn same_cache_semantics(left: &CachedPhysicalDevice, right: &CachedPhysicalDevice) -> bool {
+    left.uid == right.uid
+        && left.home_id == right.home_id
+        && left.group_id == right.group_id
+        && left.model == right.model
+        && left.instance_type == right.instance_type
+        && left.device.key == right.device.key
+        && same_device_behavior(&left.device, &right.device)
+}
+
+/// Behavior equality ignores metadata that carries no control meaning but
+/// keeps every binding, range and property that commands depend on.
+fn same_device_behavior(left: &ParsedDevice, right: &ParsedDevice) -> bool {
+    left.key == right.key
+        && left.refresh_trigger == right.refresh_trigger
+        && left.functions.len() == right.functions.len()
+        && left.functions.iter().all(|function| {
+            right.functions.iter().any(|candidate| {
+                candidate.description.id == function.description.id
+                    && candidate.description.category == function.description.category
+                    && candidate.power == function.power
+                    && candidate.lighting == function.lighting
+                    && candidate
+                        .description
+                        .same_capabilities(&function.description)
+            })
+        })
 }

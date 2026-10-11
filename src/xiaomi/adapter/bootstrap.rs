@@ -68,10 +68,18 @@ impl XiaomiAdapter {
                     continue;
                 }
                 let (physical, receivers) = PhysicalDevice::new(stored.description());
+                let did = metadata.device.key.id.clone();
+                if let Some(reason) = super::membership::publication_problem(&metadata.device) {
+                    // Valid but unpublishable: keep the reservation and reason
+                    // without installing a registry endpoint or consumers.
+                    physical.set_availability(Availability::Unavailable(reason.clone()));
+                    drop(receivers);
+                    devices.insert(did, DeviceSlot::unpublished(metadata, physical, reason));
+                    continue;
+                }
                 physical
                     .set_availability(Availability::Unavailable("restoring Xiaomi access".into()));
                 registry.insert(physical.clone());
-                let did = metadata.device.key.id.clone();
                 let slot = DeviceSlot::restored(metadata, physical);
                 consumers.push((slot.admitted.as_ref().unwrap().clone(), receivers));
                 devices.insert(did, slot);
@@ -150,6 +158,16 @@ impl XiaomiAdapter {
         for (record, receivers) in consumers {
             context.install_work(&record.physical.key().id);
             context.add_consumers(record, receivers);
+        }
+        let unpublished = context
+            .live
+            .borrow()
+            .devices
+            .iter()
+            .filter_map(|(did, slot)| slot.unpublished.clone().map(|reason| (did.clone(), reason)))
+            .collect::<Vec<_>>();
+        for (did, reason) in unpublished {
+            context.problem(&did, Some(reason));
         }
         Ok((
             Self {

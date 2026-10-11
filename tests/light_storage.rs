@@ -1,7 +1,14 @@
 use migate::{
-    device::{Capability, Category, DeviceKey, LightMode, LightPatch, PhysicalDevice},
+    device::{
+        Capability, Category, DeviceKey, LightMode, LightPatch, NumericRange, PhysicalDevice,
+    },
     storage::{AdmissionError, CachedPhysicalDevice, Store},
-    xiaomi::{capability::parse_device_for_model, cloud::group_id},
+    xiaomi::{
+        capability::{
+            NumericBinding, NumericFormat, NumericUnit, PropertyBinding, parse_device_for_model,
+        },
+        cloud::group_id,
+    },
 };
 use serde_json::Value;
 
@@ -96,7 +103,7 @@ fn all_seven_lights_restore_complete_static_bindings_one_endpoint_and_unknown_ru
 }
 
 #[test]
-fn binding_or_range_updates_keep_identity_but_changed_light_features_are_rejected() {
+fn compatible_binding_updates_keep_identity_and_static_capabilities() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let mut cached = light(
@@ -104,29 +111,27 @@ fn binding_or_range_updates_keep_identity_but_changed_light_features_are_rejecte
         include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
     );
     let original = store.devices().publish_cached(&cached, "Original").unwrap();
-    let lighting = cached.device.functions[0].lighting.as_mut().unwrap();
-    lighting.brightness.as_mut().unwrap().property.piid = 8;
-    lighting.temperature.as_mut().unwrap().range.max = 5600;
-    cached.device.functions[0].description.capabilities[2] =
-        Capability::ColorTemperature(lighting.temperature.as_ref().unwrap().range);
+    let brightness = cached.device.functions[0]
+        .lighting
+        .as_mut()
+        .unwrap()
+        .brightness
+        .as_mut()
+        .unwrap();
+    brightness.property.piid = 8;
+    // A different raw encoding still describes the same normalized brightness capability.
+    brightness.range.max = 200;
     let changed = store
         .devices()
         .publish_cached(&cached, "Changed cloud name")
         .unwrap();
-    assert_eq!(changed.unique_id, original.unique_id);
-    assert_eq!(changed.endpoint, original.endpoint);
-    assert_eq!(changed.label, original.label);
-    assert_eq!(
-        changed.description().functions[0]
-            .temperature_range()
-            .unwrap()
-            .max,
-        5600
-    );
-    let mut incompatible = changed.description();
-    incompatible.functions[0]
-        .capabilities
-        .push(Capability::ColorRgb);
+    assert_eq!(changed, original);
+    let restored = store.devices().restore_cached("account", "home").unwrap();
+    assert_eq!(restored, vec![(cached.clone(), original.clone())]);
+
+    let mut incompatible = original.description();
+    incompatible.functions[0].category = Category::Outlet;
+    incompatible.functions[0].capabilities = vec![Capability::OnOff];
     assert!(matches!(
         store.devices().publish(&incompatible),
         Err(AdmissionError::IncompatibleFunctions)
@@ -142,6 +147,34 @@ fn binding_or_range_updates_keep_identity_but_changed_light_features_are_rejecte
     let rejoined = store.devices().publish_cached(&cached, "New").unwrap();
     assert_eq!(rejoined.unique_id, original.unique_id);
     assert_eq!(rejoined.endpoint, original.endpoint);
+}
+
+#[test]
+fn capability_reordering_is_not_an_identity_or_cache_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let mut cached = light(
+        "xiaomi.light.ceil04",
+        include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
+    );
+    let original = store.devices().publish_cached(&cached, "Original").unwrap();
+    cached.device.functions[0]
+        .description
+        .capabilities
+        .reverse();
+    let reordered = store.devices().publish_cached(&cached, "Reorder").unwrap();
+    assert_eq!(reordered.unique_id, original.unique_id);
+    assert_eq!(reordered.endpoint, original.endpoint);
+    assert_eq!(reordered.label, original.label);
+    let restored = store.devices().restore_cached("account", "home").unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].1.functions[0].capabilities.len(), 3);
+    for capability in &original.functions[0].capabilities {
+        assert!(
+            restored[0].1.functions[0].capabilities.contains(capability),
+            "{capability:?}"
+        );
+    }
 }
 
 #[test]
@@ -275,38 +308,63 @@ fn cached_and_identity_temperature_ranges_must_match_on_restore() {
 }
 
 #[test]
-fn range_update_restores_identical_cache_and_identity_without_reallocating() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut cached = light(
-        "xiaomi.light.ceil04",
-        include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
-    );
-    let original;
-    {
+fn incompatible_capabilities_and_physical_ranges_preserve_cache_and_identity() {
+    for change in ["add", "remove", "range"] {
+        let directory = tempfile::tempdir().unwrap();
+        let cached = light(
+            "xiaomi.light.ceil04",
+            include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
+        );
+        let original;
+        {
+            let store = Store::open(directory.path()).unwrap();
+            original = store.devices().publish_cached(&cached, "Light").unwrap();
+            let mut changed = cached.clone();
+            let function = &mut changed.device.functions[0];
+            let lighting = function.lighting.as_mut().unwrap();
+            match change {
+                "add" => {
+                    lighting.color = Some(NumericBinding {
+                        property: PropertyBinding { siid: 2, piid: 9 },
+                        format: NumericFormat::Uint32,
+                        unit: NumericUnit::Rgb,
+                        range: NumericRange {
+                            min: 0,
+                            max: 0xffffff,
+                            step: 1,
+                        },
+                    });
+                    function.description.capabilities.push(Capability::ColorRgb);
+                }
+                "remove" => {
+                    function.power = None;
+                    function
+                        .description
+                        .capabilities
+                        .retain(|capability| *capability != Capability::OnOff);
+                }
+                "range" => {
+                    let range = &mut lighting.temperature.as_mut().unwrap().range;
+                    range.max = 5600;
+                    function.description.capabilities[2] = Capability::ColorTemperature(*range);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    store.devices().publish_cached(&changed, "Changed name"),
+                    Err(AdmissionError::IncompatibleFunctions)
+                ),
+                "{change}"
+            );
+        }
         let store = Store::open(directory.path()).unwrap();
-        original = store.devices().publish_cached(&cached, "Light").unwrap();
-        let range = &mut cached.device.functions[0]
-            .lighting
-            .as_mut()
-            .unwrap()
-            .temperature
-            .as_mut()
-            .unwrap()
-            .range;
-        range.max = 5600;
-        cached.device.functions[0].description.capabilities[2] =
-            Capability::ColorTemperature(*range);
-        store.devices().publish_cached(&cached, "New name").unwrap();
+        assert_eq!(
+            store.devices().restore_cached("account", "home").unwrap(),
+            vec![(cached, original)],
+            "{change}"
+        );
     }
-    let store = Store::open(directory.path()).unwrap();
-    let restored = store.devices().restore_cached("account", "home").unwrap();
-    assert_eq!(restored[0].1.unique_id, original.unique_id);
-    assert_eq!(restored[0].1.endpoint, original.endpoint);
-    assert_eq!(restored[0].1.label, original.label);
-    assert_eq!(
-        restored[0].0.device.functions[0].description.capabilities,
-        restored[0].1.functions[0].capabilities
-    );
 }
 
 #[test]

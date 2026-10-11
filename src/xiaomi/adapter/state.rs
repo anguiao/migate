@@ -104,8 +104,9 @@ pub(super) struct DeviceSlot {
     pub(super) loading: Option<Rc<Lifetime>>,
     pub(super) access: Option<Result<DeviceAccess, CentralError>>,
     pub(super) blocked: Option<String>,
-    /// The block is a confirmed unsupported capability, not a temporary failure.
-    pub(super) blocked_unsupported: bool,
+    /// A valid description that is not Matter-publishable. The reservation and
+    /// actual bindings stay in `admitted`, but no endpoint or consumers exist.
+    pub(super) unpublished: Option<String>,
     /// Latest cloud relation metadata when this member is a known group identity.
     pub(super) group: Option<GroupMeta>,
     pub(super) last_switch_reason: Option<String>,
@@ -119,6 +120,23 @@ impl DeviceSlot {
                 cached: RefCell::new(cached),
                 physical,
             })),
+            ..Self::default()
+        }
+    }
+    /// A valid cached identity without a supported Matter mapping.
+    pub(super) fn unpublished(
+        cached: CachedPhysicalDevice,
+        physical: PhysicalDevice,
+        reason: String,
+    ) -> Self {
+        Self {
+            admitted: Some(Rc::new(DeviceRecord {
+                life: Lifetime::default(),
+                binding_generation: Cell::new(0),
+                cached: RefCell::new(cached),
+                physical,
+            })),
+            unpublished: Some(reason),
             ..Self::default()
         }
     }

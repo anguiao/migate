@@ -1,6 +1,6 @@
 use migate::{
-    device::{Composition, DeviceKey},
-    storage::{CachedPhysicalDevice, CachedScope, CompositionCommitError, Store},
+    device::{Capability, Composition, DeviceKey},
+    storage::{AdmissionError, CachedPhysicalDevice, CachedScope, CompositionCommitError, Store},
     xiaomi::{capability::parse_device_for_model, cloud::group_id},
 };
 use rusqlite::Connection;
@@ -41,6 +41,49 @@ fn scope_in(uid: &str, home: &str) -> CachedScope {
         home_id: home.into(),
         group_id: group_id(uid, home),
     }
+}
+
+#[test]
+fn incompatible_member_description_preserves_confirmed_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    for did in ["a", "b", "c"] {
+        store.devices().publish_cached(&light(did), did).unwrap();
+    }
+    let initial = store
+        .devices()
+        .commit_composition(
+            &scope(),
+            &[group("g1", "One", &["a", "b"]), group("g2", "Two", &["c"])],
+            &[],
+        )
+        .unwrap();
+    let original = store.devices().load_published(&key("a")).unwrap().unwrap();
+    let mut incompatible = light("a");
+    incompatible.device.functions[0].power = None;
+    incompatible.device.functions[0]
+        .description
+        .capabilities
+        .retain(|capability| *capability != Capability::OnOff);
+    assert!(matches!(
+        store.devices().publish_cached(&incompatible, "Changed"),
+        Err(AdmissionError::IncompatibleFunctions)
+    ));
+    assert_eq!(
+        store.devices().restore_groups("account", "home").unwrap(),
+        initial
+    );
+    assert_eq!(
+        store.devices().load_published(&key("a")).unwrap(),
+        Some(original)
+    );
+    assert_eq!(
+        store
+            .devices()
+            .load_parsed("account", "home", &key("a"))
+            .unwrap(),
+        Some(light("a"))
+    );
 }
 
 #[test]

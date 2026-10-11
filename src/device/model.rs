@@ -338,6 +338,16 @@ impl FunctionDescription {
                 _ => None,
             })
     }
+    /// Capability lists are semantically equal when they contain the same
+    /// definite values regardless of order. Descriptions are validated, so a
+    /// kind appears at most once and value equality is enough.
+    pub fn same_capabilities(&self, other: &Self) -> bool {
+        self.capabilities.len() == other.capabilities.len()
+            && self
+                .capabilities
+                .iter()
+                .all(|capability| other.capabilities.contains(capability))
+    }
     pub fn valid_capabilities(&self) -> bool {
         match self.category {
             Category::Outlet => self.capabilities == [Capability::OnOff],

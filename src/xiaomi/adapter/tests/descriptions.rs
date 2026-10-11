@@ -328,3 +328,67 @@ fn publication_database_failures_are_fatal_and_do_not_publish_partial_topology()
             .is_none()
     );
 }
+
+#[test]
+fn capability_reordering_keeps_the_light_instance_work_and_actions() {
+    block_on(Rig::light("yeelink.light.light3").run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |_peer| async move {
+            let key = DeviceKey::new("xiaomi", "one");
+            until(|| control.context.registry.get(&key).is_some()).await;
+            let record = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let work = control.context.live.borrow().devices["one"]
+                .work
+                .clone()
+                .unwrap();
+            let mut reordered = record.cached.borrow().clone();
+            reordered.device.functions[0]
+                .description
+                .capabilities
+                .reverse();
+            control
+                .context
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut("one")
+                .unwrap()
+                .candidate = Some((reordered, None));
+            control.context.reconcile("one").unwrap();
+            // A pure capability reorder is a semantic no-op: the running
+            // instance, its work controller and its actions stay untouched.
+            assert!(Rc::ptr_eq(
+                &record,
+                &control.context.live.borrow().devices["one"]
+                    .admitted
+                    .clone()
+                    .unwrap()
+            ));
+            assert!(Rc::ptr_eq(
+                &work,
+                &control.context.live.borrow().devices["one"]
+                    .work
+                    .clone()
+                    .unwrap()
+            ));
+            assert!(!record.life.is_closed());
+            assert!(!work.life.is_closed());
+            let uid = control.data[0].uid.clone();
+            assert_eq!(
+                control
+                    .store
+                    .devices()
+                    .load_parsed(&uid, "local", &key)
+                    .unwrap()
+                    .unwrap(),
+                control.data[0]
+            );
+        })
+        .await;
+    }));
+}

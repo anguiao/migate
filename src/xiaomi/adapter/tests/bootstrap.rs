@@ -214,3 +214,28 @@ fn corrupt_saved_credentials_or_cached_topology_fail_before_network_requests() {
         assert_eq!(rig.cloud.lock().unwrap().homes, 0);
     }
 }
+
+#[test]
+fn unmappable_light_restores_a_reservation_without_controls() {
+    let rig = Rig::light("synthetic.light.rgbonly");
+    let key = DeviceKey::new("xiaomi", "one");
+    let stored = rig.store.devices().load_published(&key).unwrap().unwrap();
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| {
+            c.context
+                .status
+                .borrow()
+                .pending
+                .iter()
+                .any(|pending| pending.did == "one" && pending.reason.contains("on/off"))
+        })
+        .await;
+        assert!(c.context.registry.get(&key).is_none());
+        assert!(c.context.live.borrow().devices["one"].unpublished.is_some());
+        assert_eq!(
+            c.store.devices().load_published(&key).unwrap().unwrap(),
+            stored
+        );
+    }));
+}

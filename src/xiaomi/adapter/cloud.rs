@@ -254,7 +254,6 @@ pub(super) async fn run(
                             let mut live = current.live.borrow_mut();
                             let slot = live.devices.get_mut(&did).unwrap();
                             slot.blocked = None;
-                            slot.blocked_unsupported = false;
                             slot.candidate = None;
                             slot.group = Some(GroupMeta {
                                 model,
@@ -275,8 +274,9 @@ pub(super) async fn run(
                         match &error {
                             CatalogError::Cloud(_) => current.block_device(&did, error.to_string()),
                             CatalogError::Capability(_) => {
-                                current.block_unsupported(&did, error.to_string());
-                                current.reconcile_groups()?;
+                                // A malformed group-image description keeps the
+                                // last confirmed relation instead of revoking.
+                                current.block_device(&did, error.to_string());
                             }
                             _ => current.block_device(&did, error.to_string()),
                         }
@@ -398,7 +398,6 @@ pub(super) async fn run(
                             let mut live = current.live.borrow_mut();
                             let slot = live.devices.get_mut(&did).unwrap();
                             slot.blocked = None;
-                            slot.blocked_unsupported = false;
                             slot.candidate = Some((cached, name));
                         }
                         current.reconcile(&did)?;
@@ -409,7 +408,6 @@ pub(super) async fn run(
                             let mut live = current.live.borrow_mut();
                             let slot = live.devices.get_mut(&did).unwrap();
                             slot.blocked = None;
-                            slot.blocked_unsupported = false;
                             slot.candidate = None;
                             slot.group = Some(GroupMeta {
                                 model,
@@ -424,8 +422,10 @@ pub(super) async fn run(
                                 current.problem(&did, Some(error.to_string()))
                             }
                             CatalogError::Capability(_) => {
-                                current.block_unsupported(&did, error.to_string());
-                                current.reconcile_groups()?;
+                                // A malformed description keeps the last valid
+                                // capabilities and confirmed composition until
+                                // a fresh valid description arrives.
+                                current.block_device(&did, error.to_string());
                             }
                             _ => current.block_device(&did, error.to_string()),
                         }

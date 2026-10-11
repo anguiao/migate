@@ -78,6 +78,8 @@ impl StoredDevice {
         }
     }
 
+    /// Compare static function semantics, including physical ranges, while
+    /// allowing an equivalent capability list in a different order.
     pub(crate) fn matches_functions(&self, functions: &[FunctionDescription]) -> bool {
         self.functions.len() == functions.len()
             && self.functions.iter().all(|stored| {
@@ -85,9 +87,10 @@ impl StoredDevice {
                     stored.key.id == function.id
                         && stored.category == function.category
                         && stored.capabilities.len() == function.capabilities.len()
-                        && stored.capabilities.iter().zip(&function.capabilities).all(
-                            |(old, new)| std::mem::discriminant(old) == std::mem::discriminant(new),
-                        )
+                        && stored
+                            .capabilities
+                            .iter()
+                            .all(|capability| function.capabilities.contains(capability))
                 })
             })
     }
@@ -125,13 +128,7 @@ impl DeviceStore {
                 continue;
             };
             let functions = cached.physical_description("").functions;
-            if !stored.matches_functions(&functions)
-                || stored.functions.iter().any(|stored| {
-                    !functions.iter().any(|function| {
-                        stored.key.id == function.id && stored.capabilities == function.capabilities
-                    })
-                })
-            {
+            if !stored.matches_functions(&functions) {
                 return Err(self.invalid(
                     "restore Xiaomi device topology",
                     "Cached functions differ from the published identity",
@@ -203,20 +200,6 @@ impl DeviceStore {
                         params![description.key.source, description.key.id, record.device.label],
                     )
                     .map_err(|error| self.store.database_error(operation, error))?;
-                for function in &description.functions {
-                    let capabilities =
-                        serde_json::to_string(&function.capabilities).map_err(|_| {
-                            self.invalid(operation, "Device capabilities cannot be encoded")
-                        })?;
-                    connection.execute("UPDATE device_function SET capabilities=?4 WHERE source=?1 AND device_id=?2 AND function_id=?3", params![description.key.source, description.key.id, function.id, capabilities]).map_err(|error| self.store.database_error(operation, error))?;
-                    record
-                        .device
-                        .functions
-                        .iter_mut()
-                        .find(|stored| stored.key.id == function.id)
-                        .expect("compatible function exists")
-                        .capabilities = function.capabilities.clone();
-                }
                 record.device.published = true;
                 Ok(record.device)
             }
@@ -332,19 +315,20 @@ pub(super) fn compatible_light_member(
     {
         return Ok(false);
     }
+    // A member must stay standalone publishable through the shared Matter
+    // mapping, not only generically valid.
+    if crate::matter::publication::map_light(&cached.device.functions[0].description).is_err() {
+        return Ok(false);
+    }
     let Some(record) = load_record(connection, key)? else {
         return Ok(false);
     };
     if !record.device.published {
         return Ok(false);
     }
-    let functions = cached.physical_description("").functions;
-    Ok(record.device.matches_functions(&functions)
-        && record.device.functions.iter().all(|stored| {
-            functions.iter().any(|function| {
-                stored.key.id == function.id && stored.capabilities == function.capabilities
-            })
-        }))
+    Ok(record
+        .device
+        .matches_functions(&cached.physical_description("").functions))
 }
 
 fn validate_description(description: &PhysicalDeviceDescription) -> Result<(), &'static str> {

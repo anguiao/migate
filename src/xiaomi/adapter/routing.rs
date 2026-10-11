@@ -147,6 +147,9 @@ impl Context {
     pub(super) fn install_work(self: &Rc<Self>, did: &str) {
         let mut live = self.live.borrow_mut();
         let slot = live.devices.get_mut(did).unwrap();
+        if slot.unpublished.is_some() {
+            return;
+        }
         let record = slot.admitted.as_ref().unwrap().clone();
         let work = slot
             .work
@@ -203,7 +206,7 @@ impl Context {
         let live = self.live.borrow();
         let slot = live.devices.get(did)?;
         let record = slot.admitted.as_ref()?;
-        if slot.blocked.is_some() || record.life.is_closed() {
+        if slot.blocked.is_some() || slot.unpublished.is_some() || record.life.is_closed() {
             return None;
         }
         let cached = record.cached.borrow();
@@ -268,7 +271,11 @@ impl Context {
         let Some(record) = &slot.admitted else {
             return false;
         };
-        if slot.blocked.is_some() || record.life.is_closed() || slot.cloud_forbidden {
+        if slot.blocked.is_some()
+            || slot.unpublished.is_some()
+            || record.life.is_closed()
+            || slot.cloud_forbidden
+        {
             return false;
         }
         let cached = record.cached.borrow();
@@ -314,6 +321,7 @@ impl Context {
             Availability::Unavailable(
                 slot.blocked
                     .clone()
+                    .or_else(|| slot.unpublished.clone())
                     .unwrap_or_else(|| "no usable control path".into()),
             )
         });

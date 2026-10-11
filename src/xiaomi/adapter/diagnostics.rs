@@ -90,12 +90,15 @@ impl Context {
                 }
                 slot.last_switch_reason.clone()
             };
+            let unpublished = self.live.borrow().devices[&did].unpublished.clone();
             let unavailable_reason = selected.is_none().then(|| {
-                format!(
-                    "local: {}; cloud: {}",
-                    self.local_reason(&did, false),
-                    self.cloud_reason(&did, true)
-                )
+                unpublished.unwrap_or_else(|| {
+                    format!(
+                        "local: {}; cloud: {}",
+                        self.local_reason(&did, false),
+                        self.cloud_reason(&did, true)
+                    )
+                })
             });
             let sync_limited_reason = notification
                 .is_none()
