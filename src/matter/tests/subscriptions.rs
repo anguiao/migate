@@ -1486,3 +1486,80 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
         .join()
         .unwrap();
 }
+
+#[test]
+fn light_groups_commands_route_through_real_capabilities() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path()).unwrap();
+            let identity = store.load_identity().unwrap();
+            let info = basic_info(&identity);
+            let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            let protocol = StoreAdapter::new(store.matter());
+            let kv = matter.kv(protocol.clone());
+            matter.startup(&kv).unwrap();
+            let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            connect(&matter, SERVER_ID, CLIENT_ID, 32);
+            connect(&client, CLIENT_ID, SERVER_ID, 32);
+            matter.with_state(|state| {
+                state
+                    .fabrics
+                    .fabric_mut(NonZeroU8::new(1).unwrap())
+                    .unwrap()
+                    .groups_mut()
+                    .key_map_add(GroupKeyMapping {
+                        group_id: 123,
+                        group_key_set_id: 1,
+                    })
+                    .unwrap()
+            });
+            let crypto = test_only_crypto();
+            let buffers: MatterBuffers = MatterBuffers::new();
+            let state: EthInteractionModelState =
+                EthInteractionModelState::new(EthNetwork::new_default());
+            let (device, _receiver) = super::support::light(true);
+            device.set_availability(Availability::Available);
+            let registry = super::test_registry(&store, &device);
+            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+            let incoming = Pipe::default();
+            let outgoing = Pipe::default();
+            let responder = DefaultResponder::new(&im);
+            block_on(async {
+                im.startup().await.unwrap();
+                let services = async {
+                    or(
+                        matter.run(
+                            &crypto,
+                            SendPipe(&outgoing),
+                            ReceivePipe(&incoming),
+                            NoNetwork,
+                        ),
+                        or(
+                            client.run(
+                                &crypto,
+                                SendPipe(&incoming),
+                                ReceivePipe(&outgoing),
+                                NoNetwork,
+                            ),
+                            or(responder.run::<4, 4>(), im.run()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    panic!("light group services exited");
+                };
+                let controller = async {
+                    group_request(&client, true).await;
+                    group_request(&client, false).await;
+                };
+                or(services, controller).await;
+            });
+            protocol.check_failure().unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

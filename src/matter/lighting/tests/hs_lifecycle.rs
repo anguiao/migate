@@ -41,7 +41,7 @@ fn hs_transition_from_temperature_ignores_the_inactive_rgb_cache() {
             })
             .unwrap();
         block_on(async {
-            let handler = ColorHandler::<true>(&light);
+            let handler = ColorHandler::<true, true>(&light);
             let data = hs_to(170, 254, 20);
             let mut invoke = pin!(handler.handle_move_to_hue_and_saturation(
                 &ctx,
@@ -96,7 +96,7 @@ fn gray_hue_motion_accepts_without_a_write_and_stop_preserves_the_hue_for_satura
             })
             .unwrap();
         block_on(async {
-            let handler = ColorHandler::<true>(&light);
+            let handler = ColorHandler::<true, true>(&light);
             let data = if continuous {
                 axis_move(1, 60)
             } else {
@@ -183,7 +183,7 @@ fn a_cancelled_hs_startup_receipt_cannot_restore_its_mode_or_gray_hue_over_a_rep
                 })
                 .unwrap();
             block_on(async {
-                let handler = ColorHandler::<true>(&light);
+                let handler = ColorHandler::<true, true>(&light);
                 let data = hs_to(84, 254, 0);
                 let mut old = pin!(handler.handle_move_to_hue_and_saturation(
                     &ctx,
@@ -271,7 +271,7 @@ fn a_cancelled_hs_receipt_without_a_new_command_does_not_change_the_last_accepte
             })
             .unwrap();
         block_on(async {
-            let handler = ColorHandler::<true>(&light);
+            let handler = ColorHandler::<true, true>(&light);
             let data = [
                 0x15, 0x25, 0, 0xCD, 0x4C, 0x25, 1, 0x9A, 0x99, 0x25, 2, 0, 0, 0x24, 3, 0, 0x24, 4,
                 0, 0x18,
@@ -354,7 +354,7 @@ fn an_external_rgb_change_versions_and_reports_the_hs_attributes() {
     assert!(ctx.changes.borrow().contains(&(2, 0x300, 0)));
     assert!(ctx.changes.borrow().contains(&(2, 0x300, 1)));
     block_on(async {
-        let handler = ColorHandler::<true>(&light);
+        let handler = ColorHandler::<true, true>(&light);
         assert!(handler.current_hue(&ctx).await.unwrap().abs_diff(85) <= 1);
         assert!(
             handler

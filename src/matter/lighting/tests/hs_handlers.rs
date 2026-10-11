@@ -67,7 +67,7 @@ fn hs_absolute_unknown_start_and_color_mode_follow_the_accepted_command() {
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true>(&light);
+        let handler = ColorHandler::<true, true>(&light);
         assert!(handler.current_hue(&ctx).await.is_err());
         let data = hs_to(0, 254, 0);
         let target = applied(
@@ -153,7 +153,7 @@ fn gray_hue_selection_is_used_when_saturation_increases() {
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true>(&light);
+        let handler = ColorHandler::<true, true>(&light);
         let data = hs_to(84, 0, 0);
         applied(
             &function,
@@ -228,7 +228,7 @@ fn invalid_and_ignored_hs_requests_preserve_the_existing_action() {
             .unwrap();
         accept(&function, frame(&mut receiver).await);
         action.accepted().await.unwrap();
-        let handler = ColorHandler::<true>(&light);
+        let handler = ColorHandler::<true, true>(&light);
         for (hue, direction, duration) in [(255, 0, 0), (50, 4, 0), (50, 0, u16::MAX)] {
             let data = hue_to(hue, direction, duration);
             assert!(
@@ -307,7 +307,7 @@ fn hue_and_saturation_commands_keep_each_others_timeline_and_stop_both_axes() {
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true>(&light);
+        let handler = ColorHandler::<true, true>(&light);
         let data = axis_move(1, 20);
         applied(
             &function,
@@ -396,7 +396,7 @@ fn hs_stop_does_not_cancel_xy_or_temperature_actions() {
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true>(&light);
+        let handler = ColorHandler::<true, true>(&light);
         for task in [
             ColorTask::ColorTemperatureMoveTo {
                 start: 200,
@@ -446,7 +446,7 @@ fn hue_direction_and_steps_wrap_while_saturation_clips_for_the_full_requested_ti
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true>(&light);
+        let handler = ColorHandler::<true, true>(&light);
         for (direction, midpoint) in [(0, 0), (1, 127), (2, 0), (3, 127)] {
             let data = hs_to(250, 254, 0);
             applied(

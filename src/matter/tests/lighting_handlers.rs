@@ -5,6 +5,9 @@ macro_rules! setup_light {
     ($rgb:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
         setup_light!(@source crate::matter::tests::support::light($rgb),$device,$receiver,$registry,$handler,$ctx);
     };
+    (@caps $capabilities:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
+        setup_light!(@source crate::matter::tests::support::light_caps("test-light", &$capabilities),$device,$receiver,$registry,$handler,$ctx);
+    };
     (@source $source:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -1018,6 +1021,273 @@ fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(ctx.changes.borrow().contains(&(2, 0x300, 0)));
         assert!(ctx.changes.borrow().contains(&(2, 0x300, 1)));
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
+    assert_eq!(registry.list().len(), 1);
+}
+
+#[test]
+fn on_off_only_light_rejects_absent_dimensions_and_keeps_real_power_control() {
+    setup_light!(
+        @caps vec![crate::device::Capability::OnOff],
+        device,
+        receiver,
+        registry,
+        handler,
+        ctx
+    );
+    device.set_availability(Availability::Available);
+    let function = device.functions()[0].clone();
+    function.observe(false);
+    block_on(async {
+        ctx.attribute = attr(6, 0);
+        assert!(
+            !report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                .bool()
+                .unwrap()
+        );
+
+        let mut on = Context::new(ctx.base, 6, 0);
+        on.command.cmd_id = 1;
+        on.data = TLVElement::new(&[0x15, 0x18]);
+        let mut out = [0; 128];
+        let mut invoke = pin!(handler.invoke(
+            &on,
+            InvokeReplyInstance::new(&on.command, WriteBuf::new(&mut out))
+        ));
+        assert!(poll_once(invoke.as_mut()).await.is_none());
+        let DeviceRequest::Power(request) = receiver.next_operation().await.unwrap() else {
+            panic!("on/off is not a power frame")
+        };
+        request.mark_sent().unwrap();
+        request.accept().unwrap();
+        invoke.await.unwrap();
+        assert_eq!(function.snapshot().power.value(), Some(true));
+
+        for cluster in [8, 0x300] {
+            ctx.attribute = attr(cluster, 0);
+            assert_eq!(
+                read_bytes(&handler, &ctx).await.unwrap_err().code(),
+                ErrorCode::ClusterNotFound,
+                "read cluster {cluster:#x}"
+            );
+            let mut command = Context::new(ctx.base, cluster, 0);
+            command.command.cmd_id = 0;
+            assert_eq!(
+                handler
+                    .invoke(
+                        &command,
+                        InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut [0; 128]))
+                    )
+                    .await
+                    .unwrap_err()
+                    .code(),
+                ErrorCode::ClusterNotFound,
+                "invoke cluster {cluster:#x}"
+            );
+        }
+        let mut unknown = Context::new(ctx.base, 6, 0);
+        unknown.command.cmd_id = 0x40;
+        assert_eq!(
+            handler
+                .invoke(
+                    &unknown,
+                    InvokeReplyInstance::new(&unknown.command, WriteBuf::new(&mut [0; 128]))
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::CommandNotFound
+        );
+        // The real Groups cluster keeps its commands on a light without
+        // fabricated dimensions; only an absent command is rejected.
+        ctx.attribute = attr(4, 0xfffc);
+        assert!(!read_bytes(&handler, &ctx).await.unwrap().is_empty());
+        let mut unknown_groups = Context::new(ctx.base, 4, 0);
+        unknown_groups.command.cmd_id = 0x40;
+        assert_eq!(
+            handler
+                .invoke(
+                    &unknown_groups,
+                    InvokeReplyInstance::new(&unknown_groups.command, WriteBuf::new(&mut [0; 128]))
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::CommandNotFound
+        );
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
+    assert_eq!(registry.list().len(), 1);
+}
+
+#[test]
+fn color_temperature_without_brightness_controls_color_and_rejects_level_and_rgb() {
+    setup_light!(
+        @caps vec![
+            crate::device::Capability::OnOff,
+            crate::device::Capability::ColorTemperature(crate::device::NumericRange {
+                min: 2700,
+                max: 6500,
+                step: 1,
+            }),
+        ],
+        device,
+        receiver,
+        registry,
+        handler,
+        ctx
+    );
+    device.set_availability(Availability::Available);
+    let function = device.functions()[0].clone();
+    function
+        .observe_light(LightPatch {
+            power: Some(true),
+            temperature_kelvin: Some(5000),
+            mode: Some(crate::device::LightMode::Temperature),
+            ..Default::default()
+        })
+        .unwrap();
+    block_on(async {
+        ctx.attribute = attr(8, 0);
+        assert_eq!(
+            read_bytes(&handler, &ctx).await.unwrap_err().code(),
+            ErrorCode::ClusterNotFound
+        );
+
+        let mut ct = Context::new(ctx.base, 0x300, 0);
+        ct.command.cmd_id = 0x0a;
+        ct.data = TLVElement::new(&[
+            0x15, 0x25, 0, 200, 0, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+        ]);
+        let mut out = [0; 128];
+        let mut invoke = pin!(handler.invoke(
+            &ct,
+            InvokeReplyInstance::new(&ct.command, WriteBuf::new(&mut out))
+        ));
+        assert!(poll_once(invoke.as_mut()).await.is_none());
+        let DeviceRequest::Light(frame) = receiver.next_operation().await.unwrap() else {
+            panic!("temperature is not a light frame")
+        };
+        frame.mark_sent().unwrap();
+        frame.accept().unwrap();
+        invoke.await.unwrap();
+
+        for attribute in [0u32, 1, 3, 4] {
+            ctx.attribute = attr(0x300, attribute);
+            assert_eq!(
+                read_bytes(&handler, &ctx).await.unwrap_err().code(),
+                ErrorCode::AttributeNotFound,
+                "attribute {attribute:#x}"
+            );
+        }
+        for command in [0u32, 7] {
+            let mut unsupported = Context::new(ctx.base, 0x300, 0);
+            unsupported.command.cmd_id = command;
+            unsupported.data = TLVElement::new(&[
+                0x15, 0x24, 0, 10, 0x24, 1, 0, 0x25, 2, 0, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
+            ]);
+            assert_eq!(
+                handler
+                    .invoke(
+                        &unsupported,
+                        InvokeReplyInstance::new(
+                            &unsupported.command,
+                            WriteBuf::new(&mut [0; 128])
+                        )
+                    )
+                    .await
+                    .unwrap_err()
+                    .code(),
+                ErrorCode::CommandNotFound,
+                "command {command:#x}"
+            );
+        }
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
+    assert_eq!(registry.list().len(), 1);
+}
+
+#[test]
+fn rgb_without_temperature_or_brightness_controls_hue_and_rejects_ct_and_level() {
+    use crate::device::{LightMode, Rgb};
+
+    setup_light!(
+        @caps vec![
+            crate::device::Capability::OnOff,
+            crate::device::Capability::ColorRgb,
+        ],
+        device,
+        receiver,
+        registry,
+        handler,
+        ctx
+    );
+    device.set_availability(Availability::Available);
+    let function = device.functions()[0].clone();
+    function
+        .observe_light(LightPatch {
+            power: Some(true),
+            color: Some(Rgb {
+                red: 255,
+                green: 0,
+                blue: 0,
+            }),
+            mode: Some(LightMode::Rgb),
+            ..Default::default()
+        })
+        .unwrap();
+    block_on(async {
+        ctx.attribute = attr(8, 0);
+        assert_eq!(
+            read_bytes(&handler, &ctx).await.unwrap_err().code(),
+            ErrorCode::ClusterNotFound
+        );
+        ctx.attribute = attr(0x300, 3);
+        assert!(read_bytes(&handler, &ctx).await.is_ok());
+
+        let mut hue = Context::new(ctx.base, 0x300, 0);
+        hue.command.cmd_id = 6;
+        hue.data = TLVElement::new(&[
+            0x15, 0x24, 0, 254, 0x24, 1, 2, 0x25, 2, 0, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
+        ]);
+        let mut out = [0; 128];
+        let mut invoke = pin!(handler.invoke(
+            &hue,
+            InvokeReplyInstance::new(&hue.command, WriteBuf::new(&mut out))
+        ));
+        assert!(poll_once(invoke.as_mut()).await.is_none());
+        let DeviceRequest::Light(frame) = receiver.next_operation().await.unwrap() else {
+            panic!("hue is not a light frame")
+        };
+        frame.mark_sent().unwrap();
+        frame.accept().unwrap();
+        invoke.await.unwrap();
+
+        for attribute in [7u32, 0x400b, 0x400c, 0x400d] {
+            ctx.attribute = attr(0x300, attribute);
+            assert_eq!(
+                read_bytes(&handler, &ctx).await.unwrap_err().code(),
+                ErrorCode::AttributeNotFound,
+                "CT attribute {attribute:#x}"
+            );
+        }
+        let mut ct = Context::new(ctx.base, 0x300, 0);
+        ct.command.cmd_id = 0x0a;
+        ct.data = TLVElement::new(&[
+            0x15, 0x25, 0, 200, 0, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+        ]);
+        assert_eq!(
+            handler
+                .invoke(
+                    &ct,
+                    InvokeReplyInstance::new(&ct.command, WriteBuf::new(&mut [0; 128]))
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::CommandNotFound
+        );
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
     assert_eq!(registry.list().len(), 1);

@@ -285,15 +285,16 @@ macro_rules! setup {
         let $ctx = Context::new(&im, 8, 0);
 
         let $clock = Rc::new(TestClock::default());
+        let mapping = crate::matter::publication::map_light($function.description()).unwrap();
         let $light = Lighting::with_clock(
             $function.clone(),
             2,
             Dataver::new(1),
             Dataver::new(2),
             Dataver::new(3),
+            mapping,
             $clock.clone(),
-        )
-        .unwrap();
+        );
     };
 }
 async fn frame(receiver: &mut crate::device::CommandReceiver) -> LightRequest {
@@ -338,7 +339,7 @@ fn ct_wire_zero_clips_and_step_keeps_requested_rate_at_boundary() {
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<false>(&light);
+        let handler = ColorHandler::<true, false>(&light);
         let data = TLVElement::new(&[
             0x15, 0x25, 0, 0, 0, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
         ]);
@@ -455,8 +456,7 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
         );
         assert_eq!(function.snapshot().power.value(), Some(true));
         let task = light
-            .level
-            .borrow()
+            .level_state()
             .move_level(false, MoveModeEnum::Up, Some(1), 0, 0, Some(true))
             .unwrap()
             .unwrap();
@@ -579,7 +579,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
         light.advance();
         assert!(poll_once(receiver.next_operation()).await.is_none());
         assert!(action.ended().await.is_err());
-        assert_eq!(light.level.borrow().remaining_time.value, 0);
+        assert_eq!(light.level_state().remaining_time.value, 0);
         let before = function.snapshot().lighting.unwrap().brightness_percent;
         assert_eq!(
             light.refresh().level,
@@ -610,8 +610,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
         assert!(poll_once(receiver.next_operation()).await.is_none());
         let projected = light.refresh().level.unwrap();
         let next = light
-            .level
-            .borrow()
+            .level_state()
             .move_level(false, MoveModeEnum::Down, Some(2), 0, 0, Some(true))
             .unwrap()
             .unwrap();
@@ -704,7 +703,7 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
         light.remaining_dirty.set([false, false]);
         light.update_remaining(LightDimension::Color, 9900, false);
         assert_ne!(light.color_version.get(), old);
-        assert_eq!(light.color.borrow().remaining_time.value, 99);
+        assert_eq!(light.color_state().remaining_time.value, 99);
     }
 }
 
@@ -756,7 +755,7 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
                 if dimension == LightDimension::Brightness {
                     LevelHandler(&light).dataver();
                 } else {
-                    ColorHandler::<false>(&light).dataver();
+                    ColorHandler::<true, false>(&light).dataver();
                 }
                 assert!(ctx.changes.borrow().is_empty());
                 light.reports(&ctx);
@@ -794,7 +793,7 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
             ..Default::default()
         })
         .unwrap();
-    ColorHandler::<true>(&light).dataver();
+    ColorHandler::<true, true>(&light).dataver();
     assert!(ctx.changes.borrow().is_empty());
     light.reports(&ctx);
     assert!(ctx.changes.borrow().contains(&(2, 0x300, 3)));
@@ -813,7 +812,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
             ..Default::default()
         })
         .unwrap();
-    light.level.borrow_mut().on_level = Some(1);
+    light.level_state_mut().on_level = Some(1);
     block_on(async {
         let mut on = pin!(light.power(Command::On));
         assert!(poll_once(on.as_mut()).await.is_none());
@@ -879,7 +878,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
             function.snapshot().lighting.unwrap().brightness_percent,
             Some(30.0)
         );
-        light.level.borrow_mut().on_level = None;
+        light.level_state_mut().on_level = None;
         function
             .observe_light(LightPatch {
                 power: Some(true),
@@ -963,7 +962,7 @@ fn ct_stop_parses_all_fields_before_cancellation_and_ignores_motion_only_bounds(
                 0x18,
             ][..],
         ] {
-            let result = ColorHandler::<false>(&light)
+            let result = ColorHandler::<true, false>(&light)
                 .handle_move_color_temperature(
                     &ctx,
                     c::MoveColorTemperatureRequest::new(TLVElement::new(bytes)),
@@ -976,7 +975,7 @@ fn ct_stop_parses_all_fields_before_cancellation_and_ignores_motion_only_bounds(
             0x15, 0x24, 0, 0, 0x25, 1, 0, 0, 0x25, 2, 250, 0, 0x25, 3, 200, 0, 0x24, 4, 0, 0x24, 5,
             0, 0x18,
         ];
-        ColorHandler::<false>(&light)
+        ColorHandler::<true, false>(&light)
             .handle_move_color_temperature(
                 &ctx,
                 c::MoveColorTemperatureRequest::new(TLVElement::new(&bytes)),
@@ -1002,7 +1001,7 @@ fn clipped_ct_step_reaches_two_mired_boundary_in_two_milliseconds_and_equal_targ
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true>(&light);
+        let handler = ColorHandler::<true, true>(&light);
         let bytes = [
             0x15, 0x24, 0, 1, 0x25, 1, 100, 0, 0x25, 2, 1, 0, 0x25, 3, 0, 0, 0x25, 4, 202, 0, 0x24,
             5, 0, 0x24, 6, 0, 0x18,
@@ -1135,7 +1134,7 @@ fn ignored_ct_step_still_validates_required_bounds_before_success() {
                 0x24, 5, 0, 0x24, 6, 0, 0x18,
             ][..],
         ] {
-            let result = ColorHandler::<false>(&light)
+            let result = ColorHandler::<true, false>(&light)
                 .handle_step_color_temperature(
                     &ctx,
                     c::StepColorTemperatureRequest::new(TLVElement::new(bytes)),
@@ -1148,7 +1147,7 @@ fn ignored_ct_step_still_validates_required_bounds_before_success() {
             0x15, 0x24, 0, 1, 0x25, 1, 1, 0, 0x25, 2, 0, 0, 0x25, 3, 44, 1, 0x25, 4, 200, 0, 0x24,
             5, 0, 0x24, 6, 0, 0x18,
         ];
-        ColorHandler::<false>(&light)
+        ColorHandler::<true, false>(&light)
             .handle_step_color_temperature(
                 &ctx,
                 c::StepColorTemperatureRequest::new(TLVElement::new(&bytes)),

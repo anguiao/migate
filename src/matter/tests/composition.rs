@@ -125,6 +125,31 @@ impl GroupRig {
             .unwrap()
     }
 
+    /// Replace one published member with the same stable key but different real
+    /// capabilities, as a later capability update would. The confirmed group
+    /// relation and the reserved identity are untouched.
+    pub(in crate::matter) fn set_member_capabilities(
+        &mut self,
+        did: &str,
+        capabilities: Vec<Capability>,
+    ) {
+        let index = self
+            .members
+            .iter()
+            .position(|member| member.key.id == did)
+            .unwrap();
+        let mut description = self.members[index].device.description();
+        description.functions[0].capabilities = capabilities;
+        let (device, mut receivers) = PhysicalDevice::new(description);
+        device.set_availability(Availability::Available);
+        self.registry
+            .replace(device.clone())
+            .expect("capability replacement stays a supported single light");
+        let member = &mut self.members[index];
+        member.device = device;
+        member.receiver = receivers.remove(0);
+    }
+
     pub(in crate::matter) fn scope(&self) -> CachedScope {
         CachedScope {
             uid: "uid".into(),
@@ -1508,4 +1533,86 @@ fn member_external_reports_and_command_failures_stay_isolated() {
                 .is_none()
         );
     });
+}
+
+#[test]
+fn group_child_metadata_matches_every_real_on_off_combination() {
+    let range = crate::device::NumericRange {
+        min: 2700,
+        max: 6500,
+        step: 1,
+    };
+    for (brightness, temperature, rgb) in [
+        (false, false, false),
+        (false, true, false),
+        (false, false, true),
+        (false, true, true),
+        (true, false, false),
+        (true, false, true),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let mut rig = GroupRig::new(&[("member-a", "yeelink.light.light3", "Member")]);
+        let child_endpoint = rig.member("member-a").endpoint;
+        let mut capabilities = vec![Capability::OnOff];
+        if brightness {
+            capabilities.push(Capability::Brightness);
+        }
+        if temperature {
+            capabilities.push(Capability::ColorTemperature(range));
+        }
+        if rgb {
+            capabilities.push(Capability::ColorRgb);
+        }
+        rig.set_member_capabilities("member-a", capabilities);
+        let model = rig.model();
+        let combo = (true, brightness, temperature, rgb);
+        model.access(|node| {
+            let child = node
+                .endpoints
+                .iter()
+                .find(|candidate| candidate.id == child_endpoint)
+                .unwrap_or_else(|| panic!("{combo:?} child endpoint is missing"));
+            assert_light_surface(child, brightness, temperature, rgb, false, combo);
+        });
+    }
+}
+
+#[test]
+fn group_with_unmappable_member_is_not_published_and_others_fall_back_to_standalone() {
+    let mut rig = GroupRig::new(&[
+        ("member-a", "yeelink.light.light3", "Ceiling"),
+        ("member-b", "devcea.light.ls2307", "Bedside"),
+    ]);
+    let parent = rig.parent;
+    let unmappable = rig.member("member-a").endpoint;
+    let mappable = rig.member("member-b").endpoint;
+    rig.set_member_capabilities("member-a", vec![Capability::Brightness]);
+    let model = rig.model();
+    model.access(|node| {
+        let ids = node
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.id)
+            .collect::<Vec<_>>();
+        assert!(
+            !ids.contains(&parent),
+            "a group with an unmappable member must not publish its parent"
+        );
+        assert!(
+            !ids.contains(&unmappable),
+            "the unmappable member has no Matter endpoint"
+        );
+        let child = node
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == mappable)
+            .expect("the mappable member stays published as a standalone light");
+        assert_light_surface(child, true, true, true, true, (true, true, true, true));
+    });
+    let key = rig.member("member-a").key.clone();
+    assert!(
+        rig.store.devices().load_published(&key).unwrap().is_some(),
+        "the published identity of the unmappable member is not mutated"
+    );
 }

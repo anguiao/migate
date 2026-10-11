@@ -23,7 +23,7 @@ fn check_hue_254_endpoint(outcome: FinalOutcome) {
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true>(&light);
+        let handler = ColorHandler::<true, true>(&light);
         // MoveToHue(254, Up, 1 second). The encoded endpoint 254 and
         // canonical RGB red (hue 0) are physically equivalent.
         let data = [

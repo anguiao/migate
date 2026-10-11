@@ -3,10 +3,10 @@ mod handlers;
 #[cfg(test)]
 mod tests;
 
+use super::publication::LightPublication;
 use crate::device::{
-    ActionToken, Capability, Command, CommandError, Function, LightAction, LightColorTarget,
-    LightDimension, LightMode, LightTarget, NumericRange, brightness_from_matter_level,
-    brightness_to_matter_level,
+    ActionToken, Command, CommandError, Function, LightAction, LightColorTarget, LightDimension,
+    LightMode, LightTarget, NumericRange, brightness_from_matter_level, brightness_to_matter_level,
 };
 use controllers::{
     clock::{Clock, SystemClock},
@@ -22,7 +22,7 @@ use rs_matter::{
     error::{Error, ErrorCode},
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, Ref, RefCell, RefMut},
     rc::Rc,
 };
 
@@ -44,7 +44,11 @@ impl Task {
             Self::Color(task) => task.duration(),
         }
     }
-    fn frame(self, elapsed: u64, range: NumericRange) -> Result<(LightTarget, bool), Error> {
+    fn frame(
+        self,
+        elapsed: u64,
+        range: Option<NumericRange>,
+    ) -> Result<(LightTarget, bool), Error> {
         match self {
             Self::Level(task) => {
                 let (level, end, power) = task.frame(elapsed);
@@ -65,7 +69,10 @@ impl Task {
                     color::Target::Xy(x, y) => LightColorTarget::Rgb(color::xy_to_rgb(x, y)),
                     color::Target::Hs(value) => LightColorTarget::Rgb(hs::hs_to_rgb(value)),
                     color::Target::Temperature(mireds) => LightColorTarget::Temperature(
-                        range.kelvin_from_mireds(mireds).map_err(command_error)?,
+                        range
+                            .expect("temperature task requires a temperature range")
+                            .kelvin_from_mireds(mireds)
+                            .map_err(command_error)?,
                     ),
                 };
                 Ok((
@@ -107,12 +114,10 @@ impl Projection {
 pub(super) struct Lighting {
     function: Function,
     endpoint: u16,
-    rgb: bool,
-    range: NumericRange,
-    bounds: (u16, u16),
+    mapping: LightPublication,
     clock: Rc<dyn Clock>,
-    level: RefCell<LevelControlState>,
-    color: RefCell<ColorControlState>,
+    level: Option<RefCell<LevelControlState>>,
+    color: Option<RefCell<ColorControlState>>,
     active: RefCell<[Option<Active>; 2]>,
     rgb_mode: Cell<u8>,
     hue_hint: Cell<f64>,
@@ -144,13 +149,15 @@ impl Lighting {
         on_off: Dataver,
         level: Dataver,
         color: Dataver,
-    ) -> Result<Self, Error> {
+        mapping: LightPublication,
+    ) -> Self {
         Self::with_clock(
             function,
             endpoint,
             on_off,
             level,
             color,
+            mapping,
             Rc::new(SystemClock::new()),
         )
     }
@@ -160,23 +167,20 @@ impl Lighting {
         on_off: Dataver,
         level: Dataver,
         color: Dataver,
+        mapping: LightPublication,
         clock: Rc<dyn Clock>,
-    ) -> Result<Self, Error> {
-        let description = function.description();
-        let range = description
-            .temperature_range()
-            .ok_or(ErrorCode::InvalidState)?;
-        let bounds = range.mired_bounds().map_err(command_error)?;
-        let rgb = description.capabilities.contains(&Capability::ColorRgb);
+    ) -> Self {
         let result = Self {
             function,
             endpoint,
-            rgb,
-            range,
-            bounds,
+            mapping,
             clock,
-            level: RefCell::new(LevelControlState::default()),
-            color: RefCell::new(ColorControlState::default()),
+            level: mapping
+                .brightness
+                .then(|| RefCell::new(LevelControlState::default())),
+            color: mapping
+                .has_color_control()
+                .then(|| RefCell::new(ColorControlState::default())),
             active: RefCell::new([None, None]),
             rgb_mode: Cell::new(0),
             hue_hint: Cell::new(0.0),
@@ -194,33 +198,63 @@ impl Lighting {
         let projection = result.refresh();
         result.versioned.set(projection);
         result.observed.set(projection);
-        Ok(result)
+        result
     }
-    pub(super) fn rgb(&self) -> bool {
-        self.rgb
+    pub(super) fn publication(&self) -> LightPublication {
+        self.mapping
+    }
+    fn level_state(&self) -> Ref<'_, LevelControlState> {
+        self.level
+            .as_ref()
+            .expect("level handler owns its level state")
+            .borrow()
+    }
+    fn level_state_mut(&self) -> RefMut<'_, LevelControlState> {
+        self.level
+            .as_ref()
+            .expect("level handler owns its level state")
+            .borrow_mut()
+    }
+    fn color_state(&self) -> Ref<'_, ColorControlState> {
+        self.color
+            .as_ref()
+            .expect("color handler owns its color state")
+            .borrow()
+    }
+    fn color_state_mut(&self) -> RefMut<'_, ColorControlState> {
+        self.color
+            .as_ref()
+            .expect("color handler owns its color state")
+            .borrow_mut()
     }
     fn refresh(&self) -> Projection {
         self.accept_color_metadata();
         let snapshot = self.function.snapshot();
-        let lighting = snapshot
-            .lighting
-            .as_ref()
-            .expect("lighting Function snapshot");
-        let temperature = lighting.temperature_kelvin.map(|value| {
-            self.range
-                .mireds_from_kelvin(value)
-                .expect("validated snapshot temperature")
+        let lighting = snapshot.lighting.as_ref();
+        let temperature = self.mapping.temperature.as_ref().and_then(|published| {
+            lighting
+                .and_then(|lighting| lighting.temperature_kelvin)
+                .map(|value| {
+                    published
+                        .range
+                        .mireds_from_kelvin(value)
+                        .expect("validated snapshot temperature")
+                })
         });
-        let (xy, hs) = if self.rgb {
-            match lighting.mode {
+        let (xy, hs) = if self.mapping.rgb {
+            match lighting.and_then(|lighting| lighting.mode) {
                 Some(LightMode::Temperature) => {
                     let xy = temperature.map(color::temperature_to_xy);
                     let hs = xy.map(|(x, y)| hs::rgb_to_hs(color::xy_to_rgb(x, y)));
                     (xy, hs)
                 }
                 Some(LightMode::Rgb) => (
-                    lighting.color.and_then(color::rgb_to_xy),
-                    lighting.color.map(|rgb| self.rgb_hs(rgb)),
+                    lighting
+                        .and_then(|lighting| lighting.color)
+                        .and_then(color::rgb_to_xy),
+                    lighting
+                        .and_then(|lighting| lighting.color)
+                        .map(|rgb| self.rgb_hs(rgb)),
                 ),
                 None => (None, None),
             }
@@ -231,23 +265,36 @@ impl Lighting {
             power: snapshot.power.value(),
             // Observed zero is a known physical value; Matter's nonzero minimum
             // projects it to MinLevel without inferring the independent power state.
-            level: lighting.brightness_percent.map(|value| {
-                brightness_to_matter_level(value.max(1.0)).expect("validated snapshot brightness")
-            }),
+            level: if self.mapping.brightness {
+                lighting
+                    .and_then(|lighting| lighting.brightness_percent)
+                    .map(|value| {
+                        brightness_to_matter_level(value.max(1.0))
+                            .expect("validated snapshot brightness")
+                    })
+            } else {
+                None
+            },
             xy,
             temperature,
-            mode: lighting.mode,
+            mode: lighting.and_then(|lighting| lighting.mode),
             hs,
-            color_mode: lighting.mode.map(|mode| match mode {
-                LightMode::Rgb => self.rgb_mode.get(),
-                LightMode::Temperature => 2,
-            }),
+            color_mode: lighting
+                .and_then(|lighting| lighting.mode)
+                .map(|mode| match mode {
+                    LightMode::Rgb => self.rgb_mode.get(),
+                    LightMode::Temperature => 2,
+                }),
         };
-        self.level.borrow_mut().current_level = result.level;
-        let mut color = self.color.borrow_mut();
-        color.xy = result.xy;
-        color.color_temperature_mireds = result.temperature;
-        color.mode = result.mode;
+        if let Some(level) = &self.level {
+            level.borrow_mut().current_level = result.level;
+        }
+        if let Some(color) = &self.color {
+            let mut color = color.borrow_mut();
+            color.xy = result.xy;
+            color.color_temperature_mireds = result.temperature;
+            color.mode = result.mode;
+        }
         result
     }
     fn rgb_hs(&self, rgb: crate::device::Rgb) -> hs::Hs {
@@ -373,12 +420,18 @@ impl Lighting {
             1
         };
         let (old, new, report) = if index == 0 {
-            let mut level = self.level.borrow_mut();
+            let Some(level) = &self.level else {
+                return;
+            };
+            let mut level = level.borrow_mut();
             let old = level.remaining_time.value;
             let report = level.remaining_time.write(millis, start, u16::MAX);
             (old, level.remaining_time.value, report)
         } else {
-            let mut color = self.color.borrow_mut();
+            let Some(color) = &self.color else {
+                return;
+            };
+            let mut color = color.borrow_mut();
             let old = color.remaining_time.value;
             let report = color.remaining_time.write(millis, start, 0xfffe);
             (old, color.remaining_time.value, report)
@@ -398,7 +451,7 @@ impl Lighting {
     }
     fn begin(&self, task: Task, forced_power: Option<bool>) -> Result<Rc<LightAction>, Error> {
         self.refresh();
-        let (mut target, final_frame) = task.frame(0, self.range)?;
+        let (mut target, final_frame) = task.frame(0, self.mapping.temperature.map(|t| t.range))?;
         if forced_power.is_some() {
             target.power = forced_power;
         }
@@ -455,7 +508,10 @@ impl Lighting {
             Command::Off => false,
             Command::Toggle => !projection.power.ok_or(ErrorCode::InvalidState)?,
         };
-        let on_level = self.level.borrow().on_level;
+        let on_level = self
+            .level
+            .as_ref()
+            .and_then(|level| level.borrow().on_level);
         // Repeated On keeps the existing level. Repeated Off still cancels actions.
         if let Some(preset) = on_level.filter(|_| projection.power != Some(on)) {
             let target = if on { preset } else { 1 };
@@ -510,7 +566,7 @@ impl Lighting {
             let elapsed = now.saturating_sub(active.start);
             let (target, final_frame) = active
                 .task
-                .frame(elapsed, self.range)
+                .frame(elapsed, self.mapping.temperature.map(|t| t.range))
                 .expect("validated controller task");
             let mut remaining = active.task.duration().saturating_sub(elapsed);
             let local_startup = !active.accepted
@@ -613,7 +669,7 @@ impl Lighting {
             if current.mode == Some(LightMode::Temperature) {
                 ctx.notify_attr_changed(self.endpoint, 0x300, 7);
             }
-            if self.rgb {
+            if self.mapping.rgb {
                 for attribute in [0, 1, 3, 4] {
                     ctx.notify_attr_changed(self.endpoint, 0x300, attribute);
                 }
@@ -631,10 +687,7 @@ impl Lighting {
     }
     pub(super) async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         let mut snapshots = self.function.subscribe();
-        let mut actions = self
-            .function
-            .subscribe_light_actions()
-            .expect("lighting action subscription");
+        let mut actions = self.function.subscribe_light_actions();
         loop {
             self.advance();
             self.reports(&ctx);
@@ -656,7 +709,12 @@ impl Lighting {
                         snapshots.changed().await;
                     },
                     async {
-                        actions.changed().await;
+                        match &mut actions {
+                            Some(actions) => {
+                                actions.changed().await;
+                            }
+                            None => std::future::pending().await,
+                        }
                     },
                 ),
                 async {

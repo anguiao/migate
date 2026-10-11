@@ -65,7 +65,7 @@ fn accepted_color_mode_survives_dropped_hs_and_xy_invoke_waiters() {
             setup!(true, function, receiver, light, clock, ctx);
             white_state(&function);
             block_on(async {
-                let handler = ColorHandler::<true>(&light);
+                let handler = ColorHandler::<true, true>(&light);
                 // Establish the opposite representation with a real accepted
                 // command, so the default mode cannot make the assertion pass.
                 accepted_color(&light, &function, &mut receiver, color_task(!use_hs, 0)).await;
@@ -108,7 +108,7 @@ fn accepted_startup_keeps_its_mode_when_a_later_frame_fails_before_invoke_resume
         setup!(true, function, receiver, light, clock, ctx);
         white_state(&function);
         block_on(async {
-            let handler = ColorHandler::<true>(&light);
+            let handler = ColorHandler::<true, true>(&light);
             accepted_color(&light, &function, &mut receiver, color_task(!use_hs, 0)).await;
             let previous = handler.color_mode(&ctx).await.unwrap();
             let expected = if use_hs {
@@ -182,7 +182,7 @@ fn gray_hue_waits_for_older_red_receipt_and_rejects_failed_white_correction() {
         assert_eq!(function.snapshot().lighting.unwrap().color, Some(red));
         assert!(poll_once(receiver.next_operation()).await.is_none());
         assert_eq!(
-            ColorHandler::<true>(&light)
+            ColorHandler::<true, true>(&light)
                 .current_hue(&ctx)
                 .await
                 .unwrap(),
@@ -220,7 +220,7 @@ fn failed_older_write_allows_gray_hue_startup_to_be_accepted_on_advance() {
         // known physical state white, and the gray trajectory stays white.
         unchanged.skip_unchanged().unwrap();
         assert_eq!(
-            ColorHandler::<true>(&light)
+            ColorHandler::<true, true>(&light)
                 .current_hue(&ctx)
                 .await
                 .unwrap(),
@@ -262,7 +262,7 @@ fn skipped_older_frame_allows_gray_hue_startup_to_be_accepted_on_advance() {
         let unchanged = frame(&mut receiver).await;
         unchanged.skip_unchanged().unwrap();
         assert_eq!(
-            ColorHandler::<true>(&light)
+            ColorHandler::<true, true>(&light)
                 .current_hue(&ctx)
                 .await
                 .unwrap(),

@@ -4,6 +4,7 @@ mod lighting;
 mod model;
 mod on_off;
 mod pairing;
+pub(crate) mod publication;
 mod storage;
 
 pub use bridge::Bridge;
