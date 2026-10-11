@@ -2,8 +2,8 @@ use super::{AuthStatus, current_time};
 use crate::{
     RuntimeError,
     device::{
-        Availability, Capability, Command, Composition, DeviceKey, DeviceRegistry, LightMode,
-        PhysicalDevice, Power, RegistrySnapshot,
+        Availability, Capability, Category, Command, Composition, DeviceKey, DeviceRegistry,
+        LightMode, PhysicalDevice, Power, RegistrySnapshot,
     },
     storage::{DeviceStore, StorageError},
     xiaomi::adapter::PendingDevice,
@@ -47,49 +47,54 @@ fn render_device(device: &PhysicalDevice, group: Option<&Composition>, lines: &m
     }
     for function in device.functions() {
         let id = &function.function_key().id;
-        let label = &function.description().label;
+        let description = function.description();
+        let label = &description.label;
         let snapshot = function.snapshot();
-        let power = match snapshot.power {
-            Power::Unknown => "unknown",
-            Power::On => "on",
-            Power::Off => "off",
-        };
-        lines.push(format!("  {id} ({label}): {power}"));
-        if let Some(light) = snapshot.lighting {
-            let capabilities = function
-                .description()
-                .capabilities
-                .iter()
-                .map(|capability| match capability {
-                    Capability::OnOff => "on/off".into(),
-                    Capability::Brightness => "brightness".into(),
-                    Capability::ColorTemperature(range) => {
-                        format!("temperature {}–{} K", range.min, range.effective_max())
-                    }
-                    Capability::ColorRgb => "RGB".into(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+        let capabilities = description
+            .capabilities
+            .iter()
+            .map(|capability| match capability {
+                Capability::OnOff => "on/off".into(),
+                Capability::Brightness => "brightness".into(),
+                Capability::ColorTemperature(range) => {
+                    format!("temperature {}–{} K", range.min, range.effective_max())
+                }
+                Capability::ColorRgb => "RGB".into(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if description.capabilities.contains(&Capability::OnOff) {
+            let power = match snapshot.power {
+                Power::Unknown => "unknown",
+                Power::On => "on",
+                Power::Off => "off",
+            };
+            lines.push(format!("  {id} ({label}): {power}"));
+        } else {
+            lines.push(format!("  {id} ({label})"));
+        }
+        if description.category == Category::Light {
             lines.push(format!("    Capabilities: {capabilities}."));
-            let mut values = vec![
-                format!(
+        }
+        if let Some(light) = snapshot.lighting {
+            let mut values = Vec::new();
+            if description.capabilities.contains(&Capability::Brightness) {
+                values.push(format!(
                     "Brightness: {}",
                     light
                         .brightness_percent
                         .map_or_else(|| "unknown".into(), |value| format!("{value}%"))
-                ),
-                format!(
+                ));
+            }
+            if description.temperature_range().is_some() {
+                values.push(format!(
                     "temperature: {}",
                     light
                         .temperature_kelvin
                         .map_or_else(|| "unknown".into(), |value| format!("{value} K"))
-                ),
-            ];
-            if function
-                .description()
-                .capabilities
-                .contains(&Capability::ColorRgb)
-            {
+                ));
+            }
+            if description.capabilities.contains(&Capability::ColorRgb) {
                 values.push(format!(
                     "RGB: {}",
                     light.color.map_or_else(
@@ -98,15 +103,21 @@ fn render_device(device: &PhysicalDevice, group: Option<&Composition>, lines: &m
                     )
                 ));
             }
-            values.push(format!(
-                "mode: {}",
-                match light.mode {
-                    None => "unknown",
-                    Some(LightMode::Temperature) => "temperature",
-                    Some(LightMode::Rgb) => "RGB",
-                }
-            ));
-            lines.push(format!("    {}.", values.join("; ")));
+            if description.temperature_range().is_some()
+                || description.capabilities.contains(&Capability::ColorRgb)
+            {
+                values.push(format!(
+                    "mode: {}",
+                    match light.mode {
+                        None => "unknown",
+                        Some(LightMode::Temperature) => "temperature",
+                        Some(LightMode::Rgb) => "RGB",
+                    }
+                ));
+            }
+            if !values.is_empty() {
+                lines.push(format!("    {}.", values.join("; ")));
+            }
         }
     }
 }
@@ -213,7 +224,7 @@ pub async fn handle_line(
         ["status"] => format!(
             "{}\n{}",
             render(&snapshot, None),
-            status.render_devices(now, None)
+            status.render_devices(now, None, &snapshot)
         ),
         ["status", did] => {
             let group = snapshot
@@ -243,7 +254,7 @@ pub async fn handle_line(
                     ));
                 }
                 text.push('\n');
-                text.push_str(&status.render_group_devices(now, &members));
+                text.push_str(&status.render_group_devices(now, &members, &snapshot));
                 text
             } else if physical.is_some() {
                 let mut text = render(&snapshot, Some(did));
@@ -254,7 +265,7 @@ pub async fn handle_line(
                     ));
                 }
                 text.push('\n');
-                text.push_str(&status.render_devices(now, Some(did)));
+                text.push_str(&status.render_devices(now, Some(did), &snapshot));
                 text
             } else if let Some(pending) = &pending {
                 format!(
@@ -345,3 +356,6 @@ pub async fn run_input(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

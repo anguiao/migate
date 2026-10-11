@@ -199,7 +199,8 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
             }],
         }],
     });
-    let output = status.render_devices(1_700_000_000, None);
+    let registry = crate::device::DeviceRegistry::new();
+    let output = status.render_devices(1_700_000_000, None, &registry.snapshot());
     assert!(
         output.contains("Routing: cloud-first; local connected; business degraded."),
         "{output}"
@@ -279,7 +280,8 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
             }],
         }],
     });
-    let output = status.render_devices(0, Some("one"));
+    let registry = crate::device::DeviceRegistry::new();
+    let output = status.render_devices(0, Some("one"), &registry.snapshot());
     assert!(output.contains("Local recovery: running."), "{output}");
     assert!(output.contains("Usable control paths: none."), "{output}");
     assert!(output.contains("Selected control: none."), "{output}");
@@ -400,21 +402,32 @@ fn light_diagnostics_fixture() -> (crate::device::Function, crate::device::Comma
 }
 
 fn action_report(function: &crate::device::Function) -> String {
-    format_device(&DeviceStatus {
-        did: "light".into(),
-        usable_control_paths: vec![PathKind::Cloud],
-        selected_control: Some(PathKind::Cloud),
-        notification_source: Some(PathKind::Local),
-        unavailable_reason: None,
-        sync_limited_reason: None,
-        last_switch_reason: None,
-        commands: vec![ChannelCommands {
-            channel: "main".into(),
-            light_actions: function.light_action_diagnostics(),
-            inflight: None,
-            last: None,
-        }],
-    })
+    use crate::device::*;
+    let (physical, _receivers) = PhysicalDevice::new(PhysicalDeviceDescription {
+        key: function.function_key().device.clone(),
+        label: "Light".into(),
+        functions: vec![function.description().clone()],
+    });
+    let registry = DeviceRegistry::new();
+    registry.insert(physical);
+    format_device(
+        &DeviceStatus {
+            did: function.function_key().device.id.clone(),
+            usable_control_paths: vec![PathKind::Cloud],
+            selected_control: Some(PathKind::Cloud),
+            notification_source: Some(PathKind::Local),
+            unavailable_reason: None,
+            sync_limited_reason: None,
+            last_switch_reason: None,
+            commands: vec![ChannelCommands {
+                channel: "main".into(),
+                light_actions: function.light_action_diagnostics(),
+                inflight: None,
+                last: None,
+            }],
+        },
+        &registry.snapshot(),
+    )
 }
 
 #[test]
