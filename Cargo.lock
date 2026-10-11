@@ -2323,7 +2323,7 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.4.1"
-source = "git+https://github.com/anguiao/rs-matter.git?rev=e29f03cd8dde4559de137c6634585a3db16e0dff#e29f03cd8dde4559de137c6634585a3db16e0dff"
+source = "git+https://github.com/anguiao/rs-matter.git?rev=a26d26ab94359604f416637d640785f9127a9361#a26d26ab94359604f416637d640785f9127a9361"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -2381,7 +2381,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.4.1"
-source = "git+https://github.com/anguiao/rs-matter.git?rev=e29f03cd8dde4559de137c6634585a3db16e0dff#e29f03cd8dde4559de137c6634585a3db16e0dff"
+source = "git+https://github.com/anguiao/rs-matter.git?rev=a26d26ab94359604f416637d640785f9127a9361#a26d26ab94359604f416637d640785f9127a9361"
 dependencies = [
  "convert_case",
  "miette",
@@ -2400,7 +2400,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.4.1"
-source = "git+https://github.com/anguiao/rs-matter.git?rev=e29f03cd8dde4559de137c6634585a3db16e0dff#e29f03cd8dde4559de137c6634585a3db16e0dff"
+source = "git+https://github.com/anguiao/rs-matter.git?rev=a26d26ab94359604f416637d640785f9127a9361#a26d26ab94359604f416637d640785f9127a9361"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
