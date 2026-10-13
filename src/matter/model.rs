@@ -1422,19 +1422,6 @@ impl Metadata for Model {
     }
 }
 impl AsyncHandler for Model {
-    fn read_awaits(&self, ctx: impl ReadContext) -> bool {
-        ctx.attr().endpoint_id <= AGGREGATOR_ENDPOINT && self.root.read_awaits(ctx)
-    }
-    fn write_awaits(&self, ctx: impl WriteContext) -> bool {
-        ctx.attr().endpoint_id <= AGGREGATOR_ENDPOINT && self.root.write_awaits(ctx)
-    }
-    fn invoke_awaits(&self, ctx: impl InvokeContext) -> bool {
-        if ctx.cmd().endpoint_id <= AGGREGATOR_ENDPOINT {
-            self.root.invoke_awaits(ctx)
-        } else {
-            matches!(ctx.cmd().cluster_id, 6 | 8 | 0x300)
-        }
-    }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
         if ctx.attr().endpoint_id <= AGGREGATOR_ENDPOINT {
             self.root.read(ctx, reply).await

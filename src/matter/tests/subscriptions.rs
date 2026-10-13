@@ -444,7 +444,7 @@ fn test_fabric_groups_and_subscription_survive_restarts_and_report_terminal_chan
         .unwrap();
 }
 
-fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u32 {
+fn recovery_race_boot(directory: &Path, resume: bool) {
     let store = Store::open(directory).unwrap();
     let identity = store.load_identity().unwrap();
     let info = basic_info(&identity);
@@ -453,11 +453,9 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
     let kv = matter.kv(protocol.clone());
     matter.startup(&kv).unwrap();
     let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    if previous_subscription.is_none() {
+    if !resume {
         connect(&matter, SERVER_ID, CLIENT_ID, 41);
         connect(&client, CLIENT_ID, SERVER_ID, 41);
-    }
-    if previous_subscription.is_none() {
         let mut fabrics = rs_matter::fabric::FabricPersist::new(&kv);
         matter.with_state(|state| {
             fabrics
@@ -479,10 +477,10 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
     let outgoing = Pipe::default();
     let responder = DefaultResponder::new(&im);
 
-    let id = block_on(async {
+    block_on(async {
         im.startup().await.unwrap();
         handler.initialize(&im).unwrap();
-        if previous_subscription.is_some() {
+        if resume {
             assert!(matter.has_fabrics());
             assert!(
                 state
@@ -513,7 +511,7 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
             panic!("Matter services exited during the session recovery race");
         };
         let controller = async {
-            if let Some(previous) = previous_subscription {
+            if resume {
                 // Wait until the restored report is resolving the peer
                 // before the new inbound CASE session arrives.
                 let service = matter.transport().wait_mdns_resolve_request().await;
@@ -540,30 +538,34 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
                 // No resolver answer is deposited; the real resolve timer
                 // produces the failure while the inbound session exists.
                 assert!(matter.transport().mdns_resolve_in_flight());
-                // Synchronize with the actual cleanup instead of a time delay.
-                state.subscriptions().wait_report_failed().await;
+                // A failed first report discards the resumed subscription.
+                // Wait for persistence cleanup before checking session liveness.
+                while store
+                    .matter()
+                    .contains(PERSISTENT_SUBSCRIPTIONS_START)
+                    .unwrap()
+                {
+                    futures_lite::future::yield_now().await;
+                }
+                assert!(
+                    !state
+                        .subscriptions()
+                        .has_subscription_for(NonZeroU8::new(1).unwrap(), CLIENT_ID)
+                );
                 assert!(
                     session_probe.pending_retrans().is_ok(),
                     "a failed restored-subscription operation removed the new inbound CASE session"
                 );
-                // The restored subscription retries on the inbound session,
-                // preserving its ID and continuing with subsequent changes.
-                expect_report(&client, previous, Some(false), Some(true))
-                    .await
-                    .unwrap();
-                wait_committed(&state).await;
+            }
+            // The controller can subscribe again over the surviving session.
+            let id = subscribe(&client, false).await.unwrap();
+            wait_committed(&state).await;
+            if resume {
                 for power in [true, false] {
                     device.functions()[0].observe(power);
-                    expect_report(&client, previous, Some(power), None)
-                        .await
-                        .unwrap();
+                    expect_report(&client, id, Some(power), None).await.unwrap();
                     wait_committed(&state).await;
                 }
-                previous
-            } else {
-                let id = subscribe(&client, false).await.unwrap();
-                wait_committed(&state).await;
-                id
             }
         };
         or(
@@ -582,20 +584,16 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
             .contains(PERSISTENT_SUBSCRIPTIONS_START)
             .unwrap()
     );
-    id
 }
 
 #[test]
-fn resumed_resolve_failure_must_preserve_new_inbound_session() {
+fn resumed_resolve_failure_preserves_session_and_allows_resubscribe() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
             let directory = tempfile::tempdir().unwrap();
-            let previous = recovery_race_boot(directory.path(), None);
-            assert_eq!(
-                recovery_race_boot(directory.path(), Some(previous)),
-                previous
-            );
+            recovery_race_boot(directory.path(), false);
+            recovery_race_boot(directory.path(), true);
         })
         .unwrap()
         .join()

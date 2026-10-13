@@ -2323,7 +2323,7 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.4.1"
-source = "git+https://github.com/anguiao/rs-matter.git?rev=a26d26ab94359604f416637d640785f9127a9361#a26d26ab94359604f416637d640785f9127a9361"
+source = "git+https://github.com/project-chip/rs-matter.git?rev=3df0c91c6b77551438068d57e972502b3031c449#3df0c91c6b77551438068d57e972502b3031c449"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -2372,8 +2372,6 @@ dependencies = [
  "strum",
  "subtle",
  "time",
- "tokio",
- "tokio-stream",
  "verhoeff",
  "x509-cert",
 ]
@@ -2381,7 +2379,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.4.1"
-source = "git+https://github.com/anguiao/rs-matter.git?rev=a26d26ab94359604f416637d640785f9127a9361#a26d26ab94359604f416637d640785f9127a9361"
+source = "git+https://github.com/project-chip/rs-matter.git?rev=3df0c91c6b77551438068d57e972502b3031c449#3df0c91c6b77551438068d57e972502b3031c449"
 dependencies = [
  "convert_case",
  "miette",
@@ -2400,7 +2398,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.4.1"
-source = "git+https://github.com/anguiao/rs-matter.git?rev=a26d26ab94359604f416637d640785f9127a9361#a26d26ab94359604f416637d640785f9127a9361"
+source = "git+https://github.com/project-chip/rs-matter.git?rev=3df0c91c6b77551438068d57e972502b3031c449#3df0c91c6b77551438068d57e972502b3031c449"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2979,26 +2977,6 @@ dependencies = [
  "displaydoc",
  "serde_core",
  "zerovec",
-]
-
-[[package]]
-name = "tokio"
-version = "1.53.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
-dependencies = [
- "pin-project-lite",
-]
-
-[[package]]
-name = "tokio-stream"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
-dependencies = [
- "futures-core",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]
