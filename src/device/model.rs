@@ -158,6 +158,81 @@ pub struct Composition {
     pub members: Vec<DeviceKey>,
 }
 
+/// The account/home that owns a pending or applied publication configuration.
+/// Pending entries carry it so the generic Store/DeviceRegistry apply path can
+/// commit without holding source context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigurationScope {
+    pub uid: String,
+    pub home_id: String,
+    pub group_id: String,
+}
+
+/// One standalone endpoint of an applied publication set. Group endpoints are
+/// carried by their group configuration instead.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishedEndpoint {
+    pub key: DeviceKey,
+    pub endpoint: u16,
+}
+
+/// One group's applied configuration: the confirmed relation together with
+/// the capability and range shape derived from its members' real
+/// descriptions. The derived shape is persisted with the relation so an
+/// applied view survives a member description becoming unavailable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupConfiguration {
+    pub key: DeviceKey,
+    pub label: String,
+    pub members: Vec<DeviceKey>,
+    pub capabilities: Vec<Capability>,
+}
+
+/// The group shape rule: each member must have the capability, and the
+/// common temperature interval is the intersection of the adjustable ranges.
+/// Source admission and configuration staging share this rule. Applying a
+/// configuration installs the checked shape in the live group.
+pub fn derive_group_capabilities<'a>(
+    functions: impl IntoIterator<Item = &'a FunctionDescription>,
+) -> Vec<Capability> {
+    let functions = functions.into_iter().collect::<Vec<_>>();
+    let mut capabilities = Vec::new();
+    if functions
+        .iter()
+        .all(|function| function.capabilities.contains(&Capability::OnOff))
+    {
+        capabilities.push(Capability::OnOff);
+    }
+    if functions
+        .iter()
+        .all(|function| function.capabilities.contains(&Capability::Brightness))
+    {
+        capabilities.push(Capability::Brightness);
+    }
+    if let Some(range) = common_temperature(&functions) {
+        capabilities.push(Capability::ColorTemperature(range));
+    }
+    if functions
+        .iter()
+        .all(|function| function.capabilities.contains(&Capability::ColorRgb))
+    {
+        capabilities.push(Capability::ColorRgb);
+    }
+    capabilities
+}
+
+fn common_temperature(functions: &[&FunctionDescription]) -> Option<NumericRange> {
+    let first = functions.first()?.temperature_range()?;
+    let mut min = first.min;
+    let mut max = first.effective_max();
+    for function in &functions[1..] {
+        let range = function.temperature_range()?;
+        min = min.max(range.min);
+        max = max.min(range.effective_max());
+    }
+    (min < max).then_some(NumericRange { min, max, step: 1 })
+}
+
 /// An integer physical range. Every accepted value lies on its declared grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NumericRange {
@@ -287,6 +362,15 @@ pub struct LightPatch {
     pub temperature_kelvin: Option<u32>,
     pub color: Option<Rgb>,
     pub mode: Option<LightMode>,
+}
+/// A function snapshot filtered to observations that are still valid: fields
+/// whose only value predates a reachability loss are unknown again, while the
+/// single-light cache behind [`FunctionSnapshot`] keeps them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FreshSnapshot {
+    pub key: FunctionKey,
+    pub snapshot: FunctionSnapshot,
+    pub reachable: bool,
 }
 impl Capability {
     fn index(self) -> usize {

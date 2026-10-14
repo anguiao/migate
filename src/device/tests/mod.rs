@@ -388,3 +388,5 @@ mod lighting;
 mod light_commands;
 
 mod composition;
+
+mod group;

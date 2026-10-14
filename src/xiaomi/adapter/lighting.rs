@@ -98,7 +98,8 @@ pub(super) fn encode(
         .physical
         .function(id)
         .ok_or(CommandError::Unsupported)?
-        .snapshot();
+        .fresh_snapshot()
+        .snapshot;
     let state = snapshot.lighting;
     let brightness = light.and_then(|light| light.brightness.as_ref());
     let temperature = light.and_then(|light| light.temperature.as_ref());

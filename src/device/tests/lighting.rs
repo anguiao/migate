@@ -75,13 +75,21 @@ fn one_light_report_updates_power_and_values_with_one_revision_and_keeps_mode_ex
     assert_eq!(function.snapshot().revision, 2);
     function.observe_light(patch).unwrap();
     assert_eq!(function.snapshot().revision, 2);
-    let invalid = LightPatch {
-        power: Some(false),
-        brightness_percent: Some(f64::NAN),
-        ..LightPatch::default()
-    };
-    assert!(function.observe_light(invalid).is_err());
-    assert_eq!(function.snapshot().power, crate::device::Power::On);
+    let before = function.snapshot();
+    for invalid in [
+        LightPatch {
+            power: Some(false),
+            brightness_percent: Some(f64::NAN),
+            ..LightPatch::default()
+        },
+        LightPatch {
+            temperature_kelvin: Some(1000),
+            ..LightPatch::default()
+        },
+    ] {
+        assert!(function.observe_light(invalid).is_err());
+        assert_eq!(function.snapshot(), before);
+    }
 }
 
 #[test]

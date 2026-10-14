@@ -102,6 +102,70 @@ fn local_light_write_switches_mode_in_one_batch_and_keeps_partial_acceptance() {
     }));
 }
 
+#[test]
+fn restored_path_does_not_deduplicate_writes_against_unobserved_cached_state() {
+    block_on(Rig::light("devcea.light.ls2307").run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(peer_values(&c), |peer| async move {
+            let light = ready_light(control).await;
+            let cached = light.snapshot();
+            peer.state.borrow_mut().hold_reads = true;
+            peer.state.borrow_mut().online.insert("one".into(), false);
+            peer.list_changed(&["one"]);
+            until(|| matches!(light.snapshot().availability, Availability::Unavailable(_))).await;
+
+            let reads = peer.count("get", "one", 0);
+            peer.state.borrow_mut().online.insert("one".into(), true);
+            peer.list_changed(&["one"]);
+            until(|| {
+                light.snapshot().availability == Availability::Available
+                    && peer.count("get", "one", 0) > reads
+            })
+            .await;
+            assert_eq!(light.snapshot().power, cached.power);
+            assert_eq!(light.snapshot().lighting, cached.lighting);
+            let fresh = light.fresh_snapshot().snapshot;
+            assert_eq!(fresh.power, Power::Unknown);
+            assert_eq!(fresh.lighting.unwrap().mode, None);
+
+            assert_eq!(light.execute(Command::On).await.unwrap().power, Power::On);
+            light
+                .begin_light_action(
+                    LightDimension::Color,
+                    color_target(LightColorTarget::Temperature(
+                        cached.lighting.unwrap().temperature_kelvin.unwrap(),
+                    )),
+                    true,
+                )
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            let state = peer.state.borrow();
+            let writes = state
+                .seen
+                .iter()
+                .filter(|(operation, _)| operation == "rpcReq")
+                .map(|(_, payload)| &payload["rpc"]["params"])
+                .collect::<Vec<_>>();
+            assert_eq!(writes.len(), 2);
+            assert_eq!(
+                writes[0],
+                &json!([{"did":"one","siid":2,"piid":1,"value":true}])
+            );
+            assert_eq!(
+                writes[1],
+                &json!([
+                    {"did":"one","siid":2,"piid":3,"value":2700},
+                    {"did":"one","siid":4,"piid":2,"value":0},
+                ])
+            );
+        })
+        .await;
+    }));
+}
+
 const BRIGHTNESS: PropertyBinding = PropertyBinding { siid: 2, piid: 2 };
 const TEMPERATURE: PropertyBinding = PropertyBinding { siid: 2, piid: 3 };
 const COLOR: PropertyBinding = PropertyBinding { siid: 4, piid: 1 };

@@ -37,9 +37,56 @@ fn initial_lighting(description: &FunctionDescription) -> Option<LightSnapshot> 
 pub(super) struct RuntimeState {
     pub(super) power: Power,
     pub(super) lighting: Option<super::LightSnapshot>,
+    fresh: Freshness,
     pub(super) revision: u64,
     pub(super) queue: Queue,
     pub(super) light_commands: Option<super::light_command::LightCoordinator>,
+}
+
+/// Which function field an observation belongs to.
+#[derive(Clone, Copy)]
+enum Field {
+    Power,
+    Brightness,
+    Temperature,
+    Color,
+    Mode,
+}
+impl Field {
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Per-field observation validity since the last reachability loss. A value
+/// whose validity is cleared may still live in the single-light cache, but it
+/// must not participate in group aggregation.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct Freshness {
+    valid: [bool; 5],
+}
+impl Freshness {
+    fn new(structural_mode: bool) -> Self {
+        Self {
+            valid: [false, false, false, false, structural_mode],
+        }
+    }
+    fn observe(&mut self, field: Field) {
+        self.valid[field.index()] = true;
+    }
+    fn is_valid(self, field: Field) -> bool {
+        self.valid[field.index()]
+    }
+    fn invalidate(&mut self, structural_mode: bool) {
+        *self = Self::new(structural_mode);
+    }
+}
+
+/// A single color kind fixes the active mode, so it stays valid without a mode
+/// property; a dual-color light only knows its mode after an observation.
+fn structural_mode(description: &FunctionDescription) -> bool {
+    description.temperature_range().is_some()
+        != description.capabilities.contains(&Capability::ColorRgb)
 }
 struct PhysicalState {
     availability: Availability,
@@ -141,6 +188,11 @@ impl PhysicalDevice {
             state.revision = state.revision.wrapping_add(1);
         }
         self.inner.changed.notify(usize::MAX);
+        if result.is_err() {
+            for function in self.functions.iter() {
+                function.invalidate_freshness();
+            }
+        }
         if let Err(error) = result {
             for function in self.functions.iter() {
                 let mut state = function.0.state.lock().unwrap();
@@ -176,6 +228,7 @@ impl Function {
     ) -> (Self, CommandReceiver) {
         let key = FunctionKey::new(physical_key, description.id.clone());
         let lighting = initial_lighting(&description);
+        let fresh = Freshness::new(structural_mode(&description));
         let function = Self(Arc::new(Inner {
             description,
             key,
@@ -183,6 +236,7 @@ impl Function {
             state: Mutex::new(RuntimeState {
                 power: Power::Unknown,
                 lighting,
+                fresh,
                 revision: 0,
                 queue: Queue::default(),
                 light_commands: lighting.map(|_| super::light_command::LightCoordinator::new()),
@@ -215,21 +269,53 @@ impl Function {
             revision: state.revision.wrapping_add(physical.revision),
         }
     }
-    pub fn observe(&self, power: bool) {
-        let mut state = self.0.state.lock().unwrap();
-        self.update_power(&mut state, power);
-    }
-    pub(super) fn update_power(&self, state: &mut RuntimeState, power: bool) {
-        let power = power.into();
-        if state.power != power {
-            state.power = power;
-            state.revision = state.revision.wrapping_add(1);
-            self.0.changed.notify(usize::MAX);
+    /// A snapshot filtered to still-valid observations. Reachability loss and
+    /// close always yield unknown fields even when the single-light cache and
+    /// an old handle still carry values.
+    pub fn fresh_snapshot(&self) -> super::FreshSnapshot {
+        let state = self.0.state.lock().unwrap();
+        let snapshot = self.snapshot_locked(&state);
+        let reachable = !state.queue.closed && snapshot.availability == Availability::Available;
+        let fresh = |field: Field| reachable && state.fresh.is_valid(field);
+        super::FreshSnapshot {
+            key: self.0.key.clone(),
+            snapshot: FunctionSnapshot {
+                power: if fresh(Field::Power) && snapshot.power != Power::Unknown {
+                    snapshot.power
+                } else {
+                    Power::Unknown
+                },
+                lighting: snapshot.lighting.map(|lighting| LightSnapshot {
+                    brightness_percent: if fresh(Field::Brightness) {
+                        lighting.brightness_percent
+                    } else {
+                        None
+                    },
+                    temperature_kelvin: if fresh(Field::Temperature) {
+                        lighting.temperature_kelvin
+                    } else {
+                        None
+                    },
+                    color: if fresh(Field::Color) {
+                        lighting.color
+                    } else {
+                        None
+                    },
+                    mode: if fresh(Field::Mode) {
+                        lighting.mode
+                    } else {
+                        None
+                    },
+                }),
+                availability: snapshot.availability,
+                revision: snapshot.revision,
+            },
+            reachable,
         }
     }
-    /// Apply one validated function report and publish one shared revision.
-    /// Fields whose capability is absent are rejected as a whole so an
-    /// irrelevant report can never partially mutate the snapshot.
+    /// Apply one validated report. Omitted fields preserve their observations;
+    /// received fields become fresh even when their cached value is unchanged.
+    /// Unsupported fields reject the whole report before any state changes.
     pub fn observe_light(
         &self,
         patch: super::LightPatch,
@@ -243,16 +329,16 @@ impl Function {
         let has_brightness = description.capabilities.contains(&Capability::Brightness);
         let has_rgb = description.capabilities.contains(&Capability::ColorRgb);
         let temperature_range = description.temperature_range();
-        if patch.power.is_some() && !has_on_off {
+        if !has_on_off && patch.power.is_some() {
             return Err(CommandError::Unsupported);
         }
-        if patch.brightness_percent.is_some() && !has_brightness {
+        if !has_brightness && patch.brightness_percent.is_some() {
             return Err(CommandError::Unsupported);
         }
-        if patch.temperature_kelvin.is_some() && temperature_range.is_none() {
+        if temperature_range.is_none() && patch.temperature_kelvin.is_some() {
             return Err(CommandError::Unsupported);
         }
-        if patch.color.is_some() && !has_rgb {
+        if !has_rgb && patch.color.is_some() {
             return Err(CommandError::Unsupported);
         }
         match patch.mode {
@@ -269,42 +355,76 @@ impl Function {
                 "brightness is outside 0..100 percent".into(),
             ));
         }
-        if patch
-            .temperature_kelvin
-            .is_some_and(|value| !temperature_range.is_some_and(|range| range.contains(value)))
+        if let Some(value) = patch.temperature_kelvin
+            && !temperature_range.is_some_and(|range| range.contains(value))
         {
             return Err(CommandError::Rejected(
                 "color temperature is outside its physical range".into(),
             ));
         }
         let mut state = self.0.state.lock().unwrap();
-        let before = (state.power, state.lighting);
-        if let Some(power) = patch.power {
-            state.power = power.into();
+        let before = (state.power, state.lighting, state.fresh);
+        let RuntimeState {
+            power,
+            lighting,
+            fresh,
+            ..
+        } = &mut *state;
+        if let Some(value) = patch.power {
+            *power = value.into();
+            fresh.observe(Field::Power);
         }
-        if let Some(lighting) = state.lighting.as_mut() {
+        if let Some(lighting) = lighting.as_mut() {
             if let Some(value) = patch.brightness_percent {
                 lighting.brightness_percent = Some(value);
+                fresh.observe(Field::Brightness);
             }
             if let Some(value) = patch.temperature_kelvin {
                 lighting.temperature_kelvin = Some(value);
+                fresh.observe(Field::Temperature);
             }
             if let Some(value) = patch.color {
                 lighting.color = Some(value);
+                fresh.observe(Field::Color);
             }
             if let Some(value) = patch.mode {
                 lighting.mode = Some(value);
+                fresh.observe(Field::Mode);
             }
         }
-        if before != (state.power, state.lighting) {
+        if before != (*power, *lighting, *fresh) {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
         Ok(self.snapshot_locked(&state))
     }
+    pub(super) fn invalidate_freshness(&self) {
+        let structural = structural_mode(&self.0.description);
+        self.0.state.lock().unwrap().fresh.invalidate(structural);
+    }
+    pub fn observe(&self, power: bool) {
+        let mut state = self.0.state.lock().unwrap();
+        self.update_power(&mut state, power);
+    }
+    pub(super) fn update_power(&self, state: &mut RuntimeState, power: bool) {
+        let before = (state.power, state.fresh);
+        state.fresh.observe(Field::Power);
+        state.power = power.into();
+        if before != (state.power, state.fresh) {
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+    }
     pub(super) fn close(&self) {
         let mut state = self.0.state.lock().unwrap();
+        let was_closed = state.queue.closed;
         state.queue.closed = true;
+        // Closing removes every fresh observation. Subscribers are woken through
+        // the shared event without moving the revision, so cached snapshots stay
+        // comparable while closed members can never look valid again.
+        if !was_closed {
+            self.0.changed.notify(usize::MAX);
+        }
         let completions = if let Some(coordinator) = state.light_commands.as_mut() {
             coordinator.cancel_all(super::CommandError::Cancelled);
             state
@@ -324,13 +444,19 @@ impl Function {
         FunctionChanges {
             function: self.clone(),
             revision: self.snapshot().revision,
+            closed: self.closed(),
         }
+    }
+    pub(super) fn closed(&self) -> bool {
+        self.0.state.lock().unwrap().queue.closed
     }
 }
 /// Notifications can coalesce; consumers always read the same latest snapshot.
+/// A close is a state change even though it leaves the content revision alone.
 pub struct FunctionChanges {
     function: Function,
     revision: u64,
+    closed: bool,
 }
 
 /// Physical-device observers are independent of function power changes.
@@ -359,8 +485,10 @@ impl FunctionChanges {
             let listener = self.function.0.changed.listen();
             let physical = self.function.0.physical.changed.listen();
             let snapshot = self.function.snapshot();
-            if snapshot.revision != self.revision {
+            let closed = self.function.closed();
+            if snapshot.revision != self.revision || closed != self.closed {
                 self.revision = snapshot.revision;
+                self.closed = closed;
                 return snapshot;
             }
             futures_lite::future::or(listener, physical).await;
