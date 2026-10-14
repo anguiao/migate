@@ -7,6 +7,7 @@
 
 pub(crate) mod clock;
 pub(crate) mod controllers;
+pub(crate) mod group;
 pub(crate) mod planning;
 
 #[cfg(test)]

@@ -4,6 +4,8 @@
 //! committed plans and normal single-light lifecycle, including takeover,
 //! current progress, and cancellation without replay when scheduling resets.
 
+mod group;
+
 use super::{
     LightingExecutor, Plan,
     clock::Clock,
