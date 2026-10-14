@@ -41,7 +41,7 @@ fn published_group_identities(context: &Context) -> BTreeSet<String> {
     context
         .registry
         .snapshot()
-        .composition
+        .applied
         .groups
         .into_iter()
         .map(|group| group.key.id)
@@ -159,7 +159,7 @@ pub(super) async fn run(
         };
         // A full sync invalidates relation freshness for every known group;
         // only a successful read in this cycle may count as a fresh confirmed
-        // replacement, while the last published relation stays authoritative.
+        // replacement, while the last confirmed relation stays authoritative.
         {
             let mut live = context.live.borrow_mut();
             for slot in live.devices.values_mut() {
@@ -186,9 +186,8 @@ pub(super) async fn run(
         };
         context.live.borrow_mut().scope = Some(scope.clone());
         context.live.borrow_mut().complete = true;
-        // Confirmed whole-home deletions are persisted and published before
-        // any device-detail read, so a failed information batch cannot keep or
-        // trim a deleted member.
+        // Revoke confirmed whole-home deletions before device-detail reads.
+        // Their durable removal is committed with the pending configuration.
         if !removed_keys.is_empty() {
             context.reconcile_groups_removed(&removed_keys)?;
         }

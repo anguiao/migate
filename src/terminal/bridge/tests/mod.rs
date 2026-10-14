@@ -4,12 +4,15 @@
 //! diagnostics, using only existing APIs. Expectations separate declared
 //! capabilities, supported-but-unknown values, and absent dimensions.
 
+mod groups;
+
 use super::handle_line;
 use crate::{
     device::{
-        Availability, Capability, Category, CommandError, CommandReceiver, Composition, DeviceKey,
-        DeviceRegistry, DeviceRequest, FunctionDescription, LightDimension, LightMode, LightPatch,
-        LightTarget, NumericRange, PhysicalDevice, PhysicalDeviceDescription,
+        Availability, Capability, Category, CommandError, CommandReceiver, DeviceKey,
+        DeviceRegistry, DeviceRequest, FunctionDescription, GroupConfiguration, LightDimension,
+        LightMode, LightPatch, LightTarget, NumericRange, PhysicalDevice,
+        PhysicalDeviceDescription,
     },
     storage::Store,
     terminal::AuthStatus,
@@ -98,6 +101,20 @@ fn occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
 }
 
+/// Publish every inserted device as a standalone endpoint. The terminal
+/// renders the applied publication set, not raw registry insertion order.
+fn apply_all_standalone(registry: &DeviceRegistry) {
+    let devices = registry
+        .snapshot()
+        .devices
+        .iter()
+        .map(|device| device.key().clone())
+        .collect::<Vec<_>>();
+    registry
+        .apply_configuration(1, Vec::new(), &devices, &[])
+        .unwrap();
+}
+
 #[test]
 fn onoff_only_light_renders_its_capability_and_no_light_values() {
     block_on(async {
@@ -107,6 +124,7 @@ fn onoff_only_light_renders_its_capability_and_no_light_values() {
         let registry = DeviceRegistry::new();
         let (physical, _receiver) = light("onoff", "Lamp", vec![Capability::OnOff]);
         registry.insert(physical);
+        apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
@@ -142,6 +160,7 @@ fn brightness_only_light_keeps_supported_unknown_and_omits_color_fields() {
             vec![Capability::OnOff, Capability::Brightness],
         );
         registry.insert(physical);
+        apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
@@ -184,6 +203,7 @@ fn temperature_only_light_keeps_intrinsic_mode_and_omits_brightness() {
             ],
         );
         registry.insert(physical);
+        apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
@@ -230,6 +250,7 @@ fn rgb_only_light_keeps_intrinsic_mode_and_omits_brightness_and_temperature() {
         let (physical, _receiver) =
             light("rgb", "Lamp", vec![Capability::OnOff, Capability::ColorRgb]);
         registry.insert(physical);
+        apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
@@ -267,6 +288,7 @@ fn light_without_onoff_does_not_invent_power() {
             vec![Capability::ColorTemperature(temperature_range())],
         );
         registry.insert(physical);
+        apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
@@ -313,9 +335,10 @@ fn mixed_group_members_render_own_capabilities_and_dimensions() {
         registry.insert(one);
         registry.insert(two.clone());
         registry
-            .update_composition_versioned(
+            .apply_configuration(
                 1,
-                vec![Composition {
+                vec![GroupConfiguration {
+                    capabilities: vec![Capability::OnOff, Capability::Brightness],
                     key: DeviceKey::new("xiaomi", "group.1"),
                     label: "Reading lamp".into(),
                     members: vec![
@@ -323,6 +346,7 @@ fn mixed_group_members_render_own_capabilities_and_dimensions() {
                         DeviceKey::new("xiaomi", "two"),
                     ],
                 }],
+                &[],
                 &[],
             )
             .unwrap();

@@ -13,7 +13,7 @@ use rs_matter::{
     acl::{AclEntry, AuthMode},
     crypto::test_only_crypto,
     dm::{
-        Metadata, Privilege,
+        AttrChangeNotifier, Metadata, Privilege,
         clusters::{decl::bridged_device_basic_information as bridged, groups},
         devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET},
         networks::eth::EthNetwork,
@@ -264,13 +264,14 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let initial = boot == 3;
     let rejection = RefCell::new(None::<CommandError>);
     let accepted = Cell::new(0);
-    let registry = super::test_registry(&store, &device);
+    let registry = super::published_registry(&store, &device);
     let handler = model::handler(
         &registry,
         &store,
         protocol.clone(),
         crate::matter::tests::support::test_executor(),
         rand::rng(),
+        None,
     )
     .unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
@@ -477,13 +478,14 @@ fn recovery_race_boot(directory: &Path, resume: bool) {
     let (device, _receiver) = super::test_device();
     device.set_availability(Availability::Available);
     device.functions()[0].observe(false);
-    let registry = super::test_registry(&store, &device);
+    let registry = super::published_registry(&store, &device);
     let handler = model::handler(
         &registry,
         &store,
         protocol.clone(),
         crate::matter::tests::support::test_executor(),
         rand::rng(),
+        None,
     )
     .unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
@@ -1111,7 +1113,7 @@ where
             if require_chunks {
                 assert!(
                     more,
-                    "the structural batch must span multiple chunks for this regression"
+                    "the structural batch must span multiple chunks for this regression: {action:?}"
                 );
             }
             let mid_action = mid_action.take().expect("the mid-action hook runs once");
@@ -1164,7 +1166,21 @@ fn topology_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) -
     assert_eq!(single_stored.endpoint, 2);
     registry.insert(single.clone());
     let unique_id = if boot == 2 {
-        store.devices().remove(multi.key()).unwrap();
+        registry
+            .stage_configuration(
+                crate::device::ConfigurationScope {
+                    uid: "uid".into(),
+                    home_id: "local".into(),
+                    group_id: crate::xiaomi::cloud::group_id("uid", "local"),
+                },
+                Vec::new(),
+                vec![multi.key().clone()],
+            )
+            .unwrap();
+        store
+            .devices()
+            .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))
+            .unwrap();
         previous.as_ref().unwrap().1.clone()
     } else {
         let stored = store.devices().publish(&multi.description()).unwrap();
@@ -1180,6 +1196,16 @@ fn topology_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) -
         registry.insert(multi.clone());
         stored.unique_id
     };
+    if boot != 2 {
+        registry
+            .apply_configuration(
+                0,
+                Vec::new(),
+                &[single.key().clone(), multi.key().clone()],
+                &[],
+            )
+            .unwrap();
+    }
     for device in [&single, &multi] {
         device.set_availability(Availability::Available);
         for function in device.functions() {
@@ -1192,6 +1218,7 @@ fn topology_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) -
         protocol.clone(),
         crate::matter::tests::support::test_executor(),
         rand::rng(),
+        None,
     )
     .unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
@@ -1336,13 +1363,14 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
                     mode: Some(LightMode::Rgb),
                 })
                 .unwrap();
-            let registry = super::test_registry(&store, &device);
+            let registry = super::published_registry(&store, &device);
             let handler = model::handler(
                 &registry,
                 &store,
                 protocol.clone(),
                 crate::matter::tests::support::test_executor(),
                 rand::rng(),
+                None,
             )
             .unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
@@ -1668,13 +1696,14 @@ fn light_groups_commands_route_through_real_capabilities() {
                 EthInteractionModelState::new(EthNetwork::new_default());
             let (device, _receiver) = super::support::light(true);
             device.set_availability(Availability::Available);
-            let registry = super::test_registry(&store, &device);
+            let registry = super::published_registry(&store, &device);
             let handler = model::handler(
                 &registry,
                 &store,
                 protocol.clone(),
                 crate::matter::tests::support::test_executor(),
                 rand::rng(),
+                None,
             )
             .unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
@@ -1721,6 +1750,7 @@ fn light_groups_commands_route_through_real_capabilities() {
 
 async fn read_structural_action<F, Fut>(
     client: &Matter<'_>,
+    require_chunks: bool,
     mid_action: F,
 ) -> Result<StructuralAction, Error>
 where
@@ -1742,7 +1772,9 @@ where
                 .end()
         })
         .await?;
-    assert_eq!(chunk.response()?.more_chunks, Some(true));
+    if require_chunks {
+        assert_eq!(chunk.response()?.more_chunks, Some(true));
+    }
     let mut action = StructuralAction::default();
     action.add(&chunk.response()?);
     mid_action().await;
@@ -1799,7 +1831,6 @@ where
         }
     }
 }
-
 #[derive(Clone, Copy)]
 enum ChunkedReport {
     Read,
@@ -1824,169 +1855,194 @@ fn run_rebuild_during_report(kind: ChunkedReport) {
                 member.device.functions()[0].observe(false);
             }
             let target = rig.members.last().unwrap().endpoint;
+            let parent = Cell::new(0);
             let subscription = Cell::new(None);
             let baseline = Cell::new(0);
             let interrupted = Cell::new(false);
             for boot in 1..=2 {
-                let store = &rig.store;
-                let identity = store.load_identity().unwrap();
-                let info = basic_info(&identity);
-                let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-                let protocol = StoreAdapter::new(store.matter());
-                let kv = matter.kv(protocol.clone());
-                matter.startup(&kv).unwrap();
-                if boot == 2 {
-                    assert!(matter.has_fabrics());
-                }
-                let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-                connect(&matter, SERVER_ID, CLIENT_ID, 40 + boot);
-                connect(&client, CLIENT_ID, SERVER_ID, 40 + boot);
-                if boot == 1 {
-                    let mut fabrics = rs_matter::fabric::FabricPersist::new(&kv);
-                    matter.with_state(|state| {
-                        fabrics
-                            .store(state.fabrics.fabric(NonZeroU8::new(1).unwrap()).unwrap())
-                            .unwrap();
-                    });
-                    fabrics.run().unwrap();
-                }
-                let crypto = test_only_crypto();
-                let buffers: MatterBuffers = MatterBuffers::new();
-                let state: EthInteractionModelState =
-                    EthInteractionModelState::new(EthNetwork::new_default());
-                let handler = model::handler(
-                    &rig.registry,
-                    store,
-                    protocol.clone(),
-                    crate::matter::tests::support::test_executor(),
-                    rand::rng(),
-                )
-                .unwrap();
-                let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
-                let incoming = Pipe::default();
-                let outgoing = Pipe::default();
-                let responder = DefaultResponder::new(&im);
-                block_on(async {
-                    im.startup().await.unwrap();
-                    handler.initialize(&im).unwrap();
-                    let version = persisted_config_version(store).unwrap();
-                    if boot == 1 {
-                        baseline.set(version);
-                    } else {
-                        assert_eq!(version, baseline.get() + 1);
+                let rebuild = {
+                    let store = &rig.store;
+                    let identity = store.load_identity().unwrap();
+                    let info = basic_info(&identity);
+                    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+                    let protocol = StoreAdapter::new(store.matter());
+                    let kv = matter.kv(protocol.clone());
+                    matter.startup(&kv).unwrap();
+                    if boot == 2 {
+                        assert!(matter.has_fabrics());
                     }
-                    let services = async {
-                        or(
-                            matter.run(
-                                &crypto,
-                                SendPipe(&outgoing),
-                                ReceivePipe(&incoming),
-                                NoNetwork,
-                            ),
+                    let client =
+                        Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+                    connect(&matter, SERVER_ID, CLIENT_ID, 40 + boot);
+                    connect(&client, CLIENT_ID, SERVER_ID, 40 + boot);
+                    if boot == 1 {
+                        let mut fabrics = rs_matter::fabric::FabricPersist::new(&kv);
+                        matter.with_state(|state| {
+                            fabrics
+                                .store(state.fabrics.fabric(NonZeroU8::new(1).unwrap()).unwrap())
+                                .unwrap();
+                        });
+                        fabrics.run().unwrap();
+                    }
+                    let crypto = test_only_crypto();
+                    let buffers: MatterBuffers = MatterBuffers::new();
+                    let state: EthInteractionModelState =
+                        EthInteractionModelState::new(EthNetwork::new_default());
+                    let handler = model::handler(
+                        &rig.registry,
+                        store,
+                        protocol.clone(),
+                        crate::matter::tests::support::test_executor(),
+                        rand::rng(),
+                        None,
+                    )
+                    .unwrap();
+                    let im =
+                        InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+                    let incoming = Pipe::default();
+                    let outgoing = Pipe::default();
+                    let responder = DefaultResponder::new(&im);
+                    block_on(async {
+                        im.startup().await.unwrap();
+                        handler.initialize(&im).unwrap();
+                        let version = persisted_config_version(store).unwrap();
+                        if boot == 1 {
+                            baseline.set(version);
+                        } else {
+                            assert_eq!(version, baseline.get() + 1);
+                        }
+                        let services = async {
                             or(
-                                client.run(
+                                matter.run(
                                     &crypto,
-                                    SendPipe(&incoming),
-                                    ReceivePipe(&outgoing),
+                                    SendPipe(&outgoing),
+                                    ReceivePipe(&incoming),
                                     NoNetwork,
                                 ),
-                                or(responder.run::<4, 4>(), im.run()),
-                            ),
-                        )
-                        .await
-                        .unwrap();
-                        assert_eq!(boot, 1);
-                        assert!(interrupted.get());
-                        assert!(handler.needs_rebuild());
-                        // The old report never sees the new role or its version.
-                        assert_eq!(persisted_config_version(store), Some(baseline.get()));
-                        handler.access(|node| {
-                            assert!(node.endpoint(target).unwrap().cluster(0x39).is_some())
-                        });
-                    };
-                    let controller = async {
-                        if boot == 2 {
-                            let report = if let Some(id) = subscription.get() {
-                                receive_structural_action(&client, id, true, || async {})
-                                    .await
-                                    .unwrap()
-                            } else {
-                                read_structural_action(&client, || async {}).await.unwrap()
-                            };
-                            assert_eq!(report.versions, [baseline.get() + 1], "{report:?}");
-                            assert!(!report.server_lists[&target].contains(&0x39));
-                            assert_eq!(report.powers.len(), rig.members.len());
-                            if subscription.get().is_some() {
-                                wait_committed(&state).await;
-                            }
-                            return;
-                        }
-                        if matches!(kind, ChunkedReport::Incremental) {
-                            let id = subscribe_wildcard(&client).await.unwrap();
-                            subscription.set(Some(id));
-                            wait_committed(&state).await;
-                            // State changes produce a multi-chunk incremental report
-                            // without introducing an earlier topology transition.
-                            for member in &rig.members {
-                                member.device.functions()[0]
-                                    .observe_light(crate::device::LightPatch {
-                                        power: Some(true),
-                                        brightness_percent: Some(60.0),
-                                        temperature_kelvin: Some(4000),
-                                        color: Some(crate::device::Rgb {
-                                            red: 255,
-                                            green: 64,
-                                            blue: 0,
-                                        }),
-                                        mode: Some(crate::device::LightMode::Rgb),
-                                    })
-                                    .unwrap();
-                            }
-                        }
-                        let stop_mid_action = || async {
-                            interrupted.set(true);
-                            let names = names.iter().map(String::as_str).collect::<Vec<_>>();
-                            rig.recompose(&names);
-                            // The controller withholds its next chunk acknowledgement.
-                            // Rebuild must cancel services instead of waiting for it.
-                            std::future::pending::<()>().await;
+                                or(
+                                    client.run(
+                                        &crypto,
+                                        SendPipe(&incoming),
+                                        ReceivePipe(&outgoing),
+                                        NoNetwork,
+                                    ),
+                                    or(responder.run::<4, 4>(), im.run()),
+                                ),
+                            )
+                            .await
+                            .unwrap();
+                            assert_eq!(boot, 1);
+                            assert!(interrupted.get());
+                            // The old report never sees the new endpoint set or its version.
+                            assert_eq!(persisted_config_version(store), Some(baseline.get()));
+                            handler.access(|node| {
+                                assert!(node.endpoint(target).unwrap().cluster(0x39).is_some())
+                            });
                         };
-                        match kind {
-                            ChunkedReport::Read => {
-                                read_structural_action(&client, stop_mid_action)
+                        let controller = async {
+                            if boot == 2 {
+                                let report = if let Some(id) = subscription.get() {
+                                    receive_structural_action(&client, id, false, || async {})
+                                        .await
+                                        .unwrap()
+                                } else {
+                                    read_structural_action(&client, false, || async {})
+                                        .await
+                                        .unwrap()
+                                };
+                                assert_eq!(report.versions, [baseline.get() + 1], "{report:?}");
+                                assert!(report.server_lists[&parent.get()].contains(&0x39));
+                                assert_eq!(
+                                    report.powers.keys().copied().collect::<Vec<_>>(),
+                                    [parent.get()]
+                                );
+                                assert!(!report.server_lists.contains_key(&target));
+                                if subscription.get().is_some() {
+                                    wait_committed(&state).await;
+                                }
+                                return;
+                            }
+                            if matches!(kind, ChunkedReport::Incremental) {
+                                let id = subscribe_wildcard(&client).await.unwrap();
+                                subscription.set(Some(id));
+                                wait_committed(&state).await;
+                                // Dirty the changed endpoints together so this regression
+                                // constructs a multi-chunk action independently of how
+                                // individual control tasks schedule their notifications.
+                                for member in &rig.members {
+                                    member.device.functions()[0]
+                                        .observe_light(crate::device::LightPatch {
+                                            power: Some(true),
+                                            brightness_percent: Some(60.0),
+                                            temperature_kelvin: Some(4000),
+                                            color: Some(crate::device::Rgb {
+                                                red: 255,
+                                                green: 64,
+                                                blue: 0,
+                                            }),
+                                            mode: Some(crate::device::LightMode::Rgb),
+                                        })
+                                        .unwrap();
+                                    im.notify_endpoint_changed(member.endpoint);
+                                }
+                            }
+                            let stop_mid_action = || async {
+                                interrupted.set(true);
+                                let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+                                rig.stage(&names);
+                                // The controller withholds its next chunk acknowledgement.
+                                // Rebuild must cancel services instead of waiting for it.
+                                std::future::pending::<()>().await;
+                            };
+                            match kind {
+                                ChunkedReport::Read => {
+                                    read_structural_action(&client, true, stop_mid_action)
+                                        .await
+                                        .unwrap();
+                                }
+                                ChunkedReport::Subscribe => {
+                                    subscribe_structural_action(&client, stop_mid_action)
+                                        .await
+                                        .unwrap();
+                                }
+                                ChunkedReport::Incremental => {
+                                    receive_structural_action(
+                                        &client,
+                                        subscription.get().unwrap(),
+                                        true,
+                                        stop_mid_action,
+                                    )
                                     .await
                                     .unwrap();
+                                }
                             }
-                            ChunkedReport::Subscribe => {
-                                subscribe_structural_action(&client, stop_mid_action)
-                                    .await
-                                    .unwrap();
-                            }
-                            ChunkedReport::Incremental => {
-                                receive_structural_action(
-                                    &client,
-                                    subscription.get().unwrap(),
-                                    true,
-                                    stop_mid_action,
-                                )
-                                .await
-                                .unwrap();
-                            }
-                        }
-                        panic!("an interrupted old request must not complete");
-                    };
-                    or(
-                        services,
-                        or(controller, async {
-                            async_io::Timer::after(Duration::from_secs(10)).await;
-                            panic!("topology rebuild during report timed out on boot {boot}");
-                        }),
-                    )
-                    .await;
-                });
-                protocol.check_failure().unwrap();
-                // All old services, exchange futures, model and Matter state drop
-                // before the next boot constructs a new service from the same store.
+                            panic!("an interrupted old request must not complete");
+                        };
+                        or(
+                            services,
+                            or(controller, async {
+                                async_io::Timer::after(Duration::from_secs(10)).await;
+                                panic!("topology rebuild during report timed out on boot {boot}");
+                            }),
+                        )
+                        .await;
+                    });
+                    protocol.check_failure().unwrap();
+                    handler.take_rebuild()
+                };
+                // Drop every old service and Matter object before committing the
+                // new topology; the next boot restores the persisted identity.
+                if boot == 1 {
+                    assert!(
+                        rebuild
+                            .expect("structural change must request rebuild")
+                            .apply()
+                            .is_none()
+                    );
+                    parent.set(rig.group_endpoint(1));
+                } else {
+                    assert!(rebuild.is_none());
+                }
             }
         })
         .unwrap()

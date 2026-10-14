@@ -270,7 +270,7 @@ impl Context {
         let published_label = self
             .registry
             .snapshot()
-            .composition
+            .applied
             .groups
             .iter()
             .find(|group| group.key.id == did)

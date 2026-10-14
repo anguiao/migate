@@ -116,7 +116,7 @@ pub(in crate::matter) fn light(rgb: bool) -> (PhysicalDevice, CommandReceiver) {
 }
 pub(super) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Option<String> {
     use crate::{
-        terminal::{self, AuthStatus},
+        terminal::AuthStatus,
         xiaomi::auth::{AuthReport, AuthenticationState, CertificateUpdate},
     };
     let report = AuthReport::for_test(
@@ -134,7 +134,7 @@ pub(super) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
     } else {
         line.into()
     };
-    terminal::handle_line(&registry, &store.devices(), &status, &line, 0)
+    crate::terminal::bridge::handle_line(&registry, &store.devices(), &status, &line, 0)
         .await
         .unwrap()
 }

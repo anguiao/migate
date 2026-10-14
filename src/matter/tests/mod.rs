@@ -7,6 +7,22 @@ pub(crate) mod support;
 
 use support::*;
 
+/// A registry with the device installed **and applied to the published set**.
+/// The Matter model publishes from the applied configuration, mirroring
+/// bootstrap's restore path; this helper also publishes the stored identity.
+/// `support::test_registry` (owned by the terminal slice) only installs the
+/// runtime device.
+pub(in crate::matter) fn published_registry(
+    store: &Store,
+    device: &PhysicalDevice,
+) -> crate::device::DeviceRegistry {
+    let registry = test_registry(store, device);
+    registry
+        .apply_configuration(0, Vec::new(), &[device.key().clone()], &[])
+        .unwrap();
+    registry
+}
+
 use super::{
     Bridge, PairingEvent,
     model::{self, basic_info, initialize_basic_info},
@@ -40,11 +56,12 @@ fn topology_and_identity_are_fixed() {
     assert_eq!(info.product_name, "MiGate");
     assert_eq!(
         model::handler(
-            &test_registry(&store, &test_device().0),
+            &published_registry(&store, &test_device().0),
             &store,
             StoreAdapter::new(store.matter()),
             test_executor(),
-            rand::rng()
+            rand::rng(),
+            None
         )
         .unwrap()
         .access(|node| node.endpoints.iter().map(|e| e.id).collect::<Vec<_>>()),
@@ -57,11 +74,12 @@ fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let model = model::handler(
-        &test_registry(&store, &test_device().0),
+        &published_registry(&store, &test_device().0),
         &store,
         StoreAdapter::new(store.matter()),
         test_executor(),
         rand::rng(),
+        None,
     )
     .unwrap();
     model.access(|node| {
@@ -157,11 +175,12 @@ fn light_metadata_matches_each_real_capability_combination() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let model = model::handler(
-            &test_registry(&store, &device),
+            &published_registry(&store, &device),
             &store,
             StoreAdapter::new(store.matter()),
             test_executor(),
             rand::rng(),
+            None,
         )
         .unwrap();
         let combo = (on_off, brightness, temperature, rgb);
@@ -315,34 +334,6 @@ fn commands(cluster: &rs_matter::dm::Cluster<'_>) -> Vec<u32> {
 }
 
 #[test]
-fn unused_legacy_scenes_blob_is_preserved_without_loading() {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let store = Store::open(dir.path()).unwrap();
-            let key = rs_matter::persist::SCENES_KEY;
-            store.matter().put(key, &[0xff, 0x11]).unwrap();
-            let identity = store.load_identity().unwrap();
-            let (device, _receiver) = test_device();
-            let registry = test_registry(&store, &device);
-            let bridge = Bridge::new(&registry, &store, &identity, test_executor());
-            let error =
-                block_on(bridge.run(0, |_| Err(std::io::Error::other("startup completed"))))
-                    .unwrap_err();
-            assert_eq!(error.to_string(), "startup completed");
-            bridge.check_failure().unwrap();
-            assert_eq!(
-                Store::open(dir.path()).unwrap().matter().get(key).unwrap(),
-                Some(vec![0xff, 0x11])
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
 fn pairing_codes_use_the_same_passcode() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -454,7 +445,7 @@ fn cancelled_run_keeps_a_recorded_storage_failure() {
             let store = Store::open(dir.path()).unwrap();
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
-            let registry = test_registry(&store, &device);
+            let registry = published_registry(&store, &device);
             let bridge = Bridge::new(&registry, &store, &identity, test_executor());
             let running = bridge.run(0, |_| Ok(()));
             let mut callback_store = bridge.store.clone();

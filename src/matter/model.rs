@@ -1,22 +1,21 @@
 use super::{
-    bridged_info::{BridgedHandler, GroupBridge},
+    bridged_info::{BridgedHandler, LIGHT_CLUSTER, Target as BridgeTarget},
     lighting,
     on_off::OnOffHandler,
-    publication::{self, LightPublication, UnmappableReason},
+    publication::{self, LightPublication},
     storage::StoreAdapter,
 };
 use crate::{
     device::{
-        Category, DeviceKey, DeviceRegistry, Function, Light, PhysicalDevice, RegistrySnapshot,
+        Capability, Category, DeviceKey, DeviceRegistry, Function, Group, Light, PhysicalDevice,
     },
     lighting::LightingExecutor,
-    storage::{Identity, StorageError, Store, StoredDevice},
+    storage::{
+        BlobChange, CompositionCommitError, ConfigurationVersion, Identity, StorageError, Store,
+        StoredDevice,
+    },
 };
-use futures_util::{
-    StreamExt,
-    future::{AbortHandle, Abortable, LocalBoxFuture},
-    stream::FuturesUnordered,
-};
+use futures_util::{StreamExt, future::LocalBoxFuture, stream::FuturesUnordered};
 use rand::RngExt as _;
 use rs_matter::{
     Matter, clusters, devices,
@@ -26,7 +25,7 @@ use rs_matter::{
         Metadata, Node, ReadContext, ReadReply, SemanticTag, WriteContext,
         clusters::{
             app::on_off::{self, ClusterAsyncHandler as _},
-            basic_info::BasicInfoConfig,
+            basic_info::{self, BasicInfoConfig, BasicInfoSettings},
             decl::{
                 bridged_device_basic_information::{self as bridged, ClusterHandler as _},
                 color_control, level_control,
@@ -35,28 +34,36 @@ use rs_matter::{
             groups::{self, ClusterHandler as _},
             identify::{self, ClusterHandler as _},
         },
-        devices::{
-            DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE,
-            test::{TEST_DEV_DET, TEST_VID},
-        },
+        devices::{DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, test::TEST_DEV_DET},
         endpoints,
         networks::SysNetifs,
     },
     error::{Error, ErrorCode},
     root_endpoint,
-    utils::sync::DynBase,
+    tlv::{FromTLV, TLVElement, TLVTag, ToTLV},
+    utils::{storage::WriteBuf, sync::DynBase},
 };
 use std::{
-    cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet, HashMap},
+    cell::RefCell,
+    collections::BTreeMap,
     rc::Rc,
+    time::{Duration, Instant},
 };
 
 const AGGREGATOR_ENDPOINT: u16 = 1;
-/// Vendor blob key for the canonical published-shape boundary. The first
-/// vendor key is reserved for the migrated legacy label, so the shape uses the
-/// next one. The value is MiGate-owned and private to this module.
+/// MiGate-owned blob key for the canonical published-shape boundary.
 const MATTER_SHAPE_KEY: u16 = rs_matter::persist::VENDOR_KEYS_START + 1;
+/// Shape-blob framing marker. The payload is a count followed by
+/// length-prefixed per-endpoint sections, so the startup baseline can diff
+/// individual endpoints without parsing the fixed metadata encoding.
+const SHAPE_MAGIC: &[u8; 4] = b"MG6\0";
+const RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+const BDBI_CLUSTER: u32 = bridged::FULL_CLUSTER.id;
+const BDBI_CONFIGURATION_VERSION: u32 = bridged::AttributeId::ConfigurationVersion as u32;
+const BASIC_INFO_CLUSTER: u32 = basic_info::FULL_CLUSTER.id;
+const BASIC_INFO_CONFIGURATION_VERSION: u32 = basic_info::AttributeId::ConfigurationVersion as u32;
+const DESCRIPTOR_CLUSTER: u32 = desc::DescHandler::CLUSTER.id;
 const ROOT: Endpoint<'static> = root_endpoint!(eth);
 const AGGREGATOR: Endpoint<'static> = Endpoint::new(
     AGGREGATOR_ENDPOINT,
@@ -113,7 +120,7 @@ pub(super) fn initialize_basic_info(
     missing: bool,
 ) -> Result<(), Error> {
     if missing {
-        let mut settings = rs_matter::dm::clusters::basic_info::BasicInfoSettings::new();
+        let mut settings = BasicInfoSettings::new();
         settings.node_label.push_str("MiGate").unwrap();
         rs_matter::persist::Persist::new(&kv)
             .store_tlv(rs_matter::persist::BASIC_INFO_KEY, &settings)?;
@@ -134,29 +141,23 @@ struct Versions {
 }
 struct Entry {
     endpoint: u16,
-    device: Option<PhysicalDevice>,
     descriptor: Dataver,
     role: Role,
-    types: Box<[DeviceType]>,
-    clusters: Box<[Cluster<'static>]>,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum ChildTags {
-    Outlet { index: u8, label: String },
-    Light { endpoint: u16, label: String },
+    shape: ShapeEntry,
 }
 enum Role {
     Single {
-        control: Rc<Control>,
-        bridged: Rc<BridgedHandler>,
+        control: Control,
+        bridged: BridgedHandler,
     },
     Parent {
         children: Vec<u16>,
-        bridged: Rc<BridgedHandler>,
+        bridged: BridgedHandler,
     },
     Child {
-        control: Rc<Control>,
-        tags: ChildTags,
+        control: Control,
+        index: u8,
+        label: String,
     },
 }
 struct Control {
@@ -192,6 +193,32 @@ impl Control {
                     executor,
                 )
             }),
+        }
+    }
+
+    /// The virtual group entry. It shares the registry's applied [`Group`]
+    /// handle with commands, aggregation and the terminal; nothing here owns
+    /// a second member set.
+    fn new_group(
+        group: Group,
+        endpoint: u16,
+        versions: Versions,
+        mapping: LightPublication,
+        executor: Rc<LightingExecutor>,
+    ) -> Self {
+        Self {
+            groups: Dataver::new(versions.groups),
+            identify: identify::IdentifyHandler::new(Dataver::new(versions.identify)),
+            on_off: None,
+            lighting: Some(lighting::Lighting::new(
+                Light::Group(group),
+                endpoint,
+                Dataver::new(versions.on_off),
+                Dataver::new(versions.level),
+                Dataver::new(versions.color),
+                mapping,
+                executor,
+            )),
         }
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
@@ -239,15 +266,9 @@ impl Control {
             .chain(|_, cluster| cluster == 8, LevelDispatch(light))
             .chain(|_, cluster| cluster == 0x300, ColorDispatch(light))
     }
-    fn on_off_version(&self) -> u32 {
-        self.lighting.as_ref().map_or_else(
-            || self.on_off.as_ref().unwrap().dataver(),
-            |l| l.on_off_version.get(),
-        )
-    }
 }
 impl AsyncHandler for Control {
-    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
+    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the cluster versions. */
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
         if self.lighting.is_some() {
@@ -296,7 +317,7 @@ impl AsyncHandler for Control {
 /// no LevelControl controller to run.
 struct LevelDispatch<'a>(&'a lighting::Lighting);
 impl AsyncHandler for LevelDispatch<'_> {
-    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
+    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the cluster versions. */
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
         if !self.0.publication().brightness {
@@ -332,16 +353,30 @@ impl AsyncHandler for LevelDispatch<'_> {
     }
 }
 struct ColorDispatch<'a>(&'a lighting::Lighting);
-impl ColorDispatch<'_> {
-    fn mapped(&self) -> LightPublication {
-        self.0.publication()
-    }
+macro_rules! dispatch_color {
+    ($light:expr, $method:ident($($arg:expr),*), $missing:expr) => {
+        match ($light.publication().temperature.is_some(), $light.publication().rgb) {
+            (true, true) => {
+                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, true>($light))
+                    .$method($($arg),*).await
+            }
+            (true, false) => {
+                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, false>($light))
+                    .$method($($arg),*).await
+            }
+            (false, true) => {
+                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false, true>($light))
+                    .$method($($arg),*).await
+            }
+            (false, false) => $missing,
+        }
+    };
 }
 impl AsyncHandler for ColorDispatch<'_> {
-    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
+    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the cluster versions. */
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        let publication = self.mapped();
+        let publication = self.0.publication();
         if !publication.has_color_control() {
             return Err(ErrorCode::ClusterNotFound.into());
         }
@@ -351,87 +386,24 @@ impl AsyncHandler for ColorDispatch<'_> {
         {
             return Err(ErrorCode::AttributeNotFound.into());
         }
-        match (publication.temperature.is_some(), publication.rgb) {
-            (true, true) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, true>(self.0))
-                    .read(ctx, reply)
-                    .await
-            }
-            (true, false) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, false>(self.0))
-                    .read(ctx, reply)
-                    .await
-            }
-            (false, true) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false, true>(self.0))
-                    .read(ctx, reply)
-                    .await
-            }
-            (false, false) => Err(ErrorCode::ClusterNotFound.into()),
-        }
+        dispatch_color!(
+            self.0,
+            read(ctx, reply),
+            Err(ErrorCode::ClusterNotFound.into())
+        )
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        let publication = self.mapped();
-        match (publication.temperature.is_some(), publication.rgb) {
-            (true, true) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, true>(self.0))
-                    .write(ctx)
-                    .await
-            }
-            (true, false) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, false>(self.0))
-                    .write(ctx)
-                    .await
-            }
-            (false, true) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false, true>(self.0))
-                    .write(ctx)
-                    .await
-            }
-            (false, false) => Err(ErrorCode::ClusterNotFound.into()),
-        }
+        dispatch_color!(self.0, write(ctx), Err(ErrorCode::ClusterNotFound.into()))
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        let publication = self.mapped();
-        match (publication.temperature.is_some(), publication.rgb) {
-            (true, true) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, true>(self.0))
-                    .invoke(ctx, reply)
-                    .await
-            }
-            (true, false) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, false>(self.0))
-                    .invoke(ctx, reply)
-                    .await
-            }
-            (false, true) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false, true>(self.0))
-                    .invoke(ctx, reply)
-                    .await
-            }
-            (false, false) => Err(ErrorCode::ClusterNotFound.into()),
-        }
+        dispatch_color!(
+            self.0,
+            invoke(ctx, reply),
+            Err(ErrorCode::ClusterNotFound.into())
+        )
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        let publication = self.mapped();
-        match (publication.temperature.is_some(), publication.rgb) {
-            (true, true) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, true>(self.0))
-                    .run(ctx)
-                    .await
-            }
-            (true, false) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true, false>(self.0))
-                    .run(ctx)
-                    .await
-            }
-            (false, true) => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false, true>(self.0))
-                    .run(ctx)
-                    .await
-            }
-            (false, false) => std::future::pending().await,
-        }
+        dispatch_color!(self.0, run(ctx), std::future::pending().await)
     }
 }
 fn color_cluster(publication: LightPublication) -> Cluster<'static> {
@@ -450,24 +422,19 @@ fn color_cluster(publication: LightPublication) -> Cluster<'static> {
         }
     }
 }
-fn light_types(publication: LightPublication, single: bool) -> Box<[DeviceType]> {
-    let mut types = vec![publication.device_type.matter_device_type()];
-    if single {
-        types.push(DEV_TYPE_BRIDGED_NODE);
-    }
-    types.into_boxed_slice()
+fn light_types(publication: LightPublication) -> Vec<DeviceType> {
+    vec![
+        publication.device_type.matter_device_type(),
+        DEV_TYPE_BRIDGED_NODE,
+    ]
 }
-fn light_clusters(publication: LightPublication, single: bool) -> Box<[Cluster<'static>]> {
+fn light_clusters(publication: LightPublication) -> Vec<Cluster<'static>> {
     let mut clusters = vec![
-        if single {
-            desc::DescHandler::CLUSTER
-        } else {
-            desc::CLUSTER_TAG_LIST
-        },
+        desc::DescHandler::CLUSTER,
         groups::GroupsHandler::CLUSTER,
         LIGHT_IDENTIFY,
+        lighting::OnOffHandler::CLUSTER,
     ];
-    clusters.push(lighting::OnOffHandler::CLUSTER);
     if publication.brightness {
         clusters.push(<lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER);
     }
@@ -475,17 +442,47 @@ fn light_clusters(publication: LightPublication, single: bool) -> Box<[Cluster<'
         clusters.push(color_cluster(publication));
     }
     // Bridge metadata follows the control clusters in the published server list.
-    if single {
-        clusters.push(BridgedHandler::CLUSTER);
+    clusters.push(LIGHT_CLUSTER);
+    clusters
+}
+
+/// One endpoint of the canonical fixed-shape encoding. It deliberately does
+/// not own handlers or shared state, so the whole candidate surface can be
+/// built, compared and encoded before any storage transaction.
+#[derive(Clone)]
+struct ShapeEntry {
+    endpoint: u16,
+    types: Vec<DeviceType>,
+    clusters: Vec<Cluster<'static>>,
+    role: ShapeRole,
+}
+#[derive(Clone)]
+enum ShapeRole {
+    Single {
+        bridged: bool,
+        light: Option<LightPublication>,
+        group: Option<DeviceKey>,
+    },
+    Parent {
+        children: Vec<u16>,
+    },
+    Child {
+        index: u8,
+        label: String,
+    },
+}
+
+impl ShapeEntry {
+    fn advertises_configuration_version(&self) -> bool {
+        self.clusters.iter().any(|cluster| {
+            cluster.id == BDBI_CLUSTER
+                && cluster
+                    .attribute(bridged::AttributeId::ConfigurationVersion as _)
+                    .is_some()
+        })
     }
-    clusters.into_boxed_slice()
 }
-fn static_types(types: &[DeviceType]) -> Box<[DeviceType]> {
-    types.to_vec().into_boxed_slice()
-}
-fn static_clusters(clusters: &[Cluster<'static>]) -> Box<[Cluster<'static>]> {
-    clusters.to_vec().into_boxed_slice()
-}
+
 impl Role {
     fn control(&self) -> Option<&Control> {
         match self {
@@ -493,28 +490,10 @@ impl Role {
             Self::Parent { .. } => None,
         }
     }
-    fn control_rc(&self) -> Option<Rc<Control>> {
-        match self {
-            Self::Single { control, .. } | Self::Child { control, .. } => Some(control.clone()),
-            Self::Parent { .. } => None,
-        }
-    }
     fn bridged(&self) -> Option<&BridgedHandler> {
         match self {
             Self::Single { bridged, .. } | Self::Parent { bridged, .. } => Some(bridged),
             Self::Child { .. } => None,
-        }
-    }
-    fn bridged_rc(&self) -> Option<Rc<BridgedHandler>> {
-        match self {
-            Self::Single { bridged, .. } | Self::Parent { bridged, .. } => Some(bridged.clone()),
-            Self::Child { .. } => None,
-        }
-    }
-    fn bridged_version(&self) -> u32 {
-        match self {
-            Self::Single { bridged, .. } | Self::Parent { bridged, .. } => bridged.dataver(),
-            Self::Child { .. } => 0,
         }
     }
 }
@@ -525,14 +504,14 @@ macro_rules! dispatch {
             Role::Single { control, bridged, .. } => AsyncHandler::$method(
                 &ChainedHandler::new(
                     |_, cluster| cluster == 0x39,
-                    Async(bridged::HandlerAdaptor(bridged.as_ref())),
-                    control.as_ref(),
+                    Async(bridged::HandlerAdaptor(bridged)),
+                    control,
                 ), $($arg),*
             ).await,
             Role::Parent { bridged, .. } => AsyncHandler::$method(
                 &EmptyHandler.chain(
                     |_, cluster| cluster == 0x39,
-                    Async(bridged::HandlerAdaptor(bridged.as_ref())),
+                    Async(bridged::HandlerAdaptor(bridged)),
                 ), $($arg),*
             ).await,
             Role::Child { control, .. } => control.$method($($arg),*).await,
@@ -541,34 +520,28 @@ macro_rules! dispatch {
 }
 
 impl Entry {
-    fn versions(&self) -> Versions {
-        let control = self.role.control();
-        Versions {
-            descriptor: self.descriptor.get(),
-            groups: control.map_or(0, |control| control.groups.get()),
-            identify: control.map_or(0, |control| control.identify.dataver()),
-            on_off: control.map_or(0, Control::on_off_version),
-            level: control
-                .and_then(|c| c.lighting.as_ref())
-                .map_or(0, |l| l.level_version.get()),
-            color: control
-                .and_then(|c| c.lighting.as_ref())
-                .map_or(0, |l| l.color_version.get()),
-            bridged: self.role.bridged_version(),
-        }
-    }
     fn descriptor(&self) -> desc::DescHandler<'_> {
         desc::DescHandler::new_matching(Dataver::new(self.descriptor.get()), self)
     }
     fn metadata<'a>(&'a self, tags: &'a [SemanticTag<'a>]) -> Endpoint<'a> {
-        let endpoint = Endpoint::new(self.endpoint, &self.types, &self.clusters);
+        let endpoint = Endpoint::new(self.endpoint, &self.shape.types, &self.shape.clusters);
         match &self.role {
             Role::Child { .. } => endpoint.with_tags(tags),
             _ => endpoint,
         }
     }
+    fn configuration_version(&self) -> u32 {
+        self.role
+            .bridged()
+            .map(|bridged| bridged.configuration_version_value())
+            .unwrap_or(1)
+    }
+    fn shape(&self) -> ShapeEntry {
+        self.shape.clone()
+    }
+
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        if ctx.attr().cluster_id == 0x1d {
+        if ctx.attr().cluster_id == DESCRIPTOR_CLUSTER {
             Handler::read(&self.descriptor().adapt(), ctx, reply)
         } else {
             dispatch!(self, read(ctx, reply))
@@ -581,7 +554,7 @@ impl Entry {
         dispatch!(self, invoke(ctx, reply))
     }
     fn bump(&self, cluster: Option<u32>) {
-        if cluster.is_none_or(|id| id == 0x1d) {
+        if cluster.is_none_or(|id| id == DESCRIPTOR_CLUSTER) {
             self.descriptor.changed();
         }
         if let Some(control) = self.role.control() {
@@ -609,7 +582,7 @@ impl Entry {
             }
         }
         if let Some(handler) = self.role.bridged()
-            && cluster.is_none_or(|id| id == 0x39)
+            && cluster.is_none_or(|id| id == BDBI_CLUSTER)
         {
             handler.dataver_changed();
         }
@@ -632,21 +605,214 @@ impl desc::PartsMatcher for Entry {
     }
 }
 
-struct Prepared {
-    entries: Vec<Rc<Entry>>,
-    member_updates: Vec<(Rc<GroupBridge>, Vec<PhysicalDevice>)>,
+/// A fully resolved publication decision. Every fallible step (identity
+/// lookups, member binding, capability mapping, TLV encoding) has already
+/// happened before this is built; applying it can only construct handlers.
+enum DesiredKind {
+    Device {
+        device: PhysicalDevice,
+        function: Function,
+        stored: StoredDevice,
+        mapping: Option<LightPublication>,
+    },
+    Parent {
+        device: PhysicalDevice,
+        stored: StoredDevice,
+        children: Vec<u16>,
+    },
+    Child {
+        function: Function,
+        index: u8,
+        label: String,
+    },
+    Group {
+        key: DeviceKey,
+        identity: String,
+        mapping: LightPublication,
+    },
+}
+struct DesiredEntry {
+    endpoint: u16,
+    kind: DesiredKind,
+    configuration_version: u32,
+}
+impl DesiredEntry {
+    fn advertises_configuration_version(&self) -> bool {
+        match &self.kind {
+            DesiredKind::Group { .. } => true,
+            DesiredKind::Device { mapping, .. } => mapping.is_some(),
+            DesiredKind::Parent { .. } | DesiredKind::Child { .. } => false,
+        }
+    }
+    fn shape(&self) -> ShapeEntry {
+        let (role, types, clusters) = match &self.kind {
+            DesiredKind::Device { mapping, .. } => match mapping {
+                Some(publication) => (
+                    ShapeRole::Single {
+                        bridged: true,
+                        light: Some(*publication),
+                        group: None,
+                    },
+                    light_types(*publication),
+                    light_clusters(*publication),
+                ),
+                None => (
+                    ShapeRole::Single {
+                        bridged: true,
+                        light: None,
+                        group: None,
+                    },
+                    SINGLE_TYPES.to_vec(),
+                    SINGLE_CLUSTERS.to_vec(),
+                ),
+            },
+            DesiredKind::Parent { children, .. } => (
+                ShapeRole::Parent {
+                    children: children.clone(),
+                },
+                PARENT_TYPES.to_vec(),
+                PARENT_CLUSTERS.to_vec(),
+            ),
+            DesiredKind::Child { index, label, .. } => (
+                ShapeRole::Child {
+                    index: *index,
+                    label: label.clone(),
+                },
+                CHILD_TYPES.to_vec(),
+                CHILD_CLUSTERS.to_vec(),
+            ),
+            DesiredKind::Group { key, mapping, .. } => (
+                ShapeRole::Single {
+                    bridged: true,
+                    light: Some(*mapping),
+                    group: Some(key.clone()),
+                },
+                light_types(*mapping),
+                light_clusters(*mapping),
+            ),
+        };
+        ShapeEntry {
+            endpoint: self.endpoint,
+            types,
+            clusters,
+            role,
+        }
+    }
 }
 
-#[derive(Default)]
-struct Reconcile {
-    /// A replacement instance needs fresh state reports without changing its shape.
-    state_refresh: Vec<u16>,
-    controls: Vec<(u16, Option<Rc<Control>>)>,
-    bridges: Vec<(u16, Option<Rc<BridgedHandler>>)>,
+/// Fixed-description changes shared by startup and online configuration.
+/// The versions and protocol blobs are committed at the same boundary.
+struct ShapeChanges {
+    versions: Vec<ConfigurationVersion>,
+    blobs: Vec<BlobChange>,
+    settings: Option<BasicInfoSettings>,
 }
 
-type JobResult = Result<Result<(), Error>, futures_util::future::Aborted>;
-type JobFutures<'a> = FuturesUnordered<LocalBoxFuture<'a, JobResult>>;
+/// Requests a new Matter instance. The latest candidate is resolved only
+/// after the old instance and all its exchanges have been dropped.
+pub(super) struct Rebuild {
+    registry: DeviceRegistry,
+    store: Store,
+    retry: Option<Retry>,
+}
+impl Rebuild {
+    pub(super) fn apply(self) -> Option<Retry> {
+        let result = self
+            .store
+            .devices()
+            .apply_pending_configuration(&self.registry, |prepared| {
+                let groups = prepared
+                    .groups()
+                    .iter()
+                    .map(|group| {
+                        (
+                            &group.key,
+                            group.endpoint,
+                            group.unique_id.clone(),
+                            group.capabilities.as_slice(),
+                        )
+                    })
+                    .collect();
+                let desired =
+                    desired_configuration(&self.store, groups, &prepared.pending().devices)?;
+                let shapes = desired
+                    .iter()
+                    .map(|entry| (entry.shape(), entry.configuration_version))
+                    .collect::<Vec<_>>();
+                let previous = self.store.matter().get(MATTER_SHAPE_KEY)?;
+                let settings = self
+                    .store
+                    .matter()
+                    .get(rs_matter::persist::BASIC_INFO_KEY)?
+                    .ok_or_else(|| {
+                        invalid(
+                            &self.store,
+                            "running Matter instance has no saved basic information",
+                        )
+                    })?;
+                let settings =
+                    BasicInfoSettings::from_tlv(&TLVElement::new(&settings)).map_err(|error| {
+                        StorageError::new(self.store.path(), "restore Matter configuration", error)
+                    })?;
+                let changes = shape_changes(&self.store, settings, previous.as_deref(), &shapes)?;
+                Ok((changes.versions, changes.blobs))
+            });
+        match result {
+            Ok(confirmed) => {
+                self.registry.clear_apply_error();
+                if let Some(confirmed) = confirmed {
+                    log::info!(
+                        "Matter configuration applied: version {}",
+                        confirmed.version
+                    );
+                }
+                None
+            }
+            Err(error) => Retry::failed(&self.registry, self.retry, &error),
+        }
+    }
+}
+
+type JobFutures<'a> = FuturesUnordered<LocalBoxFuture<'a, Result<(), Error>>>;
+pub(super) struct Retry {
+    deadline: Instant,
+    backoff: Duration,
+    revision: u64,
+    message: String,
+}
+impl Retry {
+    fn failed(
+        registry: &DeviceRegistry,
+        previous: Option<Self>,
+        failure: &impl std::fmt::Display,
+    ) -> Option<Self> {
+        let message = failure.to_string();
+        let snapshot = registry.snapshot();
+        let backoff = match &previous {
+            Some(state) if state.revision == snapshot.revision => {
+                (state.backoff * 2).min(MAX_RETRY_DELAY)
+            }
+            _ => RETRY_DELAY,
+        };
+        if previous
+            .as_ref()
+            .is_none_or(|state| state.message != message)
+        {
+            log::warn!(
+                "Matter configuration apply failed: {message}; keeping the last applied configuration and retrying"
+            );
+        } else {
+            log::debug!("Matter configuration apply still failing: {message}");
+        }
+        registry.set_apply_error(message.clone());
+        snapshot.pending.map(|_| Self {
+            deadline: Instant::now() + backoff,
+            backoff,
+            revision: snapshot.revision,
+            message,
+        })
+    }
+}
 
 pub(super) struct Model {
     registry: DeviceRegistry,
@@ -654,9 +820,11 @@ pub(super) struct Model {
     protocol: StoreAdapter,
     executor: Rc<LightingExecutor>,
     root: RootHandler,
-    rebuild: Cell<bool>,
-    entries: RefCell<Vec<Rc<Entry>>>,
+    entries: Vec<Entry>,
+    rebuild: RefCell<Option<Rebuild>>,
+    retry: RefCell<Option<Retry>>,
 }
+
 impl Drop for Model {
     fn drop(&mut self) {
         self.executor.reset();
@@ -669,8 +837,9 @@ pub(super) fn handler(
     protocol: StoreAdapter,
     executor: Rc<LightingExecutor>,
     mut random: impl rand::Rng,
+    retry: Option<Retry>,
 ) -> Result<Model, StorageError> {
-    let model = Model {
+    let mut model = Model {
         registry: registry.clone(),
         store: store.clone(),
         protocol,
@@ -679,28 +848,26 @@ pub(super) fn handler(
             .netif_diag(&SysNetifs)
             .build(&mut random)
             .chain(
-                |endpoint, cluster| endpoint == AGGREGATOR_ENDPOINT && cluster == 0x1d,
+                |endpoint, cluster| {
+                    endpoint == AGGREGATOR_ENDPOINT && cluster == DESCRIPTOR_CLUSTER
+                },
                 Async(desc::DescHandler::new_aggregator(Dataver::new_rand(&mut random)).adapt()),
             ),
-        entries: RefCell::new(Vec::new()),
-        rebuild: Cell::new(false),
+        entries: Vec::new(),
+        rebuild: RefCell::new(None),
+        retry: RefCell::new(retry),
     };
-    let prepared = model.prepare(&registry.snapshot())?;
-    *model.entries.borrow_mut() = prepared.entries;
+    model.entries = model.initial_entries()?;
     Ok(model)
 }
-
-fn same_instance(entry: &Entry, device: &PhysicalDevice) -> bool {
-    entry
-        .device
-        .as_ref()
-        .is_some_and(|present| present.same_instance(device))
-}
-fn same_rc<T>(left: &Option<Rc<T>>, right: &Option<Rc<T>>) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => Rc::ptr_eq(left, right),
-        _ => false,
+fn commit_error(
+    store: &Store,
+    operation: &'static str,
+    error: CompositionCommitError,
+) -> StorageError {
+    match error {
+        CompositionCommitError::Storage(error) => error,
+        error => StorageError::new(store.path(), operation, error),
     }
 }
 fn encode_u16(out: &mut Vec<u8>, value: u16) {
@@ -788,39 +955,51 @@ fn encode_metadata(out: &mut Vec<u8>, id: u16, types: &[DeviceType], clusters: &
         encode_cluster(out, cluster);
     }
 }
-fn encode_light(out: &mut Vec<u8>, control: &Control) {
-    match control.lighting.as_ref().map(|light| light.publication()) {
-        None => out.push(0),
-        Some(publication) => {
+fn encode_publication(out: &mut Vec<u8>, publication: LightPublication) {
+    out.push(u8::from(publication.brightness));
+    out.push(u8::from(publication.rgb));
+    match publication.temperature {
+        Some(temperature) => {
             out.push(1);
-            out.push(u8::from(publication.brightness));
-            out.push(u8::from(publication.rgb));
-            match publication.temperature {
-                Some(temperature) => {
-                    out.push(1);
-                    encode_u16(out, temperature.bounds.0);
-                    encode_u16(out, temperature.bounds.1);
-                }
-                None => out.push(0),
-            }
+            encode_u16(out, temperature.bounds.0);
+            encode_u16(out, temperature.bounds.1);
         }
+        None => out.push(0),
+    }
+}
+fn encode_group(out: &mut Vec<u8>, group: &Option<DeviceKey>) {
+    match group {
+        Some(key) => {
+            out.push(1);
+            encode_str(out, &key.source);
+            encode_str(out, &key.id);
+        }
+        None => out.push(0),
     }
 }
 /// Canonical per-endpoint shape. Order-insensitive collections are sorted so a
 /// pure reorder never looks like a structural change; real attribute/command,
-/// feature, revision, device-type and CT-bound changes do.
-fn encode_entry(out: &mut Vec<u8>, entry: &Entry) {
+/// feature, revision, device-type, range and role changes do.
+fn encode_entry(out: &mut Vec<u8>, entry: &ShapeEntry) {
     encode_metadata(out, entry.endpoint, &entry.types, &entry.clusters);
-    out.push(u8::from(entry.role.bridged_rc().is_some()));
     match &entry.role {
-        Role::Single { control, .. } => {
+        ShapeRole::Single {
+            bridged,
+            light,
+            group,
+        } => {
             out.push(1);
-            encode_len(out, 0);
-            encode_len(out, 0);
-            encode_light(out, control);
-            out.push(0);
+            out.push(u8::from(*bridged));
+            match light {
+                Some(publication) => {
+                    out.push(1);
+                    encode_publication(out, *publication);
+                }
+                None => out.push(0),
+            }
+            encode_group(out, group);
         }
-        Role::Parent { children, bridged } => {
+        ShapeRole::Parent { children } => {
             out.push(2);
             let mut children = children.clone();
             children.sort_unstable();
@@ -828,571 +1007,558 @@ fn encode_entry(out: &mut Vec<u8>, entry: &Entry) {
             for child in children {
                 encode_u16(out, child);
             }
-            encode_len(out, 0);
             out.push(0);
-            match bridged.group_key() {
-                Some(key) => {
-                    out.push(1);
-                    encode_str(out, &key.source);
-                    encode_str(out, &key.id);
-                }
-                None => out.push(0),
-            }
+            out.push(0);
         }
-        Role::Child { control, tags, .. } => {
+        ShapeRole::Child { index, label } => {
             out.push(3);
-            encode_len(out, 0);
-            match tags {
-                ChildTags::Outlet { index, label } => {
-                    encode_len(out, 1);
-                    encode_tag(out, None, NS_COMMON_NUMBER, *index, Some(label));
-                }
-                ChildTags::Light { endpoint, label } => {
-                    encode_len(out, 2);
-                    encode_tag(
-                        out,
-                        Some(TEST_VID),
-                        (*endpoint >> 8) as u8,
-                        *endpoint as u8,
-                        Some(label),
-                    );
-                    encode_tag(out, None, NS_COMMON_NUMBER, 0, None);
-                }
-            }
-            encode_light(out, control);
+            encode_len(out, 1);
+            encode_tag(out, None, NS_COMMON_NUMBER, *index, Some(label));
+            out.push(0);
             out.push(0);
         }
     }
 }
+fn encode_section(entry: &ShapeEntry) -> Vec<u8> {
+    let mut section = Vec::new();
+    encode_entry(&mut section, entry);
+    section
+}
+fn root_shape() -> ShapeEntry {
+    ShapeEntry {
+        endpoint: ROOT.id,
+        types: ROOT.device_types.to_vec(),
+        clusters: ROOT.clusters.to_vec(),
+        role: ShapeRole::Single {
+            bridged: false,
+            light: None,
+            group: None,
+        },
+    }
+}
+fn aggregator_shape() -> ShapeEntry {
+    ShapeEntry {
+        endpoint: AGGREGATOR.id,
+        types: AGGREGATOR.device_types.to_vec(),
+        clusters: AGGREGATOR.clusters.to_vec(),
+        role: ShapeRole::Single {
+            bridged: false,
+            light: None,
+            group: None,
+        },
+    }
+}
+fn encode_shape(entries: &[ShapeEntry]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(SHAPE_MAGIC);
+    encode_len(&mut out, entries.len() + 2);
+    for entry in [root_shape(), aggregator_shape()].iter().chain(entries) {
+        let section = encode_section(entry);
+        encode_len(&mut out, section.len());
+        out.extend_from_slice(&section);
+    }
+    out
+}
+fn decode_len(rest: &mut &[u8]) -> Option<u64> {
+    let bytes: [u8; 8] = rest.get(..8)?.try_into().ok()?;
+    *rest = &rest[8..];
+    Some(u64::from_le_bytes(bytes))
+}
+/// Split a stored shape blob into per-endpoint section bytes. `None` when the
+/// blob came from a different framing (or is corrupted); the caller then
+/// treats the whole surface as changed.
+fn decode_shape(bytes: &[u8]) -> Option<BTreeMap<u16, Vec<u8>>> {
+    let mut rest = bytes.strip_prefix(SHAPE_MAGIC)?;
+    let count = decode_len(&mut rest)?;
+    let mut sections = BTreeMap::new();
+    for _ in 0..count {
+        let len = usize::try_from(decode_len(&mut rest)?).ok()?;
+        let section = rest.get(..len)?;
+        rest = &rest[len..];
+        let endpoint = u16::from_le_bytes([*section.first()?, *section.get(1)?]);
+        if sections.insert(endpoint, section.to_vec()).is_some() {
+            return None;
+        }
+    }
+    Some(sections)
+}
+fn encode_basic_info(settings: &BasicInfoSettings) -> Result<Vec<u8>, Error> {
+    let mut buffer = vec![0u8; 512];
+    let mut write = WriteBuf::new(&mut buffer);
+    settings.to_tlv(&TLVTag::Anonymous, &mut write)?;
+    Ok(write.as_slice().to_vec())
+}
 
 impl Model {
-    fn entry(&self, endpoint: u16) -> Result<Rc<Entry>, Error> {
+    fn entry(&self, endpoint: u16) -> Result<&Entry, Error> {
         self.entries
-            .borrow()
             .iter()
             .find(|entry| entry.endpoint == endpoint)
-            .cloned()
             .ok_or_else(|| ErrorCode::EndpointNotFound.into())
     }
-    fn versions_at(&self, previous: &BTreeMap<u16, Rc<Entry>>, endpoint: u16) -> Versions {
-        previous
-            .get(&endpoint)
-            .map(|entry| entry.versions())
-            .unwrap_or_else(|| {
-                let mut random = rand::rng();
-                Versions {
-                    descriptor: random.random(),
-                    groups: random.random(),
-                    identify: random.random(),
-                    on_off: random.random(),
-                    bridged: random.random(),
-                    level: random.random(),
-                    color: random.random(),
-                }
-            })
-    }
-    /// Canonical bytes of the whole published surface, including the static
-    /// root and aggregator metadata so protocol or app upgrades that change
-    /// them are detected too. Dynamic NodeLabel and source values are excluded.
-    fn shape_bytes(&self) -> Vec<u8> {
-        Self::encode_shape(&self.entries.borrow())
-    }
-    fn encode_shape(entries: &[Rc<Entry>]) -> Vec<u8> {
-        let mut out = Vec::new();
-        encode_metadata(&mut out, ROOT.id, ROOT.device_types, ROOT.clusters);
-        encode_metadata(
-            &mut out,
-            AGGREGATOR.id,
-            AGGREGATOR.device_types,
-            AGGREGATOR.clusters,
-        );
-        for entry in entries {
-            encode_entry(&mut out, entry);
-        }
-        out
-    }
-    fn prepare(&self, snapshot: &RegistrySnapshot) -> Result<Prepared, StorageError> {
-        let previous = self.entries.borrow().clone();
-        let previous_by_endpoint = previous
+
+    /// Build every published endpoint from the registry's applied
+    /// configuration. Startup uses the last committed identities, endpoints
+    /// and derived capabilities; a staged candidate is not mixed in.
+    fn initial_entries(&self) -> Result<Vec<Entry>, StorageError> {
+        let applied = self.registry.snapshot().applied;
+        let descriptions = applied
+            .groups
             .iter()
-            .map(|entry| (entry.endpoint, entry.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let mut stored = HashMap::<DeviceKey, StoredDevice>::new();
-        for device in &snapshot.devices {
-            let identity = self
-                .store
-                .devices()
-                .load_published(device.key())?
-                .ok_or_else(|| self.invalid("Canonical device has no published identity"))?;
-            stored.insert(device.key().clone(), identity);
-        }
-        let mut light_publication =
-            HashMap::<DeviceKey, Result<LightPublication, UnmappableReason>>::new();
-        for device in &snapshot.devices {
-            let functions = device.functions();
-            if functions.len() == 1 && functions[0].description().category == Category::Light {
-                light_publication.insert(
-                    device.key().clone(),
-                    publication::map_light(functions[0].description()),
-                );
-            }
-        }
-        let member_publishable =
-            |key: &DeviceKey| light_publication.get(key).is_some_and(Result::is_ok);
-        let mut member_group = HashMap::<DeviceKey, DeviceKey>::new();
-        for group in &snapshot.composition.groups {
-            if group.members.iter().all(&member_publishable) {
-                for member in &group.members {
-                    member_group.insert(member.clone(), group.key.clone());
-                }
-            } else {
-                log::info!(
-                    "Matter group {} stays unpublished: a member is not Matter-publishable",
-                    group.key.id
-                );
-            }
-        }
+            .map(|group| group.description())
+            .collect::<Vec<_>>();
+        let groups = applied
+            .groups
+            .iter()
+            .zip(&descriptions)
+            .map(|(group, description)| {
+                let identity = self
+                    .store
+                    .devices()
+                    .load_group_identity(&group.key)?
+                    .ok_or_else(|| invalid(&self.store, "applied group has no stored identity"))?;
+                Ok((
+                    &group.key,
+                    identity.endpoint,
+                    identity.unique_id,
+                    description.capabilities.as_slice(),
+                ))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let desired = desired_configuration(&self.store, groups, &applied.devices)?;
+        Ok(desired
+            .iter()
+            .map(|desired| self.build_entry(desired, &applied))
+            .collect())
+    }
+}
 
-        let mut desired = Vec::<Rc<Entry>>::new();
-        // Shared group state is only mutated after every fallible step passed,
-        // so a later failure cannot leave the old topology with new members.
-        let mut member_updates = Vec::<(Rc<GroupBridge>, Vec<PhysicalDevice>)>::new();
-        for device in &snapshot.devices {
-            let identity = &stored[device.key()];
-            let multiple = identity.functions.len() > 1;
-            if multiple {
-                let endpoint = identity.endpoint;
-                let versions = self.versions_at(&previous_by_endpoint, endpoint);
-                let inherited = previous_by_endpoint
-                    .get(&endpoint)
-                    .filter(|entry| same_instance(entry, device));
-                let bridged = match inherited.map(|entry| &entry.role) {
-                    Some(Role::Parent { bridged, .. }) => bridged.clone(),
-                    _ => Rc::new(BridgedHandler::new(
-                        device.clone(),
-                        Dataver::new(versions.bridged),
-                        identity,
-                        self.store.devices(),
-                        self.protocol.clone(),
-                    )),
-                };
-                desired.push(Rc::new(Entry {
-                    endpoint,
-                    device: Some(device.clone()),
-                    descriptor: Dataver::new(versions.descriptor),
-                    role: Role::Parent {
-                        children: identity.functions.iter().map(|f| f.endpoint).collect(),
-                        bridged,
-                    },
-                    types: static_types(PARENT_TYPES),
-                    clusters: static_clusters(PARENT_CLUSTERS),
-                }));
-                for (index, function) in identity.functions.iter().enumerate() {
-                    let endpoint = function.endpoint;
-                    let versions = self.versions_at(&previous_by_endpoint, endpoint);
-                    let inherited = previous_by_endpoint
-                        .get(&endpoint)
-                        .filter(|entry| same_instance(entry, device));
-                    let control = inherited
-                        .and_then(|entry| entry.role.control_rc())
-                        .unwrap_or_else(|| {
-                            Rc::new(Control::new(
-                                device.function(&function.key.id).unwrap(),
-                                endpoint,
-                                versions,
-                                None,
-                                self.executor.clone(),
-                            ))
-                        });
-                    desired.push(Rc::new(Entry {
-                        endpoint,
-                        device: Some(device.clone()),
-                        descriptor: Dataver::new(versions.descriptor),
-                        role: Role::Child {
-                            control,
-                            tags: ChildTags::Outlet {
-                                index: index as u8 + 1,
-                                label: function.label.clone(),
-                            },
-                        },
-                        types: static_types(CHILD_TYPES),
-                        clusters: static_clusters(CHILD_CLUSTERS),
-                    }));
-                }
-            } else {
-                let function = &identity.functions[0];
-                let endpoint = function.endpoint;
-                let versions = self.versions_at(&previous_by_endpoint, endpoint);
-                let inherited = previous_by_endpoint
-                    .get(&endpoint)
-                    .filter(|entry| same_instance(entry, device));
-                let mapping = match light_publication.get(device.key()) {
-                    Some(Ok(mapping)) => Some(*mapping),
-                    Some(Err(reason)) => {
-                        log::info!(
-                            "Matter device {} stays unpublished: {}",
-                            device.key().id,
-                            reason.as_str()
-                        );
-                        continue;
-                    }
-                    None => None,
-                };
-                let control = inherited
-                    .and_then(|entry| entry.role.control_rc())
-                    .unwrap_or_else(|| {
-                        Rc::new(Control::new(
-                            device.function(&function.key.id).unwrap(),
-                            endpoint,
-                            versions,
-                            mapping,
-                            self.executor.clone(),
-                        ))
-                    });
-                if member_group.contains_key(device.key()) {
-                    let publication = mapping.expect("group members are Matter-publishable");
-                    desired.push(Rc::new(Entry {
-                        endpoint,
-                        device: Some(device.clone()),
-                        descriptor: Dataver::new(versions.descriptor),
-                        role: Role::Child {
-                            control,
-                            tags: ChildTags::Light {
-                                endpoint,
-                                label: identity.label.clone(),
-                            },
-                        },
-                        types: light_types(publication, false),
-                        clusters: light_clusters(publication, false),
-                    }));
-                } else {
-                    let bridged = match inherited.map(|entry| &entry.role) {
-                        Some(Role::Single { bridged, .. }) => bridged.clone(),
-                        _ => Rc::new(BridgedHandler::new(
-                            device.clone(),
-                            Dataver::new(versions.bridged),
-                            identity,
-                            self.store.devices(),
-                            self.protocol.clone(),
-                        )),
-                    };
-                    let (types, clusters) = match mapping {
-                        Some(publication) => (
-                            light_types(publication, true),
-                            light_clusters(publication, true),
-                        ),
-                        None => (static_types(SINGLE_TYPES), static_clusters(SINGLE_CLUSTERS)),
-                    };
-                    desired.push(Rc::new(Entry {
-                        endpoint,
-                        device: Some(device.clone()),
-                        descriptor: Dataver::new(versions.descriptor),
-                        role: Role::Single { control, bridged },
-                        types,
-                        clusters,
-                    }));
-                }
-            }
+/// Applied and pending configurations supply the same resolved sources and
+/// reserved group identities to a single publication mapper.
+fn desired_configuration(
+    store: &Store,
+    groups: Vec<(&DeviceKey, u16, String, &[Capability])>,
+    devices: &[PhysicalDevice],
+) -> Result<Vec<DesiredEntry>, StorageError> {
+    let device_store = store.devices();
+    let mut desired = Vec::new();
+    for (key, endpoint, identity, capabilities) in groups {
+        let mapping = publication::map_capabilities(capabilities)
+            .map_err(|reason| invalid(store, reason.as_str()))?;
+        desired.push(DesiredEntry {
+            endpoint,
+            kind: DesiredKind::Group {
+                key: key.clone(),
+                identity,
+                mapping,
+            },
+            configuration_version: 1,
+        });
+    }
+    for device in devices {
+        let stored = device_store
+            .load_published(device.key())?
+            .ok_or_else(|| invalid(store, "standalone endpoint has no published identity"))?;
+        desired.extend(desired_device_entries(store, device, &stored)?);
+    }
+    for entry in &mut desired {
+        if entry.advertises_configuration_version() {
+            entry.configuration_version = device_store
+                .configuration_version(entry.endpoint)?
+                .unwrap_or(1);
         }
+    }
+    desired.sort_by_key(|entry| entry.endpoint);
+    Ok(desired)
+}
 
-        for group in &snapshot.composition.groups {
-            if !group.members.iter().all(&member_publishable) {
-                continue;
-            }
-            let group_identity = self
-                .store
-                .devices()
-                .load_group_identity(&group.key)?
-                .ok_or_else(|| self.invalid("Group composition has no stored identity"))?;
-            let endpoint = group_identity.endpoint;
-            let mut members = Vec::new();
-            let mut children = Vec::new();
-            for member in &group.members {
-                let device = snapshot
-                    .devices
+/// Resolve one physical device into its published entries. A multi-channel
+/// device keeps the outlet parent/child structure; a single function is one
+/// bridged endpoint (a light when its description maps, an outlet
+/// otherwise). An unmappable light is not published at all.
+fn desired_device_entries(
+    store: &Store,
+    device: &PhysicalDevice,
+    stored: &StoredDevice,
+) -> Result<Vec<DesiredEntry>, StorageError> {
+    let mut desired = Vec::new();
+    if stored.functions.len() > 1 {
+        desired.push(DesiredEntry {
+            endpoint: stored.endpoint,
+            kind: DesiredKind::Parent {
+                device: device.clone(),
+                stored: stored.clone(),
+                children: stored
+                    .functions
                     .iter()
-                    .find(|device| device.key() == member)
-                    .cloned()
-                    .ok_or_else(|| self.invalid("Group member is not in the registry"))?;
-                let Some(identity) = stored.get(member) else {
-                    return Err(self.invalid("Group member has no published identity"));
-                };
-                let [function] = identity.functions.as_slice() else {
-                    return Err(self.invalid("Group member does not have exactly one function"));
-                };
-                children.push(function.endpoint);
-                members.push(device);
-            }
-            children.sort_unstable();
-            let versions = self.versions_at(&previous_by_endpoint, endpoint);
-            let previous_group = previous_by_endpoint.get(&endpoint).and_then(|entry| {
-                match (&entry.role, &entry.device) {
-                    (Role::Parent { children, bridged }, None)
-                        if bridged.group_key() == Some(&group.key) =>
-                    {
-                        Some((children.clone(), bridged.clone()))
-                    }
-                    _ => None,
-                }
-            });
-            let (bridged, staged) = match previous_group {
-                Some((old_children, old_bridged)) => {
-                    let bridge = old_bridged
-                        .group_state()
-                        .expect("group bridge owns shared state");
-                    if old_children == children && bridge.same_members(&members) {
-                        (old_bridged, None)
-                    } else {
-                        let handler = Rc::new(BridgedHandler::new_group(
-                            bridge.clone(),
-                            Dataver::new(versions.bridged),
-                            self.store.devices(),
-                            self.protocol.clone(),
-                        ));
-                        (handler, Some((bridge, members)))
-                    }
-                }
-                None => {
-                    let bridge = Rc::new(GroupBridge::new(
-                        group.key.clone(),
-                        group_identity.unique_id.clone(),
-                        endpoint,
-                        group_identity.label.clone(),
-                        members,
-                        self.registry.clone(),
-                    ));
-                    let handler = Rc::new(BridgedHandler::new_group(
-                        bridge,
-                        Dataver::new(versions.bridged),
-                        self.store.devices(),
-                        self.protocol.clone(),
-                    ));
-                    (handler, None)
-                }
+                    .map(|function| function.endpoint)
+                    .collect(),
+            },
+            configuration_version: 1,
+        });
+        for (index, function) in stored.functions.iter().enumerate() {
+            let Some(live) = device.function(&function.key.id) else {
+                return Err(invalid(
+                    store,
+                    "published device function is missing at runtime",
+                ));
             };
-            if let Some((bridge, members)) = staged {
-                member_updates.push((bridge, members));
+            desired.push(DesiredEntry {
+                endpoint: function.endpoint,
+                kind: DesiredKind::Child {
+                    function: live,
+                    index: index as u8 + 1,
+                    label: function.label.clone(),
+                },
+                configuration_version: 1,
+            });
+        }
+        return Ok(desired);
+    }
+    let Some(function) = stored.functions.first() else {
+        return Err(invalid(store, "published device has no functions"));
+    };
+    let Some(live) = device.function(&function.key.id) else {
+        return Err(invalid(
+            store,
+            "published device function is missing at runtime",
+        ));
+    };
+    let mapping = if function.category == Category::Light {
+        match publication::map_light(live.description()) {
+            Ok(mapping) => Some(mapping),
+            Err(reason) => {
+                log::info!(
+                    "Matter device {} stays unpublished: {}",
+                    device.key().id,
+                    reason.as_str()
+                );
+                return Ok(Vec::new());
             }
-            desired.push(Rc::new(Entry {
-                endpoint,
-                device: None,
-                descriptor: Dataver::new(versions.descriptor),
-                role: Role::Parent {
+        }
+    } else {
+        None
+    };
+    desired.push(DesiredEntry {
+        endpoint: function.endpoint,
+        kind: DesiredKind::Device {
+            device: device.clone(),
+            function: live,
+            stored: stored.clone(),
+            mapping,
+        },
+        configuration_version: 1,
+    });
+    Ok(desired)
+}
+
+/// Compare only fixed descriptions. A decoded baseline that lacks an
+/// endpoint represents a new publication; its reserved version advances
+/// when that identity has already been published. A missing or legacy
+/// baseline retains stored endpoint versions while establishing the shape.
+fn shape_changes(
+    store: &Store,
+    mut settings: BasicInfoSettings,
+    previous: Option<&[u8]>,
+    entries: &[(ShapeEntry, u32)],
+) -> Result<ShapeChanges, StorageError> {
+    let shape = encode_shape(
+        &entries
+            .iter()
+            .map(|(shape, _)| shape.clone())
+            .collect::<Vec<_>>(),
+    );
+    if previous == Some(shape.as_slice()) {
+        return Ok(ShapeChanges {
+            versions: Vec::new(),
+            blobs: Vec::new(),
+            settings: None,
+        });
+    }
+    let sections = previous.and_then(decode_shape);
+    let mut versions = Vec::new();
+    for (entry, current) in entries {
+        if !entry.advertises_configuration_version() {
+            continue;
+        }
+        let stored = store.devices().configuration_version(entry.endpoint)?;
+        let old = sections
+            .as_ref()
+            .and_then(|sections| sections.get(&entry.endpoint));
+        let version = match old {
+            Some(old) if *old != encode_section(entry) => {
+                (*current).max(stored.unwrap_or(1)).saturating_add(1)
+            }
+            Some(_) => stored.unwrap_or(*current),
+            None if sections.is_some() => stored.map_or(1, |version| version.saturating_add(1)),
+            None => stored.unwrap_or(1),
+        };
+        versions.push(ConfigurationVersion {
+            endpoint: entry.endpoint,
+            version,
+        });
+    }
+    settings.bump_configuration_version();
+    let bytes = encode_basic_info(&settings)
+        .map_err(|error| StorageError::new(store.path(), "encode Matter configuration", error))?;
+    Ok(ShapeChanges {
+        versions,
+        blobs: vec![
+            BlobChange {
+                key: rs_matter::persist::BASIC_INFO_KEY,
+                value: Some(bytes),
+            },
+            BlobChange {
+                key: MATTER_SHAPE_KEY,
+                value: Some(shape),
+            },
+        ],
+        settings: Some(settings),
+    })
+}
+
+fn invalid(store: &Store, reason: &'static str) -> StorageError {
+    StorageError::new(store.path(), "build Matter topology", reason)
+}
+
+impl Model {
+    pub(super) fn take_rebuild(&self) -> Option<Rebuild> {
+        self.rebuild.borrow_mut().take()
+    }
+
+    /// Build the live handlers for one resolved entry. This only reads the
+    /// already-committed registry handles; a missing group handle would mean
+    /// the commit itself failed to install the prepared plan.
+    fn build_entry(
+        &self,
+        desired: &DesiredEntry,
+        applied: &crate::device::AppliedConfiguration,
+    ) -> Entry {
+        let mut random = rand::rng();
+        let versions = Versions {
+            descriptor: random.random(),
+            groups: random.random(),
+            identify: random.random(),
+            on_off: random.random(),
+            bridged: random.random(),
+            level: random.random(),
+            color: random.random(),
+        };
+        let role = match &desired.kind {
+            DesiredKind::Device {
+                device,
+                function,
+                stored,
+                mapping,
+            } => {
+                let control = Control::new(
+                    function.clone(),
+                    desired.endpoint,
+                    versions,
+                    *mapping,
+                    self.executor.clone(),
+                );
+                let bridged = self.device_bridge(desired, device, stored, versions.bridged);
+                Role::Single { control, bridged }
+            }
+            DesiredKind::Parent {
+                device,
+                stored,
+                children,
+            } => {
+                let bridged = self.device_bridge(desired, device, stored, versions.bridged);
+                Role::Parent {
                     children: children.clone(),
                     bridged,
-                },
-                types: static_types(PARENT_TYPES),
-                clusters: static_clusters(PARENT_CLUSTERS),
-            }));
-        }
-
-        desired.sort_by_key(|entry| entry.endpoint);
-        for pair in desired.windows(2) {
-            if pair[0].endpoint == pair[1].endpoint {
-                return Err(self.invalid("Reconciled endpoints are duplicated"));
+                }
             }
+            DesiredKind::Child {
+                function,
+                index,
+                label,
+            } => {
+                let control = Control::new(
+                    function.clone(),
+                    desired.endpoint,
+                    versions,
+                    None,
+                    self.executor.clone(),
+                );
+                Role::Child {
+                    control,
+                    index: *index,
+                    label: label.clone(),
+                }
+            }
+            DesiredKind::Group {
+                key,
+                identity,
+                mapping,
+            } => {
+                let group = applied
+                    .groups
+                    .iter()
+                    .find(|group| &group.key == key)
+                    .expect("a prepared group is installed by the same commit")
+                    .handle()
+                    .clone();
+                let bridged = BridgedHandler::new(
+                    BridgeTarget::Group {
+                        group: group.clone(),
+                        registry: self.registry.clone(),
+                    },
+                    Dataver::new(versions.bridged),
+                    desired.configuration_version,
+                    desired.endpoint,
+                    identity.clone(),
+                    self.store.devices(),
+                    self.protocol.clone(),
+                );
+                let control = Control::new_group(
+                    group,
+                    desired.endpoint,
+                    versions,
+                    *mapping,
+                    self.executor.clone(),
+                );
+                Role::Single { control, bridged }
+            }
+        };
+        Entry {
+            endpoint: desired.endpoint,
+            descriptor: Dataver::new(versions.descriptor),
+            role,
+            shape: desired.shape(),
         }
-        Ok(Prepared {
-            entries: desired,
-            member_updates,
-        })
     }
 
-    fn reconcile(&self, snapshot: &RegistrySnapshot) -> Result<Option<Reconcile>, StorageError> {
-        let Prepared {
-            entries,
-            member_updates,
-        } = self.prepare(snapshot)?;
-        // Nothing shared with the current model is changed until this check.
-        // A new service instance will publish the latest confirmed topology.
-        if Self::encode_shape(&entries) != self.shape_bytes() {
-            self.rebuild.set(true);
-            return Ok(None);
-        }
-        let previous = self.entries.borrow();
-        let mut report = Reconcile::default();
-        for (entry, previous) in entries.iter().zip(previous.iter()) {
-            if let (Some(old), Some(new)) = (&previous.device, &entry.device)
-                && !old.same_instance(new)
-            {
-                report.state_refresh.push(entry.endpoint);
-            }
-            let control = entry.role.control_rc();
-            if !same_rc(&control, &previous.role.control_rc()) {
-                report.controls.push((entry.endpoint, control));
-            }
-            let bridged = entry.role.bridged_rc();
-            if !same_rc(&bridged, &previous.role.bridged_rc()) {
-                report.bridges.push((entry.endpoint, bridged));
-            }
-        }
-        drop(previous);
-        for (bridge, members) in member_updates {
-            bridge.set_members(members);
-        }
-        *self.entries.borrow_mut() = entries;
-        Ok(Some(report))
-    }
-
-    pub(super) fn needs_rebuild(&self) -> bool {
-        self.rebuild.get()
+    fn device_bridge(
+        &self,
+        desired: &DesiredEntry,
+        device: &PhysicalDevice,
+        stored: &StoredDevice,
+        version: u32,
+    ) -> BridgedHandler {
+        BridgedHandler::new(
+            BridgeTarget::Device(device.clone()),
+            Dataver::new(version),
+            desired.configuration_version,
+            stored.endpoint,
+            stored.unique_id.clone(),
+            self.store.devices(),
+            self.protocol.clone(),
+        )
     }
 
     /// Establish the complete persisted shape/version boundary before serving
-    /// exchanges or resumed subscriptions. Repeating this is a no-op.
+    /// exchanges or resumed subscriptions. A baseline commit groups the
+    /// canonical shape, the root BasicInfo bump and affected endpoint versions
+    /// into one transaction; a repeated call with the same shape is a no-op.
     pub(super) fn initialize(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        let shape = self.shape_bytes();
         let stored = self
             .protocol
             .record(self.store.matter().get(MATTER_SHAPE_KEY))?;
-        if stored.as_deref() != Some(shape.as_slice()) {
-            if let Err(error) = ctx.matter().bump_configuration_version(ctx.kv(), &ctx) {
-                self.protocol.record::<()>(Err(StorageError::new(
-                    self.store.path(),
-                    "persist Matter configuration version",
-                    error,
-                )))?;
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| (entry.shape(), entry.configuration_version()))
+            .collect::<Vec<_>>();
+        let settings = ctx
+            .matter()
+            .with_state(|state| state.basic_info_settings.clone());
+        let changes = self.protocol.record(shape_changes(
+            &self.store,
+            settings,
+            stored.as_deref(),
+            &entries,
+        ))?;
+        let Some(settings) = changes.settings else {
+            return Ok(());
+        };
+        self.protocol.record(
+            self.store
+                .devices()
+                .commit_protocol_configuration(changes.versions.clone(), changes.blobs)
+                .map_err(|error| commit_error(&self.store, "commit Matter shape baseline", error)),
+        )?;
+        ctx.matter()
+            .with_state(|state| state.basic_info_settings = settings);
+        ctx.notify_attr_changed(0, BASIC_INFO_CLUSTER, BASIC_INFO_CONFIGURATION_VERSION);
+        for version in changes.versions {
+            let entry = self.entry(version.endpoint)?;
+            let bridged = entry
+                .role
+                .bridged()
+                .expect("a light-like entry owns bridged information");
+            let changed = bridged.configuration_version_value() != version.version;
+            bridged.set_configuration_version(version.version);
+            if changed {
+                ctx.notify_attr_changed(version.endpoint, BDBI_CLUSTER, BDBI_CONFIGURATION_VERSION);
             }
-            self.protocol
-                .record(self.store.matter().put(MATTER_SHAPE_KEY, &shape))?;
         }
         Ok(())
-    }
-    fn invalid(&self, reason: &'static str) -> StorageError {
-        StorageError::new(self.store.path(), "build Matter topology", reason)
-    }
-    fn start_control<'a>(
-        ctx: &'a impl HandlerContext,
-        tasks: &mut JobFutures<'a>,
-        control: Rc<Control>,
-    ) -> AbortHandle {
-        let (handle, registration) = AbortHandle::new_pair();
-        tasks.push(Box::pin(Abortable::new(
-            async move { control.run(ctx).await },
-            registration,
-        )));
-        handle
-    }
-    fn start_bridge<'a>(
-        ctx: &'a impl HandlerContext,
-        tasks: &mut JobFutures<'a>,
-        bridge: Rc<BridgedHandler>,
-    ) -> AbortHandle {
-        let (handle, registration) = AbortHandle::new_pair();
-        tasks.push(Box::pin(Abortable::new(
-            async move { bridged::HandlerAdaptor(bridge.as_ref()).run(ctx).await },
-            registration,
-        )));
-        handle
-    }
-    async fn job_failure(tasks: &mut JobFutures<'_>) -> Error {
-        while let Some(result) = tasks.next().await {
-            match result {
-                Ok(Err(error)) => return error,
-                Ok(Ok(())) => return ErrorCode::InvalidState.into(),
-                Err(_) => {}
-            }
-        }
-        std::future::pending().await
     }
 
     async fn run_devices(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         let mut changes = self.registry.subscribe();
-        let mut control_jobs = BTreeMap::<u16, AbortHandle>::new();
-        let mut bridge_jobs = BTreeMap::<u16, AbortHandle>::new();
         let mut tasks = JobFutures::new();
+        for entry in &self.entries {
+            if let Some(control) = entry.role.control() {
+                tasks.push(Box::pin(control.run(&ctx)));
+            }
+            if let Some(bridge) = entry.role.bridged() {
+                let ctx = &ctx;
+                tasks.push(Box::pin(async move {
+                    bridged::HandlerAdaptor(bridge).run(ctx).await
+                }));
+            }
+        }
+        let mut retry = self.retry.borrow_mut().take();
         loop {
-            let Some(report) = self
-                .protocol
-                .record(self.reconcile(&self.registry.snapshot()))?
-            else {
-                return Ok(());
+            let snapshot = self.registry.snapshot();
+            if snapshot.pending.is_some() {
+                if retry
+                    .as_ref()
+                    .is_some_and(|state| state.revision != snapshot.revision)
+                {
+                    retry = None;
+                }
+                if retry
+                    .as_ref()
+                    .is_none_or(|state| Instant::now() >= state.deadline)
+                {
+                    *self.rebuild.borrow_mut() = Some(Rebuild {
+                        registry: self.registry.clone(),
+                        store: self.store.clone(),
+                        retry,
+                    });
+                    return Ok(());
+                }
+            } else {
+                retry = None;
+                self.registry.clear_apply_error();
+            }
+            let changed = async {
+                changes.changed().await;
+                Ok::<(), Error>(())
             };
-            for (endpoint, control) in report.controls {
-                if let Some(job) = control_jobs.remove(&endpoint) {
-                    job.abort();
-                }
-                if let Some(control) = control {
-                    control_jobs.insert(endpoint, Self::start_control(&ctx, &mut tasks, control));
-                }
-            }
-            for (endpoint, bridge) in report.bridges {
-                if let Some(job) = bridge_jobs.remove(&endpoint) {
-                    job.abort();
-                }
-                if let Some(bridge) = bridge {
-                    bridge_jobs.insert(endpoint, Self::start_bridge(&ctx, &mut tasks, bridge));
-                }
-            }
-            // `handler` already reconciled the initial topology, so the first
-            // report is empty. Seed the jobs of every current role explicitly
-            // so a reused entry that never appears in a report still runs.
-            for entry in self.entries.borrow().iter() {
-                if let Some(control) = entry.role.control_rc()
-                    && !control_jobs.contains_key(&entry.endpoint)
-                {
-                    control_jobs.insert(
-                        entry.endpoint,
-                        Self::start_control(&ctx, &mut tasks, control),
-                    );
-                }
-                if let Some(bridge) = entry.role.bridged_rc()
-                    && !bridge_jobs.contains_key(&entry.endpoint)
-                {
-                    bridge_jobs
-                        .insert(entry.endpoint, Self::start_bridge(&ctx, &mut tasks, bridge));
-                }
-            }
-            let mut cluster_notifications = BTreeMap::<u16, BTreeSet<u32>>::new();
-            let mut reachable_refresh = BTreeSet::new();
-            // A rejoined device starts from the current source snapshot; its
-            // control clusters may now be unknown or reset. The published
-            // surface itself is unchanged, so this is not a configuration
-            // change and must not bump the configuration version.
-            for endpoint in &report.state_refresh {
-                let entry = self.entry(*endpoint)?;
-                if let Some(control) = entry.role.control() {
-                    let clusters = cluster_notifications.entry(*endpoint).or_default();
-                    clusters.insert(6);
-                    if let Some(light) = &control.lighting {
-                        let publication = light.publication();
-                        if publication.brightness {
-                            clusters.insert(8);
-                        }
-                        if publication.has_color_control() {
-                            clusters.insert(0x300);
-                        }
+            let retry_due = async {
+                match &retry {
+                    Some(state) => {
+                        async_io::Timer::at(state.deadline).await;
+                        Ok(())
                     }
+                    None => std::future::pending::<Result<(), Error>>().await,
                 }
-                // A device-backed bridge keeps its BDBI, but the replacement
-                // seeds `reported` from the new instance's availability, so
-                // its run loop stays silent. Report Reachable explicitly; the
-                // retained group-parent aggregator keeps tracking its own
-                // reported value.
-                if entry
-                    .role
-                    .bridged_rc()
-                    .is_some_and(|bridged| bridged.group_key().is_none())
-                {
-                    reachable_refresh.insert(*endpoint);
+            };
+            let failed = async {
+                match tasks.next().await {
+                    Some(Err(error)) => Err(error),
+                    Some(Ok(())) => Err(ErrorCode::InvalidState.into()),
+                    None => std::future::pending().await,
                 }
-            }
-            for (endpoint, clusters) in cluster_notifications {
-                for cluster in clusters {
-                    ctx.notify_cluster_changed(endpoint, cluster);
-                }
-            }
-            for endpoint in reachable_refresh {
-                ctx.notify_attr_changed(endpoint, 0x39, 17);
-            }
-            futures_lite::future::or(
-                async {
-                    changes.changed().await;
-                    Ok(())
-                },
-                async { Err(Self::job_failure(&mut tasks).await) },
-            )
-            .await?;
+            };
+            futures_lite::future::or(changed, futures_lite::future::or(retry_due, failed)).await?;
         }
     }
 }
@@ -1401,29 +1567,13 @@ impl Metadata for Model {
     where
         F: FnOnce(&Node<'_>) -> R,
     {
-        let entries = self.entries.borrow();
+        let entries = &self.entries;
         let tags = entries
             .iter()
             .map(|entry| match &entry.role {
-                Role::Child {
-                    tags: ChildTags::Outlet { index, label },
-                    ..
-                } => vec![SemanticTag::new(NS_COMMON_NUMBER, *index).with_label(label)],
-                Role::Child {
-                    tags: ChildTags::Light { endpoint, label },
-                    ..
-                } => vec![
-                    // A manufacturer tag carries the stable endpoint identity
-                    // as (namespace high byte, tag low byte). Its label is
-                    // mandatory and holds the saved member name.
-                    SemanticTag {
-                        mfg_code: Some(TEST_VID),
-                        namespace_id: (*endpoint >> 8) as u8,
-                        tag: *endpoint as u8,
-                        label: Some(label),
-                    },
-                    SemanticTag::new(NS_COMMON_NUMBER, 0),
-                ],
+                Role::Child { index, label, .. } => {
+                    vec![SemanticTag::new(NS_COMMON_NUMBER, *index).with_label(label)]
+                }
                 _ => Vec::new(),
             })
             .collect::<Vec<_>>();
@@ -1461,7 +1611,7 @@ impl AsyncHandler for Model {
     }
     fn bump_dataver(&self, ctx: impl MatchContext) {
         self.root.bump_dataver(&ctx);
-        for entry in self.entries.borrow().iter().filter(|entry| {
+        for entry in self.entries.iter().filter(|entry| {
             ctx.endpt()
                 .is_none_or(|endpoint| entry.endpoint == endpoint)
         }) {
@@ -1469,7 +1619,7 @@ impl AsyncHandler for Model {
         }
     }
     fn lifecycle(&self, ctx: impl HandlerContext, op: LifecycleOp) -> Result<(), Error> {
-        // Dynamic clusters keep no persistent lifecycle state.
+        // Bridged clusters keep no persistent lifecycle state.
         self.root.lifecycle(ctx, op)
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {

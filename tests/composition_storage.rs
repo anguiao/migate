@@ -1,6 +1,13 @@
+use migate as library;
+#[path = "../src/storage/tests/support.rs"]
+mod configuration_support;
+use configuration_support::stage_configuration;
 use migate::{
     device::{Capability, Composition, DeviceKey},
-    storage::{AdmissionError, CachedPhysicalDevice, CachedScope, CompositionCommitError, Store},
+    storage::{
+        AdmissionError, CachedPhysicalDevice, CachedScope, CompositionCommitError,
+        ConfirmedComposition, Store,
+    },
     xiaomi::{capability::parse_device_for_model, cloud::group_id},
 };
 use rusqlite::Connection;
@@ -43,6 +50,34 @@ fn scope_in(uid: &str, home: &str) -> CachedScope {
     }
 }
 
+fn commit_groups(
+    store: &Store,
+    scope: &CachedScope,
+    groups: &[Composition],
+) -> Result<ConfirmedComposition, CompositionCommitError> {
+    commit(store, scope, groups, &[], &[])
+}
+
+fn commit(
+    store: &Store,
+    scope: &CachedScope,
+    groups: &[Composition],
+    removed: &[DeviceKey],
+    devices: &[&str],
+) -> Result<ConfirmedComposition, CompositionCommitError> {
+    let (registry, _receivers) = stage_configuration(
+        &store.devices(),
+        scope,
+        groups,
+        removed,
+        &devices.iter().map(|id| key(id)).collect::<Vec<_>>(),
+    )?;
+    Ok(store
+        .devices()
+        .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))?
+        .unwrap())
+}
+
 #[test]
 fn incompatible_member_description_preserves_confirmed_groups() {
     let dir = tempfile::tempdir().unwrap();
@@ -50,14 +85,12 @@ fn incompatible_member_description_preserves_confirmed_groups() {
     for did in ["a", "b", "c"] {
         store.devices().publish_cached(&light(did), did).unwrap();
     }
-    let initial = store
-        .devices()
-        .commit_composition(
-            &scope(),
-            &[group("g1", "One", &["a", "b"]), group("g2", "Two", &["c"])],
-            &[],
-        )
-        .unwrap();
+    let initial = commit_groups(
+        &store,
+        &scope(),
+        &[group("g1", "One", &["a", "b"]), group("g2", "Two", &["c"])],
+    )
+    .unwrap();
     let original = store.devices().load_published(&key("a")).unwrap().unwrap();
     let mut incompatible = light("a");
     incompatible.device.functions[0].power = None;
@@ -93,10 +126,12 @@ fn committed_group_restores_after_restart_without_a_main_light_identity() {
     for did in ["a", "b"] {
         store.devices().publish_cached(&light(did), did).unwrap();
     }
-    let confirmed = store
-        .devices()
-        .commit_composition(&scope(), &[group("group.1", "Ceiling", &["a", "b"])], &[])
-        .unwrap();
+    let confirmed = commit_groups(
+        &store,
+        &scope(),
+        &[group("group.1", "Ceiling", &["a", "b"])],
+    )
+    .unwrap();
     assert_eq!(confirmed.version, 1);
     assert_eq!(confirmed.groups.len(), 1);
     assert_eq!(confirmed.groups[0].key, key("group.1"));
@@ -112,9 +147,11 @@ fn committed_group_restores_after_restart_without_a_main_light_identity() {
     assert_eq!(
         store
             .devices()
-            .load_published_group("account", "home", &key("group.1"))
+            .restore_groups("account", "home")
             .unwrap()
-            .as_ref(),
+            .groups
+            .iter()
+            .find(|group| group.key == key("group.1")),
         Some(&confirmed.groups[0])
     );
     assert!(
@@ -174,52 +211,44 @@ fn commit_rejects_invalid_sets_without_touching_storage() {
         store.devices().publish_cached(&light(did), did).unwrap();
     }
     store.devices().publish_cached(&outlet("o"), "O").unwrap();
-    store.devices().publish_cached(&light("c"), "C").unwrap();
-    store.devices().remove(&key("c")).unwrap();
 
     assert!(matches!(
-        store.devices().commit_composition(
+        commit_groups(
+            &store,
             &scope,
             &[Composition {
                 key: key("empty"),
                 label: "Empty".into(),
                 members: Vec::new(),
-            }],
-            &[],
+            }]
         ),
         Err(CompositionCommitError::Invalid(
             CompositionError::EmptyGroup(_)
         ))
     ));
     assert!(matches!(
-        store.devices().commit_composition(
-            &scope,
-            &[group("missing", "Missing", &["absent"])],
-            &[]
-        ),
-        Err(CompositionCommitError::UnsupportedMember(_))
+        commit_groups(&store, &scope, &[group("missing", "Missing", &["absent"])]),
+        Err(CompositionCommitError::Invalid(
+            CompositionError::MissingMember(_)
+        ))
     ));
     assert!(matches!(
-        store
-            .devices()
-            .commit_composition(&scope, &[group("outlet", "Outlet", &["o"])], &[]),
-        Err(CompositionCommitError::UnsupportedMember(_))
+        commit_groups(&store, &scope, &[group("outlet", "Outlet", &["o"])]),
+        Err(CompositionCommitError::Invalid(
+            CompositionError::UnsupportedMember(_)
+        ))
     ));
     assert!(matches!(
-        store.devices().commit_composition(
-            &scope,
-            &[group("unpublished", "Unpublished", &["c"])],
-            &[]
-        ),
-        Err(CompositionCommitError::UnsupportedMember(_))
-    ));
-    assert!(matches!(
-        store.devices().commit_composition(
+        commit(
+            &store,
             &scope,
             &[group("group.1", "Group", &["a"])],
             &[key("a")],
+            &[]
         ),
-        Err(CompositionCommitError::RemovedMember(_))
+        Err(CompositionCommitError::Invalid(
+            CompositionError::MissingMember(_)
+        ))
     ));
 
     let restored = store.devices().restore_groups("account", "home").unwrap();
@@ -239,7 +268,7 @@ fn commit_rejects_invalid_sets_without_touching_storage() {
             |row| row.get::<_, u16>(0)
         )
         .unwrap(),
-        5
+        4
     );
 }
 
@@ -251,28 +280,31 @@ fn dissolve_and_readd_reuse_parent_reservation_and_saved_label() {
     for did in ["a", "b"] {
         store.devices().publish_cached(&light(did), did).unwrap();
     }
-    let first = store
-        .devices()
-        .commit_composition(&scope, &[group("group.1", "Cloud name", &["a"])], &[])
-        .unwrap();
+    let first = commit(
+        &store,
+        &scope,
+        &[group("group.1", "Cloud name", &["a"])],
+        &[],
+        &["b"],
+    )
+    .unwrap();
     let stored = first.groups[0].clone();
     store
         .devices()
         .set_group_label(&stored.key, "Saved group")
         .unwrap();
 
-    let dissolved = store
-        .devices()
-        .commit_composition(&scope, &[], &[])
-        .unwrap();
+    let dissolved = commit(&store, &scope, &[], &[], &["a", "b"]).unwrap();
     assert_eq!(dissolved.version, 2);
     assert!(dissolved.groups.is_empty());
     assert!(
         store
             .devices()
-            .load_published_group("account", "home", &stored.key)
+            .restore_groups("account", "home")
             .unwrap()
-            .is_none()
+            .groups
+            .iter()
+            .all(|group| group.key != stored.key)
     );
     let db = Connection::open(store.path()).unwrap();
     let reservation = db
@@ -303,14 +335,12 @@ fn dissolve_and_readd_reuse_parent_reservation_and_saved_label() {
         0
     );
 
-    let rejoined = store
-        .devices()
-        .commit_composition(
-            &scope,
-            &[group("group.1", "Later cloud name", &["b", "a"])],
-            &[],
-        )
-        .unwrap();
+    let rejoined = commit_groups(
+        &store,
+        &scope,
+        &[group("group.1", "Later cloud name", &["b", "a"])],
+    )
+    .unwrap();
     assert_eq!(rejoined.version, 3);
     assert_eq!(rejoined.groups[0].unique_id, stored.unique_id);
     assert_eq!(rejoined.groups[0].endpoint, stored.endpoint);
@@ -326,19 +356,21 @@ fn confirmed_member_deletion_revokes_relations_and_storage_failure_rolls_back() 
     for did in ["a", "b", "c"] {
         store.devices().publish_cached(&light(did), did).unwrap();
     }
-    store
-        .devices()
-        .commit_composition(
-            &scope,
-            &[group("g1", "One", &["a", "b"]), group("g2", "Two", &["c"])],
-            &[],
-        )
-        .unwrap();
+    commit_groups(
+        &store,
+        &scope,
+        &[group("g1", "One", &["a", "b"]), group("g2", "Two", &["c"])],
+    )
+    .unwrap();
 
-    let confirmed = store
-        .devices()
-        .commit_composition(&scope, &[group("g2", "Two", &["c"])], &[key("b")])
-        .unwrap();
+    let confirmed = commit(
+        &store,
+        &scope,
+        &[group("g2", "Two", &["c"])],
+        &[key("b")],
+        &["a"],
+    )
+    .unwrap();
     assert_eq!(confirmed.version, 2);
     assert_eq!(confirmed.groups.len(), 1);
     assert_eq!(confirmed.groups[0].key, key("g2"));
@@ -375,14 +407,12 @@ fn confirmed_member_deletion_revokes_relations_and_storage_failure_rolls_back() 
          BEGIN SELECT RAISE(ABORT, 'private relation'); END;",
     )
     .unwrap();
-    let error = store
-        .devices()
-        .commit_composition(
-            &scope,
-            &[group("g1", "One", &["a"]), group("g2", "Two", &["c"])],
-            &[],
-        )
-        .unwrap_err();
+    let error = commit_groups(
+        &store,
+        &scope,
+        &[group("g1", "One", &["a"]), group("g2", "Two", &["c"])],
+    )
+    .unwrap_err();
     assert!(!format!("{error:?} {error}").contains("private relation"));
     assert_eq!(
         store.devices().restore_groups("account", "home").unwrap(),
@@ -400,136 +430,67 @@ fn confirmed_member_deletion_revokes_relations_and_storage_failure_rolls_back() 
 }
 
 #[test]
-fn commit_migrates_only_known_legacy_group_identities_to_parent_role() {
+fn commit_rejects_promoting_device_identities_to_groups() {
+    use migate::device::CompositionError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let cached = light("ordinary");
+    let old = store
+        .devices()
+        .publish_cached(&cached, "Saved light")
+        .unwrap();
+    store
+        .devices()
+        .publish_cached(&light("member"), "Member")
+        .unwrap();
+    let before = std::fs::read(store.path()).unwrap();
+    assert!(matches!(
+        commit_groups(&store, &scope(), &[group("ordinary", "Group", &["member"])]),
+        Err(CompositionCommitError::Invalid(
+            CompositionError::GroupKeyConflict(_)
+        ))
+    ));
+    assert_eq!(std::fs::read(store.path()).unwrap(), before);
+    assert_eq!(
+        store.devices().load_published(&cached.device.key).unwrap(),
+        Some(old)
+    );
+}
+
+#[test]
+fn physical_cache_rejects_light_group_keys_and_models_on_write_and_read() {
     for (did, model) in [
         ("group.42", "xiaomi.light.ceil04"),
         ("42", "mijia.light.group3"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let scope = scope();
-        let cached = group_like(did, model);
-        let old = store
-            .devices()
-            .publish_cached(&cached, "Old light")
-            .unwrap();
-        store
-            .devices()
-            .publish_cached(&light("member"), "Member")
-            .unwrap();
-        let confirmed = store
-            .devices()
-            .commit_composition(&scope, &[group(did, "Group", &["member"])], &[])
-            .unwrap();
-        assert_eq!(confirmed.groups[0].unique_id, old.unique_id);
-        assert_eq!(confirmed.groups[0].endpoint, old.endpoint);
-        assert_eq!(confirmed.groups[0].label, "Old light");
-        assert!(store.devices().load_published(&key(did)).unwrap().is_none());
-        let db = Connection::open(store.path()).unwrap();
-        assert_eq!(
-            db.query_row(
-                "SELECT count(*) FROM device_identity WHERE source='xiaomi' AND device_id=?1",
-                [did],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT slot FROM endpoint_allocation WHERE source='xiaomi' AND device_id=?1",
-                [did],
-                |row| row.get::<_, String>(0)
-            )
-            .unwrap(),
-            "group"
-        );
-        assert!(matches!(
+        let before = std::fs::read(store.path()).unwrap();
+        assert!(
             store
                 .devices()
-                .publish(&migate::device::PhysicalDeviceDescription {
-                    key: key(did),
-                    label: "Taken over".into(),
-                    functions: cached
-                        .device
-                        .functions
-                        .iter()
-                        .map(|function| function.description.clone())
-                        .collect(),
-                }),
-            Err(migate::storage::AdmissionError::IncompatibleFunctions)
-        ));
-        let again = store
-            .devices()
-            .commit_composition(&scope, &[group(did, "Cloud rename", &["member"])], &[])
-            .unwrap();
-        assert_eq!(again, confirmed);
-    }
-}
-
-#[test]
-fn commit_rejects_promoting_an_ordinary_device_identity_to_group() {
-    use migate::device::CompositionError;
-    use migate::storage::CompositionCommitError;
-
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let scope = scope();
-    let old = store
-        .devices()
-        .publish_cached(&light("42"), "Ordinary light")
-        .unwrap();
-    store
-        .devices()
-        .publish_cached(&light("member"), "Member")
-        .unwrap();
-    assert!(matches!(
+                .publish_cached(&group_like(did, model), "Group")
+                .is_err()
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
         store
             .devices()
-            .commit_composition(&scope, &[group("42", "Group", &["member"])], &[]),
-        Err(CompositionCommitError::Invalid(
-            CompositionError::GroupKeyConflict(_)
-        ))
-    ));
-    assert_eq!(
-        store.devices().load_published(&key("42")).unwrap(),
-        Some(old)
-    );
-    let db = Connection::open(store.path()).unwrap();
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM group_identity", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-}
-
-#[test]
-fn commit_rejects_known_group_identities_as_members() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let scope = scope();
-    store
-        .devices()
-        .publish_cached(&group_like("group.42", "xiaomi.light.ceil04"), "Group-like")
-        .unwrap();
-    store
-        .devices()
-        .publish_cached(&group_like("42", "mijia.light.group3"), "Group-like")
-        .unwrap();
-    store
-        .devices()
-        .publish_cached(&light("member"), "Member")
-        .unwrap();
-    for member in ["group.42", "42"] {
-        assert!(matches!(
-            store.devices().commit_composition(
-                &scope,
-                &[group("parent", "Parent", &[member])],
-                &[]
-            ),
-            Err(CompositionCommitError::UnsupportedMember(_))
-        ));
+            .publish_cached(&light("original"), "Light")
+            .unwrap();
+        Connection::open(store.path())
+            .unwrap()
+            .execute(
+                "UPDATE device_cache SET device_id=?1, model=?2",
+                [did, model],
+            )
+            .unwrap();
+        assert!(
+            store
+                .devices()
+                .load_parsed("account", "home", &key(did))
+                .is_err()
+        );
     }
 }
 
@@ -546,9 +507,7 @@ fn commit_requires_member_functions_to_match_the_published_identity() {
     )
     .unwrap();
     assert!(matches!(
-        store
-            .devices()
-            .commit_composition(&scope, &[group("g", "G", &["a"])], &[]),
+        commit_groups(&store, &scope, &[group("g", "G", &["a"])]),
         Err(CompositionCommitError::UnsupportedMember(_))
     ));
 }
@@ -560,9 +519,7 @@ fn commit_rejects_a_removed_key_that_is_also_a_proposed_group() {
     let scope = scope();
     store.devices().publish_cached(&light("a"), "A").unwrap();
     assert!(matches!(
-        store
-            .devices()
-            .commit_composition(&scope, &[group("g", "G", &["a"])], &[key("g")]),
+        commit(&store, &scope, &[group("g", "G", &["a"])], &[key("g")], &[]),
         Err(CompositionCommitError::RemovedGroup(_))
     ));
     assert!(
@@ -583,10 +540,7 @@ fn no_op_commit_does_not_rewrite_relations_or_consume_a_version() {
     for did in ["a", "b"] {
         store.devices().publish_cached(&light(did), did).unwrap();
     }
-    let first = store
-        .devices()
-        .commit_composition(&scope, &[group("g", "Saved name", &["a", "b"])], &[])
-        .unwrap();
+    let first = commit_groups(&store, &scope, &[group("g", "Saved name", &["a", "b"])]).unwrap();
     let db = Connection::open(store.path()).unwrap();
     db.execute_batch(
         "CREATE TRIGGER reject_relation_insert BEFORE INSERT ON group_relation
@@ -595,10 +549,7 @@ fn no_op_commit_does_not_rewrite_relations_or_consume_a_version() {
          BEGIN SELECT RAISE(ABORT, 'no-op identity'); END;",
     )
     .unwrap();
-    let again = store
-        .devices()
-        .commit_composition(&scope, &[group("g", "Cloud rename", &["b", "a"])], &[])
-        .unwrap();
+    let again = commit_groups(&store, &scope, &[group("g", "Cloud rename", &["b", "a"])]).unwrap();
     assert_eq!(again, first);
     assert_eq!(again.groups[0].label, "Saved name");
 }
@@ -617,14 +568,10 @@ fn scope_isolation_keeps_same_group_key_confirmed_per_home() {
         .devices()
         .publish_cached(&light_in("account", "other", "b"), "B")
         .unwrap();
-    let home_confirmed = store
-        .devices()
-        .commit_composition(&home, &[group("group.1", "Home group", &["a"])], &[])
-        .unwrap();
-    let other_confirmed = store
-        .devices()
-        .commit_composition(&other, &[group("group.1", "Other group", &["b"])], &[])
-        .unwrap();
+    let home_confirmed =
+        commit_groups(&store, &home, &[group("group.1", "Home group", &["a"])]).unwrap();
+    let other_confirmed =
+        commit_groups(&store, &other, &[group("group.1", "Other group", &["b"])]).unwrap();
     assert_eq!(
         other_confirmed.groups[0].unique_id,
         home_confirmed.groups[0].unique_id
@@ -635,7 +582,7 @@ fn scope_isolation_keeps_same_group_key_confirmed_per_home() {
     );
     assert_eq!(other_confirmed.groups[0].label, "Home group");
 
-    store.devices().commit_composition(&home, &[], &[]).unwrap();
+    commit(&store, &home, &[], &[], &["a"]).unwrap();
     assert!(
         store
             .devices()
@@ -649,15 +596,14 @@ fn scope_isolation_keeps_same_group_key_confirmed_per_home() {
     assert!(
         store
             .devices()
-            .load_published_group("account", "other", &key("group.1"))
+            .restore_groups("account", "other")
             .unwrap()
-            .is_some()
+            .groups
+            .iter()
+            .any(|group| group.key == key("group.1"))
     );
 
-    store
-        .devices()
-        .commit_composition(&other, &[], &[])
-        .unwrap();
+    commit(&store, &other, &[], &[], &["b"]).unwrap();
     assert!(
         store
             .devices()
@@ -692,11 +638,8 @@ fn removing_a_member_revokes_the_group_and_republishing_does_not_resurrect_it() 
     for did in ["a", "b"] {
         store.devices().publish_cached(&light(did), did).unwrap();
     }
-    let first = store
-        .devices()
-        .commit_composition(&scope, &[group("g", "G", &["a", "b"])], &[])
-        .unwrap();
-    store.devices().remove(&key("a")).unwrap();
+    let first = commit_groups(&store, &scope, &[group("g", "G", &["a", "b"])]).unwrap();
+    commit(&store, &scope, &[], &[key("a")], &["b"]).unwrap();
     let revoked = store.devices().restore_groups("account", "home").unwrap();
     assert_eq!(revoked.version, 2);
     assert!(revoked.groups.is_empty());
@@ -705,10 +648,7 @@ fn removing_a_member_revokes_the_group_and_republishing_does_not_resurrect_it() 
     assert_eq!(after.version, 2);
     assert!(after.groups.is_empty());
 
-    let restored = store
-        .devices()
-        .commit_composition(&scope, &[group("g", "G", &["a", "b"])], &[])
-        .unwrap();
+    let restored = commit_groups(&store, &scope, &[group("g", "G", &["a", "b"])]).unwrap();
     assert_eq!(restored.version, 3);
     assert_eq!(restored.groups[0].unique_id, first.groups[0].unique_id);
     assert_eq!(restored.groups[0].endpoint, first.groups[0].endpoint);
@@ -719,10 +659,7 @@ fn restore_groups_propagates_corrupt_member_descriptions() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     store.devices().publish_cached(&light("a"), "A").unwrap();
-    store
-        .devices()
-        .commit_composition(&scope(), &[group("g", "G", &["a"])], &[])
-        .unwrap();
+    commit_groups(&store, &scope(), &[group("g", "G", &["a"])]).unwrap();
     Connection::open(store.path())
         .unwrap()
         .execute(
@@ -743,10 +680,7 @@ fn load_confirmed_rejects_corrupt_group_identity_and_orphan_relations() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         store.devices().publish_cached(&light("a"), "A").unwrap();
-        store
-            .devices()
-            .commit_composition(&scope(), &[group("g", "G", &["a"])], &[])
-            .unwrap();
+        commit_groups(&store, &scope(), &[group("g", "G", &["a"])]).unwrap();
         Connection::open(store.path())
             .unwrap()
             .execute_batch(mutation)
@@ -760,10 +694,7 @@ fn load_confirmed_rejects_corrupt_group_identity_and_orphan_relations() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         store.devices().publish_cached(&light("a"), "A").unwrap();
-        store
-            .devices()
-            .commit_composition(&scope(), &[group("g", "G", &["a"])], &[])
-            .unwrap();
+        commit_groups(&store, &scope(), &[group("g", "G", &["a"])]).unwrap();
         Connection::open(store.path())
             .unwrap()
             .execute("UPDATE group_identity SET label=?1", [&label])
@@ -776,10 +707,7 @@ fn load_confirmed_rejects_corrupt_group_identity_and_orphan_relations() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     store.devices().publish_cached(&light("a"), "A").unwrap();
-    store
-        .devices()
-        .commit_composition(&scope(), &[group("g", "G", &["a"])], &[])
-        .unwrap();
+    commit_groups(&store, &scope(), &[group("g", "G", &["a"])]).unwrap();
     Connection::open(store.path())
         .unwrap()
         .execute_batch(
@@ -811,14 +739,14 @@ fn commit_never_transitions_non_xiaomi_group_like_devices() {
         .publish_cached(&light("member"), "Member")
         .unwrap();
     assert!(matches!(
-        store.devices().commit_composition(
+        commit_groups(
+            &store,
             &scope(),
             &[Composition {
                 key: DeviceKey::new("other", "group.42"),
                 label: "Group".into(),
                 members: vec![key("member")],
-            }],
-            &[],
+            }]
         ),
         Err(CompositionCommitError::Invalid(
             CompositionError::GroupKeyConflict(_)

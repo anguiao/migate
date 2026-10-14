@@ -59,25 +59,32 @@ impl<'a> Bridge<'a> {
     /// Run protocol services on the caller's local executor until failure or cancellation.
     /// Bind the requested UDP port; zero asks the OS to choose an available port.
     /// Report pairing window changes through the caller's output callback.
+    /// A relation, source-instance or fixed-description change replaces Matter and cancels its
+    /// unfinished lighting schedules while source connections keep running.
     /// After dropping this future, call `check_failure` before treating cancellation as success.
     pub async fn run(
         &self,
         port: u16,
         report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
     ) -> Result<(), RuntimeError> {
+        let mut retry = None;
         loop {
-            self.run_instance(port, &report_pairing).await?;
-            log::info!("Matter structure changed; rebuilding protocol services");
+            let rebuild = self.run_instance(port, &report_pairing, retry).await?;
+            // The old instance and all of its tasks and sockets have been
+            // dropped. No old exchange can observe this configuration commit.
+            log::info!("Matter configuration changed; rebuilding protocol services");
+            retry = rebuild.apply();
         }
     }
 
-    // Returning drops the whole instance, including its responder, exchanges,
-    // model controllers and socket, before the next instance can start.
+    // Returning drops every object belonging to the old protocol instance
+    // before the caller resolves and installs the latest configuration.
     async fn run_instance(
         &self,
         port: u16,
         report_pairing: &impl Fn(PairingEvent) -> std::io::Result<()>,
-    ) -> Result<(), RuntimeError> {
+        retry: Option<model::Retry>,
+    ) -> Result<model::Rebuild, RuntimeError> {
         self.check_failure()?;
         let store = &self.store;
         let missing_basic_info = !store
@@ -102,6 +109,7 @@ impl<'a> Bridge<'a> {
             store.clone(),
             self.executor.clone(),
             crypto.rand()?,
+            retry,
         )?;
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         store.with_context("restore Matter model", im.startup().await)?;
@@ -160,9 +168,8 @@ impl<'a> Bridge<'a> {
         // A protocol task may return an error before the storage watcher is polled again.
         self.check_failure()?;
         result?;
-        if !handler.needs_rebuild() {
-            return Err("Matter services ended without a requested rebuild".into());
-        }
-        Ok(())
+        handler
+            .take_rebuild()
+            .ok_or_else(|| "Matter services ended without a requested rebuild".into())
     }
 }

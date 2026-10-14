@@ -13,10 +13,10 @@ macro_rules! setup_light {
         let store = Store::open(dir.path()).unwrap();
         let identity = store.load_identity().unwrap();
         let ($device, mut $receiver) = $source;
-        let $registry = crate::matter::tests::support::test_registry(&store, &$device);
+        let $registry = crate::matter::tests::published_registry(&store, &$device);
         let $executor = crate::matter::tests::support::test_executor();
         let _ = &$executor;
-        let $handler = model::handler(&$registry, &store, StoreAdapter::new(store.matter()), $executor.clone(), rand::rng()).unwrap();
+        let $handler = model::handler(&$registry, &store, StoreAdapter::new(store.matter()), $executor.clone(), rand::rng(), None).unwrap();
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();

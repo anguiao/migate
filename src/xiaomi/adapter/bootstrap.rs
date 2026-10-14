@@ -5,11 +5,9 @@ use super::{
     tasks::TaskSet,
 };
 use crate::{
-    device::{Availability, Composition, DeviceRegistry, PhysicalDevice},
+    device::{Availability, DeviceRegistry, GroupConfiguration, PhysicalDevice},
     storage::Store,
-    xiaomi::{
-        auth::AuthService, capability::is_light_group, cloud::CloudClient, discovery::Discovery,
-    },
+    xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
 };
 use event_listener::Event;
 use std::{
@@ -63,10 +61,6 @@ impl XiaomiAdapter {
         let mut consumers = Vec::new();
         if let Some(scope) = &scope {
             for (metadata, stored) in store.devices().restore_cached(&scope.uid, &scope.home_id)? {
-                if is_light_group(&metadata.device.key, &metadata.model) {
-                    store.devices().remove(&metadata.device.key)?;
-                    continue;
-                }
                 let (physical, receivers) = PhysicalDevice::new(stored.description());
                 let did = metadata.device.key.id.clone();
                 if let Some(reason) = super::membership::publication_problem(&metadata.device) {
@@ -85,23 +79,33 @@ impl XiaomiAdapter {
                 devices.insert(did, slot);
             }
             let confirmed = store.devices().restore_groups(&scope.uid, &scope.home_id)?;
-            if confirmed.version > 0 || !confirmed.groups.is_empty() {
+            if confirmed.version > 0
+                || !confirmed.groups.is_empty()
+                || !confirmed.devices.is_empty()
+            {
                 // Restored parents stay known placeholders until a fresh
-                // directory read confirms their relation.
+                // directory read confirms their relation. Restore the committed
+                // shape and standalone publication set at the same boundary.
                 for group in &confirmed.groups {
                     devices.entry(group.key.id.clone()).or_default();
                 }
-                let compositions = confirmed
+                let groups = confirmed
                     .groups
                     .into_iter()
-                    .map(|group| Composition {
+                    .map(|group| GroupConfiguration {
                         key: group.key,
                         label: group.label,
                         members: group.members,
+                        capabilities: group.capabilities,
                     })
                     .collect::<Vec<_>>();
+                let devices = confirmed
+                    .devices
+                    .iter()
+                    .map(|device| device.key.clone())
+                    .collect::<Vec<_>>();
                 registry
-                    .update_composition_versioned(confirmed.version, compositions, &[])
+                    .apply_configuration(confirmed.version, groups, &devices, &[])
                     .map_err(|error| AdapterError::Unavailable(error.to_string()))?;
             }
         }

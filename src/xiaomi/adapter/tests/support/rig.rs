@@ -97,6 +97,9 @@ pub(in super::super) struct Control {
     pub(in super::super) data: Vec<CachedPhysicalDevice>,
     pub(in super::super) cloud: Arc<Mutex<CloudState>>,
     pub(in super::super) clock: Arc<TestClock>,
+    /// Whether the harness applies staged configuration through the real
+    /// prepare/commit interface without running Matter services.
+    pub(in super::super) auto_apply: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Rig {
     pub(in super::super) fn new(restore: bool, members: &[&str]) -> Self {
@@ -161,6 +164,38 @@ impl Rig {
             members,
         )
     }
+    /// A live selected home with separate record members and one explicit
+    /// group relation over a subset of them, applying per-member model
+    /// overrides. A record outside the group stays a standalone candidate.
+    pub(in super::super) fn group_with_members(
+        records: &[&str],
+        group_members: &[&str],
+        did: &str,
+        model: &str,
+        overrides: &[(&str, &str)],
+    ) -> Self {
+        Self::build_groups(
+            false,
+            records,
+            &[GroupSpec {
+                did,
+                model,
+                members: group_members,
+                label: "Mixed group",
+            }],
+            None,
+            overrides,
+        )
+    }
+    /// A live selected home with separate record members and several explicit
+    /// group relations, applying per-member model overrides.
+    pub(in super::super) fn groups_with_members(
+        records: &[&str],
+        groups: &[GroupSpec<'_>],
+        overrides: &[(&str, &str)],
+    ) -> Self {
+        Self::build_groups(false, records, groups, None, overrides)
+    }
     fn build(restore: bool, members: &[&str], light: Option<&str>) -> Self {
         Self::build_groups(restore, members, &[], light, &[])
     }
@@ -212,8 +247,7 @@ impl Rig {
             data.push(record);
         }
         if let Some(model) = light {
-            let text = light_fixture(model);
-            let instance: Value = serde_json::from_str(text).unwrap();
+            let instance: Value = light_instance(model);
             for did in &record_members {
                 let record = data
                     .iter_mut()
@@ -235,8 +269,7 @@ impl Rig {
             }
         }
         for (did, model) in overrides {
-            let text = light_fixture(model);
-            let instance: Value = serde_json::from_str(text).unwrap();
+            let instance: Value = light_instance(model);
             let record = data
                 .iter_mut()
                 .find(|record| record.device.key.id == *did)
@@ -263,11 +296,10 @@ impl Rig {
                         .unwrap();
                 }
             }
-            for group in groups {
-                if group.members.is_empty() {
-                    continue;
-                }
-                let composition = crate::device::Composition {
+            let compositions = groups
+                .iter()
+                .filter(|group| !group.members.is_empty())
+                .map(|group| crate::device::Composition {
                     key: DeviceKey::new("xiaomi", group.did),
                     label: group.label.into(),
                     members: group
@@ -275,10 +307,34 @@ impl Rig {
                         .iter()
                         .map(|member| DeviceKey::new("xiaomi", *member))
                         .collect(),
-                };
+                })
+                .collect::<Vec<_>>();
+            if !compositions.is_empty() {
+                let registry = crate::device::DeviceRegistry::new();
+                for member in &record_members {
+                    let stored = store
+                        .devices()
+                        .load_published(&DeviceKey::new("xiaomi", member))
+                        .unwrap()
+                        .unwrap();
+                    let (device, _) = crate::device::PhysicalDevice::new(stored.description());
+                    registry.insert(device);
+                }
+                let scope = scope(&tls.credentials.uid);
+                registry
+                    .stage_configuration(
+                        crate::device::ConfigurationScope {
+                            uid: scope.uid,
+                            home_id: scope.home_id,
+                            group_id: scope.group_id,
+                        },
+                        compositions,
+                        Vec::new(),
+                    )
+                    .unwrap();
                 store
                     .devices()
-                    .commit_composition(&scope(&tls.credentials.uid), &[composition], &[])
+                    .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))
                     .unwrap();
             }
         }
@@ -478,14 +534,19 @@ impl Rig {
                             function.description.category == crate::device::Category::Light
                         })
                 });
-                let mut value: Value = serde_json::from_str(if let Some(record) = light {
-                    light_fixture(&record.model)
+                let mut value: Value = if let Some(record) = light {
+                    light_instance(&record.model)
                 } else if multi {
-                    include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
+                    serde_json::from_str(include_str!(
+                        "../../../../../tests/fixtures/miot/cuco-cp7pd.json"
+                    ))
+                    .unwrap()
                 } else {
-                    include_str!("../../../../../tests/fixtures/miot/outlet.json")
-                })
-                .unwrap();
+                    serde_json::from_str(include_str!(
+                        "../../../../../tests/fixtures/miot/outlet.json"
+                    ))
+                    .unwrap()
+                };
                 if state
                     .unsupported
                     .contains(if multi { "multi" } else { "one" })
@@ -577,6 +638,7 @@ impl Rig {
         let keep_events = self.events.clone();
         let context = self.source.context.clone();
         let clock = self.clock.clone();
+        let auto_apply = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let running = self.source.run(|_| {});
         let discovering = async {
             self.driver.run().await?;
@@ -585,7 +647,7 @@ impl Rig {
         let testing = test(Control {
             ready: Some(self.ready),
             store: self.store,
-            context,
+            context: context.clone(),
             discovery: self.discovery,
             events: self.events,
             listener: self.listener,
@@ -593,6 +655,7 @@ impl Rig {
             data: self.data,
             cloud: self.cloud,
             clock: self.clock,
+            auto_apply: auto_apply.clone(),
         });
         let ticking = async {
             loop {
@@ -602,13 +665,26 @@ impl Rig {
                 }
             }
         };
+        // Drive the storage/registry apply boundary without Matter services.
+        // Pending tests pause this driver to inspect the staged state.
+        let applying = async {
+            loop {
+                async_io::Timer::after(Duration::from_millis(1)).await;
+                if auto_apply.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = context.apply_pending_configuration(Vec::new(), Vec::new());
+                }
+            }
+        };
         let result = future::or(
             ticking,
             future::or(
-                future::or(future::or(running, discovering), async {
-                    testing.await;
-                    Ok(())
-                }),
+                future::or(
+                    future::or(future::or(running, discovering), applying),
+                    async {
+                        testing.await;
+                        Ok(())
+                    },
+                ),
                 async {
                     async_io::Timer::after(Duration::from_secs(5)).await;
                     panic!("source scenario stalled");
@@ -621,6 +697,29 @@ impl Rig {
     }
 }
 impl Control {
+    /// Pause automatic application so a test can inspect the pending configuration.
+    pub(in super::super) fn hold_apply(&self) {
+        self.auto_apply
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Run the real apply interface once without changing the harness mode.
+    pub(in super::super) fn apply_now(&self) {
+        let _ = self
+            .context
+            .apply_pending_configuration(Vec::new(), Vec::new());
+    }
+
+    /// Run the real apply interface once and surface its result.
+    pub(in super::super) fn try_apply(
+        &self,
+    ) -> Result<
+        Option<crate::storage::ConfirmedComposition>,
+        crate::xiaomi::adapter::model::AdapterError,
+    > {
+        self.context
+            .apply_pending_configuration(Vec::new(), Vec::new())
+    }
     pub(in super::super) fn announce(&self) {
         self.events
             .send(announcement(
@@ -681,6 +780,45 @@ fn record_value(state: &CloudState, record: &CachedPhysicalDevice) -> Value {
     value
 }
 
+/// Instance JSON for a member model. `synthetic.light.ct:<min>-<max>` builds a
+/// synthetic on/off plus temperature light with that physical range; every
+/// other model resolves to its fixed fixture.
+fn light_instance(model: &str) -> Value {
+    if let Some(range) = model.strip_prefix("synthetic.light.ct:")
+        && let Some((min, max)) = range.split_once('-')
+        && let (Ok(min), Ok(max)) = (min.parse::<u32>(), max.parse::<u32>())
+    {
+        return json!({
+            "type": format!("urn:miot-spec-v2:device:light:0000A001:synthetic-ct-{min}-{max}:1"),
+            "description": "Synthetic color temperature light",
+            "services": [{
+                "iid": 2,
+                "type": "urn:miot-spec-v2:service:light:00007802:synthetic-ct:1",
+                "description": "Light",
+                "properties": [
+                    {
+                        "iid": 1,
+                        "type": "urn:miot-spec-v2:property:on:00000006:synthetic-ct:1",
+                        "description": "Power",
+                        "format": "bool",
+                        "access": ["read", "write", "notify"]
+                    },
+                    {
+                        "iid": 3,
+                        "type": "urn:miot-spec-v2:property:color-temperature:0000000F:synthetic-ct:1",
+                        "description": "Color temperature",
+                        "format": "uint16",
+                        "unit": "kelvin",
+                        "access": ["read", "write", "notify"],
+                        "value-range": [min, max, 1]
+                    }
+                ]
+            }]
+        });
+    }
+    serde_json::from_str(light_fixture(model)).unwrap()
+}
+
 fn light_fixture(model: &str) -> &'static str {
     match model {
         "devcea.light.ls2307" => {
@@ -717,5 +855,27 @@ fn light_fixture(model: &str) -> &'static str {
             include_str!("../../../../../tests/fixtures/miot/synthetic-rgbonly-light.json")
         }
         _ => panic!("unknown light fixture"),
+    }
+}
+
+impl crate::xiaomi::adapter::state::Context {
+    /// Apply a source candidate through the production storage/registry transaction.
+    pub(in super::super) fn apply_pending_configuration(
+        &self,
+        versions: Vec<crate::storage::ConfigurationVersion>,
+        blobs: Vec<crate::storage::BlobChange>,
+    ) -> Result<
+        Option<crate::storage::ConfirmedComposition>,
+        crate::xiaomi::adapter::model::AdapterError,
+    > {
+        use crate::storage::CompositionCommitError;
+        use crate::xiaomi::adapter::model::AdapterError;
+        self.store
+            .devices()
+            .apply_pending_configuration(&self.registry, |_| Ok((versions, blobs)))
+            .map_err(|error| match error {
+                CompositionCommitError::Storage(error) => AdapterError::Storage(error),
+                error => AdapterError::Unavailable(error.to_string()),
+            })
     }
 }

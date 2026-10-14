@@ -31,7 +31,7 @@ CREATE TABLE device_cache (
 ) STRICT;
 CREATE TABLE device_identity (
     source TEXT NOT NULL, device_id TEXT NOT NULL, unique_id TEXT NOT NULL UNIQUE,
-    endpoint INTEGER NOT NULL CHECK (endpoint BETWEEN 2 AND 65534), label TEXT,
+    endpoint INTEGER NOT NULL CHECK (endpoint BETWEEN 2 AND 65534), label TEXT NOT NULL,
     published INTEGER NOT NULL CHECK (published IN (0,1)), PRIMARY KEY (source, device_id)
 ) STRICT;
 CREATE TABLE device_function (
@@ -49,7 +49,7 @@ CREATE TABLE xiaomi_scope (
 ) STRICT;
 CREATE TABLE group_identity (
     source TEXT NOT NULL, device_id TEXT NOT NULL, unique_id TEXT NOT NULL UNIQUE,
-    endpoint INTEGER NOT NULL CHECK (endpoint BETWEEN 2 AND 65534), label TEXT,
+    endpoint INTEGER NOT NULL CHECK (endpoint BETWEEN 2 AND 65534), label TEXT NOT NULL,
     PRIMARY KEY (source, device_id)
 ) STRICT;
 

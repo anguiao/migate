@@ -1,3 +1,4 @@
+use super::support::stage_configuration;
 use crate::{
     device::{Capability, Category, Composition, DeviceKey, FunctionDescription},
     storage::{CachedPhysicalDevice, CachedScope, Store},
@@ -43,17 +44,22 @@ fn compose(store: &Store) -> (DeviceKey, u16) {
         .publish_cached(&member, "Member One")
         .unwrap();
     let key = DeviceKey::new("xiaomi", "group-1");
+    let (registry, _receivers) = stage_configuration(
+        &store.devices(),
+        &scope,
+        &[Composition {
+            key: key.clone(),
+            label: "Kitchen".into(),
+            members: vec![member.device.key.clone()],
+        }],
+        &[],
+        &[],
+    )
+    .unwrap();
     let confirmed = store
         .devices()
-        .commit_composition(
-            &scope,
-            &[Composition {
-                key: key.clone(),
-                label: "Kitchen".into(),
-                members: vec![member.device.key.clone()],
-            }],
-            &[],
-        )
+        .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))
+        .unwrap()
         .unwrap();
     (key, confirmed.groups[0].endpoint)
 }
@@ -90,7 +96,7 @@ fn group_identity_lookup_resolves_the_reserved_endpoint_and_saved_label() {
 fn group_identity_lookup_rejects_inconsistent_storage() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let (key, endpoint) = compose(&store);
+    let (key, _endpoint) = compose(&store);
     {
         let connection = rusqlite::Connection::open(store.path()).unwrap();
         connection
@@ -102,27 +108,10 @@ fn group_identity_lookup_rejects_inconsistent_storage() {
             .unwrap();
     }
     assert!(store.devices().load_group_identity(&key).is_err());
-
-    {
-        let connection = rusqlite::Connection::open(store.path()).unwrap();
-        connection
-            .execute(
-                "INSERT INTO endpoint_allocation VALUES(?4,?1,?2,'group')",
-                rusqlite::params![key.source, key.id, endpoint, endpoint],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE group_identity SET label=NULL WHERE source=?1 AND device_id=?2",
-                [&key.source, &key.id],
-            )
-            .unwrap();
-    }
-    assert!(store.devices().load_group_identity(&key).is_err());
 }
 
 #[test]
-fn group_label_lookup_allows_unnamed_legacy_reservations_but_rejects_malformed_labels() {
+fn group_label_lookup_rejects_null_and_malformed_labels() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let (key, _endpoint) = compose(&store);
@@ -138,32 +127,18 @@ fn group_label_lookup_allows_unnamed_legacy_reservations_but_rejects_malformed_l
             .is_none()
     );
 
-    // A revoked reservation with no saved name is a valid legacy state.
-    store
-        .devices()
-        .commit_composition(
-            &CachedScope {
-                uid: "uid".into(),
-                home_id: "local".into(),
-                group_id: group_id("uid", "local"),
-            },
-            &[],
-            &[],
-        )
-        .unwrap();
-    {
-        let connection = rusqlite::Connection::open(store.path()).unwrap();
-        connection
+    assert!(
+        store
+            .connection()
             .execute(
                 "UPDATE group_identity SET label=NULL WHERE source=?1 AND device_id=?2",
                 [&key.source, &key.id],
             )
-            .unwrap();
-    }
-    assert!(store.devices().load_group_label(&key).unwrap().is_none());
-    assert!(
-        store.devices().load_group_identity(&key).is_err(),
-        "the strict published identity lookup still requires a saved label"
+            .is_err()
+    );
+    assert_eq!(
+        store.devices().load_group_label(&key).unwrap().as_deref(),
+        Some("Kitchen")
     );
 
     {
@@ -177,4 +152,54 @@ fn group_label_lookup_allows_unnamed_legacy_reservations_but_rejects_malformed_l
     }
     let error = store.devices().load_group_label(&key).unwrap_err();
     assert!(error.to_string().contains("32"), "{error}");
+}
+
+#[test]
+fn apply_rejects_orphaned_group_reservations_before_mapping() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let (key, endpoint) = compose(&store);
+    store
+        .connection()
+        .execute("DELETE FROM group_identity", [])
+        .unwrap();
+    let original = std::fs::read(store.path()).unwrap();
+    let (registry, _receivers) = stage_configuration(
+        &store.devices(),
+        &CachedScope {
+            uid: "uid".into(),
+            home_id: "local".into(),
+            group_id: group_id("uid", "local"),
+        },
+        &[Composition {
+            key: key.clone(),
+            label: "Kitchen".into(),
+            members: vec![DeviceKey::new("xiaomi", "member-one")],
+        }],
+        &[],
+        &[],
+    )
+    .unwrap();
+    let error = store
+        .devices()
+        .apply_pending_configuration(&registry, |_| {
+            panic!("an inconsistent reservation must be rejected before protocol mapping")
+        })
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Group endpoint reservation has no identity")
+    );
+    assert_eq!(std::fs::read(store.path()).unwrap(), original);
+    assert_eq!(
+        store.connection().query_row(
+            "SELECT endpoint FROM endpoint_allocation WHERE source=?1 AND device_id=?2 AND slot='group'",
+            [&key.source, &key.id],
+            |row| row.get::<_, u16>(0),
+        ).unwrap(),
+        endpoint
+    );
+    assert!(store.devices().load_group_identity(&key).unwrap().is_none());
+    assert!(registry.snapshot().pending.is_some());
 }

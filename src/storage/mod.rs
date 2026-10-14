@@ -13,7 +13,8 @@ mod xiaomi;
 mod tests;
 
 pub use composition::{
-    CompositionCommitError, ConfirmedComposition, StoredGroup, StoredGroupIdentity,
+    BlobChange, CompositionCommitError, ConfigurationVersion, ConfirmedComposition,
+    PreparedConfiguration, StoredGroup, StoredGroupIdentity,
 };
 pub use device::{CachedPhysicalDevice, CachedScope, DeviceStore};
 pub use error::StorageError;

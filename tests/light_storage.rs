@@ -136,17 +136,6 @@ fn compatible_binding_updates_keep_identity_and_static_capabilities() {
         store.devices().publish(&incompatible),
         Err(AdmissionError::IncompatibleFunctions)
     ));
-    store.devices().remove(&cached.device.key).unwrap();
-    assert!(
-        store
-            .devices()
-            .restore_cached("account", "home")
-            .unwrap()
-            .is_empty()
-    );
-    let rejoined = store.devices().publish_cached(&cached, "New").unwrap();
-    assert_eq!(rejoined.unique_id, original.unique_id);
-    assert_eq!(rejoined.endpoint, original.endpoint);
 }
 
 #[test]

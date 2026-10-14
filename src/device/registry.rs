@@ -1,4 +1,8 @@
-use super::{Category, Composition, DeviceKey, PhysicalDevice};
+use super::group::Group;
+use super::{
+    Category, Composition, ConfigurationScope, DeviceKey, Function, GroupConfiguration,
+    GroupDescription, GroupSnapshot, PhysicalDevice, derive_group_capabilities,
+};
 use event_listener::Event;
 use std::{
     collections::HashSet,
@@ -6,23 +10,139 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// The whole visible composition relation set and its own revision.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompositionSnapshot {
-    pub revision: u64,
-    /// Storage-confirmed relation version, when published from storage.
+/// Latest confirmed relation set waiting for the configuration apply boundary. Pending
+/// relations never affect the applied composition, group command snapshots or
+/// aggregates; the storage commit and applied update happen together later.
+#[derive(Clone)]
+pub struct PendingConfiguration {
+    /// The account/home this candidate belongs to. The generic
+    /// Store/DeviceRegistry apply path commits without source context.
+    pub scope: ConfigurationScope,
+    /// Complete candidate relation set with its derived shape.
+    pub groups: Vec<GroupConfiguration>,
+    /// Confirmed deletions not yet part of the applied version.
+    pub removed: Vec<DeviceKey>,
+    /// Standalone physical devices in the candidate publication set. A new
+    /// admission must form a candidate even when group relations do not change.
+    pub devices: Vec<PhysicalDevice>,
+    /// Member device instances the candidate groups bind to, aligned with
+    /// `groups`. A same-key replacement forms a candidate for the next rebuild.
+    instances: Vec<Vec<PhysicalDevice>>,
+}
+
+impl fmt::Debug for PendingConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PendingConfiguration")
+            .field("scope", &self.scope)
+            .field("groups", &self.groups)
+            .field("removed", &self.removed)
+            .field(
+                "devices",
+                &self
+                    .devices
+                    .iter()
+                    .map(PhysicalDevice::key)
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// One applied group: the committed relation and derived capability shape plus
+/// a stable aggregate handle. The handle survives membership updates so the
+/// process-local all-off brightness memory is preserved.
+#[derive(Clone)]
+pub struct AppliedGroup {
+    pub key: DeviceKey,
+    pub label: String,
+    pub members: Vec<DeviceKey>,
+    handle: Group,
+    /// The member device instances the handle currently binds. A same-key
+    /// replacement must rebind even when keys, members and caps are equal.
+    instances: Vec<PhysicalDevice>,
+}
+
+impl AppliedGroup {
+    fn composition(&self) -> Composition {
+        Composition {
+            key: self.key.clone(),
+            label: self.label.clone(),
+            members: self.members.clone(),
+        }
+    }
+
+    pub fn description(&self) -> GroupDescription {
+        self.handle.description()
+    }
+
+    /// Aggregate state of the applied member set. Members whose control path
+    /// was revoked keep their old handle and only report unavailable/unknown.
+    pub fn snapshot(&self) -> GroupSnapshot {
+        self.handle.snapshot()
+    }
+
+    pub fn handle(&self) -> &Group {
+        &self.handle
+    }
+
+    pub fn functions(&self) -> Vec<Function> {
+        self.handle.functions()
+    }
+}
+
+impl fmt::Debug for AppliedGroup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AppliedGroup")
+            .field("key", &self.key)
+            .field("label", &self.label)
+            .field("members", &self.members)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The applied publication set: visible group endpoints and standalone
+/// physical device handles. [`RegistrySnapshot::devices`] stays the real source
+/// list; this is what a publication consumer may expose.
+#[derive(Clone, Default)]
+pub struct AppliedConfiguration {
+    /// Storage-confirmed version of the applied publication set.
     pub confirmed: Option<u64>,
-    pub groups: Vec<Composition>,
+    pub groups: Vec<AppliedGroup>,
+    pub devices: Vec<PhysicalDevice>,
+}
+
+impl fmt::Debug for AppliedConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AppliedConfiguration")
+            .field("confirmed", &self.confirmed)
+            .field("groups", &self.groups)
+            .field(
+                "devices",
+                &self
+                    .devices
+                    .iter()
+                    .map(PhysicalDevice::key)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone)]
 pub struct RegistrySnapshot {
     pub revision: u64,
+    /// Real source devices currently holding control paths.
     pub devices: Vec<PhysicalDevice>,
-    pub composition: CompositionSnapshot,
+    /// Applied publication set sharing stable aggregate handles.
+    pub applied: AppliedConfiguration,
+    /// Latest confirmed configuration staged for the apply boundary.
+    pub pending: Option<PendingConfiguration>,
 }
 
-/// A rejected composition update. Rejection leaves the registry unchanged.
+/// A rejected configuration update. Rejection leaves the registry unchanged.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompositionError {
     EmptyGroup(DeviceKey),
@@ -32,7 +152,6 @@ pub enum CompositionError {
     UnsupportedMember(DeviceKey),
     SelfMember(DeviceKey),
     DuplicateMember { group: DeviceKey, member: DeviceKey },
-    OverlappingMember(DeviceKey),
     NestedGroup(DeviceKey),
 }
 
@@ -58,11 +177,6 @@ impl fmt::Display for CompositionError {
                 "composition {} repeats member {}",
                 group.id, member.id
             ),
-            Self::OverlappingMember(key) => write!(
-                formatter,
-                "composition member {} appears in multiple groups",
-                key.id
-            ),
             Self::NestedGroup(key) => write!(
                 formatter,
                 "composition {} is nested in another group",
@@ -79,6 +193,7 @@ pub struct DeviceRegistry(Arc<Inner>);
 struct Inner {
     snapshot: Mutex<RegistrySnapshot>,
     changed: Event,
+    apply_error: Mutex<Option<String>>,
 }
 impl Default for DeviceRegistry {
     fn default() -> Self {
@@ -91,13 +206,11 @@ impl DeviceRegistry {
             snapshot: Mutex::new(RegistrySnapshot {
                 revision: 0,
                 devices: Vec::new(),
-                composition: CompositionSnapshot {
-                    revision: 0,
-                    confirmed: None,
-                    groups: Vec::new(),
-                },
+                applied: AppliedConfiguration::default(),
+                pending: None,
             }),
             changed: Event::new(),
+            apply_error: Mutex::new(None),
         }))
     }
     pub fn get(&self, key: &DeviceKey) -> Option<PhysicalDevice> {
@@ -123,7 +236,7 @@ impl DeviceRegistry {
             .iter()
             .any(|present| present.key() == device.key())
             || state
-                .composition
+                .applied
                 .groups
                 .iter()
                 .any(|group| &group.key == device.key())
@@ -134,44 +247,20 @@ impl DeviceRegistry {
         state.revision = state.revision.wrapping_add(1);
         self.0.changed.notify(usize::MAX);
     }
-    /// Atomically substitute a new physical instance under an existing key.
-    /// The published composition must stay valid for the replacement; invalid
-    /// replacements leave the registry untouched. A same-instance replacement
-    /// is a no-op and never closes the installed device.
-    pub fn replace(
-        &self,
-        device: PhysicalDevice,
-    ) -> Result<Option<PhysicalDevice>, CompositionError> {
+    /// Close and detach a source device immediately, leaving the applied
+    /// relations and group handles untouched. An applied group keeps the old
+    /// handle, which can only report unavailable/unknown afterwards.
+    pub fn revoke(&self, key: &DeviceKey) -> Option<PhysicalDevice> {
         let mut state = self.0.snapshot.lock().unwrap();
-        let Some(index) = state
+        let index = state
             .devices
             .iter()
-            .position(|present| present.key() == device.key())
-        else {
-            if state
-                .composition
-                .groups
-                .iter()
-                .any(|group| &group.key == device.key())
-            {
-                return Err(CompositionError::GroupKeyConflict(device.key().clone()));
-            }
-            state.devices.push(device);
-            state.revision = state.revision.wrapping_add(1);
-            self.0.changed.notify(usize::MAX);
-            return Ok(None);
-        };
-        if state.devices[index].same_instance(&device) {
-            return Ok(None);
-        }
-        let mut surviving = state.devices.clone();
-        surviving[index] = device.clone();
-        validate_compositions(&state.composition.groups, &surviving)?;
-        let previous = std::mem::replace(&mut state.devices[index], device);
-        previous.close();
+            .position(|device| device.key() == key)?;
+        let removed = state.devices.remove(index);
+        removed.close();
         state.revision = state.revision.wrapping_add(1);
         self.0.changed.notify(usize::MAX);
-        Ok(Some(previous))
+        Some(removed)
     }
     pub fn remove(&self, key: &DeviceKey) -> Option<PhysicalDevice> {
         let mut state = self.0.snapshot.lock().unwrap();
@@ -181,82 +270,244 @@ impl DeviceRegistry {
             .position(|device| device.key() == key)?;
         let removed = state.devices.remove(index);
         removed.close();
-        let groups = state.composition.groups.len();
+        let groups = state.applied.groups.len();
         state
-            .composition
+            .applied
             .groups
             .retain(|group| &group.key != key && !group.members.contains(key));
-        if state.composition.groups.len() != groups {
-            state.composition.revision = state.composition.revision.wrapping_add(1);
+        state.applied.devices.retain(|device| device.key() != key);
+        if state.applied.groups.len() != groups {
             // The stored confirmation no longer describes the visible relations.
-            state.composition.confirmed = None;
+            state.applied.confirmed = None;
         }
+        state.pending = None;
         state.revision = state.revision.wrapping_add(1);
         self.0.changed.notify(usize::MAX);
         Some(removed)
     }
-    /// Atomically replace the whole relation set and remove confirmed-deleted
-    /// members. A confirmed deletion revokes any group that references it; the
-    /// caller must submit the complete surviving relation set. Invalid updates
-    /// leave the registry unchanged.
-    pub fn update_composition(
-        &self,
-        compositions: Vec<Composition>,
-        removed: &[DeviceKey],
-    ) -> Result<(), CompositionError> {
-        self.update_composition_inner(None, compositions, removed)
-    }
 
-    /// Publish a relation set together with the storage-confirmed version so
-    /// the same confirmation stays identifiable in the snapshot.
-    pub fn update_composition_versioned(
+    /// Stage the latest confirmed relation set for the configuration apply boundary.
+    /// The applied relations, group handles and confirmed version stay
+    /// unchanged. Removals accumulate across consecutive confirmations so a
+    /// later apply cannot resurrect a deleted member.
+    pub fn stage_configuration(
         &self,
-        version: u64,
+        scope: ConfigurationScope,
         compositions: Vec<Composition>,
-        removed: &[DeviceKey],
-    ) -> Result<(), CompositionError> {
-        self.update_composition_inner(Some(version), compositions, removed)
-    }
-
-    fn update_composition_inner(
-        &self,
-        confirmed: Option<u64>,
-        compositions: Vec<Composition>,
-        removed: &[DeviceKey],
+        removed: Vec<DeviceKey>,
     ) -> Result<(), CompositionError> {
         let mut state = self.0.snapshot.lock().unwrap();
+        let mut removed = removed;
+        if let Some(pending) = &state.pending {
+            // A deletion stays pending only while the key is still absent. A
+            // later re-admission of the same key clears the stale removal.
+            for key in &pending.removed {
+                if !state.devices.iter().any(|device| device.key() == key)
+                    && !compositions.iter().any(|group| &group.key == key)
+                {
+                    removed.push(key.clone());
+                }
+            }
+        }
+        removed.sort_by(key_order);
+        removed.dedup();
+        let compositions = normalize_compositions(compositions);
         let surviving = state
             .devices
             .iter()
             .filter(|device| !removed.contains(device.key()))
             .cloned()
             .collect::<Vec<_>>();
-        validate_compositions(&compositions, &surviving)?;
-        let compositions = normalize_compositions(compositions);
-        let devices_changed = removed
+        let resolved = resolve_compositions(&compositions, &surviving)?;
+        let (groups, instances): (Vec<_>, Vec<_>) = compositions
+            .into_iter()
+            .zip(resolved)
+            .map(|(group, instances)| {
+                let label = state
+                    .applied
+                    .groups
+                    .iter()
+                    .find(|present| present.key == group.key)
+                    .map_or(group.label, |present| present.label.clone());
+                (
+                    GroupConfiguration {
+                        key: group.key,
+                        label,
+                        members: group.members,
+                        capabilities: derive_group_capabilities(
+                            instances
+                                .iter()
+                                .map(|device| device.functions()[0].description()),
+                        ),
+                    },
+                    instances,
+                )
+            })
+            .unzip();
+        // Standalone devices are every surviving source that is not hidden
+        // behind one of the candidate groups.
+        let members = groups
             .iter()
-            .any(|key| state.devices.iter().any(|device| device.key() == key));
-        let composition_changed = compositions != state.composition.groups;
-        let confirmed_changed = state.composition.confirmed != confirmed;
-        if !devices_changed && !composition_changed && !confirmed_changed {
+            .flat_map(|group| group.members.iter())
+            .collect::<HashSet<_>>();
+        let mut devices = surviving
+            .iter()
+            .filter(|device| !members.contains(device.key()))
+            .cloned()
+            .collect::<Vec<_>>();
+        devices.sort_by(|left, right| key_order(left.key(), right.key()));
+        let unchanged = state.applied.confirmed.is_some()
+            && removed.is_empty()
+            && groups_match_applied(&groups, &instances, &state.applied.groups)
+            && same_instances(&devices, &state.applied.devices);
+        let pending = (!unchanged).then_some(PendingConfiguration {
+            scope,
+            groups,
+            removed,
+            devices,
+            instances,
+        });
+        if same_pending(state.pending.as_ref(), pending.as_ref()) {
             return Ok(());
         }
-        if devices_changed {
-            for key in removed {
-                if let Some(index) = state.devices.iter().position(|device| device.key() == key) {
-                    state.devices.remove(index).close();
-                }
-            }
+        match (&state.pending, &pending) {
+            (_, Some(candidate)) => log::info!(
+                "Directory configuration confirmed: {} group(s), {} standalone device(s), {} removal(s); candidate staged for application",
+                candidate.groups.len(),
+                candidate.devices.len(),
+                candidate.removed.len()
+            ),
+            (Some(_), None) => log::debug!(
+                "Directory configuration returned to the applied set; no candidate pending"
+            ),
+            (None, None) => {}
         }
-        if composition_changed {
-            state.composition.groups = compositions;
-            state.composition.revision = state.composition.revision.wrapping_add(1);
-        }
-        state.composition.confirmed = confirmed;
+        state.pending = pending;
         state.revision = state.revision.wrapping_add(1);
         self.0.changed.notify(usize::MAX);
         Ok(())
     }
+
+    /// The latest confirmed relation set, pending first. Used by the source
+    /// reconciler as its retention baseline; never an applied view.
+    pub fn desired_composition(&self) -> Vec<Composition> {
+        let state = self.0.snapshot.lock().unwrap();
+        match &state.pending {
+            Some(pending) => pending
+                .groups
+                .iter()
+                .map(|group| Composition {
+                    key: group.key.clone(),
+                    label: group.label.clone(),
+                    members: group.members.clone(),
+                })
+                .collect(),
+            None => state
+                .applied
+                .groups
+                .iter()
+                .map(AppliedGroup::composition)
+                .collect(),
+        }
+    }
+
+    pub fn pending_configuration(&self) -> Option<PendingConfiguration> {
+        self.0.snapshot.lock().unwrap().pending.clone()
+    }
+
+    /// Record the latest failed configuration apply for
+    /// diagnostics. This deliberately does not touch the snapshot revision or
+    /// wake registry observers: a persistent failure must not spin the apply
+    /// loop or flood the log.
+    pub fn set_apply_error(&self, message: impl Into<String>) {
+        *self.0.apply_error.lock().unwrap() = Some(message.into());
+    }
+
+    /// Clear the recorded apply failure after a successful configuration
+    /// commit (or when no candidate is pending anymore).
+    pub fn clear_apply_error(&self) {
+        *self.0.apply_error.lock().unwrap() = None;
+    }
+
+    /// The latest failed configuration apply, for terminal diagnostics.
+    pub fn apply_error(&self) -> Option<String> {
+        self.0.apply_error.lock().unwrap().clone()
+    }
+
+    /// Apply the latest candidate synchronously while source and directory
+    /// changes are excluded. The callback must not re-enter the registry.
+    /// Storage succeeds before the infallible applied-view update.
+    pub(crate) fn apply_pending<T, E>(
+        &self,
+        commit: impl FnOnce(&mut PendingConfiguration) -> Result<(T, u64), E>,
+    ) -> Result<Option<T>, E> {
+        let mut state = self.0.snapshot.lock().unwrap();
+        let Some(mut pending) = state.pending.clone() else {
+            return Ok(None);
+        };
+        let (result, version) = commit(&mut pending)?;
+        apply_configuration(
+            &mut state,
+            version,
+            pending.groups,
+            pending.instances,
+            pending.devices,
+            &pending.removed,
+        );
+        self.0.changed.notify(usize::MAX);
+        Ok(Some(result))
+    }
+
+    /// Restore a stored configuration at the runtime boundary. Validate all
+    /// member bindings before changing the applied view.
+    pub fn apply_configuration(
+        &self,
+        version: u64,
+        groups: Vec<GroupConfiguration>,
+        devices: &[DeviceKey],
+        removed: &[DeviceKey],
+    ) -> Result<(), CompositionError> {
+        let mut state = self.0.snapshot.lock().unwrap();
+        let groups = normalize_configurations(groups);
+        let compositions = groups
+            .iter()
+            .map(|group| Composition {
+                key: group.key.clone(),
+                label: group.label.clone(),
+                members: group.members.clone(),
+            })
+            .collect::<Vec<_>>();
+        let surviving = state
+            .devices
+            .iter()
+            .filter(|device| !removed.contains(device.key()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let instances = resolve_compositions(&compositions, &surviving)?;
+        let mut devices = devices
+            .iter()
+            .map(|key| {
+                surviving
+                    .iter()
+                    .find(|device| device.key() == key)
+                    .cloned()
+                    .ok_or_else(|| CompositionError::MissingMember(key.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        devices.sort_by(|left, right| key_order(left.key(), right.key()));
+        if removed.is_empty()
+            && groups_match_applied(&groups, &instances, &state.applied.groups)
+            && same_instances(&devices, &state.applied.devices)
+            && state.applied.confirmed == Some(version)
+            && state.pending.is_none()
+        {
+            return Ok(());
+        }
+        apply_configuration(&mut state, version, groups, instances, devices, removed);
+        self.0.changed.notify(usize::MAX);
+        Ok(())
+    }
+
     pub fn subscribe(&self) -> RegistryChanges {
         RegistryChanges {
             registry: self.clone(),
@@ -264,35 +515,135 @@ impl DeviceRegistry {
         }
     }
 
-    /// Update the saved label of one published composition. The relation set
-    /// and its confirmed version stay unchanged; the revision wakes snapshot
+    /// Update the saved label of one applied composition. The relation set and
+    /// its confirmed version stay unchanged; the revision wakes snapshot
     /// observers so runtime readers do not keep a stale name.
     pub fn set_composition_label(&self, key: &DeviceKey, label: impl Into<String>) -> bool {
         let mut state = self.0.snapshot.lock().unwrap();
+        let label = label.into();
         let Some(group) = state
-            .composition
+            .applied
             .groups
             .iter_mut()
             .find(|group| &group.key == key)
         else {
             return false;
         };
-        let label = label.into();
         if group.label == label {
             return true;
         }
-        group.label = label;
-        state.composition.revision = state.composition.revision.wrapping_add(1);
+        group.label = label.clone();
+        group.handle.set_label(label);
         state.revision = state.revision.wrapping_add(1);
         self.0.changed.notify(usize::MAX);
         true
     }
 }
 
-fn validate_compositions(
+fn apply_configuration(
+    state: &mut RegistrySnapshot,
+    version: u64,
+    groups: Vec<GroupConfiguration>,
+    instances: Vec<Vec<PhysicalDevice>>,
+    devices: Vec<PhysicalDevice>,
+    removed: &[DeviceKey],
+) {
+    state.devices.retain(|device| {
+        if removed.contains(device.key()) {
+            device.close();
+            false
+        } else {
+            true
+        }
+    });
+    let mut applied = Vec::with_capacity(groups.len());
+    for (group, instances) in groups.into_iter().zip(instances) {
+        let functions = instances
+            .iter()
+            .map(|device| device.functions()[0].clone())
+            .collect();
+        let handle = match state
+            .applied
+            .groups
+            .iter()
+            .find(|present| present.key == group.key)
+            .map(|present| present.handle.clone())
+        {
+            Some(handle) => {
+                handle.replace_validated(group.label.clone(), functions, group.capabilities);
+                handle
+            }
+            None => Group::from_validated(
+                group.key.clone(),
+                group.label.clone(),
+                functions,
+                group.capabilities,
+            ),
+        };
+        applied.push(AppliedGroup {
+            key: group.key,
+            label: group.label,
+            members: group.members,
+            handle,
+            instances,
+        });
+    }
+    state.applied = AppliedConfiguration {
+        groups: applied,
+        devices,
+        confirmed: Some(version),
+    };
+    state.pending = None;
+    state.revision = state.revision.wrapping_add(1);
+}
+
+fn groups_match_applied(
+    groups: &[GroupConfiguration],
+    instances: &[Vec<PhysicalDevice>],
+    applied: &[AppliedGroup],
+) -> bool {
+    groups.len() == applied.len()
+        && groups.iter().zip(instances).all(|(group, instances)| {
+            applied.iter().any(|present| {
+                present.key == group.key
+                    && present.label == group.label
+                    && present.members == group.members
+                    && present.handle.has_capabilities(&group.capabilities)
+                    && same_instances(&present.instances, instances)
+            })
+        })
+}
+
+fn same_instances(left: &[PhysicalDevice], right: &[PhysicalDevice]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.same_instance(right))
+}
+
+fn same_pending(left: Option<&PendingConfiguration>, right: Option<&PendingConfiguration>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.scope == right.scope
+                && left.groups == right.groups
+                && left.removed == right.removed
+                && same_instances(&left.devices, &right.devices)
+                && left
+                    .instances
+                    .iter()
+                    .zip(&right.instances)
+                    .all(|(left, right)| same_instances(left, right))
+        }
+        _ => false,
+    }
+}
+
+fn resolve_compositions(
     compositions: &[Composition],
     devices: &[PhysicalDevice],
-) -> Result<(), CompositionError> {
+) -> Result<Vec<Vec<PhysicalDevice>>, CompositionError> {
     validate_composition_structure(compositions)?;
     if let Some(group) = compositions
         .iter()
@@ -300,24 +651,32 @@ fn validate_compositions(
     {
         return Err(CompositionError::GroupKeyConflict(group.key.clone()));
     }
-    for group in compositions {
-        for member in &group.members {
-            let Some(device) = devices.iter().find(|device| device.key() == member) else {
-                return Err(CompositionError::MissingMember(member.clone()));
-            };
-            let functions = device.functions();
-            let supported = functions.len() == 1 && {
-                let function = functions[0].description();
-                function.id == "main"
-                    && function.category == Category::Light
-                    && function.valid_capabilities()
-            };
-            if !supported {
-                return Err(CompositionError::UnsupportedMember(member.clone()));
-            }
-        }
-    }
-    Ok(())
+    compositions
+        .iter()
+        .map(|group| {
+            group
+                .members
+                .iter()
+                .map(|member| {
+                    let device = devices
+                        .iter()
+                        .find(|device| device.key() == member)
+                        .ok_or_else(|| CompositionError::MissingMember(member.clone()))?;
+                    let [function] = device.functions() else {
+                        return Err(CompositionError::UnsupportedMember(member.clone()));
+                    };
+                    let description = function.description();
+                    if description.id != "main"
+                        || description.category != Category::Light
+                        || !description.valid_capabilities()
+                    {
+                        return Err(CompositionError::UnsupportedMember(member.clone()));
+                    }
+                    Ok(device.clone())
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect()
 }
 
 /// Validate a proposed relation set's structure independent of device presence.
@@ -334,7 +693,6 @@ pub(crate) fn validate_composition_structure(
             return Err(CompositionError::DuplicateGroup(group.key.clone()));
         }
     }
-    let mut seen = HashSet::new();
     for group in compositions {
         let mut members = HashSet::new();
         for member in &group.members {
@@ -350,24 +708,31 @@ pub(crate) fn validate_composition_structure(
                     member: member.clone(),
                 });
             }
-            if !seen.insert(member.clone()) {
-                return Err(CompositionError::OverlappingMember(member.clone()));
-            }
         }
     }
     Ok(())
 }
 
 fn normalize_compositions(mut compositions: Vec<Composition>) -> Vec<Composition> {
-    let order = |left: &DeviceKey, right: &DeviceKey| {
-        (left.source.as_str(), left.id.as_str()).cmp(&(right.source.as_str(), right.id.as_str()))
-    };
     for group in &mut compositions {
-        group.members.sort_by(order);
+        group.members.sort_by(key_order);
     }
-    compositions.sort_by(|left, right| order(&left.key, &right.key));
+    compositions.sort_by(|left, right| key_order(&left.key, &right.key));
     compositions
 }
+
+fn normalize_configurations(mut groups: Vec<GroupConfiguration>) -> Vec<GroupConfiguration> {
+    for group in &mut groups {
+        group.members.sort_by(key_order);
+    }
+    groups.sort_by(|left, right| key_order(&left.key, &right.key));
+    groups
+}
+
+fn key_order(left: &DeviceKey, right: &DeviceKey) -> std::cmp::Ordering {
+    (left.source.as_str(), left.id.as_str()).cmp(&(right.source.as_str(), right.id.as_str()))
+}
+
 pub struct RegistryChanges {
     registry: DeviceRegistry,
     revision: u64,

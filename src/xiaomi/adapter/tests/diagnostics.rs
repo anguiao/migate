@@ -339,7 +339,7 @@ fn pending_group_diagnostics_classify_numeric_groups_and_use_the_relation_name()
                 .all(|pending| !pending.group)
         );
         assert!(
-            c.context.registry.snapshot().composition.groups.is_empty(),
+            c.context.registry.snapshot().applied.groups.is_empty(),
             "an unpublished group never enters the composition registry"
         );
         release.send(()).unwrap();
@@ -367,21 +367,19 @@ fn pending_group_diagnostics_keep_the_saved_name_over_a_cloud_rename() {
                 > 0
         })
         .await;
-        let reads = c.cloud.lock().unwrap().detail_counts["group.1"];
         {
             let mut cloud = c.cloud.lock().unwrap();
             cloud.names.insert("group.1".into(), "Cloud rename".into());
             cloud.detail_failures.insert("group.1".into(), 503);
         }
         c.context.request_sync();
-        until(|| c.cloud.lock().unwrap().detail_counts["group.1"] > reads).await;
         until(|| {
             c.context
                 .status
                 .borrow()
                 .pending
                 .iter()
-                .any(|pending| pending.did == "group.1")
+                .any(|pending| pending.did == "group.1" && pending.reason.contains("503"))
         })
         .await;
         let status = c.context.diagnostics();
@@ -392,7 +390,6 @@ fn pending_group_diagnostics_keep_the_saved_name_over_a_cloud_rename() {
             .unwrap();
         assert!(pending.group);
         assert_eq!(pending.name, "Saved Home lamp");
-        assert!(pending.reason.contains("503"), "{}", pending.reason);
     }));
 }
 

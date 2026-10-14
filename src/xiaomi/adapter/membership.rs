@@ -267,9 +267,8 @@ impl Context {
     pub(super) fn remove(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
         self.reconcile_groups_removed(&[DeviceKey::new("xiaomi", did)])
     }
-    /// Retire the runtime resources of devices whose deletion was already
-    /// persisted and published atomically. Registry physical devices were
-    /// closed by the versioned composition update.
+    /// Retire runtime resources immediately after confirmed source deletion.
+    /// Registry devices are already revoked; persistence follows at configuration apply.
     pub(super) fn retire_confirmed_removed(&self, removed: &[DeviceKey]) {
         for key in removed {
             if key.source != "xiaomi" {

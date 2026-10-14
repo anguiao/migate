@@ -3,7 +3,8 @@ use crate::{
     device::{Capability, Category, DeviceKey, PhysicalDeviceDescription},
     xiaomi::{
         capability::{
-            ParsedDevice, ParsedFunction, PropertyBinding, is_light_type, is_outlet_type,
+            ParsedDevice, ParsedFunction, PropertyBinding, is_light_group, is_light_type,
+            is_outlet_type,
         },
         cloud::group_id,
     },
@@ -133,6 +134,9 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
     validate_text(&cached.instance_type)?;
     validate_key(&cached.device.key)?;
     let light = is_light_type(&cached.instance_type);
+    if is_light_group(&cached.device.key, &cached.model) {
+        return Err("Xiaomi light groups cannot be cached as physical devices");
+    }
     if cached.device.key.source != "xiaomi"
         || !(is_outlet_type(&cached.instance_type) || light)
         || cached.device.functions.is_empty()

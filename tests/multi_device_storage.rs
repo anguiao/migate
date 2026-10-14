@@ -1,3 +1,6 @@
+use migate as library;
+#[path = "../src/storage/tests/support.rs"]
+mod configuration_support;
 use migate::{
     device::{Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription},
     storage::{CachedPhysicalDevice, CachedScope, Store},
@@ -50,6 +53,25 @@ fn cached(uid: &str, home: &str) -> CachedPhysicalDevice {
     }
 }
 
+fn remove_devices(store: &Store, removed: &[DeviceKey], retained: &[DeviceKey]) {
+    let (registry, _receivers) = configuration_support::stage_configuration(
+        &store.devices(),
+        &CachedScope {
+            uid: "account".into(),
+            home_id: "home".into(),
+            group_id: group_id("account", "home"),
+        },
+        &[],
+        removed,
+        retained,
+    )
+    .unwrap();
+    store
+        .devices()
+        .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))
+        .unwrap();
+}
+
 #[test]
 fn physical_and_function_identities_names_and_historical_endpoints_survive_remove_and_rejoin() {
     let dir = tempfile::tempdir().unwrap();
@@ -69,7 +91,7 @@ fn physical_and_function_identities_names_and_historical_endpoints_survive_remov
         .devices()
         .set_device_label(&desc.key, "Home name")
         .unwrap();
-    store.devices().remove(&desc.key).unwrap();
+    remove_devices(&store, std::slice::from_ref(&desc.key), &[]);
     assert!(store.devices().list_published().unwrap().is_empty());
     let other = store.devices().publish(&description("other")).unwrap();
     assert_eq!(other.endpoint, 6);
@@ -340,7 +362,11 @@ fn restoration_uses_committed_names_and_checks_only_published_topology() {
     let mut deleted = original.clone();
     deleted.device.key.id = "deleted".into();
     store.devices().publish_cached(&deleted, "Deleted").unwrap();
-    store.devices().remove(&deleted.device.key).unwrap();
+    remove_devices(
+        &store,
+        std::slice::from_ref(&deleted.device.key),
+        std::slice::from_ref(&original.device.key),
+    );
     // A valid cached candidate cannot silently change a published function identity.
     let mut candidate = original.clone();
     candidate.device.functions.reverse();
@@ -371,7 +397,7 @@ fn restoration_uses_committed_names_and_checks_only_published_topology() {
         [],
     ).unwrap();
     assert!(store.devices().restore_cached("account", "home").is_err());
-    store.devices().remove(&original.device.key).unwrap();
+    remove_devices(&store, std::slice::from_ref(&original.device.key), &[]);
     assert!(
         store
             .devices()

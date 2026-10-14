@@ -14,14 +14,16 @@ pub use light_command::{
     LightActionResult, LightColorTarget, LightDimension, LightRequest, LightTarget,
 };
 pub use model::{
-    Availability, Capability, Category, Command, CommandError, Composition, DeviceKey,
-    FreshSnapshot, FunctionDescription, FunctionKey, FunctionSnapshot, LightMode, LightPatch,
-    LightSnapshot, NumericRange, PhysicalDeviceDescription, Power, Rgb,
-    brightness_from_matter_level, brightness_to_matter_level, derive_group_capabilities,
+    Availability, Capability, Category, Command, CommandError, Composition, ConfigurationScope,
+    DeviceKey, FreshSnapshot, FunctionDescription, FunctionKey, FunctionSnapshot,
+    GroupConfiguration, LightMode, LightPatch, LightSnapshot, NumericRange,
+    PhysicalDeviceDescription, Power, PublishedEndpoint, Rgb, brightness_from_matter_level,
+    brightness_to_matter_level, derive_group_capabilities,
 };
 pub(crate) use registry::validate_composition_structure;
 pub use registry::{
-    CompositionError, CompositionSnapshot, DeviceRegistry, RegistryChanges, RegistrySnapshot,
+    AppliedConfiguration, AppliedGroup, CompositionError, DeviceRegistry, PendingConfiguration,
+    RegistryChanges, RegistrySnapshot,
 };
 pub use state::{AvailabilityChanges, Function, FunctionChanges, PhysicalDevice};
 

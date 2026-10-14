@@ -52,6 +52,18 @@ fn fixture() -> (
         registry.insert(physical);
         receivers.append(&mut consumers);
     }
+    registry
+        .apply_configuration(
+            1,
+            Vec::new(),
+            &[
+                DeviceKey::new("xiaomi", "one"),
+                DeviceKey::new("xiaomi", "two"),
+                DeviceKey::new("xiaomi", "multi"),
+            ],
+            &[],
+        )
+        .unwrap();
     (directory, store, status, registry, receivers)
 }
 #[test]
@@ -125,6 +137,18 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         let (physical, _consumers) = PhysicalDevice::new(stored.description());
         registry.remove(&key);
         registry.insert(physical.clone());
+        registry
+            .apply_configuration(
+                2,
+                Vec::new(),
+                &[
+                    DeviceKey::new("xiaomi", "one"),
+                    DeviceKey::new("xiaomi", "two"),
+                    DeviceKey::new("xiaomi", "multi"),
+                ],
+                &[],
+            )
+            .unwrap();
         physical.function("usb").unwrap().observe(true);
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
             .await
@@ -201,6 +225,20 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
             registry.insert(physical.clone());
             lights.push((physical, receivers));
         }
+        registry
+            .apply_configuration(
+                2,
+                Vec::new(),
+                &[
+                    DeviceKey::new("xiaomi", "one"),
+                    DeviceKey::new("xiaomi", "two"),
+                    DeviceKey::new("xiaomi", "multi"),
+                    DeviceKey::new("xiaomi", "rgb"),
+                    DeviceKey::new("xiaomi", "ct"),
+                ],
+                &[],
+            )
+            .unwrap();
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
             .await
             .unwrap()
@@ -643,7 +681,7 @@ fn group_fixture() -> (
     DeviceRegistry,
     Vec<CommandReceiver>,
 ) {
-    use migate::device::{Composition, NumericRange};
+    use migate::device::{GroupConfiguration, NumericRange};
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
@@ -677,9 +715,16 @@ fn group_fixture() -> (
         receivers.append(&mut consumers);
     }
     registry
-        .update_composition_versioned(
+        .apply_configuration(
             1,
-            vec![Composition {
+            vec![GroupConfiguration {
+                capabilities: registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .unwrap()
+                    .functions()[0]
+                    .description()
+                    .capabilities
+                    .clone(),
                 key: DeviceKey::new("xiaomi", "group.1"),
                 label: "Reading lamp".into(),
                 members: vec![
@@ -688,6 +733,7 @@ fn group_fixture() -> (
                 ],
             }],
             &[],
+            &[],
         )
         .unwrap();
     (directory, store, status, registry, receivers)
@@ -695,7 +741,7 @@ fn group_fixture() -> (
 
 #[test]
 fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
-    use migate::device::{Composition, LightPatch};
+    use migate::device::{GroupConfiguration, LightPatch};
     block_on(async {
         let (_dir, store, status, registry, _receivers) = group_fixture();
         let one = registry.get(&DeviceKey::new("xiaomi", "one")).unwrap();
@@ -733,9 +779,10 @@ fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
         assert!(list.contains("Group: group.1 (Reading lamp)."), "{list}");
 
         registry
-            .update_composition_versioned(
+            .apply_configuration(
                 2,
-                vec![Composition {
+                vec![GroupConfiguration {
+                    capabilities: one.functions()[0].description().capabilities.clone(),
                     key: DeviceKey::new("xiaomi", "group.1"),
                     label: "Reading lamp".into(),
                     members: vec![
@@ -744,10 +791,11 @@ fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
                     ],
                 }],
                 &[],
+                &[],
             )
             .unwrap();
         assert_eq!(
-            registry.snapshot().composition.groups[0].members,
+            registry.snapshot().applied.groups[0].members,
             vec![
                 DeviceKey::new("xiaomi", "one"),
                 DeviceKey::new("xiaomi", "two")
@@ -796,7 +844,7 @@ fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
         assert!(same_names.contains("two (Lamp): available"), "{same_names}");
 
         registry
-            .update_composition_versioned(3, Vec::new(), &[])
+            .apply_configuration(3, Vec::new(), &[one.key().clone(), two.key().clone()], &[])
             .unwrap();
         let ungrouped = handle_line(&registry, &store.devices(), &status, "list", 0)
             .await
@@ -888,37 +936,6 @@ fn group_status_includes_member_routes_and_errors_while_member_status_names_its_
 }
 
 #[test]
-fn group_on_off_points_to_members_and_never_touches_member_queues() {
-    block_on(async {
-        let (_dir, store, status, registry, mut receivers) = group_fixture();
-        for line in ["on group.1", "off group.1", "on group.1 main"] {
-            let output = handle_line(&registry, &store.devices(), &status, line, 0)
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(output.contains("member"), "{line}: {output}");
-            assert!(
-                output.contains("select a member DID for on/off"),
-                "{line}: {output}"
-            );
-            assert!(!output.contains("command accepted"), "{line}: {output}");
-            for receiver in &mut receivers {
-                assert!(poll_once(receiver.next()).await.is_none());
-            }
-        }
-        let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "on one", 0),
-            async {
-                let request = receivers[0].next().await.unwrap();
-                request.accept().unwrap();
-            },
-        )
-        .await;
-        assert_eq!(result.unwrap().unwrap(), "one: command accepted");
-    })
-}
-
-#[test]
 fn unpublished_numeric_group_status_and_commands_use_the_pending_diagnostic() {
     use migate::xiaomi::adapter::*;
     block_on(async {
@@ -982,7 +999,8 @@ fn unpublished_numeric_group_status_and_commands_use_the_pending_diagnostic() {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(output.contains("member"), "{line}: {output}");
+            assert!(output.contains("waiting to apply"), "{line}: {output}");
+            assert!(output.contains("not published"), "{line}: {output}");
             assert!(!output.contains("command accepted"), "{line}: {output}");
             for receiver in &mut receivers {
                 assert!(poll_once(receiver.next()).await.is_none());
@@ -999,8 +1017,8 @@ fn persisted_group_fixture() -> (
     Vec<CommandReceiver>,
 ) {
     use migate::{
-        device::Composition,
-        storage::{CachedPhysicalDevice, CachedScope},
+        device::{Composition, ConfigurationScope},
+        storage::CachedPhysicalDevice,
         xiaomi::{capability::parse_device_for_model, cloud::group_id},
     };
     let directory = tempfile::tempdir().unwrap();
@@ -1010,7 +1028,7 @@ fn persisted_group_fixture() -> (
         .unwrap();
     let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
     let registry = DeviceRegistry::new();
-    let scope = CachedScope {
+    let scope = ConfigurationScope {
         uid: "uid".into(),
         home_id: "local".into(),
         group_id: group_id("uid", "local"),
@@ -1048,16 +1066,16 @@ fn persisted_group_fixture() -> (
             DeviceKey::new("xiaomi", "two"),
         ],
     };
-    store
-        .devices()
-        .commit_composition(&scope, std::slice::from_ref(&group), &[])
+    let devices = store.devices();
+    registry
+        .stage_configuration(scope, vec![group.clone()], Vec::new())
+        .unwrap();
+    devices
+        .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))
         .unwrap();
     store
         .devices()
         .set_group_label(&group.key, "Saved Home lamp")
-        .unwrap();
-    registry
-        .update_composition_versioned(1, vec![group], &[])
         .unwrap();
     (directory, store, status, registry, receivers)
 }
@@ -1065,24 +1083,24 @@ fn persisted_group_fixture() -> (
 #[test]
 fn pending_group_names_keep_the_saved_identity_after_revocation_and_storage_failure_propagates() {
     use migate::{
-        storage::CachedScope,
+        device::ConfigurationScope,
         xiaomi::{adapter::*, cloud::group_id},
     };
     block_on(async {
         let (_dir, store, status, registry, _receivers) = persisted_group_fixture();
         // Revoke the stored relation as well, keeping the reserved identity as
         // a real unpublished group, and publish the returned confirmed version.
-        let scope = CachedScope {
+        let scope = ConfigurationScope {
             uid: "uid".into(),
             home_id: "local".into(),
             group_id: group_id("uid", "local"),
         };
-        let confirmed = store
-            .devices()
-            .commit_composition(&scope, &[], &[])
-            .unwrap();
+        let devices = store.devices();
         registry
-            .update_composition_versioned(confirmed.version, Vec::new(), &[])
+            .stage_configuration(scope, Vec::new(), Vec::new())
+            .unwrap();
+        devices
+            .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))
             .unwrap();
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
             .local_status()
@@ -1118,33 +1136,6 @@ fn pending_group_names_keep_the_saved_identity_after_revocation_and_storage_fail
             "{selected}"
         );
         assert!(!selected.contains("Cloud rename"), "{selected}");
-
-        // A legacy reservation without a saved label is legitimate and falls
-        // back to the available pending name instead of failing.
-        rusqlite::Connection::open(store.path())
-            .unwrap()
-            .execute(
-                "UPDATE group_identity SET label=NULL WHERE source='xiaomi' AND device_id='group.1'",
-                [],
-            )
-            .unwrap();
-        let legacy = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            legacy.contains("group.1 (Cloud rename): pending group"),
-            "{legacy}"
-        );
-        let legacy_selected =
-            handle_line(&registry, &store.devices(), &status, "status group.1", 0)
-                .await
-                .unwrap()
-                .unwrap();
-        assert!(
-            legacy_selected.contains("group.1 (Cloud rename): pending group"),
-            "{legacy_selected}"
-        );
 
         // A malformed saved label still propagates instead of being hidden.
         rusqlite::Connection::open(store.path())

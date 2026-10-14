@@ -3,18 +3,21 @@ use super::{
     state::{Context, DeviceRecord, DeviceSlot},
 };
 use crate::{
-    device::{Category, Composition, DeviceKey},
+    device::{
+        Category, Composition, ConfigurationScope, DeviceKey, FunctionDescription,
+        derive_group_capabilities,
+    },
     runtime::default_device_label,
-    storage::{CompositionCommitError, import_label},
+    storage::import_label,
     xiaomi::cloud::CloudGroup,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     rc::Rc,
 };
 
 /// The whole relation set one sync evaluation wants to persist, together with
-/// the per-group diagnostics that explain deferred or revoked relations.
+/// the per-group diagnostics that explain pending or revoked relations.
 struct Evaluated {
     compositions: Vec<Composition>,
     problems: Vec<(String, Option<String>)>,
@@ -30,24 +33,20 @@ enum Fresh {
     Rejected(String),
 }
 
-/// One known group identity's fresh and last confirmed relation.
-struct Relation {
-    fresh: Fresh,
-    retained: Option<Composition>,
-    deferred: Option<String>,
-}
-
 impl Context {
-    /// Re-evaluate the whole relation set and persist it only when the
-    /// evaluated snapshot differs from the published one. A failed commit
-    /// leaves the previously confirmed registry state untouched.
+    /// Re-evaluate the whole relation set and stage the latest confirmed
+    /// result for the configuration apply boundary. Confirmed deletions revoke real
+    /// control immediately; nothing candidate is persisted as applied here.
     pub(super) fn reconcile_groups(self: &Rc<Self>) -> Result<(), AdapterError> {
         self.reconcile_groups_removed(&[])
     }
 
-    /// Re-evaluate with a confirmed whole-home deletion set. Deletions are
-    /// persisted and published atomically before any runtime resource is
-    /// retired, so a failed commit leaves the previous topology intact.
+    /// Re-evaluate with a confirmed whole-home deletion set. Every deleted
+    /// member's control path, consumer and source reference is revoked
+    /// immediately, before and regardless of any storage attempt, so a failed
+    /// publication commit can never retain control over it. The surviving
+    /// relation set is only staged; storage and the applied view change
+    /// together at the configuration apply boundary.
     pub(super) fn reconcile_groups_removed(
         self: &Rc<Self>,
         removed: &[DeviceKey],
@@ -59,38 +58,25 @@ impl Context {
         for (did, reason) in &evaluated.problems {
             self.problem(did, reason.clone());
         }
-        let published = self.registry.snapshot().composition.groups;
-        if evaluated.compositions == published && removed.is_empty() {
-            return Ok(());
+        for key in removed {
+            self.registry.revoke(key);
         }
-        let confirmed =
-            match self
-                .store
-                .devices()
-                .commit_composition(&scope, &evaluated.compositions, removed)
-            {
-                Ok(confirmed) => confirmed,
-                Err(CompositionCommitError::Storage(error)) => return Err(error.into()),
-                Err(error) => {
-                    if let Some(group) = evaluated.compositions.first() {
-                        self.problem(&group.key.id, Some(error.to_string()));
-                    }
-                    return Ok(());
-                }
-            };
-        let compositions = confirmed
-            .groups
-            .into_iter()
-            .map(|group| Composition {
-                key: group.key,
-                label: group.label,
-                members: group.members,
-            })
-            .collect::<Vec<_>>();
-        self.registry
-            .update_composition_versioned(confirmed.version, compositions, removed)
-            .map_err(|error| AdapterError::Unavailable(error.to_string()))?;
         self.retire_confirmed_removed(removed);
+        // The applied storage keeps the last committed topology, derived shape,
+        // publication set and versions until the configuration commit succeeds. Only
+        // real control is revoked here; a durable removal is part of the same
+        // atomic configuration commit as everything else.
+        self.registry
+            .stage_configuration(
+                ConfigurationScope {
+                    uid: scope.uid,
+                    home_id: scope.home_id,
+                    group_id: scope.group_id,
+                },
+                evaluated.compositions,
+                removed.to_vec(),
+            )
+            .map_err(|error| AdapterError::Unavailable(error.to_string()))?;
         self.changed.notify(usize::MAX);
         Ok(())
     }
@@ -101,7 +87,10 @@ impl Context {
             .iter()
             .map(|key| key.id.as_str())
             .collect::<BTreeSet<_>>();
-        let published = self.registry.snapshot().composition.groups;
+        // The latest confirmed relation set is the retention baseline: a
+        // newer pending relation must survive a later failed directory read
+        // instead of falling back to the older applied version.
+        let published = self.registry.desired_composition();
         let mut identities = BTreeSet::new();
         for group in &published {
             identities.insert(group.key.id.clone());
@@ -113,11 +102,10 @@ impl Context {
                 identities.insert(did.clone());
             }
         }
-        let mut relations = BTreeMap::<String, Relation>::new();
-        let mut claims = HashMap::<&str, &str>::new();
-        let mut overlapping = BTreeSet::new();
+        let mut compositions = Vec::new();
+        let mut problems = Vec::new();
         for id in &identities {
-            let retained = published.iter().find(|group| &group.key.id == id).cloned();
+            let retained = published.iter().find(|group| &group.key.id == id);
             let fresh = if deleted.contains(id.as_str()) {
                 Fresh::Rejected(format!("group {id} was removed from the selected home"))
             } else {
@@ -137,156 +125,50 @@ impl Context {
                         id,
                         "waits for a confirmed member relation",
                     )),
-                    Some(CloudGroup::Confirmed { members, .. }) => {
-                        // Raw claims count even when a member makes the group
-                        // unsupported. Deleted parents never reach this branch;
-                        // repeated members within one group are not overlaps.
-                        for member in members {
-                            if let Some(owner) = claims.insert(member.as_str(), id.as_str())
-                                && owner != id.as_str()
-                            {
-                                overlapping.insert(owner.to_owned());
-                                overlapping.insert(id.clone());
-                            }
-                        }
-                        fresh_relation(
-                            id,
-                            members,
-                            &live.devices,
-                            &deleted,
-                            &identities,
-                            live.complete,
-                        )
-                    }
+                    Some(CloudGroup::Confirmed { members, .. }) => fresh_relation(
+                        id,
+                        members,
+                        &live.devices,
+                        &deleted,
+                        &identities,
+                        live.complete,
+                    ),
                 }
             };
-            relations.insert(
-                id.clone(),
-                Relation {
-                    fresh,
-                    retained,
-                    deferred: None,
-                },
-            );
-        }
-
-        // Relations that stay authoritative reserve every member they still
-        // reference; unknown or deferred owners protect old ownership before
-        // any fresh candidate may claim the same member. Overlapping
-        // identities are unsupported and reserve nothing.
-        let mut authoritative = BTreeMap::<String, Composition>::new();
-        let mut reserved = HashMap::<DeviceKey, String>::new();
-        for (id, relation) in &relations {
-            if overlapping.contains(id)
-                || matches!(relation.fresh, Fresh::Rejected(_) | Fresh::Ready(_))
-            {
-                continue;
-            }
-            let Some(retained) = &relation.retained else {
-                continue;
-            };
-            if retained_invalid(retained, &live.devices, &deleted, live.complete) {
-                continue;
-            }
-            authoritative.insert(id.clone(), retained.clone());
-            for member in &retained.members {
-                reserved.entry(member.clone()).or_insert_with(|| id.clone());
-            }
-        }
-        // Deferring a fresh relation keeps its retained relation alive, which
-        // can reserve more members and defer further claims. Iterate to a
-        // fixed point so transitive dependencies are honored.
-        loop {
-            let mut progressed = false;
-            for (id, relation) in &mut relations {
-                if overlapping.contains(id) {
-                    continue;
-                }
-                let Fresh::Ready(members) = &relation.fresh else {
-                    continue;
-                };
-                if relation.deferred.is_some() {
-                    continue;
-                }
-                let conflict = members.iter().find_map(|member| {
-                    reserved
-                        .get(member)
-                        .filter(|owner| *owner != id)
-                        .map(|owner| (member, owner.clone()))
-                });
-                let Some((member, owner)) = conflict else {
-                    continue;
-                };
-                relation.deferred = Some(format!(
-                    "group relation for {id} is deferred while {owner} retains member {}",
-                    member.id
-                ));
-                progressed = true;
-                if let Some(retained) = &relation.retained
-                    && !retained_invalid(retained, &live.devices, &deleted, live.complete)
-                {
-                    authoritative.insert(id.clone(), retained.clone());
-                    for retained_member in &retained.members {
-                        reserved
-                            .entry(retained_member.clone())
-                            .or_insert_with(|| id.clone());
-                    }
-                }
-            }
-            if !progressed {
-                break;
-            }
-        }
-
-        let mut compositions = Vec::new();
-        let mut problems = Vec::new();
-        for (id, relation) in relations {
-            let problem = match &relation.fresh {
-                Fresh::Rejected(reason) => Some(reason.clone()),
-                _ if overlapping.contains(&id) => {
-                    Some(format!("group {id} overlaps another confirmed group"))
-                }
-                _ => relation.deferred.clone().or_else(|| match &relation.fresh {
-                    Fresh::Pending(reason) => Some(reason.clone()),
-                    _ => None,
-                }),
-            };
-            let publishable = !matches!(relation.fresh, Fresh::Rejected(_))
-                && !overlapping.contains(&id)
-                && relation.deferred.is_none();
-            match &relation.fresh {
-                Fresh::Ready(members) if publishable => {
-                    let label = relation
-                        .retained
-                        .as_ref()
+            let problem = match fresh {
+                Fresh::Ready(members) => {
+                    let label = retained
                         .map(|group| group.label.clone())
-                        .or_else(|| group_name(&live.devices, &id))
+                        .or_else(|| group_name(&live.devices, id))
                         .unwrap_or_else(|| {
                             let model = live
                                 .devices
-                                .get(&id)
+                                .get(id)
                                 .and_then(|slot| slot.group.as_ref())
                                 .map(|meta| meta.model.as_str())
                                 .unwrap_or_default();
-                            default_device_label(model, &id)
+                            default_device_label(model, id)
                         });
                     compositions.push(Composition {
-                        key: DeviceKey::new("xiaomi", &id),
+                        key: DeviceKey::new("xiaomi", id),
                         label,
-                        members: members.clone(),
+                        members,
                     });
+                    None
                 }
-                _ => {
-                    // A confirmed overlap revokes retained ownership too; the
-                    // relation is unsupported, not merely deferred.
-                    if !overlapping.contains(&id)
-                        && let Some(retained) = authoritative.get(&id)
+                Fresh::Pending(reason) => {
+                    // Each group retains only its own latest confirmation.
+                    // A shared member never blocks another group's progress.
+                    if let Some(retained) = retained
+                        && !retained_invalid(retained, &live.devices, &deleted, live.complete)
                     {
                         compositions.push(retained.clone());
                     }
+                    Some(reason)
                 }
-            }
-            problems.push((id, problem));
+                Fresh::Rejected(reason) => Some(reason),
+            };
+            problems.push((id.clone(), problem));
         }
         Evaluated {
             compositions,
@@ -309,6 +191,7 @@ fn fresh_relation(
     let mut unique = BTreeSet::new();
     let mut confirmed = Vec::new();
     let mut pending = Vec::new();
+    let mut descriptions = Vec::new();
     for member in members {
         if member == id || !unique.insert(member.clone()) {
             return Fresh::Rejected(format!(
@@ -340,18 +223,38 @@ fn fresh_relation(
                         "group {id} member {member} cannot be published standalone: {problem}"
                     ));
                 }
+                descriptions.push(record.cached.borrow());
             }
             None => pending.push(member.clone()),
         }
     }
-    if pending.is_empty() {
-        Fresh::Ready(confirmed)
-    } else {
-        Fresh::Pending(format!(
+    if !pending.is_empty() {
+        return Fresh::Pending(format!(
             "group {id} waits for member descriptions: {}",
             pending.join(", ")
-        ))
+        ));
     }
+    // The derived shape is admission-checked through the same mapping rule as
+    // a single light: a non-empty common range that Matter mireds cannot
+    // represent makes the group unsupported instead of fabricating another
+    // capability set. Members then stay standalone candidates.
+    let description = FunctionDescription {
+        id: "main".into(),
+        label: String::new(),
+        category: Category::Light,
+        capabilities: derive_group_capabilities(
+            descriptions
+                .iter()
+                .map(|cached| &cached.device.functions[0].description),
+        ),
+    };
+    if let Err(reason) = crate::matter::publication::map_light(&description) {
+        return Fresh::Rejected(format!(
+            "group {id} cannot be published: {}",
+            reason.as_str()
+        ));
+    }
+    Fresh::Ready(confirmed)
 }
 
 /// A retained relation stops being authoritative once it references a member
@@ -368,10 +271,13 @@ fn retained_invalid(
         }
         match devices.get(&member.id) {
             None => complete,
-            Some(slot) => slot
-                .admitted
-                .as_ref()
-                .is_some_and(|record| member_problem(record).is_some()),
+            Some(slot) => {
+                slot.group.is_some()
+                    || slot
+                        .admitted
+                        .as_ref()
+                        .is_some_and(|record| member_problem(record).is_some())
+            }
         }
     })
 }

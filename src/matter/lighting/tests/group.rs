@@ -77,13 +77,14 @@ macro_rules! group_case {
             $members[..$count].to_vec(),
         )
         .unwrap();
-        let registry = support::test_registry(&store, &$devices[0]);
+        let registry = crate::matter::tests::published_registry(&store, &$devices[0]);
         let handler = model::handler(
             &registry,
             &store,
             StoreAdapter::new(store.matter()),
             support::test_executor(),
             rand::rng(),
+            None,
         )
         .unwrap();
         let info = model::basic_info(&identity);

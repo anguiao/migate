@@ -225,7 +225,9 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
         c.cloud.lock().unwrap().members = vec!["one".into()];
         c.context.request_sync();
         until(|| c.context.registry.get(&key).is_none()).await;
-        assert!(c.store.devices().load_published(&key).unwrap().is_none());
+        // The durable removal lands with the same configuration commit as the rest of
+        // the applied configuration.
+        until(|| c.store.devices().load_published(&key).unwrap().is_none()).await;
         assert_eq!(
             usb.execute(Command::On).await,
             Err(crate::device::CommandError::Cancelled)

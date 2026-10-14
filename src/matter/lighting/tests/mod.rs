@@ -284,13 +284,14 @@ macro_rules! setup {
         let $function = device.functions()[0].clone();
         device.set_availability(Availability::Available);
 
-        let registry = support::test_registry(&store, &device);
+        let registry = crate::matter::tests::published_registry(&store, &device);
         let handler = model::handler(
             &registry,
             &store,
             StoreAdapter::new(store.matter()),
             support::test_executor(),
             rand::rng(),
+            None,
         )
         .unwrap();
 
