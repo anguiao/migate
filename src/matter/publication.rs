@@ -9,7 +9,7 @@
 //! only reads a [`FunctionDescription`] and returns a publication decision or
 //! an explicit unmappable reason.
 
-use crate::device::{Capability, FunctionDescription, NumericRange};
+use crate::device::{Capability, Category, FunctionDescription, NumericRange};
 use rs_matter::dm::DeviceType;
 
 /// The Matter device type selected for a mappable light.
@@ -100,17 +100,33 @@ impl UnmappableReason {
 pub(crate) fn map_light(
     description: &FunctionDescription,
 ) -> Result<LightPublication, UnmappableReason> {
-    use crate::device::Category;
+    map_parts(description.category, &description.capabilities)
+}
 
-    if description.category != Category::Light {
+/// Map derived group capabilities to their Matter light publication. A group
+/// is always a light function, so the category check is fixed.
+pub(crate) fn map_capabilities(
+    capabilities: &[Capability],
+) -> Result<LightPublication, UnmappableReason> {
+    map_parts(Category::Light, capabilities)
+}
+
+fn map_parts(
+    category: Category,
+    capabilities: &[Capability],
+) -> Result<LightPublication, UnmappableReason> {
+    if category != Category::Light {
         return Err(UnmappableReason::NotLight);
     }
-    if !description.capabilities.contains(&Capability::OnOff) {
+    if !capabilities.contains(&Capability::OnOff) {
         return Err(UnmappableReason::MissingOnOff);
     }
-    let brightness = description.capabilities.contains(&Capability::Brightness);
-    let rgb = description.capabilities.contains(&Capability::ColorRgb);
-    let temperature = match description.temperature_range() {
+    let brightness = capabilities.contains(&Capability::Brightness);
+    let rgb = capabilities.contains(&Capability::ColorRgb);
+    let temperature = match capabilities.iter().find_map(|capability| match capability {
+        Capability::ColorTemperature(range) => Some(*range),
+        _ => None,
+    }) {
         Some(range) => {
             let bounds = range
                 .mired_bounds()

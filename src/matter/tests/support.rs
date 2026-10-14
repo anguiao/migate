@@ -139,11 +139,16 @@ pub(super) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
         .unwrap()
 }
 
+pub(in crate::matter) fn test_executor() -> std::rc::Rc<crate::lighting::LightingExecutor> {
+    crate::lighting::LightingExecutor::new(std::rc::Rc::new(
+        crate::lighting::clock::SystemClock::new(),
+    ))
+}
 pub(super) fn startup_error(store: &Store) -> RuntimeError {
     let identity = store.load_identity().unwrap();
     let (device, _receiver) = test_device();
     let registry = test_registry(store, &device);
-    let bridge = Bridge::new(&registry, store, &identity);
+    let bridge = Bridge::new(&registry, store, &identity, test_executor());
     block_on(or(bridge.run(0, |_| Ok(())), async {
         async_io::Timer::after(std::time::Duration::from_secs(5)).await;
         panic!("startup did not report invalid storage");

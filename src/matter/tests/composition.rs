@@ -191,6 +191,7 @@ impl GroupRig {
             &self.registry,
             &self.store,
             StoreAdapter::new(self.store.matter()),
+            crate::matter::tests::support::test_executor(),
             rand::rng(),
         )
         .unwrap()

@@ -232,6 +232,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
         &registry,
         &store,
         StoreAdapter::new(store.matter()),
+        crate::matter::tests::support::test_executor(),
         rand::rng(),
     )
     .unwrap();
@@ -369,6 +370,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         &registry,
         &store,
         StoreAdapter::new(store.matter()),
+        crate::matter::tests::support::test_executor(),
         rand::rng(),
     )
     .unwrap();
@@ -428,7 +430,14 @@ fn rebuilt_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         let protocol = StoreAdapter::new(store.matter());
         let kv = matter.kv(protocol.clone());
         let registry = crate::device::DeviceRegistry::new();
-        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let handler = model::handler(
+            &registry,
+            &store,
+            protocol.clone(),
+            crate::matter::tests::support::test_executor(),
+            rand::rng(),
+        )
+        .unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         let ctx = Context::new(&im, 6, 0);
         let mut run = Box::pin(handler.run(&ctx));
@@ -453,7 +462,14 @@ fn rebuilt_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         drop(run);
         drop(im);
         drop(handler);
-        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let handler = model::handler(
+            &registry,
+            &store,
+            protocol.clone(),
+            crate::matter::tests::support::test_executor(),
+            rand::rng(),
+        )
+        .unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         let ctx = Context::new(&im, 6, 0);
         let mut run = Box::pin(handler.run(&ctx));
@@ -622,7 +638,14 @@ fn rebuilt_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         drop(run);
         drop(im);
         drop(handler);
-        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let handler = model::handler(
+            &registry,
+            &store,
+            protocol.clone(),
+            crate::matter::tests::support::test_executor(),
+            rand::rng(),
+        )
+        .unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         let ctx = Context::new(&im, 6, 0);
         let mut run = Box::pin(handler.run(&ctx));
@@ -652,7 +675,14 @@ fn rebuilt_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         drop(run);
         drop(im);
         drop(handler);
-        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let handler = model::handler(
+            &registry,
+            &store,
+            protocol.clone(),
+            crate::matter::tests::support::test_executor(),
+            rand::rng(),
+        )
+        .unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         let ctx = Context::new(&im, 6, 0);
         let mut run = Box::pin(handler.run(&ctx));
@@ -696,7 +726,14 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         let second_stored = store.devices().publish(&second.description()).unwrap();
         registry.insert(first.clone());
         registry.insert(second.clone());
-        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let handler = model::handler(
+            &registry,
+            &store,
+            protocol.clone(),
+            crate::matter::tests::support::test_executor(),
+            rand::rng(),
+        )
+        .unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         write_label(&handler, &im, first_stored.endpoint, "Renamed first")
             .await

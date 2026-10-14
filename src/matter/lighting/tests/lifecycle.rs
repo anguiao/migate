@@ -1,15 +1,23 @@
-use super::*;
+//! Matter entry waiters and reports use the shared executor.
+//! The Matter model owns shutdown cancellation.
 
-fn controller(function: &Function) -> Lighting {
-    Lighting::with_clock(
-        function.clone(),
+use super::*;
+use crate::device::{Command, DeviceRequest};
+use crate::lighting::LightingExecutor;
+
+fn controller(function: &Function) -> (Lighting, Rc<LightingExecutor>, Rc<TestClock>) {
+    let clock = Rc::new(TestClock::default());
+    let executor = LightingExecutor::new(clock.clone());
+    let light = Lighting::new(
+        Light::Single(function.clone()),
         2,
         Dataver::new(1),
         Dataver::new(2),
         Dataver::new(3),
         crate::matter::publication::map_light(function.description()).unwrap(),
-        Rc::new(TestClock::default()),
-    )
+        executor.clone(),
+    );
+    (light, executor, clock)
 }
 
 fn level_task(transition_ms: u64) -> LightingTask {
@@ -22,88 +30,110 @@ fn level_task(transition_ms: u64) -> LightingTask {
 }
 
 #[test]
-fn dropping_controller_cancels_owned_actions_without_replaying_sent_frames() {
-    for sent in [false, true] {
-        let (device, mut receiver) = support::light(true);
+fn dropping_the_invoke_waiter_does_not_cancel_the_committed_action() {
+    let (device, mut receiver) = support::light(false);
+    device.set_availability(Availability::Available);
+    let function = device.functions()[0].clone();
+    let (light, executor, clock) = controller(&function);
+    function
+        .observe_light(LightPatch {
+            power: Some(true),
+            brightness_percent: Some(1.0),
+            ..Default::default()
+        })
+        .unwrap();
+    block_on(async {
+        let action = light.begin(level_task(1000), None).unwrap();
+        let token = action.token();
+        drop(action);
+        let startup = frame(&mut receiver).await;
+        assert!(startup.is_current());
+        startup.mark_sent().unwrap();
+        startup.accept().unwrap();
+
+        clock.set(1000);
+        executor.advance();
+        let last = frame(&mut receiver).await;
+        assert_eq!(last.token, token);
+        assert!(last.final_frame);
+        last.mark_sent().unwrap();
+        last.accept().unwrap();
+        assert!(!function.light_action_current(token));
+        assert!(executor.ending(function.function_key(), LightDimension::Brightness));
+    });
+}
+
+#[test]
+fn handler_report_loop_never_waits_on_a_past_action_deadline() {
+    setup!(false, function, receiver, light, clock, ctx);
+    function
+        .observe_light(LightPatch {
+            power: Some(true),
+            brightness_percent: Some(1.0),
+            ..Default::default()
+        })
+        .unwrap();
+    block_on(async {
+        let action = light.begin(level_task(1000), None).unwrap();
+        let startup = frame(&mut receiver).await;
+        startup.mark_sent().unwrap();
+        startup.accept().unwrap();
+        action.accepted().await.unwrap();
+        // Move the clock past the committed deadline without advancing the
+        // executor. A report loop that waits on the lapsed deadline would
+        // spin forever; with a forward cadence it parks.
+        clock.set(5000);
+        let mut run = pin!(light.run(&ctx));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(light.level_state().remaining_time.value, 0);
+    });
+}
+
+#[test]
+fn power_waiter_is_woken_by_device_accept_or_reject_without_a_runner() {
+    for reject in [false, true] {
+        let (device, mut receiver) = support::light(false);
         device.set_availability(Availability::Available);
-        let function = &device.functions()[0];
-        let light = controller(function);
-        let level = light.begin(level_task(1000), None).unwrap();
-        let color = light
-            .begin(
-                LightingTask::Color(ColorTask::XyMove {
-                    start_x: 20000,
-                    start_y: 20000,
-                    rate_x: 100,
-                    rate_y: 0,
-                }),
-                None,
-            )
-            .unwrap();
+        let function = device.functions()[0].clone();
+        let (light, _executor, _clock) = controller(&function);
         block_on(async {
-            let request = frame(&mut receiver).await;
-            if sent {
-                request.mark_sent().unwrap();
-            }
-            drop(light);
-            for action in [&level, &color] {
-                assert!(!function.light_action_current(action.token()));
-                assert_eq!(action.ended().await, Err(CommandError::Cancelled));
-            }
-            assert_eq!(color.accepted().await, Err(CommandError::Cancelled));
-            if sent {
-                assert!(poll_once(level.accepted()).await.is_none());
-                assert_eq!(
-                    function
-                        .light_action_diagnostics()
-                        .unwrap()
-                        .awaiting_startup,
-                    Some(level.token())
-                );
-                request.accept().unwrap();
-                level.accepted().await.unwrap();
+            let mut on = pin!(light.power(Command::On));
+            assert!(poll_once(on.as_mut()).await.is_none());
+            let DeviceRequest::Power(request) = receiver.next_operation().await.unwrap() else {
+                panic!("expected a power dispatch");
+            };
+            request.mark_sent().unwrap();
+            if reject {
+                request.reject(CommandError::Rejected("power rejected".into()));
+                assert!(on.await.is_err());
             } else {
-                assert_eq!(request.mark_sent(), Err(CommandError::Cancelled));
-                assert_eq!(level.accepted().await, Err(CommandError::Cancelled));
-                drop(request);
+                request.accept().unwrap();
+                on.await.unwrap();
+                assert_eq!(function.snapshot().power.value(), Some(true));
             }
-            let new = controller(function);
-            assert_eq!(new.level_state().remaining_time.value, 0);
-            assert_eq!(new.color_state().remaining_time.value, 0);
-            new.advance();
-            assert!(poll_once(receiver.next_operation()).await.is_none());
-            assert!(
-                function
-                    .light_action_diagnostics()
-                    .unwrap()
-                    .awaiting_startup
-                    .is_none()
-            );
         });
+        // No runner tick was needed: the caller waker polls the
+        // executor-owned future at the physical acceptance boundary.
+        drop(device);
     }
 }
 
 #[test]
-fn dropping_old_controller_and_settling_its_receipt_preserves_the_new_action() {
+fn matter_power_waiter_drop_leaves_dispatch_with_the_executor() {
     let (device, mut receiver) = support::light(false);
     device.set_availability(Availability::Available);
-    let function = &device.functions()[0];
-    let old = controller(function);
-    let old_action = old.begin(level_task(1000), None).unwrap();
+    let function = device.functions()[0].clone();
+    let (light, executor, _clock) = controller(&function);
     block_on(async {
-        let old_request = frame(&mut receiver).await;
-        old_request.mark_sent().unwrap();
-        let new = controller(function);
-        let new_action = new.begin(level_task(0), None).unwrap();
-        drop(old);
-        assert_eq!(old_action.ended().await, Err(CommandError::Superseded));
-        assert!(function.light_action_current(new_action.token()));
-        old_request.accept().unwrap();
-        assert!(function.light_action_current(new_action.token()));
-        let request = frame(&mut receiver).await;
-        assert_eq!(request.token, new_action.token());
-        accept(function, request);
-        new_action.ended().await.unwrap();
-        assert!(poll_once(receiver.next_operation()).await.is_none());
+        let mut on = Box::pin(light.power(Command::On));
+        assert!(poll_once(on.as_mut()).await.is_none());
+        drop(on);
+        let DeviceRequest::Power(request) = receiver.next_operation().await.unwrap() else {
+            panic!("expected a power dispatch");
+        };
+        request.mark_sent().unwrap();
+        request.accept().unwrap();
+        executor.advance();
+        assert_eq!(function.snapshot().power.value(), Some(true));
     });
 }

@@ -219,10 +219,13 @@ fn invalid_and_ignored_hs_requests_preserve_the_existing_action() {
     block_on(async {
         let action = light
             .begin(
-                LightingTask::Color(ColorTask::Hs(hs::HsTask {
-                    hue: hs::HueAxis::move_at(0.0, 10.0),
-                    saturation: hs::SaturationAxis::Hold(254.0),
-                })),
+                color_plan(
+                    &light,
+                    ColorTask::Hs(hs::HsTask {
+                        hue: hs::HueAxis::move_at(0.0, 10.0),
+                        saturation: hs::SaturationAxis::Hold(254.0),
+                    }),
+                ),
                 None,
             )
             .unwrap();
@@ -316,7 +319,7 @@ fn hue_and_saturation_commands_keep_each_others_timeline_and_stop_both_axes() {
         )
         .await;
         clock.set(1000);
-        light.advance();
+        light.executor.advance();
         accept(&function, frame(&mut receiver).await);
         let data = axis_move(3, 30);
         applied(
@@ -329,7 +332,7 @@ fn hue_and_saturation_commands_keep_each_others_timeline_and_stop_both_axes() {
         )
         .await;
         clock.set(2000);
-        light.advance();
+        light.executor.advance();
         accept(&function, frame(&mut receiver).await);
         assert_near(handler.current_hue(&ctx).await.unwrap(), 40);
         assert_near(handler.current_saturation(&ctx).await.unwrap(), 224);
@@ -341,7 +344,7 @@ fn hue_and_saturation_commands_keep_each_others_timeline_and_stop_both_axes() {
         )
         .await;
         clock.set(3000);
-        light.advance();
+        light.executor.advance();
         let request = frame(&mut receiver).await;
         assert!(!request.final_frame);
         accept(&function, request);
@@ -353,7 +356,7 @@ fn hue_and_saturation_commands_keep_each_others_timeline_and_stop_both_axes() {
             .await
             .unwrap();
         clock.set(4000);
-        light.advance();
+        light.executor.advance();
         assert!(poll_once(receiver.next_operation()).await.is_none());
         assert_eq!(handler.remaining_time(&ctx).await.unwrap(), 0);
         assert_eq!(
@@ -374,7 +377,7 @@ fn hue_and_saturation_commands_keep_each_others_timeline_and_stop_both_axes() {
             .await
             .unwrap();
         clock.set(5000);
-        light.advance();
+        light.executor.advance();
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
 }
@@ -411,7 +414,7 @@ fn hs_stop_does_not_cancel_xy_or_temperature_actions() {
                 transition_ms: 1000,
             },
         ] {
-            let action = light.begin(LightingTask::Color(task), None).unwrap();
+            let action = light.begin(color_plan(&light, task), None).unwrap();
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
             let before = handler.color_mode(&ctx).await.unwrap();
@@ -427,11 +430,11 @@ fn hs_stop_does_not_cancel_xy_or_temperature_actions() {
             assert!(function.light_action_current(action.token()));
             assert_eq!(handler.color_mode(&ctx).await.unwrap(), before);
             clock.set(clock.now() + 100);
-            light.advance();
+            light.executor.advance();
             let request = frame(&mut receiver).await;
             assert_eq!(request.token, action.token());
             accept(&function, request);
-            light.stop(LightDimension::Color).unwrap();
+            light.stop(LightDimension::Color).await.unwrap();
         }
     });
 }
@@ -466,7 +469,7 @@ fn hue_direction_and_steps_wrap_while_saturation_clips_for_the_full_requested_ti
             )
             .await;
             clock.set(clock.now() + 500);
-            light.advance();
+            light.executor.advance();
             accept(&function, frame(&mut receiver).await);
             let hue = handler.current_hue(&ctx).await.unwrap();
             if midpoint == 0 {
@@ -475,7 +478,7 @@ fn hue_direction_and_steps_wrap_while_saturation_clips_for_the_full_requested_ti
                 assert_near(hue, midpoint);
             }
             clock.set(clock.now() + 500);
-            light.advance();
+            light.executor.advance();
             accept(&function, frame(&mut receiver).await);
             assert_near(handler.current_hue(&ctx).await.unwrap(), 4);
         }
@@ -497,7 +500,7 @@ fn hue_direction_and_steps_wrap_while_saturation_clips_for_the_full_requested_ti
         )
         .await;
         clock.set(clock.now() + 1000);
-        light.advance();
+        light.executor.advance();
         accept(&function, frame(&mut receiver).await);
         assert_near(handler.current_hue(&ctx).await.unwrap(), 6);
         let data = axis_step(1, 100, 10);
@@ -511,13 +514,13 @@ fn hue_direction_and_steps_wrap_while_saturation_clips_for_the_full_requested_ti
         )
         .await;
         clock.set(clock.now() + 500);
-        light.advance();
+        light.executor.advance();
         let request = frame(&mut receiver).await;
         assert!(!request.final_frame);
         accept(&function, request);
         assert_near(handler.current_saturation(&ctx).await.unwrap(), 247);
         clock.set(clock.now() + 500);
-        light.advance();
+        light.executor.advance();
         let request = frame(&mut receiver).await;
         assert!(request.final_frame);
         accept(&function, request);
@@ -530,7 +533,7 @@ fn hue_direction_and_steps_wrap_while_saturation_clips_for_the_full_requested_ti
         )
         .await;
         clock.set(clock.now() + 25500);
-        light.advance();
+        light.executor.advance();
         let request = frame(&mut receiver).await;
         assert!(request.final_frame);
         accept(&function, request);

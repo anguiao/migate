@@ -7,6 +7,7 @@ use super::{
 use crate::{
     RuntimeError,
     device::DeviceRegistry,
+    lighting::LightingExecutor,
     storage::{Identity, StorageError, Store},
 };
 use rs_matter::{
@@ -22,7 +23,7 @@ use rs_matter::{
         MATTER_SOCKET_BIND_ADDR, exchange::MatterBuffers, network::mdns::astro::AstroMdns,
     },
 };
-use std::{net::UdpSocket, time::Duration};
+use std::{net::UdpSocket, rc::Rc, time::Duration};
 
 const WINDOW_SECONDS: u16 = 900;
 
@@ -31,14 +32,21 @@ pub struct Bridge<'a> {
     registry: DeviceRegistry,
     storage: Store,
     identity: &'a Identity,
+    executor: Rc<LightingExecutor>,
     pub(super) store: StoreAdapter,
 }
 impl<'a> Bridge<'a> {
-    pub fn new(registry: &DeviceRegistry, store: &Store, identity: &'a Identity) -> Self {
+    pub(crate) fn new(
+        registry: &DeviceRegistry,
+        store: &Store,
+        identity: &'a Identity,
+        executor: Rc<LightingExecutor>,
+    ) -> Self {
         Self {
             registry: registry.clone(),
             storage: store.clone(),
             identity,
+            executor,
             store: StoreAdapter::new(store.matter()),
         }
     }
@@ -88,7 +96,13 @@ impl<'a> Bridge<'a> {
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let handler = model::handler(&self.registry, &self.storage, store.clone(), crypto.rand()?)?;
+        let handler = model::handler(
+            &self.registry,
+            &self.storage,
+            store.clone(),
+            self.executor.clone(),
+            crypto.rand()?,
+        )?;
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         store.with_context("restore Matter model", im.startup().await)?;
         // Initialize only after every existing blob has been restored successfully.

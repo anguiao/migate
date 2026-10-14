@@ -272,14 +272,14 @@ fn mode_boundary_flushes_the_new_group_and_discards_the_old_quiet_report() {
                 max_mireds: 370,
             }
         };
-        let action = light.begin(LightingTask::Color(task), None).unwrap();
+        let action = light.begin(color_plan(&light, task), None).unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
             light.reports(&ctx);
             reported(&ctx);
             clock.set(100);
-            light.advance();
+            light.executor.advance();
             accept(&function, frame(&mut receiver).await);
             light.reports(&ctx);
             assert!(reported(&ctx).is_empty());
@@ -344,20 +344,20 @@ fn short_color_transitions_report_the_active_group_at_the_end() {
                 transition_ms: 100,
             }
         };
-        let action = light.begin(LightingTask::Color(task), None).unwrap();
+        let action = light.begin(color_plan(&light, task), None).unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
             light.reports(&ctx);
             reported(&ctx);
             clock.set(50);
-            light.advance();
+            light.executor.advance();
             accept(&function, frame(&mut receiver).await);
             light.reports(&ctx);
             assert!(reported(&ctx).is_empty());
 
             clock.set(100);
-            light.advance();
+            light.executor.advance();
             let request = frame(&mut receiver).await;
             assert!(request.final_frame);
             accept(&function, request);
@@ -386,10 +386,13 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
         .unwrap();
     let action = light
         .begin(
-            LightingTask::Color(ColorTask::Hs(hs::HsTask::stationary(hs::Hs {
-                hue: 170.0,
-                saturation: 0.0,
-            }))),
+            color_plan(
+                &light,
+                ColorTask::Hs(hs::HsTask::stationary(hs::Hs {
+                    hue: 170.0,
+                    saturation: 0.0,
+                })),
+            ),
             None,
         )
         .unwrap();
@@ -401,8 +404,13 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
         let handler = ColorHandler::<true, true>(&light);
         assert_eq!(handler.current_hue(&ctx).await.unwrap(), 170);
         assert_eq!(handler.current_saturation(&ctx).await.unwrap(), 0);
-        light.advance();
-        assert!(light.active.borrow()[1].is_none());
+        light.executor.advance();
+        assert!(
+            light
+                .executor
+                .remaining_ms(function.function_key(), LightDimension::Color)
+                .is_none()
+        );
         let rgb_cache = function.snapshot().lighting.unwrap().color;
 
         function

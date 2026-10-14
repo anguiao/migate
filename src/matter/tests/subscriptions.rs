@@ -265,7 +265,14 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let rejection = RefCell::new(None::<CommandError>);
     let accepted = Cell::new(0);
     let registry = super::test_registry(&store, &device);
-    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model::handler(
+        &registry,
+        &store,
+        protocol.clone(),
+        crate::matter::tests::support::test_executor(),
+        rand::rng(),
+    )
+    .unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -471,7 +478,14 @@ fn recovery_race_boot(directory: &Path, resume: bool) {
     device.set_availability(Availability::Available);
     device.functions()[0].observe(false);
     let registry = super::test_registry(&store, &device);
-    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model::handler(
+        &registry,
+        &store,
+        protocol.clone(),
+        crate::matter::tests::support::test_executor(),
+        rand::rng(),
+    )
+    .unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -1172,7 +1186,14 @@ fn topology_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) -
             function.observe(false);
         }
     }
-    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model::handler(
+        &registry,
+        &store,
+        protocol.clone(),
+        crate::matter::tests::support::test_executor(),
+        rand::rng(),
+    )
+    .unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -1316,7 +1337,14 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
                 })
                 .unwrap();
             let registry = super::test_registry(&store, &device);
-            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model::handler(
+                &registry,
+                &store,
+                protocol.clone(),
+                crate::matter::tests::support::test_executor(),
+                rand::rng(),
+            )
+            .unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -1641,7 +1669,14 @@ fn light_groups_commands_route_through_real_capabilities() {
             let (device, _receiver) = super::support::light(true);
             device.set_availability(Availability::Available);
             let registry = super::test_registry(&store, &device);
-            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model::handler(
+                &registry,
+                &store,
+                protocol.clone(),
+                crate::matter::tests::support::test_executor(),
+                rand::rng(),
+            )
+            .unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -1819,8 +1854,14 @@ fn run_rebuild_during_report(kind: ChunkedReport) {
                 let buffers: MatterBuffers = MatterBuffers::new();
                 let state: EthInteractionModelState =
                     EthInteractionModelState::new(EthNetwork::new_default());
-                let handler =
-                    model::handler(&rig.registry, store, protocol.clone(), rand::rng()).unwrap();
+                let handler = model::handler(
+                    &rig.registry,
+                    store,
+                    protocol.clone(),
+                    crate::matter::tests::support::test_executor(),
+                    rand::rng(),
+                )
+                .unwrap();
                 let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
                 let incoming = Pipe::default();
                 let outgoing = Pipe::default();

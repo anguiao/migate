@@ -43,6 +43,7 @@ fn topology_and_identity_are_fixed() {
             &test_registry(&store, &test_device().0),
             &store,
             StoreAdapter::new(store.matter()),
+            test_executor(),
             rand::rng()
         )
         .unwrap()
@@ -59,6 +60,7 @@ fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
         &test_registry(&store, &test_device().0),
         &store,
         StoreAdapter::new(store.matter()),
+        test_executor(),
         rand::rng(),
     )
     .unwrap();
@@ -158,6 +160,7 @@ fn light_metadata_matches_each_real_capability_combination() {
             &test_registry(&store, &device),
             &store,
             StoreAdapter::new(store.matter()),
+            test_executor(),
             rand::rng(),
         )
         .unwrap();
@@ -323,7 +326,7 @@ fn unused_legacy_scenes_blob_is_preserved_without_loading() {
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
             let registry = test_registry(&store, &device);
-            let bridge = Bridge::new(&registry, &store, &identity);
+            let bridge = Bridge::new(&registry, &store, &identity, test_executor());
             let error =
                 block_on(bridge.run(0, |_| Err(std::io::Error::other("startup completed"))))
                     .unwrap_err();
@@ -452,7 +455,7 @@ fn cancelled_run_keeps_a_recorded_storage_failure() {
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
             let registry = test_registry(&store, &device);
-            let bridge = Bridge::new(&registry, &store, &identity);
+            let bridge = Bridge::new(&registry, &store, &identity, test_executor());
             let running = bridge.run(0, |_| Ok(()));
             let mut callback_store = bridge.store.clone();
             let db = rusqlite::Connection::open(store.path()).unwrap();

@@ -6,7 +6,10 @@ use super::{
     storage::StoreAdapter,
 };
 use crate::{
-    device::{Category, DeviceKey, DeviceRegistry, Function, PhysicalDevice, RegistrySnapshot},
+    device::{
+        Category, DeviceKey, DeviceRegistry, Function, Light, PhysicalDevice, RegistrySnapshot,
+    },
+    lighting::LightingExecutor,
     storage::{Identity, StorageError, Store, StoredDevice},
 };
 use futures_util::{
@@ -168,6 +171,7 @@ impl Control {
         endpoint: u16,
         versions: Versions,
         mapping: Option<LightPublication>,
+        executor: Rc<LightingExecutor>,
     ) -> Self {
         let is_light = function.description().category == Category::Light;
         let mapping = is_light.then(|| mapping.expect("light function has a publication"));
@@ -179,12 +183,13 @@ impl Control {
             }),
             lighting: mapping.map(|mapping| {
                 lighting::Lighting::new(
-                    function,
+                    Light::Single(function),
                     endpoint,
                     Dataver::new(versions.on_off),
                     Dataver::new(versions.level),
                     Dataver::new(versions.color),
                     mapping,
+                    executor,
                 )
             }),
         }
@@ -647,20 +652,29 @@ pub(super) struct Model {
     registry: DeviceRegistry,
     store: Store,
     protocol: StoreAdapter,
+    executor: Rc<LightingExecutor>,
     root: RootHandler,
     rebuild: Cell<bool>,
     entries: RefCell<Vec<Rc<Entry>>>,
 }
+impl Drop for Model {
+    fn drop(&mut self) {
+        self.executor.reset();
+    }
+}
+
 pub(super) fn handler(
     registry: &DeviceRegistry,
     store: &Store,
     protocol: StoreAdapter,
+    executor: Rc<LightingExecutor>,
     mut random: impl rand::Rng,
 ) -> Result<Model, StorageError> {
     let model = Model {
         registry: registry.clone(),
         store: store.clone(),
         protocol,
+        executor,
         root: endpoints::EthSysHandlerBuilder::new()
             .netif_diag(&SysNetifs)
             .build(&mut random)
@@ -987,6 +1001,7 @@ impl Model {
                                 endpoint,
                                 versions,
                                 None,
+                                self.executor.clone(),
                             ))
                         });
                     desired.push(Rc::new(Entry {
@@ -1031,6 +1046,7 @@ impl Model {
                             endpoint,
                             versions,
                             mapping,
+                            self.executor.clone(),
                         ))
                     });
                 if member_group.contains_key(device.key()) {

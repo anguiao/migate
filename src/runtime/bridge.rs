@@ -1,6 +1,7 @@
 use crate::{
     RuntimeError,
     device::DeviceRegistry,
+    lighting::{LightingExecutor, clock::SystemClock},
     matter::{Bridge, PairingEvent},
     storage::{Identity, Store},
     terminal::{self, AuthStatus},
@@ -9,7 +10,7 @@ use futures_lite::{
     future,
     io::{AsyncBufRead, AsyncWrite},
 };
-use std::future::Future;
+use std::{future::Future, rc::Rc};
 
 pub struct BridgeOptions<'a> {
     pub store: &'a Store,
@@ -48,7 +49,12 @@ pub async fn run_prepared_bridge(
     };
     let registry = prepared;
     log::info!("MiGate bridge_id={}", options.identity.bridge_id);
-    let bridge = Bridge::new(&registry, options.store, options.identity);
+    let executor = LightingExecutor::new(Rc::new(SystemClock::new()));
+    let bridge = Bridge::new(&registry, options.store, options.identity, executor.clone());
+    let executor_run = async move {
+        executor.run().await;
+        Err::<(), RuntimeError>("Lighting executor ended unexpectedly".into())
+    };
     let result = {
         let input = async {
             terminal::bridge::run_input(
@@ -67,7 +73,10 @@ pub async fn run_prepared_bridge(
             interrupt.as_mut(),
             future::or(
                 source.as_mut(),
-                future::or(bridge.run(options.port, pairing), input),
+                future::or(
+                    bridge.run(options.port, pairing),
+                    future::or(executor_run, input),
+                ),
             ),
         )
         .await

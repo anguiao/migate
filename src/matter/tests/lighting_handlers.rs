@@ -2,19 +2,21 @@ use super::*;
 use crate::device::{DeviceRequest, LightDimension, LightPatch};
 
 macro_rules! setup_light {
-    ($rgb:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
-        setup_light!(@source crate::matter::tests::support::light($rgb),$device,$receiver,$registry,$handler,$ctx);
+    ($rgb:expr, $executor:ident, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
+        setup_light!(@source crate::matter::tests::support::light($rgb),$executor,$device,$receiver,$registry,$handler,$ctx);
     };
-    (@caps $capabilities:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
-        setup_light!(@source crate::matter::tests::support::light_caps("test-light", $capabilities),$device,$receiver,$registry,$handler,$ctx);
+    (@caps $capabilities:expr, $executor:ident, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
+        setup_light!(@source crate::matter::tests::support::light_caps("test-light", $capabilities),$executor,$device,$receiver,$registry,$handler,$ctx);
     };
-    (@source $source:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
+    (@source $source:expr, $executor:ident, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let identity = store.load_identity().unwrap();
         let ($device, mut $receiver) = $source;
         let $registry = crate::matter::tests::support::test_registry(&store, &$device);
-        let $handler = model::handler(&$registry, &store, StoreAdapter::new(store.matter()), rand::rng()).unwrap();
+        let $executor = crate::matter::tests::support::test_executor();
+        let _ = &$executor;
+        let $handler = model::handler(&$registry, &store, StoreAdapter::new(store.matter()), $executor.clone(), rand::rng()).unwrap();
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
@@ -76,7 +78,7 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
             8,
         ),
     ] {
-        setup_light!(true, device, receiver, registry, handler, ctx);
+        setup_light!(true, executor, device, receiver, registry, handler, ctx);
         let function = device.functions()[0].clone();
         function
             .observe_light(LightPatch {
@@ -173,7 +175,7 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
 fn ct_projection_reads_ignore_inactive_rgb_and_rgb_keeps_its_ct_cache_readable() {
     use crate::device::{LightMode, Rgb};
 
-    setup_light!(true, device, receiver, registry, handler, ctx);
+    setup_light!(true, executor, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     function
         .observe_light(LightPatch {
@@ -274,7 +276,7 @@ fn ct_projection_reads_ignore_inactive_rgb_and_rgb_keeps_its_ct_cache_readable()
 fn light_unfiltered_reads_use_new_versions_and_encoded_equal_values_keep_versions() {
     use crate::device::{LightMode, Rgb};
 
-    setup_light!(true, device, receiver, registry, handler, ctx);
+    setup_light!(true, executor, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     function
         .observe_light(LightPatch {
@@ -344,7 +346,7 @@ fn light_unfiltered_reads_use_new_versions_and_encoded_equal_values_keep_version
 fn light_unknown_projection_edges_invalidate_filters_before_run() {
     use crate::device::{LightMode, Rgb};
 
-    setup_light!(true, device, receiver, registry, handler, ctx);
+    setup_light!(true, executor, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     block_on(async {
         let level_before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
@@ -397,7 +399,7 @@ fn light_unknown_projection_edges_invalidate_filters_before_run() {
 #[test]
 fn light_remaining_time_start_and_stop_change_versions_before_run() {
     for cluster in [8, 0x300] {
-        setup_light!(false, device, receiver, registry, handler, ctx);
+        setup_light!(false, executor, device, receiver, registry, handler, ctx);
         device.set_availability(Availability::Available);
         let function = device.functions()[0].clone();
         function
@@ -474,7 +476,7 @@ fn light_remaining_time_start_and_stop_change_versions_before_run() {
 #[test]
 fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes() {
     for rgb in [false, true] {
-        setup_light!(rgb, device, receiver, registry, handler, ctx);
+        setup_light!(rgb, executor, device, receiver, registry, handler, ctx);
         device.set_availability(Availability::Available);
         block_on(async {
             assert!(
@@ -547,7 +549,7 @@ fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes(
 
 #[test]
 fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
-    setup_light!(false, device, receiver, registry, handler, ctx);
+    setup_light!(false, executor, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     device.set_availability(Availability::Available);
     function
@@ -570,7 +572,9 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
             InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut output))
         ));
         let mut run = pin!(handler.run(&ctx));
+        let mut executor_run = pin!(executor.clone().run());
         assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(poll_once(executor_run.as_mut()).await.is_none());
         assert!(poll_once(invoke.as_mut()).await.is_none());
         let DeviceRequest::Light(first) = receiver.next_operation().await.unwrap() else {
             panic!("missing light startup")
@@ -602,7 +606,12 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
                 }
             },
             async {
-                run.as_mut().await.unwrap();
+                futures_lite::future::or(run.as_mut(), async {
+                    executor_run.as_mut().await;
+                    Ok::<(), rs_matter::error::Error>(())
+                })
+                .await
+                .unwrap();
             },
         )
         .await;
@@ -651,7 +660,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                 .collect(),
         };
         let (device, mut receivers) = crate::device::PhysicalDevice::new(description);
-        setup_light!(@source (device,receivers.remove(0)),device,receiver,registry,handler,ctx);
+        setup_light!(@source (device,receivers.remove(0)),executor,device,receiver,registry,handler,ctx);
         let function = device.functions()[0].clone();
         device.set_availability(Availability::Available);
         function.observe(true);
@@ -766,7 +775,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
 
 #[test]
 fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_power() {
-    setup_light!(false, device, receiver, registry, handler, ctx);
+    setup_light!(false, executor, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     device.set_availability(Availability::Available);
     function
@@ -858,7 +867,7 @@ fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_po
 fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
     use crate::device::{LightColorTarget, LightMode};
 
-    setup_light!(true, device, receiver, registry, handler, ctx);
+    setup_light!(true, executor, device, receiver, registry, handler, ctx);
     device.set_availability(Availability::Available);
     let function = device.functions()[0].clone();
     function.observe(true);
@@ -988,6 +997,7 @@ fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
 fn on_off_only_light_rejects_absent_dimensions_and_keeps_real_power_control() {
     setup_light!(
         @caps &[crate::device::Capability::OnOff],
+        executor,
         device,
         receiver,
         registry,
@@ -1090,6 +1100,7 @@ fn color_temperature_without_brightness_controls_color_and_rejects_level_and_rgb
                 step: 1,
             }),
         ],
+        executor,
         device,
         receiver,
         registry,
@@ -1175,6 +1186,7 @@ fn rgb_without_temperature_or_brightness_controls_hue_and_rejects_ct_and_level()
             crate::device::Capability::OnOff,
             crate::device::Capability::ColorRgb,
         ],
+        executor,
         device,
         receiver,
         registry,
