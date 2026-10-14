@@ -5,7 +5,6 @@ mod error;
 mod identity;
 mod lock;
 mod matter;
-mod migration;
 mod registry;
 mod store;
 mod xiaomi;

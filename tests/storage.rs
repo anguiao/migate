@@ -9,18 +9,6 @@ use migate::{
 use rusqlite::Connection;
 use std::{error::Error as _, fs};
 
-const LEGACY_SCHEMA: &str = r#"
-CREATE TABLE identity (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    bridge_id TEXT NOT NULL CHECK (length(bridge_id) = 32),
-    light_id TEXT NOT NULL CHECK (length(light_id) = 32 AND light_id <> bridge_id)
-) STRICT;
-CREATE TABLE blobs (
-    key INTEGER PRIMARY KEY CHECK (key BETWEEN 0 AND 65535),
-    value BLOB NOT NULL
-) STRICT;
-"#;
-
 #[test]
 fn initializes_and_restores_identity_without_power() {
     let root = tempfile::tempdir().unwrap();
@@ -34,7 +22,7 @@ fn initializes_and_restores_identity_without_power() {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            6
+            7
         );
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
@@ -277,78 +265,66 @@ fn private_permissions() {
 }
 
 #[test]
-fn migrates_unversioned_storage_without_changing_existing_data() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("state.db");
-    let db = Connection::open(&path).unwrap();
-    db.execute_batch(LEGACY_SCHEMA).unwrap();
-    db.execute(
-        "INSERT INTO identity (id, bridge_id, light_id) VALUES (1, ?1, ?2)",
-        [
-            "11111111111111111111111111111111",
-            "22222222222222222222222222222222",
-        ],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO blobs (key, value) VALUES (7, ?1)",
-        [b"matter".as_slice()],
-    )
-    .unwrap();
-    drop(db);
-
-    let store = Store::open(dir.path()).unwrap();
-    assert_eq!(
-        store.load_identity().unwrap().bridge_id,
-        "11111111111111111111111111111111"
-    );
-    assert_eq!(
-        store.matter().get(7).unwrap().as_deref(),
-        Some(b"matter".as_slice())
-    );
-    assert!(store.xiaomi().load().unwrap().is_none());
-
-    let db = Connection::open(path).unwrap();
-    assert_eq!(
-        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        6
-    );
-}
-
-#[test]
-fn rejects_unsupported_or_damaged_schemas_without_changing_data() {
-    for (setup, expected) in [
-        (
-            "PRAGMA user_version = 7; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
-            "future",
-        ),
-        (
-            "PRAGMA user_version = 1; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('missing');",
-            "missing",
-        ),
-        (
-            "CREATE TABLE identity (id INTEGER PRIMARY KEY, bridge_id INTEGER NOT NULL, light_id TEXT NOT NULL) STRICT;
-             CREATE TABLE blobs (key INTEGER PRIMARY KEY, value BLOB NOT NULL) STRICT;
-             CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('damaged');",
-            "damaged",
-        ),
-    ] {
+fn rejects_incompatible_versions_without_changing_data() {
+    for version in [0, 6, 8] {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
+        let store = Store::open(dir.path()).unwrap();
+        let identity = store.load_identity().unwrap();
+        store.matter().put(7, b"paired").unwrap();
+        let path = store.path().to_owned();
+        drop(store);
         let db = Connection::open(&path).unwrap();
-        db.execute_batch(setup).unwrap();
+        db.pragma_update(None, "user_version", version).unwrap();
         drop(db);
+        let original = fs::read(&path).unwrap();
 
         let error = Store::open(dir.path()).err().unwrap();
         assert_eq!(error.path(), path);
-        let db = Connection::open(error.path()).unwrap();
+        assert_eq!(error.operation(), "validate database schema");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("version {version} is not supported"))
+        );
+        assert!(error.to_string().contains("expected version 7"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let db = Connection::open(&path).unwrap();
         assert_eq!(
-            db.query_row("SELECT value FROM marker", [], |row| row
+            db.query_row("SELECT bridge_id FROM identity", [], |row| row
                 .get::<_, String>(0))
                 .unwrap(),
-            expected
+            identity.bridge_id
         );
+        assert_eq!(
+            db.query_row("SELECT value FROM blobs WHERE key=7", [], |row| row
+                .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            b"paired"
+        );
+    }
+}
+
+#[test]
+fn corrupt_current_identity_is_rejected_without_regenerating_data() {
+    for mutation in [
+        "UPDATE identity SET bridge_id='zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'",
+        "PRAGMA ignore_check_constraints=ON; UPDATE identity SET id=2",
+        "PRAGMA ignore_check_constraints=ON; INSERT INTO identity VALUES(2,'44444444444444444444444444444444')",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.matter().put(7, b"paired").unwrap();
+        let path = store.path().to_owned();
+        drop(store);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(mutation)
+            .unwrap();
+        let original = fs::read(&path).unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert!(store.load_identity().is_err(), "{mutation}");
+        assert_eq!(store.matter().get(7).unwrap(), Some(b"paired".to_vec()));
+        assert_eq!(fs::read(&path).unwrap(), original);
     }
 }
 
@@ -368,44 +344,6 @@ fn invalid_current_schema_reports_sql_errors_without_replacing_identity() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        6
-    );
-}
-
-#[test]
-fn failed_migration_rolls_back_version_and_preserves_legacy_data() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("state.db");
-    let db = Connection::open(&path).unwrap();
-    db.execute_batch(LEGACY_SCHEMA).unwrap();
-    db.execute(
-        "INSERT INTO identity (id, bridge_id, light_id) VALUES (1, ?1, ?2)",
-        [
-            "11111111111111111111111111111111",
-            "22222222222222222222222222222222",
-        ],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO blobs (key, value) VALUES (7, ?1)",
-        [b"matter".as_slice()],
-    )
-    .unwrap();
-    db.execute_batch("CREATE VIEW xiaomi_auth AS SELECT 1 AS id;")
-        .unwrap();
-    drop(db);
-
-    assert!(Store::open(dir.path()).is_err());
-    let db = Connection::open(path).unwrap();
-    assert_eq!(
-        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.query_row("SELECT value FROM blobs WHERE key = 7", [], |row| row
-            .get::<_, Vec<u8>>(0))
-            .unwrap(),
-        b"matter"
+        7
     );
 }

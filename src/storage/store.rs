@@ -5,7 +5,6 @@ use super::{
     identity::{self, Identity},
     lock,
     matter::MatterStore,
-    migration,
     xiaomi::XiaomiStore,
 };
 use rusqlite::Connection;
@@ -40,6 +39,20 @@ impl Store {
 
         let mut connection = Connection::open(&path)
             .map_err(|e| StorageError::database(&path, "open database", e))?;
+        if !new {
+            let version = connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .map_err(|error| StorageError::database(&path, "read database version", error))?;
+            if version != 7 {
+                return Err(StorageError::new(
+                    &path,
+                    "validate database schema",
+                    format!(
+                        "Database schema version {version} is not supported; expected version 7"
+                    ),
+                ));
+            }
+        }
         private_permissions(&path, 0o600)?;
         connection
             .execute_batch("PRAGMA journal_mode = DELETE; PRAGMA synchronous = EXTRA;")
@@ -47,14 +60,8 @@ impl Store {
         if new {
             initialize(&mut connection)
                 .map_err(|e| StorageError::database(&path, "initialize database", e))?;
-        } else {
-            migration::migrate(&mut connection).map_err(|error| match error {
-                migration::MigrationError::Database(error) => {
-                    StorageError::database(&path, "migrate database", error)
-                }
-                error => StorageError::new(&path, "validate database schema", error),
-            })?;
         }
+
         Ok(Self {
             inner: Rc::new(Inner { path, connection }),
         })
@@ -111,7 +118,7 @@ fn require_empty_directory(directory: &Path) -> Result<(), StorageError> {
 
 fn initialize(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
-    transaction.execute_batch(migration::SCHEMA)?;
+    transaction.execute_batch(include_str!("schema.sql"))?;
     identity::insert(&transaction)?;
     transaction.commit()
 }

@@ -1,6 +1,6 @@
 use super::{StorageError, Store};
 use crate::{
-    device::{Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription},
+    device::{Capability, Category, DeviceKey, PhysicalDeviceDescription},
     xiaomi::{
         capability::{
             ParsedDevice, ParsedFunction, PropertyBinding, is_light_type, is_outlet_type,
@@ -9,7 +9,6 @@ use crate::{
     },
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedPhysicalDevice {
@@ -43,13 +42,6 @@ pub struct CachedScope {
 #[derive(Clone)]
 pub struct DeviceStore {
     pub(super) store: Store,
-}
-#[derive(Serialize, Deserialize)]
-struct CachedFunction {
-    id: String,
-    label: String,
-    siid: u32,
-    piid: u32,
 }
 impl DeviceStore {
     pub(super) fn new(store: Store) -> Self {
@@ -351,36 +343,4 @@ pub(super) fn load_cached(
     };
     validate_cached(&cached).map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(Some(cached))
-}
-
-pub(super) fn migrate_functions_v4(functions: &str) -> rusqlite::Result<String> {
-    let functions: Vec<CachedFunction> =
-        serde_json::from_str(functions).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let functions = functions
-        .into_iter()
-        .map(|function| ParsedFunction {
-            description: FunctionDescription {
-                id: function.id,
-                label: function.label,
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
-            },
-            power: Some(PropertyBinding {
-                siid: function.siid,
-                piid: function.piid,
-            }),
-            lighting: None,
-        })
-        .collect::<Vec<_>>();
-    if functions.is_empty()
-        || functions.iter().any(|function| {
-            function.description.id.is_empty()
-                || function
-                    .power
-                    .is_none_or(|power| power.siid == 0 || power.piid == 0)
-        })
-    {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    serde_json::to_string(&functions).map_err(|_| rusqlite::Error::InvalidQuery)
 }

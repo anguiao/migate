@@ -304,8 +304,8 @@ pub(super) fn compatible_light_member(
     let Some(cached) = load_cached(connection, uid, home_id, key)? else {
         return Ok(false);
     };
-    // A legacy group cache can still look like one main light; never treat it
-    // as an ordinary member before an explicit role migration.
+    // A group description can look like one main light, but groups cannot
+    // serve as ordinary members.
     if crate::xiaomi::capability::is_light_group(key, &cached.model) {
         return Ok(false);
     }
