@@ -365,6 +365,146 @@ fn render_applied(snapshot: &RegistrySnapshot, labels: &Labels, did: Option<&str
     }
 }
 
+/// The pending configuration header. A recorded apply failure is part of the
+/// pending context only: the applied configuration stays authoritative until
+/// the candidate is committed, and a failure with nothing pending is never
+/// presented as current.
+fn pending_header(snapshot: &RegistrySnapshot, apply_error: Option<&str>) -> String {
+    let applied = match snapshot.applied.confirmed {
+        Some(version) => format!("applied version {version}."),
+        None => "no committed version is applied.".into(),
+    };
+    let mut header = format!("Configuration: confirmed changes are pending application; {applied}");
+    if let Some(error) = apply_error {
+        header.push('\n');
+        header.push_str(&format!(
+            "Last configuration apply failed: {error}; the applied configuration is still in use, retrying."
+        ));
+    }
+    header
+}
+
+/// One confirmed candidate group compared with the currently applied group.
+/// The pending set is complete, so an applied group with no observable field
+/// change is omitted instead of guessing why the candidate exists. The
+/// summary names member and derived-description changes instead of repeating
+/// the whole fixed description.
+fn pending_group_line(
+    group: &GroupConfiguration,
+    applied: Option<&AppliedGroup>,
+    labels: &Labels,
+) -> Option<String> {
+    let names = member_names(labels, &group.members);
+    let capabilities = capability_list(&group.capabilities);
+    let Some(applied) = applied else {
+        return Some(format!(
+            "+ {} ({}): new group; members: {names}; capabilities: {capabilities}.",
+            group.key.id, group.label
+        ));
+    };
+    let mut changes = Vec::new();
+    if applied.members != group.members {
+        let applied_names = member_names(labels, &applied.members);
+        changes.push(format!("members: {names} (applied: {applied_names})"));
+    }
+    let applied_capabilities = applied.description().capabilities;
+    if applied_capabilities != group.capabilities {
+        changes.push(format!(
+            "capabilities: {capabilities} (applied: {})",
+            capability_list(&applied_capabilities)
+        ));
+    }
+    if applied.label != group.label {
+        changes.push(format!(
+            "name: {} (applied: {})",
+            group.label, applied.label
+        ));
+    }
+    if changes.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "~ {} ({}): {}.",
+        group.key.id,
+        group.label,
+        changes.join("; ")
+    ))
+}
+
+/// Render confirmed changes, optionally restricted to a selected DID. A member
+/// moving between groups reports both the relation it leaves and the one it joins.
+fn format_pending_configuration(
+    snapshot: &RegistrySnapshot,
+    labels: &Labels,
+    did: Option<&str>,
+    apply_error: Option<&str>,
+) -> Option<String> {
+    let pending = snapshot.pending.as_ref()?;
+    let mut lines = vec![pending_header(snapshot, apply_error)];
+    for group in &pending.groups {
+        let applied = snapshot
+            .applied
+            .groups
+            .iter()
+            .find(|applied| applied.key == group.key);
+        if did.is_some_and(|did| {
+            group.key.id != did
+                && !group.members.iter().any(|member| member.id == did)
+                && !applied.is_some_and(|group| group.members.iter().any(|member| member.id == did))
+        }) {
+            continue;
+        }
+        match pending_group_line(group, applied, labels) {
+            Some(line) => lines.push(format!("  {line}")),
+            // A complete candidate can be waiting because another relation changed.
+            None if did.is_some_and(|did| group.key.id == did) => lines.push(format!(
+                "  {} ({}): relation and description unchanged.",
+                group.key.id, group.label
+            )),
+            None => {}
+        }
+    }
+    for applied in &snapshot.applied.groups {
+        if pending.groups.iter().any(|group| group.key == applied.key)
+            || did.is_some_and(|did| {
+                applied.key.id != did && !applied.members.iter().any(|member| member.id == did)
+            })
+        {
+            continue;
+        }
+        lines.push(format!(
+            "  - {} ({}): group removed.",
+            applied.key.id, applied.label
+        ));
+    }
+    for (sign, from, to) in [
+        ("+", &pending.devices, &snapshot.applied.devices),
+        ("-", &snapshot.applied.devices, &pending.devices),
+    ] {
+        let names = member_names(
+            labels,
+            from.iter().map(PhysicalDevice::key).filter(|key| {
+                did.is_none_or(|did| key.id == did) && !to.iter().any(|device| device.key() == *key)
+            }),
+        );
+        if !names.is_empty() {
+            lines.push(format!("  {sign} standalone: {names}."));
+        }
+    }
+    let removed = member_names(
+        labels,
+        pending
+            .removed
+            .iter()
+            .filter(|key| did.is_none_or(|did| key.id == did)),
+    );
+    if !removed.is_empty() {
+        let suffix = if did.is_some() { "" } else { "." };
+        lines.push(format!("  confirmed removed devices: {removed}{suffix}"));
+    }
+    (did.is_none() || lines.len() > 1).then(|| lines.join("\n"))
+}
+
 /// A confirmed candidate group without an applied endpoint is never called
 /// published and never executes commands.
 fn render_candidate(group: &GroupConfiguration, labels: &Labels) -> String {
@@ -436,12 +576,19 @@ pub async fn handle_line(
 ) -> Result<Option<String>, StorageError> {
     let words = line.split_whitespace().collect::<Vec<_>>();
     let snapshot = registry.snapshot();
+    let apply_error = registry.apply_error();
     let text = match words.as_slice() {
         [] => return Ok(None),
         ["help"] => format!("{COMMAND_HELP}\n{}", status.render(now)),
         ["list"] => {
             let labels = labels(store, &snapshot)?;
             let mut text = render_applied(&snapshot, &labels, None);
+            if let Some(pending) =
+                format_pending_configuration(&snapshot, &labels, None, apply_error.as_deref())
+            {
+                text.push('\n');
+                text.push_str(&pending);
+            }
             for pending in status.pending() {
                 let name = if pending.group {
                     pending_name(store, &pending)?
@@ -462,6 +609,12 @@ pub async fn handle_line(
         ["status"] => {
             let labels = labels(store, &snapshot)?;
             let mut text = render_applied(&snapshot, &labels, None);
+            if let Some(pending) =
+                format_pending_configuration(&snapshot, &labels, None, apply_error.as_deref())
+            {
+                text.push('\n');
+                text.push_str(&pending);
+            }
             text.push('\n');
             text.push_str(&status.render_devices(now, None, &snapshot));
             text
@@ -509,6 +662,16 @@ pub async fn handle_line(
             };
             if let Some(pending) = &adapter_pending {
                 sections.push(format_pending(pending, &pending_name(store, pending)?));
+            }
+            if (applied || live.is_some())
+                && let Some(pending) = format_pending_configuration(
+                    &snapshot,
+                    &labels,
+                    Some(did),
+                    apply_error.as_deref(),
+                )
+            {
+                sections.push(pending);
             }
             sections.push(if let Some(group) = applied_group {
                 let members = group
