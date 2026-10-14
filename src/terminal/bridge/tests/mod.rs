@@ -6,7 +6,7 @@
 
 mod groups;
 
-use super::handle_line;
+use super::Terminal;
 use crate::{
     device::{
         Availability, Capability, Category, CommandError, CommandReceiver, DeviceKey,
@@ -122,15 +122,13 @@ fn onoff_only_light_renders_its_capability_and_no_light_values() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (physical, _receiver) = light("onoff", "Lamp", vec![Capability::OnOff]);
         registry.insert(physical);
         apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(list.contains("main (Light): unknown"), "{list}");
         assert!(list.contains("Capabilities: on/off."), "{list}");
         assert!(!list.contains("Brightness:"), "{list}");
@@ -138,7 +136,8 @@ fn onoff_only_light_renders_its_capability_and_no_light_values() {
         assert!(!list.contains("RGB:"), "{list}");
         assert!(!list.contains("mode:"), "{list}");
 
-        let selected = handle_line(&registry, &store.devices(), &status, "status onoff", 0)
+        let selected = terminal
+            .handle_line("status onoff", 0)
             .await
             .unwrap()
             .unwrap();
@@ -154,6 +153,7 @@ fn brightness_only_light_keeps_supported_unknown_and_omits_color_fields() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (physical, _receiver) = light(
             "brightness",
             "Lamp",
@@ -163,17 +163,15 @@ fn brightness_only_light_keeps_supported_unknown_and_omits_color_fields() {
         apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(list.contains("Capabilities: on/off, brightness."), "{list}");
         assert!(list.contains("Brightness: unknown."), "{list}");
         assert!(!list.contains("temperature:"), "{list}");
         assert!(!list.contains("RGB:"), "{list}");
         assert!(!list.contains("mode:"), "{list}");
 
-        let selected = handle_line(&registry, &store.devices(), &status, "status brightness", 0)
+        let selected = terminal
+            .handle_line("status brightness", 0)
             .await
             .unwrap()
             .unwrap();
@@ -194,6 +192,7 @@ fn temperature_only_light_keeps_intrinsic_mode_and_omits_brightness() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (physical, _receiver) = light(
             "temperature",
             "Lamp",
@@ -206,10 +205,7 @@ fn temperature_only_light_keeps_intrinsic_mode_and_omits_brightness() {
         apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains("Capabilities: on/off, temperature 2700–6500 K."),
             "{list}"
@@ -221,16 +217,11 @@ fn temperature_only_light_keeps_intrinsic_mode_and_omits_brightness() {
         assert!(!list.contains("Brightness:"), "{list}");
         assert!(!list.contains("RGB:"), "{list}");
 
-        let selected = handle_line(
-            &registry,
-            &store.devices(),
-            &status,
-            "status temperature",
-            0,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let selected = terminal
+            .handle_line("status temperature", 0)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             selected
                 .contains("main actions: color idle; awaiting startup receipt none; last none."),
@@ -247,22 +238,21 @@ fn rgb_only_light_keeps_intrinsic_mode_and_omits_brightness_and_temperature() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (physical, _receiver) =
             light("rgb", "Lamp", vec![Capability::OnOff, Capability::ColorRgb]);
         registry.insert(physical);
         apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(list.contains("Capabilities: on/off, RGB."), "{list}");
         assert!(list.contains("RGB: unknown; mode: RGB."), "{list}");
         assert!(!list.contains("Brightness:"), "{list}");
         assert!(!list.contains("temperature:"), "{list}");
 
-        let selected = handle_line(&registry, &store.devices(), &status, "status rgb", 0)
+        let selected = terminal
+            .handle_line("status rgb", 0)
             .await
             .unwrap()
             .unwrap();
@@ -282,6 +272,7 @@ fn light_without_onoff_does_not_invent_power() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (physical, _receiver) = light(
             "color",
             "Lamp",
@@ -291,10 +282,7 @@ fn light_without_onoff_does_not_invent_power() {
         apply_all_standalone(&registry);
         publish_diagnostics(&status, &registry);
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains("Capabilities: temperature 2700–6500 K."),
             "{list}"
@@ -317,6 +305,7 @@ fn mixed_group_members_render_own_capabilities_and_dimensions() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (one, _one_receiver) = light(
             "one",
             "Lamp one",
@@ -358,17 +347,15 @@ fn mixed_group_members_render_own_capabilities_and_dimensions() {
             .unwrap();
         publish_diagnostics(&status, &registry);
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(list.contains("Capabilities: on/off, brightness."), "{list}");
         assert!(
             list.contains("Capabilities: on/off, brightness, temperature 2700–6500 K, RGB."),
             "{list}"
         );
 
-        let group = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let group = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -376,7 +363,8 @@ fn mixed_group_members_render_own_capabilities_and_dimensions() {
         assert_eq!(occurrences(&group, "color idle"), 1, "{group}");
         assert_eq!(occurrences(&group, "brightness idle"), 2, "{group}");
 
-        let one_status = handle_line(&registry, &store.devices(), &status, "status one", 0)
+        let one_status = terminal
+            .handle_line("status one", 0)
             .await
             .unwrap()
             .unwrap();
@@ -384,7 +372,8 @@ fn mixed_group_members_render_own_capabilities_and_dimensions() {
         assert!(!one_status.contains("temperature:"), "{one_status}");
         assert!(!one_status.contains("RGB:"), "{one_status}");
 
-        let two_status = handle_line(&registry, &store.devices(), &status, "status two", 0)
+        let two_status = terminal
+            .handle_line("status two", 0)
             .await
             .unwrap()
             .unwrap();
@@ -403,6 +392,7 @@ fn diagnostics_without_a_matching_function_keep_only_receipt_and_last_info() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (physical, mut receiver) = light(
             "one",
             "Lamp",
@@ -453,7 +443,8 @@ fn diagnostics_without_a_matching_function_keep_only_receipt_and_last_info() {
             }],
         });
 
-        let selected = handle_line(&registry, &store.devices(), &status, "status one", 0)
+        let selected = terminal
+            .handle_line("status one", 0)
             .await
             .unwrap()
             .unwrap();

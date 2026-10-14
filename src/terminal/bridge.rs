@@ -6,10 +6,11 @@ use crate::{
         Function, FunctionSnapshot, GroupConfiguration, GroupDescription, GroupSnapshot, LightMode,
         PhysicalDevice, Power, RegistrySnapshot, Rgb,
     },
+    lighting::{LightingExecutor, clock::SystemClock, group::Fanout},
     storage::{DeviceStore, StorageError},
     xiaomi::adapter::PendingDevice,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID [channel], off DID [channel], help\nUse list to find stable channel keys. A single-channel device may omit channel; channel is required for a multi-channel device.";
 fn invalid(status: &AuthStatus, now: i64, reason: &str) -> String {
     format!("{reason}\n{COMMAND_HELP}\n{}", status.render(now))
@@ -558,224 +559,307 @@ fn pending_name(store: &DeviceStore, pending: &PendingDevice) -> Result<String, 
     }
     Ok(pending.name.clone())
 }
-/// Terminal on/off commands select physical member DIDs.
-fn group_command_refusal(status: &AuthStatus, now: i64, did: &str, member: Option<&str>) -> String {
-    let example = member.map_or_else(String::new, |member| format!(", for example {member}"));
-    invalid(
-        status,
-        now,
-        &format!("{did} is a light group; select a member DID for on/off{example}."),
-    )
+/// A terminal session sharing the physical lighting scheduler with Matter.
+/// Standalone sessions drive their scheduler through `run_input`.
+pub struct Terminal<'a> {
+    registry: DeviceRegistry,
+    store: DeviceStore,
+    status: &'a AuthStatus,
+    executor: Rc<LightingExecutor>,
+    /// The session created the executor and therefore owns its runner.
+    owned: bool,
 }
-pub async fn handle_line(
-    registry: &DeviceRegistry,
-    store: &DeviceStore,
-    status: &AuthStatus,
-    line: &str,
-    now: i64,
-) -> Result<Option<String>, StorageError> {
-    let words = line.split_whitespace().collect::<Vec<_>>();
-    let snapshot = registry.snapshot();
-    let apply_error = registry.apply_error();
-    let text = match words.as_slice() {
-        [] => return Ok(None),
-        ["help"] => format!("{COMMAND_HELP}\n{}", status.render(now)),
-        ["list"] => {
-            let labels = labels(store, &snapshot)?;
-            let mut text = render_applied(&snapshot, &labels, None);
-            if let Some(pending) =
-                format_pending_configuration(&snapshot, &labels, None, apply_error.as_deref())
-            {
-                text.push('\n');
-                text.push_str(&pending);
-            }
-            for pending in status.pending() {
-                let name = if pending.group {
-                    pending_name(store, &pending)?
-                } else {
-                    let key = DeviceKey::new("xiaomi", &pending.did);
-                    match snapshot.devices.iter().find(|device| device.key() == &key) {
-                        Some(physical) => physical.label(),
-                        None => store
-                            .load_published(&key)?
-                            .map(|stored| stored.label)
-                            .unwrap_or_else(|| pending.name.clone()),
-                    }
-                };
-                text.push_str(&format!("\n{}", format_pending(&pending, &name)));
-            }
-            text
+
+impl<'a> Terminal<'a> {
+    /// The production entry used by a standalone terminal session and by
+    /// integration tests. The session creates and keeps the executor used by
+    /// every command it handles, and [`Terminal::run_input`] drives it.
+    pub fn new(registry: &DeviceRegistry, store: &DeviceStore, status: &'a AuthStatus) -> Self {
+        Self {
+            registry: registry.clone(),
+            store: store.clone(),
+            status,
+            executor: LightingExecutor::new(Rc::new(SystemClock::new())),
+            owned: true,
         }
-        ["status"] => {
-            let labels = labels(store, &snapshot)?;
-            let mut text = render_applied(&snapshot, &labels, None);
-            if let Some(pending) =
-                format_pending_configuration(&snapshot, &labels, None, apply_error.as_deref())
-            {
-                text.push('\n');
-                text.push_str(&pending);
-            }
-            text.push('\n');
-            text.push_str(&status.render_devices(now, None, &snapshot));
-            text
+    }
+
+    /// Runtime entry: share the one executor the Matter handlers also use. The
+    /// runtime runner keeps it advancing, so this session does not drive it.
+    pub(crate) fn with_executor(
+        registry: &DeviceRegistry,
+        store: &DeviceStore,
+        status: &'a AuthStatus,
+        executor: Rc<LightingExecutor>,
+    ) -> Self {
+        Self {
+            registry: registry.clone(),
+            store: store.clone(),
+            status,
+            executor,
+            owned: false,
         }
-        ["status", did] => {
-            let labels = labels(store, &snapshot)?;
-            let applied_group = snapshot
-                .applied
-                .groups
-                .iter()
-                .find(|group| group.key.id == *did);
-            let applied_member = snapshot
-                .applied
-                .groups
-                .iter()
-                .any(|group| group.members.iter().any(|member| member.id == *did));
-            let applied_standalone = snapshot
-                .applied
-                .devices
-                .iter()
-                .any(|device| device.key().id == *did);
-            let candidate = snapshot
-                .pending
-                .as_ref()
-                .and_then(|pending| pending.groups.iter().find(|group| group.key.id == *did));
-            let live = snapshot
-                .devices
-                .iter()
-                .find(|device| device.key().id == *did);
-            let adapter_pending = status
-                .pending()
-                .into_iter()
-                .find(|pending| pending.did == *did);
-            let applied = applied_group.is_some() || applied_member || applied_standalone;
-            let mut sections = if applied {
-                vec![render_applied(&snapshot, &labels, Some(did))]
-            } else if let Some(device) = live {
-                vec![render_live(device), not_published(&snapshot, did)]
-            } else if let Some(group) = candidate {
-                vec![render_candidate(group, &labels)]
-            } else if adapter_pending.is_some() {
-                Vec::new()
-            } else {
-                return Ok(Some(invalid(status, now, "Unknown device DID.")));
-            };
-            if let Some(pending) = &adapter_pending {
-                sections.push(format_pending(pending, &pending_name(store, pending)?));
-            }
-            if (applied || live.is_some())
-                && let Some(pending) = format_pending_configuration(
-                    &snapshot,
-                    &labels,
-                    Some(did),
-                    apply_error.as_deref(),
-                )
-            {
-                sections.push(pending);
-            }
-            sections.push(if let Some(group) = applied_group {
-                let members = group
-                    .members
-                    .iter()
-                    .map(|member| member.id.clone())
-                    .collect::<Vec<_>>();
-                status.render_group_devices(now, &members, &snapshot)
-            } else if applied || live.is_some() {
-                status.render_devices(now, Some(did), &snapshot)
-            } else {
-                status.render(now)
-            });
-            sections.join("\n")
-        }
-        [verb @ ("on" | "off"), did, channel @ ..] if channel.len() <= 1 => {
-            let applied_group = snapshot
-                .applied
-                .groups
-                .iter()
-                .find(|group| group.key.id == *did);
-            let candidate_group = snapshot
-                .pending
-                .as_ref()
-                .and_then(|pending| pending.groups.iter().find(|group| group.key.id == *did));
-            let pending_group = status
-                .pending()
-                .into_iter()
-                .find(|pending| pending.did == *did && pending.group);
-            if let Some(group) = applied_group {
-                return Ok(Some(group_command_refusal(
-                    status,
-                    now,
-                    did,
-                    group.members.first().map(|member| member.id.as_str()),
-                )));
-            }
-            if candidate_group.is_some() || pending_group.is_some() {
-                return Ok(Some(invalid(
-                    status,
-                    now,
-                    &format!("{did} is a light group waiting to apply; it is not published yet."),
-                )));
-            }
-            let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
-                return Ok(Some(invalid(status, now, "Unknown device DID.")));
-            };
-            let function = if let Some(channel) = channel.first() {
-                physical.function(channel)
-            } else if let [function] = physical.functions() {
-                Some(function.clone())
-            } else {
-                return Ok(Some(invalid(
-                    status,
-                    now,
-                    "A channel is required for this device.",
-                )));
-            };
-            let Some(function) = function else {
-                return Ok(Some(invalid(status, now, "Unknown channel.")));
-            };
-            let target = if physical.functions().len() == 1 {
-                did.to_string()
-            } else {
-                format!("{did}/{}", function.function_key().id)
-            };
-            match function
-                .execute(if *verb == "on" {
-                    Command::On
-                } else {
-                    Command::Off
-                })
-                .await
-            {
-                Ok(_) => {
-                    log::info!("terminal {target} {verb}: accepted");
-                    format!("{target}: command accepted")
+    }
+
+    /// Drive this session's executor. The future never completes; drop it to
+    /// stop the session. Callers that handle lines without [`Terminal::run_input`]
+    /// must poll this alongside their input so member commands keep executing.
+    pub async fn run(&self) {
+        self.executor.clone().run().await
+    }
+
+    /// Handle one terminal line. A group command returns as soon as one member
+    /// completely accepted; the remaining members keep executing.
+    pub async fn handle_line(&self, line: &str, now: i64) -> Result<Option<String>, StorageError> {
+        let words = line.split_whitespace().collect::<Vec<_>>();
+        let snapshot = self.registry.snapshot();
+        let apply_error = self.registry.apply_error();
+        let text = match words.as_slice() {
+            [] => return Ok(None),
+            ["help"] => format!("{COMMAND_HELP}\n{}", self.status.render(now)),
+            ["list"] => {
+                let labels = labels(&self.store, &snapshot)?;
+                let mut text = render_applied(&snapshot, &labels, None);
+                if let Some(pending) =
+                    format_pending_configuration(&snapshot, &labels, None, apply_error.as_deref())
+                {
+                    text.push('\n');
+                    text.push_str(&pending);
                 }
-                Err(error) => format!("{target}: {error}"),
+                for pending in self.status.pending() {
+                    let name = if pending.group {
+                        pending_name(&self.store, &pending)?
+                    } else {
+                        let key = DeviceKey::new("xiaomi", &pending.did);
+                        match snapshot.devices.iter().find(|device| device.key() == &key) {
+                            Some(physical) => physical.label(),
+                            None => self
+                                .store
+                                .load_published(&key)?
+                                .map(|stored| stored.label)
+                                .unwrap_or_else(|| pending.name.clone()),
+                        }
+                    };
+                    text.push_str(&format!("\n{}", format_pending(&pending, &name)));
+                }
+                text
             }
+            ["status"] => {
+                let labels = labels(&self.store, &snapshot)?;
+                let mut text = render_applied(&snapshot, &labels, None);
+                if let Some(pending) =
+                    format_pending_configuration(&snapshot, &labels, None, apply_error.as_deref())
+                {
+                    text.push('\n');
+                    text.push_str(&pending);
+                }
+                text.push('\n');
+                text.push_str(&self.status.render_devices(now, None, &snapshot));
+                text
+            }
+            ["status", did] => {
+                let labels = labels(&self.store, &snapshot)?;
+                let applied_group = snapshot
+                    .applied
+                    .groups
+                    .iter()
+                    .find(|group| group.key.id == *did);
+                let applied_member = snapshot
+                    .applied
+                    .groups
+                    .iter()
+                    .any(|group| group.members.iter().any(|member| member.id == *did));
+                let applied_standalone = snapshot
+                    .applied
+                    .devices
+                    .iter()
+                    .any(|device| device.key().id == *did);
+                let candidate = snapshot
+                    .pending
+                    .as_ref()
+                    .and_then(|pending| pending.groups.iter().find(|group| group.key.id == *did));
+                let live = snapshot
+                    .devices
+                    .iter()
+                    .find(|device| device.key().id == *did);
+                let adapter_pending = self
+                    .status
+                    .pending()
+                    .into_iter()
+                    .find(|pending| pending.did == *did);
+                let applied = applied_group.is_some() || applied_member || applied_standalone;
+                let mut sections = if applied {
+                    vec![render_applied(&snapshot, &labels, Some(did))]
+                } else if let Some(device) = live {
+                    vec![render_live(device), not_published(&snapshot, did)]
+                } else if let Some(group) = candidate {
+                    vec![render_candidate(group, &labels)]
+                } else if adapter_pending.is_some() {
+                    Vec::new()
+                } else {
+                    return Ok(Some(invalid(self.status, now, "Unknown device DID.")));
+                };
+                if let Some(pending) = &adapter_pending {
+                    sections.push(format_pending(
+                        pending,
+                        &pending_name(&self.store, pending)?,
+                    ));
+                }
+                if (applied || live.is_some())
+                    && let Some(pending) = format_pending_configuration(
+                        &snapshot,
+                        &labels,
+                        Some(did),
+                        apply_error.as_deref(),
+                    )
+                {
+                    sections.push(pending);
+                }
+                sections.push(if let Some(group) = applied_group {
+                    let members = group
+                        .members
+                        .iter()
+                        .map(|member| member.id.clone())
+                        .collect::<Vec<_>>();
+                    self.status.render_group_devices(now, &members, &snapshot)
+                } else if applied || live.is_some() {
+                    self.status.render_devices(now, Some(did), &snapshot)
+                } else {
+                    self.status.render(now)
+                });
+                sections.join("\n")
+            }
+            [verb @ ("on" | "off"), did, channel @ ..] if channel.len() <= 1 => {
+                let applied_group = snapshot
+                    .applied
+                    .groups
+                    .iter()
+                    .find(|group| group.key.id == *did);
+                let candidate_group = snapshot
+                    .pending
+                    .as_ref()
+                    .and_then(|pending| pending.groups.iter().find(|group| group.key.id == *did));
+                let pending_group = self
+                    .status
+                    .pending()
+                    .into_iter()
+                    .find(|pending| pending.did == *did && pending.group);
+                if let Some(group) = applied_group {
+                    if !channel.is_empty() {
+                        return Ok(Some(invalid(
+                            self.status,
+                            now,
+                            "A light group has no channel; select a member DID for channel control.",
+                        )));
+                    }
+                    // The applied handle fixes the member snapshot now; every
+                    // member is submitted synchronously and owned by the shared
+                    // executor, so the response returns on the first complete
+                    // acceptance while the remaining members keep executing.
+                    let dispatch =
+                        self.executor
+                            .fanout(group.handle(), Fanout::Power(*verb == "on"), None);
+                    return Ok(Some(match dispatch.accepted().await {
+                        Ok(_) => {
+                            log::info!("terminal {did} {verb}: at least one member accepted");
+                            format!("{did}: at least one member accepted")
+                        }
+                        Err(error) => {
+                            log::info!("terminal {did} {verb}: all members failed: {error}");
+                            format!("{did}: all members failed: {error}")
+                        }
+                    }));
+                }
+                if candidate_group.is_some() || pending_group.is_some() {
+                    return Ok(Some(invalid(
+                        self.status,
+                        now,
+                        &format!(
+                            "{did} is a light group waiting to apply; it is not published yet."
+                        ),
+                    )));
+                }
+                let Some(physical) = self.registry.get(&DeviceKey::new("xiaomi", *did)) else {
+                    return Ok(Some(invalid(self.status, now, "Unknown device DID.")));
+                };
+                let function = if let Some(channel) = channel.first() {
+                    physical.function(channel)
+                } else if let [function] = physical.functions() {
+                    Some(function.clone())
+                } else {
+                    return Ok(Some(invalid(
+                        self.status,
+                        now,
+                        "A channel is required for this device.",
+                    )));
+                };
+                let Some(function) = function else {
+                    return Ok(Some(invalid(self.status, now, "Unknown channel.")));
+                };
+                let target = if physical.functions().len() == 1 {
+                    did.to_string()
+                } else {
+                    format!("{did}/{}", function.function_key().id)
+                };
+                match function
+                    .execute(if *verb == "on" {
+                        Command::On
+                    } else {
+                        Command::Off
+                    })
+                    .await
+                {
+                    Ok(_) => {
+                        log::info!("terminal {target} {verb}: accepted");
+                        format!("{target}: command accepted")
+                    }
+                    Err(error) => format!("{target}: {error}"),
+                }
+            }
+            _ => invalid(self.status, now, "Invalid command usage."),
+        };
+        Ok(Some(text))
+    }
+    /// Process terminal input. A session that owns its executor drives it for
+    /// as long as the input session is live, so group work keeps advancing
+    /// between and after command lines; a runtime-injected executor is already
+    /// driven by the runtime's single runner.
+    pub async fn run_input(
+        &self,
+        input: impl futures_lite::io::AsyncBufRead + Unpin,
+        output: impl futures_lite::io::AsyncWrite + Unpin,
+    ) -> Result<(), RuntimeError> {
+        if !self.owned {
+            return self.input_loop(input, output).await;
         }
-        _ => invalid(status, now, "Invalid command usage."),
-    };
-    Ok(Some(text))
-}
-/// EOF ends input while the caller continues polling every bridge service.
-pub async fn run_input(
-    registry: &DeviceRegistry,
-    store: &DeviceStore,
-    status: &AuthStatus,
-    mut input: impl futures_lite::io::AsyncBufRead + Unpin,
-    mut output: impl futures_lite::io::AsyncWrite + Unpin,
-) -> Result<(), RuntimeError> {
-    use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt};
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if input.read_line(&mut line).await? == 0 {
-            return Ok(());
-        }
-        if let Some(result) = handle_line(registry, store, status, &line, current_time()).await? {
-            output.write_all(result.as_bytes()).await?;
-            output.write_all(b"\n").await?;
-            output.flush().await?;
+        futures_lite::future::or(
+            async {
+                self.run().await;
+                Ok::<(), RuntimeError>(())
+            },
+            self.input_loop(input, output),
+        )
+        .await
+    }
+
+    /// EOF ends input while the caller continues polling every bridge service.
+    async fn input_loop(
+        &self,
+        mut input: impl futures_lite::io::AsyncBufRead + Unpin,
+        mut output: impl futures_lite::io::AsyncWrite + Unpin,
+    ) -> Result<(), RuntimeError> {
+        use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt};
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if input.read_line(&mut line).await? == 0 {
+                return Ok(());
+            }
+            if let Some(result) = self.handle_line(&line, current_time()).await? {
+                output.write_all(result.as_bytes()).await?;
+                output.write_all(b"\n").await?;
+                output.flush().await?;
+            }
         }
     }
 }

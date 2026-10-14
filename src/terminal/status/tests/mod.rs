@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::terminal::bridge;
+use crate::terminal::Terminal;
 use crate::xiaomi::auth::AuthReport;
 
 #[test]
@@ -97,17 +97,12 @@ fn bridge_help_reads_the_latest_report() {
         1_700_000_000,
     );
     let status = AuthStatus::new(checking, "/bin/migate".into(), "/data".into());
+    let terminal = Terminal::new(&registry, &store.devices(), &status);
     assert!(
-        futures_lite::future::block_on(bridge::handle_line(
-            &registry,
-            &store.devices(),
-            &status,
-            "help",
-            1_700_000_000
-        ))
-        .unwrap()
-        .unwrap()
-        .contains("Xiaomi: checking authentication (cn)...")
+        futures_lite::future::block_on(terminal.handle_line("help", 1_700_000_000))
+            .unwrap()
+            .unwrap()
+            .contains("Xiaomi: checking authentication (cn)...")
     );
 
     let authenticated = AuthReport::for_test(
@@ -120,15 +115,9 @@ fn bridge_help_reads_the_latest_report() {
         1_700_000_000,
     );
     assert!(status.replace(authenticated));
-    let help = futures_lite::future::block_on(bridge::handle_line(
-        &registry,
-        &store.devices(),
-        &status,
-        "help",
-        1_700_000_000,
-    ))
-    .unwrap()
-    .unwrap();
+    let help = futures_lite::future::block_on(terminal.handle_line("help", 1_700_000_000))
+        .unwrap()
+        .unwrap();
     assert!(help.contains("Xiaomi: authenticated (cn)."), "{help}");
     assert!(!help.contains("checking authentication"), "{help}");
 

@@ -8,10 +8,7 @@ use migate::{
         FunctionDescription, PhysicalDevice, PhysicalDeviceDescription, Power,
     },
     storage::Store,
-    terminal::{
-        AuthStatus,
-        bridge::{handle_line, run_input},
-    },
+    terminal::{AuthStatus, Terminal},
     xiaomi::{auth::AuthService, cloud::CloudClient},
 };
 fn fixture() -> (
@@ -70,6 +67,7 @@ fn fixture() -> (
 fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
     block_on(async {
         let (_dir, store, status, registry, mut receivers) = fixture();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         for invalid in [
             "on",
             "off",
@@ -83,10 +81,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
             "toggle one",
             "ON one",
         ] {
-            let result = handle_line(&registry, &store.devices(), &status, invalid, 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let result = terminal.handle_line(invalid, 0).await.unwrap().unwrap();
             assert!(
                 result.contains("Available commands:"),
                 "{invalid}: {result}"
@@ -95,22 +90,16 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
                 assert!(poll_once(receiver.next()).await.is_none());
             }
         }
-        let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "on one", 0),
-            async {
-                receivers[0].next().await.unwrap().accept().unwrap();
-            },
-        )
+        let (result, ()) = future::zip(terminal.handle_line("on one", 0), async {
+            receivers[0].next().await.unwrap().accept().unwrap();
+        })
         .await;
         assert_eq!(result.unwrap().unwrap(), "one: command accepted");
-        let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "off multi usb", 0),
-            async {
-                let request = receivers[4].next().await.unwrap();
-                assert!(!request.target);
-                request.accept().unwrap();
-            },
-        )
+        let (result, ()) = future::zip(terminal.handle_line("off multi usb", 0), async {
+            let request = receivers[4].next().await.unwrap();
+            assert!(!request.target);
+            request.accept().unwrap();
+        })
         .await;
         assert_eq!(result.unwrap().unwrap(), "multi/usb: command accepted");
         assert_eq!(
@@ -134,6 +123,7 @@ fn list_and_status_read_shared_power_and_persisted_names() {
             .set_device_label(&key, "Saved Home name")
             .unwrap();
         let stored = store.devices().load_published(&key).unwrap().unwrap();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (physical, _consumers) = PhysicalDevice::new(stored.description());
         registry.remove(&key);
         registry.insert(physical.clone());
@@ -150,15 +140,13 @@ fn list_and_status_read_shared_power_and_persisted_names() {
             )
             .unwrap();
         physical.function("usb").unwrap().observe(true);
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(list.contains("Saved Home name"));
         assert!(list.contains("usb (usb): on"));
         assert!(list.contains("one (name one)"));
         physical.set_label("Live Home name".into());
-        let selected = handle_line(&registry, &store.devices(), &status, "status multi", 0)
+        let selected = terminal
+            .handle_line("status multi", 0)
             .await
             .unwrap()
             .unwrap();
@@ -168,7 +156,8 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         assert!(selected.contains("Xiaomi: not signed in"));
         registry.remove(physical.key());
         assert!(
-            handle_line(&registry, &store.devices(), &status, "on multi usb", 0)
+            terminal
+                .handle_line("on multi usb", 0)
                 .await
                 .unwrap()
                 .unwrap()
@@ -239,10 +228,8 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                 &[],
             )
             .unwrap();
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(list.contains("rgb (Saved rgb 名称): available"), "{list}");
         assert!(list.contains("main (Light): unknown"), "{list}");
         assert!(
@@ -269,7 +256,8 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                 ..Default::default()
             })
             .unwrap();
-        let partial = handle_line(&registry, &store.devices(), &status, "status rgb", 0)
+        let partial = terminal
+            .handle_line("status rgb", 0)
             .await
             .unwrap()
             .unwrap();
@@ -298,7 +286,8 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                 ..Default::default()
             })
             .unwrap();
-        let rgb = handle_line(&registry, &store.devices(), &status, "status rgb", 0)
+        let rgb = terminal
+            .handle_line("status rgb", 0)
             .await
             .unwrap()
             .unwrap();
@@ -310,10 +299,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
         );
         assert!(!rgb.contains("Saved ct 名称"));
         assert!(!rgb.contains("name one"));
-        let ct = handle_line(&registry, &store.devices(), &status, "status ct", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let ct = terminal.handle_line("status ct", 0).await.unwrap().unwrap();
         assert!(ct.contains("main (Light): on"));
         assert!(
             ct.contains("Capabilities: on/off, brightness, temperature 2700–6500 K."),
@@ -333,6 +319,7 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
 
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (physical, mut receivers) = PhysicalDevice::new(PhysicalDeviceDescription {
             key: DeviceKey::new("xiaomi", "light"),
             label: "Original name".into(),
@@ -362,18 +349,14 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
         store.devices().publish(&physical.description()).unwrap();
         registry.insert(physical.clone());
         for (line, target) in [("on light", true), ("off light main", false)] {
-            let (result, ()) = future::zip(
-                handle_line(&registry, &store.devices(), &status, line, 0),
-                async {
-                    let DeviceRequest::Power(request) =
-                        receivers[0].next_operation().await.unwrap()
-                    else {
-                        panic!("terminal power command changed lighting values")
-                    };
-                    assert_eq!(request.target, target);
-                    request.accept().unwrap();
-                },
-            )
+            let (result, ()) = future::zip(terminal.handle_line(line, 0), async {
+                let DeviceRequest::Power(request) = receivers[0].next_operation().await.unwrap()
+                else {
+                    panic!("terminal power command changed lighting values")
+                };
+                assert_eq!(request.target, target);
+                request.accept().unwrap();
+            })
             .await;
             assert_eq!(result.unwrap().unwrap(), "light: command accepted");
             let snapshot = physical.functions()[0].snapshot().lighting.unwrap();
@@ -381,16 +364,11 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
             assert_eq!(snapshot.temperature_kelvin, Some(4000));
             assert_eq!(snapshot.mode, Some(LightMode::Temperature));
         }
-        let invalid = handle_line(
-            &registry,
-            &store.devices(),
-            &status,
-            "brightness light 50",
-            0,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let invalid = terminal
+            .handle_line("brightness light 50", 0)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(invalid.contains("Invalid command usage."));
         assert!(poll_once(receivers[0].next_operation()).await.is_none());
     });
@@ -399,15 +377,10 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
 fn input_recovers_and_returns_at_eof() {
     block_on(async {
         let (_dir, store, status, registry, mut receivers) = fixture();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let mut output = Vec::new();
         future::or(
-            run_input(
-                &registry,
-                &store.devices(),
-                &status,
-                Cursor::new(b" \non one\nbad\nstatus\noff one"),
-                &mut output,
-            ),
+            terminal.run_input(Cursor::new(b" \non one\nbad\nstatus\noff one"), &mut output),
             async {
                 loop {
                     receivers[0].next().await.unwrap().accept().unwrap();
@@ -434,29 +407,20 @@ fn input_recovers_and_returns_at_eof() {
 fn input_and_output_errors_propagate() {
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
-        let error = run_input(
-            &registry,
-            &store.devices(),
-            &status,
-            Cursor::new(b"\xff\n"),
-            Vec::new(),
-        )
-        .await
-        .unwrap_err();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
+        let error = terminal
+            .run_input(Cursor::new(b"\xff\n"), Vec::new())
+            .await
+            .unwrap_err();
         assert_eq!(
             error.downcast_ref::<std::io::Error>().unwrap().kind(),
             std::io::ErrorKind::InvalidData
         );
         assert!(
-            run_input(
-                &registry,
-                &store.devices(),
-                &status,
-                Cursor::new(b"status\n"),
-                Cursor::new(&mut [0u8; 0][..])
-            )
-            .await
-            .is_err()
+            terminal
+                .run_input(Cursor::new(b"status\n"), Cursor::new(&mut [0u8; 0][..]))
+                .await
+                .is_err()
         );
     })
 }
@@ -464,6 +428,7 @@ fn input_and_output_errors_propagate() {
 fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         store
             .devices()
             .set_device_label(&DeviceKey::new("xiaomi", "multi"), "Home edited name")
@@ -488,17 +453,11 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             routing: Default::default(),
             devices: Vec::new(),
         });
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(list.contains("Home edited name"));
         assert!(!list.contains("New cloud name"));
         assert!(list.contains("subscription rejected"));
-        let help = handle_line(&registry, &store.devices(), &status, "help", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let help = terminal.handle_line("help", 0).await.unwrap().unwrap();
         assert!(help.contains("channel"));
         assert!(help.contains("list"));
         assert!(help.contains("required"));
@@ -510,6 +469,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
     use migate::xiaomi::adapter::*;
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
             .local_status()
             .unwrap();
@@ -539,16 +499,11 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
                 })
                 .collect(),
         });
-        let selected = handle_line(
-            &registry,
-            &store.devices(),
-            &status,
-            "status multi",
-            1_700_000_000,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let selected = terminal
+            .handle_line("status multi", 1_700_000_000)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(selected.contains("multi (name multi)"), "{selected}");
         assert!(selected.contains("multi routing:"), "{selected}");
         assert!(!selected.contains("one routing:"), "{selected}");
@@ -556,26 +511,23 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         assert!(selected.contains("Gateway: connected (hub)."), "{selected}");
         assert!(selected.contains("Routing: cloud-first"), "{selected}");
         assert!(selected.contains("2023-11-14T22:14:20Z"), "{selected}");
-        let all = handle_line(
-            &registry,
-            &store.devices(),
-            &status,
-            "status",
-            1_700_000_000,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let all = terminal
+            .handle_line("status", 1_700_000_000)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(all.contains("one routing:"));
         assert!(all.contains("multi routing:"));
-        let list = handle_line(&registry, &store.devices(), &status, "list", 1_700_000_000)
+        let list = terminal
+            .handle_line("list", 1_700_000_000)
             .await
             .unwrap()
             .unwrap();
         assert!(list.contains("one (name one)"));
         assert!(!list.contains("routing:"));
         assert!(!list.contains("Selected control:"));
-        let help = handle_line(&registry, &store.devices(), &status, "help", 1_700_000_000)
+        let help = terminal
+            .handle_line("help", 1_700_000_000)
             .await
             .unwrap()
             .unwrap();
@@ -746,6 +698,7 @@ fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
         let (_dir, store, status, registry, _receivers) = group_fixture();
         let one = registry.get(&DeviceKey::new("xiaomi", "one")).unwrap();
         let two = registry.get(&DeviceKey::new("xiaomi", "two")).unwrap();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         one.functions()[0]
             .observe_light(LightPatch {
                 power: Some(true),
@@ -760,10 +713,7 @@ fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
             })
             .unwrap();
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains("group.1 (Reading lamp): group; members: one (Lamp one), two (Lamp two)"),
             "{list}"
@@ -802,7 +752,8 @@ fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
             ],
             "member reordering never renumbers the remaining identities"
         );
-        let reordered = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let reordered = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -819,7 +770,8 @@ fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
         assert!(reordered.contains("main (Light): off"), "{reordered}");
         assert!(!reordered.contains("name one"), "{reordered}");
 
-        let member = handle_line(&registry, &store.devices(), &status, "status one", 0)
+        let member = terminal
+            .handle_line("status one", 0)
             .await
             .unwrap()
             .unwrap();
@@ -832,10 +784,7 @@ fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
 
         one.set_label("Lamp".into());
         two.set_label("Lamp".into());
-        let same_names = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let same_names = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             same_names.contains("members: one (Lamp), two (Lamp)"),
             "{same_names}"
@@ -846,13 +795,11 @@ fn group_list_and_status_show_identity_members_capabilities_and_member_state() {
         registry
             .apply_configuration(3, Vec::new(), &[one.key().clone(), two.key().clone()], &[])
             .unwrap();
-        let ungrouped = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let ungrouped = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(!ungrouped.contains("Reading lamp"), "{ungrouped}");
         assert!(!ungrouped.contains("Group:"), "{ungrouped}");
-        let gone = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let gone = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -865,6 +812,7 @@ fn group_status_includes_member_routes_and_errors_while_member_status_names_its_
     use migate::xiaomi::adapter::*;
     block_on(async {
         let (_dir, store, status, registry, _receivers) = group_fixture();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
             .local_status()
             .unwrap();
@@ -902,7 +850,8 @@ fn group_status_includes_member_routes_and_errors_while_member_status_names_its_
                 },
             ],
         });
-        let group = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let group = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -921,7 +870,8 @@ fn group_status_includes_member_routes_and_errors_while_member_status_names_its_
             group.contains("Control unavailable: cloud offline."),
             "{group}"
         );
-        let member = handle_line(&registry, &store.devices(), &status, "status one", 0)
+        let member = terminal
+            .handle_line("status one", 0)
             .await
             .unwrap()
             .unwrap();
@@ -936,10 +886,67 @@ fn group_status_includes_member_routes_and_errors_while_member_status_names_its_
 }
 
 #[test]
+fn applied_group_on_off_fans_out_while_member_control_stays_single() {
+    block_on(async {
+        let (_dir, store, status, registry, mut receivers) = group_fixture();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
+        let one = registry.get(&DeviceKey::new("xiaomi", "one")).unwrap();
+        let two = registry.get(&DeviceKey::new("xiaomi", "two")).unwrap();
+
+        // The applied group commits one trigger snapshot to both members; the
+        // response returns on the first complete acceptance.
+        let mut command = Box::pin(terminal.handle_line("on group.1", 0));
+        assert!(
+            poll_once(command.as_mut()).await.is_none(),
+            "group command returned before a member acceptance"
+        );
+        let request = poll_once(receivers[0].next())
+            .await
+            .expect("first member dispatched")
+            .unwrap();
+        assert!(request.target);
+        request.accept().unwrap();
+        let result = command.await.unwrap().unwrap();
+        assert!(result.contains("at least one member accepted"), "{result}");
+        assert_eq!(one.functions()[0].snapshot().power, Power::On);
+        assert_eq!(two.functions()[0].snapshot().power.value(), None);
+        let request = poll_once(receivers[1].next())
+            .await
+            .expect("second member dispatched")
+            .unwrap();
+        assert!(request.target);
+        request.accept().unwrap();
+        assert_eq!(two.functions()[0].snapshot().power, Power::On);
+
+        // A group DID names no channel; member DIDs stay the only manual
+        // single-control target.
+        for line in ["on group.1 main", "off group.1 main"] {
+            let output = terminal.handle_line(line, 0).await.unwrap().unwrap();
+            assert!(
+                output.contains("A light group has no channel"),
+                "{line}: {output}"
+            );
+            assert!(output.contains("select a member DID"), "{line}: {output}");
+            assert!(!output.contains("command accepted"), "{line}: {output}");
+            for receiver in &mut receivers {
+                assert!(poll_once(receiver.next()).await.is_none(), "{line}");
+            }
+        }
+        let (result, ()) = future::zip(terminal.handle_line("on one", 0), async {
+            let request = receivers[0].next().await.unwrap();
+            request.accept().unwrap();
+        })
+        .await;
+        assert_eq!(result.unwrap().unwrap(), "one: command accepted");
+    })
+}
+
+#[test]
 fn unpublished_numeric_group_status_and_commands_use_the_pending_diagnostic() {
     use migate::xiaomi::adapter::*;
     block_on(async {
         let (_dir, store, status, registry, mut receivers) = group_fixture();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
             .local_status()
             .unwrap();
@@ -964,20 +971,14 @@ fn unpublished_numeric_group_status_and_commands_use_the_pending_diagnostic() {
             routing: Default::default(),
             devices: Vec::new(),
         });
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains(
                 "43 (Numeric group): pending group (group 43 waits for member descriptions: two)"
             ),
             "{list}"
         );
-        let group = handle_line(&registry, &store.devices(), &status, "status 43", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let group = terminal.handle_line("status 43", 0).await.unwrap().unwrap();
         assert!(
             group.contains(
                 "43 (Numeric group): pending group (group 43 waits for member descriptions: two)"
@@ -985,7 +986,8 @@ fn unpublished_numeric_group_status_and_commands_use_the_pending_diagnostic() {
             "{group}"
         );
         assert!(!group.contains("Unknown device DID."), "{group}");
-        let device = handle_line(&registry, &store.devices(), &status, "status three", 0)
+        let device = terminal
+            .handle_line("status three", 0)
             .await
             .unwrap()
             .unwrap();
@@ -995,10 +997,7 @@ fn unpublished_numeric_group_status_and_commands_use_the_pending_diagnostic() {
         );
         assert!(!device.contains("Unknown device DID."), "{device}");
         for line in ["on 43", "off 43"] {
-            let output = handle_line(&registry, &store.devices(), &status, line, 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let output = terminal.handle_line(line, 0).await.unwrap().unwrap();
             assert!(output.contains("waiting to apply"), "{line}: {output}");
             assert!(output.contains("not published"), "{line}: {output}");
             assert!(!output.contains("command accepted"), "{line}: {output}");
@@ -1088,6 +1087,7 @@ fn pending_group_names_keep_the_saved_identity_after_revocation_and_storage_fail
     };
     block_on(async {
         let (_dir, store, status, registry, _receivers) = persisted_group_fixture();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         // Revoke the stored relation as well, keeping the reserved identity as
         // a real unpublished group, and publish the returned confirmed version.
         let scope = ConfigurationScope {
@@ -1118,16 +1118,14 @@ fn pending_group_names_keep_the_saved_identity_after_revocation_and_storage_fail
             routing: Default::default(),
             devices: Vec::new(),
         });
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains("group.1 (Saved Home lamp): pending group"),
             "{list}"
         );
         assert!(!list.contains("Cloud rename"), "{list}");
-        let selected = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let selected = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -1145,14 +1143,8 @@ fn pending_group_names_keep_the_saved_identity_after_revocation_and_storage_fail
                 rusqlite::params!["xiaomi", "group.1", "x".repeat(33)],
             )
             .unwrap();
-        let error = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap_err();
+        let error = terminal.handle_line("list", 0).await.unwrap_err();
         assert!(error.to_string().contains("32"), "{error}");
-        assert!(
-            handle_line(&registry, &store.devices(), &status, "status group.1", 0)
-                .await
-                .is_err()
-        );
+        assert!(terminal.handle_line("status group.1", 0).await.is_err());
     })
 }

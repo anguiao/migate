@@ -134,9 +134,8 @@ pub(super) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
     } else {
         line.into()
     };
-    crate::terminal::bridge::handle_line(&registry, &store.devices(), &status, &line, 0)
-        .await
-        .unwrap()
+    let terminal = crate::terminal::Terminal::new(&registry, &store.devices(), &status);
+    terminal.handle_line(&line, 0).await.unwrap()
 }
 
 pub(in crate::matter) fn test_executor() -> std::rc::Rc<crate::lighting::LightingExecutor> {

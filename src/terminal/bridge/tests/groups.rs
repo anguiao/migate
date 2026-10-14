@@ -4,17 +4,19 @@
 //! group shape and aggregate must come from the applied handle, while member
 //! blocks read only fresh observations and source diagnostics.
 
-use super::{handle_line, light, publish_diagnostics, report, status_for};
+use super::{Terminal, light, publish_diagnostics, report, status_for};
 use crate::{
     device::{
-        Capability, Composition, ConfigurationScope, DeviceKey, DeviceRegistry, GroupConfiguration,
-        LightPatch, PhysicalDevice, derive_group_capabilities,
+        Capability, CommandError, Composition, ConfigurationScope, DeviceKey, DeviceRegistry,
+        GroupConfiguration, LightPatch, PhysicalDevice, derive_group_capabilities,
     },
+    lighting::LightingExecutor,
     storage::Store,
     terminal::AuthStatus,
     xiaomi::adapter::{AdapterStatus, DeviceStatus, GatewayStatus, PathKind},
 };
-use futures_lite::future::{block_on, poll_once};
+use futures_lite::future::{self, block_on, poll_once};
+use std::rc::Rc;
 
 fn key(id: &str) -> DeviceKey {
     DeviceKey::new("xiaomi", id)
@@ -134,6 +136,7 @@ fn pending_membership_keeps_the_applied_shape_and_aggregate() {
             .unwrap();
 
         let snapshot = registry.snapshot();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         assert_eq!(
             snapshot.applied.groups[0].members,
             vec![key("one"), key("two")]
@@ -143,10 +146,7 @@ fn pending_membership_keeps_the_applied_shape_and_aggregate() {
             vec![key("one"), key("three")]
         );
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains(
                 "group.1 (Reading lamp): group; members: one (Lamp one), two (Lamp two)\n  Capabilities: on/off, brightness.\n  State: power on; brightness 40%; representative: unknown; reachable: true."
@@ -163,7 +163,8 @@ fn pending_membership_keeps_the_applied_shape_and_aggregate() {
         // replaces the applied group member set.
         assert!(list.contains("three (Lamp three): available"), "{list}");
 
-        let selected = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let selected = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -185,6 +186,7 @@ fn same_key_replacement_keeps_the_closed_handle_unknown_until_applied() {
             let store = Store::open(directory.path()).unwrap();
             let status = status_for(&directory);
             let registry = DeviceRegistry::new();
+            let terminal = Terminal::new(&registry, &store.devices(), &status);
             let capabilities = vec![Capability::OnOff, Capability::Brightness];
             let (one, _one_receiver) = light("one", "Lamp one", capabilities.clone());
             let (two, _two_receiver) = light("two", "Lamp two", capabilities.clone());
@@ -214,10 +216,7 @@ fn same_key_replacement_keeps_the_closed_handle_unknown_until_applied() {
             registry.insert(replacement);
             publish_diagnostics(&status, &registry);
 
-            let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
             if grouped {
                 assert!(
             list.contains(
@@ -229,7 +228,8 @@ fn same_key_replacement_keeps_the_closed_handle_unknown_until_applied() {
             assert!(!list.contains("power on"), "{list}");
             assert!(!list.contains("main (Light): off"), "{list}");
 
-            let member = handle_line(&registry, &store.devices(), &status, "status one", 0)
+            let member = terminal
+                .handle_line("status one", 0)
                 .await
                 .unwrap()
                 .unwrap();
@@ -283,6 +283,7 @@ fn pending_deletion_renders_a_revoked_member_without_panicking() {
         );
 
         let snapshot = registry.snapshot();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         assert!(
             snapshot
                 .devices
@@ -294,10 +295,7 @@ fn pending_deletion_renders_a_revoked_member_without_panicking() {
             vec![key("one"), key("two")]
         );
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains("group.1 (Reading lamp): group; members: one (Lamp one), two (Lamp two)"),
             "{list}"
@@ -323,7 +321,8 @@ fn pending_deletion_renders_a_revoked_member_without_panicking() {
             "{list}"
         );
 
-        let selected = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let selected = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -338,7 +337,8 @@ fn pending_deletion_renders_a_revoked_member_without_panicking() {
         );
         assert!(selected.contains("two routing:"), "{selected}");
 
-        let member = handle_line(&registry, &store.devices(), &status, "status one", 0)
+        let member = terminal
+            .handle_line("status one", 0)
             .await
             .unwrap()
             .unwrap();
@@ -416,7 +416,9 @@ fn shared_member_status_lists_all_groups_once_in_pending_and_applied_views() {
                 Vec::new(),
             )
             .unwrap();
-        let pending = handle_line(&registry, &store.devices(), &status, "status one", 0)
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
+        let pending = terminal
+            .handle_line("status one", 0)
             .await
             .unwrap()
             .unwrap();
@@ -435,7 +437,8 @@ fn shared_member_status_lists_all_groups_once_in_pending_and_applied_views() {
                 &[],
             )
             .unwrap();
-        let applied = handle_line(&registry, &store.devices(), &status, "status one", 0)
+        let applied = terminal
+            .handle_line("status one", 0)
             .await
             .unwrap()
             .unwrap();
@@ -463,6 +466,7 @@ fn a_lone_pending_candidate_is_shown_as_not_published_and_never_commands_members
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let capabilities = vec![Capability::OnOff, Capability::Brightness];
         let (one, mut one_receiver) = light("one", "Lamp one", capabilities.clone());
         let (two, mut two_receiver) = light("two", "Lamp two", capabilities);
@@ -476,10 +480,7 @@ fn a_lone_pending_candidate_is_shown_as_not_published_and_never_commands_members
             )
             .unwrap();
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains(
                 "Configuration: confirmed changes are pending application; no committed version is applied."
@@ -493,7 +494,8 @@ fn a_lone_pending_candidate_is_shown_as_not_published_and_never_commands_members
             "{list}"
         );
 
-        let selected = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let selected = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -512,10 +514,7 @@ fn a_lone_pending_candidate_is_shown_as_not_published_and_never_commands_members
         assert!(!selected.contains("command accepted"), "{selected}");
 
         for line in ["on group.1", "off group.1"] {
-            let output = handle_line(&registry, &store.devices(), &status, line, 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let output = terminal.handle_line(line, 0).await.unwrap().unwrap();
             assert!(output.contains("waiting to apply"), "{line}: {output}");
             assert!(output.contains("not published"), "{line}: {output}");
             assert!(!output.contains("command accepted"), "{line}: {output}");
@@ -532,6 +531,7 @@ fn applied_without_a_candidate_never_claims_a_pending_apply() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (one, _one_receiver) = light(
             "one",
             "Lamp one",
@@ -544,10 +544,7 @@ fn applied_without_a_candidate_never_claims_a_pending_apply() {
         observe(&one, true, Some(25.0), None);
         publish_diagnostics(&status, &registry);
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(list.contains("one (Lamp one): available"), "{list}");
         assert!(!list.contains("waiting to apply"), "{list}");
         assert!(!list.contains("Configuration:"), "{list}");
@@ -561,6 +558,7 @@ fn pending_apply_failure_keeps_the_applied_relation_until_a_successful_apply() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let capabilities = vec![Capability::OnOff, Capability::Brightness];
         let (one, _one_receiver) = light("one", "Lamp one", capabilities.clone());
         let (two, _two_receiver) = light("two", "Lamp two", capabilities.clone());
@@ -593,10 +591,7 @@ fn pending_apply_failure_keeps_the_applied_relation_until_a_successful_apply() {
         let expected = format!(
             "Last configuration apply failed: {failure}; the applied configuration is still in use, retrying."
         );
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(list.contains(&expected), "{list}");
         assert!(
             list.contains(
@@ -611,7 +606,8 @@ fn pending_apply_failure_keeps_the_applied_relation_until_a_successful_apply() {
         // Reading the diagnostic never clears it.
         assert_eq!(registry.apply_error().as_deref(), Some(failure));
 
-        let selected = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let selected = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -635,10 +631,7 @@ fn pending_apply_failure_keeps_the_applied_relation_until_a_successful_apply() {
                 &[],
             )
             .unwrap();
-        let recovered = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let recovered = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             !recovered.contains("Last configuration apply failed"),
             "{recovered}"
@@ -665,6 +658,7 @@ fn an_apply_error_without_a_pending_configuration_is_not_shown() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let capabilities = vec![Capability::OnOff, Capability::Brightness];
         let (one, _one_receiver) = light("one", "Lamp one", capabilities.clone());
         let (two, _two_receiver) = light("two", "Lamp two", capabilities);
@@ -685,17 +679,15 @@ fn an_apply_error_without_a_pending_configuration_is_not_shown() {
         registry.set_apply_error("cannot persist the applied configuration: disk is read-only");
 
         for line in ["list", "status"] {
-            let output = handle_line(&registry, &store.devices(), &status, line, 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let output = terminal.handle_line(line, 0).await.unwrap().unwrap();
             assert!(
                 !output.contains("Last configuration apply failed"),
                 "{line}: {output}"
             );
             assert!(!output.contains("Configuration:"), "{line}: {output}");
         }
-        let group = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let group = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -719,6 +711,7 @@ fn pending_summary_only_names_groups_whose_observable_fields_changed() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let capabilities = vec![Capability::OnOff, Capability::Brightness];
         let (one, _one_receiver) = light("one", "Lamp one", capabilities.clone());
         let (two, _two_receiver) = light("two", "Lamp two", capabilities.clone());
@@ -752,10 +745,7 @@ fn pending_summary_only_names_groups_whose_observable_fields_changed() {
             )
             .unwrap();
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains("~ group.2 (Hall lamp): members: three (Lamp three) (applied: four (Lamp four), three (Lamp three))."),
             "{list}"
@@ -763,7 +753,8 @@ fn pending_summary_only_names_groups_whose_observable_fields_changed() {
         assert!(!list.contains("~ group.1"), "{list}");
         assert!(!list.contains("source instances changed"), "{list}");
 
-        let unchanged = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let unchanged = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -776,7 +767,8 @@ fn pending_summary_only_names_groups_whose_observable_fields_changed() {
             "{unchanged}"
         );
 
-        let changed = handle_line(&registry, &store.devices(), &status, "status group.2", 0)
+        let changed = terminal
+            .handle_line("status group.2", 0)
             .await
             .unwrap()
             .unwrap();
@@ -794,6 +786,7 @@ fn pending_dissolution_is_visible_on_the_applied_group_status() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let capabilities = vec![Capability::OnOff, Capability::Brightness];
         let (one, _one_receiver) = light("one", "Lamp one", capabilities.clone());
         let (two, _two_receiver) = light("two", "Lamp two", capabilities);
@@ -811,7 +804,8 @@ fn pending_dissolution_is_visible_on_the_applied_group_status() {
             .stage_configuration(scope(), Vec::new(), Vec::new())
             .unwrap();
 
-        let selected = handle_line(&registry, &store.devices(), &status, "status group.1", 0)
+        let selected = terminal
+            .handle_line("status group.1", 0)
             .await
             .unwrap()
             .unwrap();
@@ -840,6 +834,7 @@ fn moving_a_member_shows_both_the_old_and_new_relations_on_status() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let capabilities = vec![Capability::OnOff, Capability::Brightness];
         let (one, _one_receiver) = light("one", "Lamp one", capabilities.clone());
         let (two, _two_receiver) = light("two", "Lamp two", capabilities.clone());
@@ -870,7 +865,8 @@ fn moving_a_member_shows_both_the_old_and_new_relations_on_status() {
             )
             .unwrap();
 
-        let member = handle_line(&registry, &store.devices(), &status, "status one", 0)
+        let member = terminal
+            .handle_line("status one", 0)
             .await
             .unwrap()
             .unwrap();
@@ -897,6 +893,7 @@ fn pending_derived_capability_change_is_summarized_against_the_applied_shape() {
         let store = Store::open(directory.path()).unwrap();
         let status = status_for(&directory);
         let registry = DeviceRegistry::new();
+        let terminal = Terminal::new(&registry, &store.devices(), &status);
         let (one, _one_receiver) = light(
             "one",
             "Lamp one",
@@ -940,10 +937,7 @@ fn pending_derived_capability_change_is_summarized_against_the_applied_shape() {
             )
             .unwrap();
 
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains(
                 "~ group.1 (Reading lamp): members: four (Lamp four), one (Lamp one) (applied: one (Lamp one), two (Lamp two)); capabilities: on/off (applied: on/off, brightness)."
@@ -955,6 +949,216 @@ fn pending_derived_capability_change_is_summarized_against_the_applied_shape() {
                 "group.1 (Reading lamp): group; members: one (Lamp one), two (Lamp two)\n  Capabilities: on/off, brightness."
             ),
             "{list}"
+        );
+    });
+}
+
+/// A production-shaped session with a private executor the module test can
+/// still drive to finish member requests between command lines.
+fn injecting_terminal<'a>(
+    registry: &DeviceRegistry,
+    store: &Store,
+    status: &'a AuthStatus,
+) -> (Terminal<'a>, Rc<LightingExecutor>) {
+    let executor = LightingExecutor::new(Rc::new(crate::lighting::clock::SystemClock::new()));
+    let terminal = Terminal::with_executor(registry, &store.devices(), status, executor.clone());
+    (terminal, executor)
+}
+
+fn applied_pair(registry: &DeviceRegistry, one: &PhysicalDevice, two: &PhysicalDevice) {
+    registry
+        .apply_configuration(
+            1,
+            vec![configuration("group.1", "Reading lamp", &[one, two])],
+            &[],
+            &[],
+        )
+        .unwrap();
+}
+
+/// Poll the group command once and require that it is still waiting for member
+/// outcomes. The fanout has already submitted every member by this point.
+async fn pending_command<'a>(
+    terminal: &'a Terminal<'a>,
+    line: &'a str,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<Option<String>, crate::storage::StorageError>> + 'a,
+    >,
+> {
+    let mut command = Box::pin(terminal.handle_line(line, 0));
+    assert!(
+        poll_once(command.as_mut()).await.is_none(),
+        "{line}: group command returned before any member outcome"
+    );
+    command
+}
+
+#[test]
+fn applied_group_on_returns_after_one_acceptance_and_the_other_member_continues() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let status = status_for(&directory);
+        let registry = DeviceRegistry::new();
+        let capabilities = vec![Capability::OnOff, Capability::Brightness];
+        let (one, mut one_receiver) = light("one", "Lamp one", capabilities.clone());
+        let (two, mut two_receiver) = light("two", "Lamp two", capabilities);
+        registry.insert(one.clone());
+        registry.insert(two.clone());
+        applied_pair(&registry, &one, &two);
+        let (terminal, executor) = injecting_terminal(&registry, &store, &status);
+
+        let command = pending_command(&terminal, "on group.1").await;
+        let request = poll_once(one_receiver.next())
+            .await
+            .expect("first member dispatched")
+            .unwrap();
+        assert!(request.target);
+        request.accept().unwrap();
+        let result = command.await.unwrap().unwrap();
+        assert!(result.contains("at least one member accepted"), "{result}");
+
+        // The response does not claim that every member has accepted.
+        let pending_status = terminal
+            .handle_line("status group.1", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            pending_status.contains("State: power on; brightness unknown;"),
+            "{pending_status}"
+        );
+
+        // The response and its waiter are gone; the second member keeps
+        // executing through its normal control chain.
+        let request = poll_once(two_receiver.next())
+            .await
+            .expect("second member dispatched")
+            .unwrap();
+        assert!(request.target);
+        request.accept().unwrap();
+        executor.advance();
+
+        let settled = terminal
+            .handle_line("status group.1", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            settled.contains("State: power on; brightness unknown;"),
+            "{settled}"
+        );
+    });
+}
+
+#[test]
+fn applied_group_command_reports_the_overall_error_when_every_member_fails() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let status = status_for(&directory);
+        let registry = DeviceRegistry::new();
+        let capabilities = vec![Capability::OnOff, Capability::Brightness];
+        let (one, mut one_receiver) = light("one", "Lamp one", capabilities.clone());
+        let (two, mut two_receiver) = light("two", "Lamp two", capabilities);
+        registry.insert(one.clone());
+        registry.insert(two.clone());
+        applied_pair(&registry, &one, &two);
+        let (terminal, _executor) = injecting_terminal(&registry, &store, &status);
+
+        let command = pending_command(&terminal, "off group.1").await;
+        let request = poll_once(one_receiver.next())
+            .await
+            .expect("first member dispatched")
+            .unwrap();
+        request.reject(CommandError::Unavailable("gateway offline".into()));
+        let request = poll_once(two_receiver.next())
+            .await
+            .expect("second member dispatched")
+            .unwrap();
+        request.reject(CommandError::Unavailable("gateway offline".into()));
+        let result = command.await.unwrap().unwrap();
+        assert!(
+            result.contains("all members failed: device unavailable: gateway offline"),
+            "{result}"
+        );
+    });
+}
+
+#[test]
+fn group_member_manual_control_targets_only_that_member() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let status = status_for(&directory);
+        let registry = DeviceRegistry::new();
+        let capabilities = vec![Capability::OnOff, Capability::Brightness];
+        let (one, mut one_receiver) = light("one", "Lamp one", capabilities.clone());
+        let (two, mut two_receiver) = light("two", "Lamp two", capabilities);
+        registry.insert(one.clone());
+        registry.insert(two.clone());
+        applied_pair(&registry, &one, &two);
+        let (terminal, _executor) = injecting_terminal(&registry, &store, &status);
+
+        let (result, ()) = future::zip(terminal.handle_line("on one", 0), async {
+            let request = one_receiver.next().await.unwrap();
+            request.accept().unwrap();
+        })
+        .await;
+        assert_eq!(result.unwrap().unwrap(), "one: command accepted");
+        // The other member of the published group is never part of the
+        // standalone command.
+        assert!(poll_once(two_receiver.next()).await.is_none());
+        assert_eq!(
+            one.functions()[0].snapshot().power,
+            crate::device::Power::On
+        );
+    });
+}
+
+#[test]
+fn consecutive_group_commands_keep_both_member_writes_alive() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let status = status_for(&directory);
+        let registry = DeviceRegistry::new();
+        let capabilities = vec![Capability::OnOff, Capability::Brightness];
+        let (one, mut one_receiver) = light("one", "Lamp one", capabilities.clone());
+        let (two, mut two_receiver) = light("two", "Lamp two", capabilities);
+        registry.insert(one.clone());
+        registry.insert(two.clone());
+        applied_pair(&registry, &one, &two);
+        let (terminal, executor) = injecting_terminal(&registry, &store, &status);
+
+        for _ in 0..2 {
+            let command = pending_command(&terminal, "on group.1").await;
+            let request = poll_once(one_receiver.next())
+                .await
+                .expect("first member dispatched")
+                .unwrap();
+            assert!(request.target);
+            request.accept().unwrap();
+            let result = command.await.unwrap().unwrap();
+            assert!(result.contains("at least one member accepted"), "{result}");
+        }
+
+        // Both line triggers committed their own member write to the second
+        // member, in order, even though the first response already returned.
+        for _ in 0..2 {
+            let request = poll_once(two_receiver.next())
+                .await
+                .expect("second member keeps its own write")
+                .unwrap();
+            assert!(request.target);
+            request.accept().unwrap();
+            executor.advance();
+        }
+
+        assert_eq!(
+            two.functions()[0].snapshot().power,
+            crate::device::Power::On
         );
     });
 }
