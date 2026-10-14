@@ -3,11 +3,11 @@ use super::{
     state::{Backoff, Context, GroupMeta, Lifetime},
 };
 use crate::{
-    storage::CachedScope,
+    storage::{CachedScope, XiaomiRecord},
     xiaomi::{
         auth::{AuthenticationState, FailureReason},
         catalog::{self, CatalogEntry, CatalogError},
-        cloud::CloudClient,
+        cloud::{CloudClient, OwnedHome},
         discovery::Discovery,
     },
 };
@@ -216,76 +216,7 @@ pub(super) async fn run(
                 // completion owns the loading marker and freshness result.
                 continue;
             }
-            let life = Rc::new(Lifetime::default());
-            context
-                .live
-                .borrow_mut()
-                .devices
-                .get_mut(did)
-                .unwrap()
-                .loading = Some(life.clone());
-            let did = did.clone();
-            let current = context.clone();
-            let client = cloud.clone();
-            let credentials = credentials.clone();
-            let home = home.clone();
-            let task = async move {
-                let Some(result) = future::or(
-                    async {
-                        life.ended().await;
-                        None
-                    },
-                    async { Some(catalog::load_entry(&client, &credentials, &home, &did).await) },
-                )
-                .await
-                else {
-                    return Ok(());
-                };
-                current
-                    .live
-                    .borrow_mut()
-                    .devices
-                    .get_mut(&did)
-                    .unwrap()
-                    .loading = None;
-                match result {
-                    Ok(CatalogEntry::Group { model, group, .. }) => {
-                        {
-                            let mut live = current.live.borrow_mut();
-                            let slot = live.devices.get_mut(&did).unwrap();
-                            slot.blocked = None;
-                            slot.candidate = None;
-                            slot.group = Some(GroupMeta {
-                                model,
-                                relation: Some(group),
-                            });
-                        }
-                        current.reconcile_groups()?;
-                    }
-                    Ok(CatalogEntry::Device { .. }) => {
-                        // A known group identity never silently becomes an
-                        // ordinary device; the relation stays unconfirmed.
-                        current.problem(
-                            &did,
-                            Some("known group identity is no longer a confirmed group".into()),
-                        );
-                    }
-                    Err(error) => {
-                        // A failed group refresh keeps the last confirmed relation.
-                        current.block_device(&did, error.to_string());
-                        if let CatalogError::Cloud(error) = &error {
-                            current.cloud_error(
-                                &credentials.tokens.access_token,
-                                Some(&did),
-                                error,
-                            )?;
-                        }
-                    }
-                }
-                Ok(())
-            };
-            context.tasks.spawn(task);
-            context.changed.notify(usize::MAX);
+            start_entry_load(&context, cloud, &credentials, &home, did, true);
         }
         let requested = {
             let live = context.live.borrow();
@@ -356,86 +287,95 @@ pub(super) async fn run(
                 context.reconcile(&did)?;
                 continue;
             }
-            let life = Rc::new(Lifetime::default());
-            {
-                let mut live = context.live.borrow_mut();
-                let slot = live.devices.get_mut(&did).unwrap();
-                slot.loading = Some(life.clone());
-            }
-            let current = context.clone();
-            let client = cloud.clone();
-            let credentials = credentials.clone();
-            let home = home.clone();
-            let task = async move {
-                let Some(result) = future::or(
-                    async {
-                        life.ended().await;
-                        None
-                    },
-                    async { Some(catalog::load_entry(&client, &credentials, &home, &did).await) },
-                )
-                .await
-                else {
-                    return Ok(());
-                };
-                current
-                    .live
-                    .borrow_mut()
-                    .devices
-                    .get_mut(&did)
-                    .unwrap()
-                    .loading = None;
-                match result {
-                    Ok(CatalogEntry::Device { cached, name }) => {
-                        {
-                            let mut live = current.live.borrow_mut();
-                            let slot = live.devices.get_mut(&did).unwrap();
-                            slot.blocked = None;
-                            slot.candidate = Some((cached, name));
-                        }
-                        current.reconcile(&did)?;
-                        current.request_sync();
-                    }
-                    Ok(CatalogEntry::Group { model, group, .. }) => {
-                        {
-                            let mut live = current.live.borrow_mut();
-                            let slot = live.devices.get_mut(&did).unwrap();
-                            slot.blocked = None;
-                            slot.candidate = None;
-                            slot.group = Some(GroupMeta {
-                                model,
-                                relation: Some(group),
-                            });
-                        }
-                        current.reconcile_groups()?;
-                    }
-                    Err(error) => {
-                        match &error {
-                            CatalogError::Cloud(_) => {
-                                current.problem(&did, Some(error.to_string()))
-                            }
-                            CatalogError::Capability(_) => {
-                                // A malformed description keeps the last valid
-                                // capabilities and confirmed composition until
-                                // a fresh valid description arrives.
-                                current.block_device(&did, error.to_string());
-                            }
-                            _ => current.block_device(&did, error.to_string()),
-                        }
-                        if let CatalogError::Cloud(error) = &error {
-                            current.cloud_error(
-                                &credentials.tokens.access_token,
-                                Some(&did),
-                                error,
-                            )?;
-                        }
-                    }
-                }
-                Ok(())
-            };
-            context.tasks.spawn(task);
-            context.changed.notify(usize::MAX);
+            start_entry_load(&context, cloud, &credentials, &home, &did, false);
         }
         due = context.clock.now() + MEMBER_INTERVAL;
     }
+}
+
+/// Both refresh phases share one cancellable catalog task. Known groups keep
+/// their identity; ordinary cloud failures preserve an admitted control path.
+fn start_entry_load(
+    context: &Rc<Context>,
+    cloud: &CloudClient,
+    credentials: &XiaomiRecord,
+    home: &OwnedHome,
+    did: &str,
+    known_group: bool,
+) {
+    let life = Rc::new(Lifetime::default());
+    context
+        .live
+        .borrow_mut()
+        .devices
+        .get_mut(did)
+        .unwrap()
+        .loading = Some(life.clone());
+    let current = context.clone();
+    let client = cloud.clone();
+    let credentials = credentials.clone();
+    let home = home.clone();
+    let did = did.to_owned();
+    context.tasks.spawn(async move {
+        let Some(result) = future::or(
+            async {
+                life.ended().await;
+                None
+            },
+            async { Some(catalog::load_entry(&client, &credentials, &home, &did).await) },
+        )
+        .await
+        else {
+            return Ok(());
+        };
+        current
+            .live
+            .borrow_mut()
+            .devices
+            .get_mut(&did)
+            .unwrap()
+            .loading = None;
+        match result {
+            Ok(CatalogEntry::Group { model, group, .. }) => {
+                {
+                    let mut live = current.live.borrow_mut();
+                    let slot = live.devices.get_mut(&did).unwrap();
+                    slot.blocked = None;
+                    slot.candidate = None;
+                    slot.group = Some(GroupMeta {
+                        model,
+                        relation: Some(group),
+                    });
+                }
+                current.reconcile_groups()?;
+            }
+            Ok(CatalogEntry::Device { .. }) if known_group => current.problem(
+                &did,
+                Some("known group identity is no longer a confirmed group".into()),
+            ),
+            Ok(CatalogEntry::Device { cached, name }) => {
+                {
+                    let mut live = current.live.borrow_mut();
+                    let slot = live.devices.get_mut(&did).unwrap();
+                    slot.blocked = None;
+                    slot.candidate = Some((cached, name));
+                }
+                current.reconcile(&did)?;
+                current.request_sync();
+            }
+            Err(error) => {
+                if !known_group && matches!(&error, CatalogError::Cloud(_)) {
+                    current.problem(&did, Some(error.to_string()));
+                } else {
+                    // Keep the last valid description and confirmed relation.
+                    current.block_device(&did, error.to_string());
+                }
+                if let CatalogError::Cloud(error) = &error {
+                    current.cloud_error(&credentials.tokens.access_token, Some(&did), error)?;
+                }
+            }
+        }
+        Ok(())
+    });
+    context.changed.notify(usize::MAX);
 }

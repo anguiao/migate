@@ -137,19 +137,3 @@ pub async fn load_entry(
         name: details.name,
     })
 }
-
-/// Load a selected home's ordinary member description and optional cloud name.
-/// Known group records stay rejected on this strict ordinary-device path.
-pub async fn load_device(
-    cloud: &CloudClient,
-    credentials: &XiaomiRecord,
-    home: &OwnedHome,
-    did: &str,
-) -> Result<(CachedPhysicalDevice, Option<String>), CatalogError> {
-    match load_entry(cloud, credentials, home, did).await? {
-        CatalogEntry::Device { cached, name } => Ok((cached, name)),
-        CatalogEntry::Group { .. } => Err(CatalogError::Capability(
-            CapabilityError::UnsupportedLightGroup,
-        )),
-    }
-}
