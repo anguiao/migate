@@ -431,14 +431,14 @@ fn path_loss_invalidates_the_aggregate_and_recovery_does_not_revive_cached_value
     let snapshot = group.snapshot();
     assert_eq!(snapshot.power, Power::Unknown);
     assert_eq!(snapshot.lighting.unwrap().brightness_percent, None);
-    // The single-light cache keeps the last values.
-    assert_eq!(function.snapshot().power, Power::On);
+    // Single-light reads use the same cleared state while awaiting observations.
+    assert_eq!(function.snapshot().power, Power::Unknown);
     assert_eq!(
         function.snapshot().lighting.unwrap().brightness_percent,
-        Some(40.0)
+        None
     );
 
-    // Same-value new observations make the fields valid again.
+    // New observations restore the fields, even if values match before loss.
     function.observe(true);
     observe(
         &function,
@@ -501,6 +501,11 @@ fn group_brightness_averages_lit_members_only_when_all_are_complete() {
         group.snapshot().lighting.unwrap().brightness_percent,
         Some(40.0)
     );
+    function_of(&second).observe(false);
+    assert_eq!(
+        group.snapshot().lighting.unwrap().brightness_percent,
+        Some(60.0)
+    );
 
     // An unobserved member power also makes the group brightness unknown.
     let (third, _third_receiver) = ready_light("third", dimmable());
@@ -521,12 +526,12 @@ fn group_brightness_averages_lit_members_only_when_all_are_complete() {
 }
 
 #[test]
-fn all_off_brightness_keeps_the_last_valid_group_value_in_process() {
+fn all_off_brightness_averages_current_values_only_when_all_are_known() {
     let (first, _first_receiver) = ready_light("first", dimmable());
     let (second, _second_receiver) = ready_light("second", dimmable());
     let group = new_group("group", &[&first, &second]);
     for device in [&first, &second] {
-        function_of(device).observe(true);
+        function_of(device).observe(false);
     }
     observe(
         &function_of(&first),
@@ -535,6 +540,8 @@ fn all_off_brightness_keeps_the_last_valid_group_value_in_process() {
             ..LightPatch::default()
         },
     );
+    assert_eq!(group.snapshot().power, Power::Off);
+    assert_eq!(group.snapshot().lighting.unwrap().brightness_percent, None);
     observe(
         &function_of(&second),
         LightPatch {
@@ -547,22 +554,18 @@ fn all_off_brightness_keeps_the_last_valid_group_value_in_process() {
         Some(40.0)
     );
 
-    for device in [&first, &second] {
-        function_of(device).observe(false);
-    }
+    // Changes while off replace the aggregate immediately, without history.
+    observe(
+        &function_of(&first),
+        LightPatch {
+            brightness_percent: Some(50.0),
+            ..LightPatch::default()
+        },
+    );
     assert_eq!(
         group.snapshot().lighting.unwrap().brightness_percent,
-        Some(40.0)
+        Some(50.0)
     );
-
-    // A group without valid history has no all-off brightness.
-    let (fresh_one, _fresh_one_receiver) = ready_light("fresh-one", dimmable());
-    let (fresh_two, _fresh_two_receiver) = ready_light("fresh-two", dimmable());
-    let fresh = new_group("fresh", &[&fresh_one, &fresh_two]);
-    function_of(&fresh_one).observe(false);
-    function_of(&fresh_two).observe(false);
-    assert_eq!(fresh.snapshot().power, Power::Off);
-    assert_eq!(fresh.snapshot().lighting.unwrap().brightness_percent, None);
 }
 
 #[test]
@@ -883,10 +886,10 @@ fn partial_reports_preserve_values_while_recovery_restores_only_observed_fields(
     assert_eq!(snapshot.power, Power::On);
     assert_eq!(snapshot.lighting.unwrap().temperature_kelvin, Some(3500));
     assert_eq!(snapshot.lighting.unwrap().brightness_percent, None);
-    // The ordinary single-light cache survives the loss of freshness.
+    // The single light also waits for a new brightness observation.
     assert_eq!(
         function.snapshot().lighting.unwrap().brightness_percent,
-        Some(50.0)
+        None
     );
 
     observe(
@@ -954,8 +957,8 @@ fn same_value_observations_wake_snapshot_subscribers_after_path_loss() {
             None
         );
 
-        // The cached power value is unchanged; restoring validity alone must
-        // still wake snapshot subscribers.
+        // New observations must wake subscribers even when they match the
+        // last values reported before path loss.
         let mut restored = Box::pin(changes.changed());
         assert!(poll_once(restored.as_mut()).await.is_none());
         function.observe(true);
@@ -990,6 +993,10 @@ fn closing_a_function_wakes_snapshot_subscribers() {
         let snapshot = closed.await;
         assert_eq!(snapshot.power, Power::On);
         assert!(!function.fresh_snapshot().reachable);
+        assert_eq!(
+            super::super::Light::Single(function).state().power,
+            Power::Unknown
+        );
         assert_eq!(group.snapshot().power, Power::Unknown);
     });
 }

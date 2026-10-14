@@ -123,11 +123,10 @@ fn restored_path_does_not_deduplicate_writes_against_unobserved_cached_state() {
                     && peer.count("get", "one", 0) > reads
             })
             .await;
-            assert_eq!(light.snapshot().power, cached.power);
-            assert_eq!(light.snapshot().lighting, cached.lighting);
-            let fresh = light.fresh_snapshot().snapshot;
-            assert_eq!(fresh.power, Power::Unknown);
-            assert_eq!(fresh.lighting.unwrap().mode, None);
+            let restored = light.snapshot();
+            assert_eq!(restored.power, Power::Unknown);
+            assert_eq!(restored.lighting.unwrap().temperature_kelvin, None);
+            assert_eq!(restored.lighting.unwrap().mode, None);
 
             assert_eq!(light.execute(Command::On).await.unwrap().power, Power::On);
             light
@@ -1378,7 +1377,7 @@ fn in_flight_feedback_survives_valid_source_epoch_change() {
 }
 
 #[test]
-fn cloud_partial_auth_rejection_keeps_accepted_color_before_restricting_access() {
+fn cloud_partial_auth_rejection_keeps_receipt_and_clears_state_after_access_loss() {
     let rig = Rig::light("devcea.light.ls2307");
     {
         let mut cloud = rig.cloud.lock().unwrap();
@@ -1417,21 +1416,25 @@ fn cloud_partial_auth_rejection_keeps_accepted_color_before_restricting_access()
                 true,
             )
             .unwrap();
-        assert!(action.accepted().await.is_err());
         assert_eq!(
-            light.snapshot().lighting.unwrap().color,
-            Rgb::from_packed(0xabcdef)
+            action.accepted().await,
+            Err(crate::device::CommandError::Rejected(
+                "cloud code -704012901".into()
+            ))
         );
-        assert_eq!(
-            light.snapshot().lighting.unwrap().mode,
-            Some(LightMode::Temperature)
-        );
+        let snapshot = light.snapshot();
+        assert!(matches!(
+            snapshot.availability,
+            Availability::Unavailable(_)
+        ));
+        assert_eq!(snapshot.lighting.unwrap().color, None);
+        assert_eq!(snapshot.lighting.unwrap().mode, None);
         assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 1);
     }));
 }
 
 #[test]
-fn local_partial_offline_rejection_keeps_accepted_color_before_device_becomes_unavailable() {
+fn local_partial_offline_rejection_keeps_receipt_and_clears_state_after_path_loss() {
     block_on(Rig::light("devcea.light.ls2307").run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
@@ -1455,19 +1458,19 @@ fn local_partial_offline_rejection_keeps_accepted_color_before_device_becomes_un
                 accepted_items(&[(COLOR, 0), (MODE, -704_042_011)]),
             )
             .await;
-            assert!(action.accepted().await.is_err());
             assert_eq!(
-                light.snapshot().lighting.unwrap().color,
-                Rgb::from_packed(0xabcdef)
+                action.accepted().await,
+                Err(crate::device::CommandError::Rejected(
+                    "gateway code -704042011".into()
+                ))
             );
-            assert_eq!(
-                light.snapshot().lighting.unwrap().mode,
-                Some(LightMode::Temperature)
-            );
+            let snapshot = light.snapshot();
             assert!(matches!(
-                light.snapshot().availability,
+                snapshot.availability,
                 Availability::Unavailable(_)
             ));
+            assert_eq!(snapshot.lighting.unwrap().color, None);
+            assert_eq!(snapshot.lighting.unwrap().mode, None);
         })
         .await;
     }));

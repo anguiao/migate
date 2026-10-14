@@ -16,11 +16,10 @@ impl Light {
     pub fn state(&self) -> GroupSnapshot {
         match self {
             Self::Single(function) => {
-                let snapshot = function.snapshot();
                 let fresh = function.fresh_snapshot();
                 GroupSnapshot {
-                    power: snapshot.power,
-                    lighting: snapshot.lighting,
+                    power: fresh.snapshot.power,
+                    lighting: fresh.snapshot.lighting,
                     reachable: fresh.reachable,
                     representative: Some(function.function_key().clone()),
                     members: vec![fresh],

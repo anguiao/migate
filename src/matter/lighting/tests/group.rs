@@ -415,6 +415,54 @@ fn group_toggle_resolves_aggregate_power_and_unknown_fails() {
 }
 
 #[test]
+fn group_partial_failure_succeeds_and_all_failed_reports_failure_without_target_state() {
+    group_case!(
+        vec![dimmable(), dimmable()],
+        2,
+        _devices,
+        members,
+        receivers,
+        _group,
+        light,
+        _executor,
+        _clock,
+        ctx,
+        {
+            block_on(async {
+                for accepts_first in [true, false] {
+                    for member in &members {
+                        member.observe(false);
+                    }
+                    let handler = OnOffHandler(&light);
+                    let mut invoke = pin!(handler.handle_on(&ctx));
+                    assert!(poll_once(invoke.as_mut()).await.is_none());
+                    for (index, receiver) in receivers.iter_mut().enumerate() {
+                        let DeviceRequest::Power(request) =
+                            receiver.next_operation().await.unwrap()
+                        else {
+                            panic!("expected power");
+                        };
+                        if accepts_first && index == 0 {
+                            request.accept().unwrap();
+                        } else {
+                            request.reject(CommandError::Rejected("device rejected".into()));
+                        }
+                    }
+                    let result = invoke.await;
+                    if accepts_first {
+                        result.unwrap();
+                    } else {
+                        assert_eq!(result.unwrap_err().code(), ErrorCode::Failure);
+                    }
+                    assert_eq!(members[1].snapshot().power, crate::device::Power::Off);
+                    assert_eq!(handler.on_off(&ctx).await.unwrap(), accepts_first);
+                }
+            });
+        }
+    );
+}
+
+#[test]
 fn group_execute_if_off_returns_protocol_success_without_member_writes() {
     use l::ClusterAsyncHandler as _;
     group_case!(

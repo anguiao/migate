@@ -1,7 +1,7 @@
 //! Virtual light group publication through the real Matter model.
 //!
 //! Groups are published from the registry's **applied** configuration as one
-//! ordinary light endpoint that shares the registry's stable `Group` handle.
+//! ordinary light endpoint bound to that configuration's shared members.
 //! Grouped members are hidden (no endpoint, no TagList children); leaving a
 //! group restores the member's own reserved endpoint and saved name.
 

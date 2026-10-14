@@ -16,7 +16,7 @@ fn invalid(status: &AuthStatus, now: i64, reason: &str) -> String {
     format!("{reason}\n{COMMAND_HELP}\n{}", status.render(now))
 }
 
-/// Saved or live names for every key the applied and pending views can name.
+/// Saved or live names for every key the applied view can name.
 /// A member whose source path was revoked keeps its reserved published name.
 type Labels = HashMap<DeviceKey, String>;
 
@@ -32,13 +32,6 @@ fn labels(store: &DeviceStore, snapshot: &RegistrySnapshot) -> Result<Labels, St
             .iter()
             .map(|device| device.key().clone()),
     );
-    if let Some(pending) = &snapshot.pending {
-        for group in &pending.groups {
-            keys.extend(group.members.iter().cloned());
-        }
-        keys.extend(pending.devices.iter().map(|device| device.key().clone()));
-        keys.extend(pending.removed.iter().cloned());
-    }
     let mut labels = Labels::new();
     for key in keys {
         if labels.contains_key(&key) {
@@ -319,10 +312,10 @@ fn render_group_members(
     }
 }
 
-/// Render the applied publication set from one registry snapshot. Groups use
-/// their stable aggregate handle; standalone devices keep their applied source
-/// instance until the next commit. A selected member keeps only its own block.
-fn render_applied(snapshot: &RegistrySnapshot, labels: &Labels, did: Option<&str>) -> String {
+/// Render applied state and identify new groups waiting for publication.
+/// Standalone devices keep their applied source instance until the next commit.
+/// A selected member keeps only its own block.
+fn render_publication(snapshot: &RegistrySnapshot, labels: &Labels, did: Option<&str>) -> String {
     let mut lines = Vec::new();
     for group in &snapshot.applied.groups {
         let group_selected = did.is_none_or(|did| group.key.id == did);
@@ -359,6 +352,20 @@ fn render_applied(snapshot: &RegistrySnapshot, labels: &Labels, did: Option<&str
             }
         }
     }
+    if did.is_none()
+        && let Some(pending) = &snapshot.pending
+    {
+        for group in &pending.groups {
+            if !snapshot
+                .applied
+                .groups
+                .iter()
+                .any(|applied| applied.key == group.key)
+            {
+                lines.push(render_candidate(group));
+            }
+        }
+    }
     if lines.is_empty() {
         "No devices are currently connected to the bridge.".into()
     } else {
@@ -370,7 +377,8 @@ fn render_applied(snapshot: &RegistrySnapshot, labels: &Labels, did: Option<&str
 /// pending context only: the applied configuration stays authoritative until
 /// the candidate is committed, and a failure with nothing pending is never
 /// presented as current.
-fn pending_header(snapshot: &RegistrySnapshot, apply_error: Option<&str>) -> String {
+fn pending_status(snapshot: &RegistrySnapshot, apply_error: Option<&str>) -> Option<String> {
+    snapshot.pending.as_ref()?;
     let applied = match snapshot.applied.confirmed {
         Some(version) => format!("applied version {version}."),
         None => "no committed version is applied.".into(),
@@ -382,139 +390,15 @@ fn pending_header(snapshot: &RegistrySnapshot, apply_error: Option<&str>) -> Str
             "Last configuration apply failed: {error}; the applied configuration is still in use, retrying."
         ));
     }
-    header
-}
-
-/// One confirmed candidate group compared with the currently applied group.
-/// The pending set is complete, so an applied group with no observable field
-/// change is omitted instead of guessing why the candidate exists. The
-/// summary names member and derived-description changes instead of repeating
-/// the whole fixed description.
-fn pending_group_line(
-    group: &GroupConfiguration,
-    applied: Option<&AppliedGroup>,
-    labels: &Labels,
-) -> Option<String> {
-    let names = member_names(labels, &group.members);
-    let capabilities = capability_list(&group.capabilities);
-    let Some(applied) = applied else {
-        return Some(format!(
-            "+ {} ({}): new group; members: {names}; capabilities: {capabilities}.",
-            group.key.id, group.label
-        ));
-    };
-    let mut changes = Vec::new();
-    if applied.members != group.members {
-        let applied_names = member_names(labels, &applied.members);
-        changes.push(format!("members: {names} (applied: {applied_names})"));
-    }
-    let applied_capabilities = applied.description().capabilities;
-    if applied_capabilities != group.capabilities {
-        changes.push(format!(
-            "capabilities: {capabilities} (applied: {})",
-            capability_list(&applied_capabilities)
-        ));
-    }
-    if applied.label != group.label {
-        changes.push(format!(
-            "name: {} (applied: {})",
-            group.label, applied.label
-        ));
-    }
-    if changes.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "~ {} ({}): {}.",
-        group.key.id,
-        group.label,
-        changes.join("; ")
-    ))
-}
-
-/// Render confirmed changes, optionally restricted to a selected DID. A member
-/// moving between groups reports both the relation it leaves and the one it joins.
-fn format_pending_configuration(
-    snapshot: &RegistrySnapshot,
-    labels: &Labels,
-    did: Option<&str>,
-    apply_error: Option<&str>,
-) -> Option<String> {
-    let pending = snapshot.pending.as_ref()?;
-    let mut lines = vec![pending_header(snapshot, apply_error)];
-    for group in &pending.groups {
-        let applied = snapshot
-            .applied
-            .groups
-            .iter()
-            .find(|applied| applied.key == group.key);
-        if did.is_some_and(|did| {
-            group.key.id != did
-                && !group.members.iter().any(|member| member.id == did)
-                && !applied.is_some_and(|group| group.members.iter().any(|member| member.id == did))
-        }) {
-            continue;
-        }
-        match pending_group_line(group, applied, labels) {
-            Some(line) => lines.push(format!("  {line}")),
-            // A complete candidate can be waiting because another relation changed.
-            None if did.is_some_and(|did| group.key.id == did) => lines.push(format!(
-                "  {} ({}): relation and description unchanged.",
-                group.key.id, group.label
-            )),
-            None => {}
-        }
-    }
-    for applied in &snapshot.applied.groups {
-        if pending.groups.iter().any(|group| group.key == applied.key)
-            || did.is_some_and(|did| {
-                applied.key.id != did && !applied.members.iter().any(|member| member.id == did)
-            })
-        {
-            continue;
-        }
-        lines.push(format!(
-            "  - {} ({}): group removed.",
-            applied.key.id, applied.label
-        ));
-    }
-    for (sign, from, to) in [
-        ("+", &pending.devices, &snapshot.applied.devices),
-        ("-", &snapshot.applied.devices, &pending.devices),
-    ] {
-        let names = member_names(
-            labels,
-            from.iter().map(PhysicalDevice::key).filter(|key| {
-                did.is_none_or(|did| key.id == did) && !to.iter().any(|device| device.key() == *key)
-            }),
-        );
-        if !names.is_empty() {
-            lines.push(format!("  {sign} standalone: {names}."));
-        }
-    }
-    let removed = member_names(
-        labels,
-        pending
-            .removed
-            .iter()
-            .filter(|key| did.is_none_or(|did| key.id == did)),
-    );
-    if !removed.is_empty() {
-        let suffix = if did.is_some() { "" } else { "." };
-        lines.push(format!("  confirmed removed devices: {removed}{suffix}"));
-    }
-    (did.is_none() || lines.len() > 1).then(|| lines.join("\n"))
+    Some(header)
 }
 
 /// A confirmed candidate group without an applied endpoint is never called
 /// published and never executes commands.
-fn render_candidate(group: &GroupConfiguration, labels: &Labels) -> String {
-    let members = member_names(labels, &group.members);
+fn render_candidate(group: &GroupConfiguration) -> String {
     format!(
-        "{} ({}): waiting to apply; not published.\n  Capabilities: {}.\n  Members: {members}.",
-        group.key.id,
-        group.label,
-        capability_list(&group.capabilities)
+        "{} ({}): waiting to apply; not published.",
+        group.key.id, group.label
     )
 }
 
@@ -619,10 +503,8 @@ impl<'a> Terminal<'a> {
             ["help"] => format!("{COMMAND_HELP}\n{}", self.status.render(now)),
             ["list"] => {
                 let labels = labels(&self.store, &snapshot)?;
-                let mut text = render_applied(&snapshot, &labels, None);
-                if let Some(pending) =
-                    format_pending_configuration(&snapshot, &labels, None, apply_error.as_deref())
-                {
+                let mut text = render_publication(&snapshot, &labels, None);
+                if let Some(pending) = pending_status(&snapshot, apply_error.as_deref()) {
                     text.push('\n');
                     text.push_str(&pending);
                 }
@@ -646,10 +528,8 @@ impl<'a> Terminal<'a> {
             }
             ["status"] => {
                 let labels = labels(&self.store, &snapshot)?;
-                let mut text = render_applied(&snapshot, &labels, None);
-                if let Some(pending) =
-                    format_pending_configuration(&snapshot, &labels, None, apply_error.as_deref())
-                {
+                let mut text = render_publication(&snapshot, &labels, None);
+                if let Some(pending) = pending_status(&snapshot, apply_error.as_deref()) {
                     text.push('\n');
                     text.push_str(&pending);
                 }
@@ -689,11 +569,11 @@ impl<'a> Terminal<'a> {
                     .find(|pending| pending.did == *did);
                 let applied = applied_group.is_some() || applied_member || applied_standalone;
                 let mut sections = if applied {
-                    vec![render_applied(&snapshot, &labels, Some(did))]
+                    vec![render_publication(&snapshot, &labels, Some(did))]
                 } else if let Some(device) = live {
                     vec![render_live(device), not_published(&snapshot, did)]
                 } else if let Some(group) = candidate {
-                    vec![render_candidate(group, &labels)]
+                    vec![render_candidate(group)]
                 } else if adapter_pending.is_some() {
                     Vec::new()
                 } else {
@@ -705,14 +585,7 @@ impl<'a> Terminal<'a> {
                         &pending_name(&self.store, pending)?,
                     ));
                 }
-                if (applied || live.is_some())
-                    && let Some(pending) = format_pending_configuration(
-                        &snapshot,
-                        &labels,
-                        Some(did),
-                        apply_error.as_deref(),
-                    )
-                {
+                if let Some(pending) = pending_status(&snapshot, apply_error.as_deref()) {
                     sections.push(pending);
                 }
                 sections.push(if let Some(group) = applied_group {

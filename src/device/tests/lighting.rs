@@ -1,4 +1,4 @@
-use super::{new_device, outlet};
+use super::{Availability, Power, new_device, outlet};
 use crate::device::{
     Capability, Category, LightMode, LightPatch, NumericRange, Rgb, brightness_from_matter_level,
     brightness_to_matter_level,
@@ -23,7 +23,7 @@ fn light(rgb: bool) -> crate::device::PhysicalDeviceDescription {
 }
 
 #[test]
-fn lighting_starts_unknown_except_for_capability_determined_temperature_mode() {
+fn lighting_starts_and_recovers_unknown_except_for_capability_determined_mode() {
     for rgb in [false, true] {
         let (device, _) = new_device(light(rgb));
         let lighting = device.functions()[0].snapshot().lighting.unwrap();
@@ -38,6 +38,23 @@ fn lighting_starts_unknown_except_for_capability_determined_temperature_mode() {
                 Some(LightMode::Temperature)
             }
         );
+        device.set_availability(Availability::Available);
+        let function = &device.functions()[0];
+        function
+            .observe_light(LightPatch {
+                power: Some(true),
+                brightness_percent: Some(60.0),
+                temperature_kelvin: Some(3100),
+                color: rgb.then(|| Rgb::from_packed(0xff0000).unwrap()),
+                mode: Some(LightMode::Temperature),
+            })
+            .unwrap();
+        device.set_availability(Availability::Unavailable("offline".into()));
+        assert_eq!(function.snapshot().power, Power::Unknown);
+        assert_eq!(function.snapshot().lighting, Some(lighting));
+        device.set_availability(Availability::Available);
+        assert_eq!(function.snapshot().power, Power::Unknown);
+        assert_eq!(function.snapshot().lighting, Some(lighting));
     }
 }
 

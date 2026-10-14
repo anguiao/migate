@@ -29,7 +29,6 @@ impl GroupDescription {
 }
 
 /// State exposed by a light entry with its valid per-member observations.
-/// Groups aggregate those observations; single lights retain their normal cache.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupSnapshot {
     pub power: Power,
@@ -67,16 +66,11 @@ impl fmt::Display for GroupError {
 
 impl std::error::Error for GroupError {}
 
-struct GroupState {
-    label: String,
-    capabilities: Vec<Capability>,
-    members: Vec<Function>,
-    last_brightness: Option<f64>,
-}
-
 struct Inner {
     key: DeviceKey,
-    state: Mutex<GroupState>,
+    label: Mutex<String>,
+    capabilities: Vec<Capability>,
+    members: Vec<Function>,
 }
 
 /// A light group bound to existing member functions by stable member keys.
@@ -119,12 +113,9 @@ impl Group {
     ) -> Self {
         Self(Arc::new(Inner {
             key,
-            state: Mutex::new(GroupState {
-                label,
-                capabilities,
-                members,
-                last_brightness: None,
-            }),
+            label: Mutex::new(label),
+            capabilities,
+            members,
         }))
     }
 
@@ -133,45 +124,27 @@ impl Group {
     }
 
     pub fn description(&self) -> GroupDescription {
-        let state = self.0.state.lock().unwrap();
         GroupDescription {
             key: self.0.key.clone(),
-            label: state.label.clone(),
-            capabilities: state.capabilities.clone(),
+            label: self.0.label.lock().unwrap().clone(),
+            capabilities: self.0.capabilities.clone(),
         }
     }
 
     pub(super) fn has_capabilities(&self, capabilities: &[Capability]) -> bool {
-        self.0.state.lock().unwrap().capabilities.as_slice() == capabilities
+        self.0.capabilities.as_slice() == capabilities
     }
 
     pub fn set_label(&self, label: impl Into<String>) {
-        self.0.state.lock().unwrap().label = label.into();
-    }
-
-    /// Replace an already checked configuration without deriving its shape again.
-    /// The stable aggregate handle keeps its process-local brightness memory.
-    pub(super) fn replace_validated(
-        &self,
-        label: String,
-        members: Vec<Function>,
-        capabilities: Vec<Capability>,
-    ) {
-        let mut state = self.0.state.lock().unwrap();
-        state.label = label;
-        state.members = members;
-        state.capabilities = capabilities;
+        *self.0.label.lock().unwrap() = label.into();
     }
 
     pub fn functions(&self) -> Vec<Function> {
-        self.0.state.lock().unwrap().members.clone()
+        self.0.members.clone()
     }
 
     pub fn keys(&self) -> Vec<FunctionKey> {
         self.0
-            .state
-            .lock()
-            .unwrap()
             .members
             .iter()
             .map(|function| function.function_key().clone())
@@ -179,9 +152,9 @@ impl Group {
     }
 
     pub fn snapshot(&self) -> GroupSnapshot {
-        let mut state = self.0.state.lock().unwrap();
-        let capabilities = &state.capabilities;
-        let members = state
+        let capabilities = &self.0.capabilities;
+        let members = self
+            .0
             .members
             .iter()
             .map(Function::fresh_snapshot)
@@ -205,36 +178,18 @@ impl Group {
                 mode: None,
             });
 
-        if has_brightness && power == Power::On && all_power_known {
-            let mut sum = 0.0;
-            let mut count = 0;
-            let mut complete = true;
-            for member in &members {
-                if member.snapshot.power == Power::On {
-                    let Some(value) = member
-                        .snapshot
-                        .lighting
-                        .and_then(|lighting| lighting.brightness_percent)
-                    else {
-                        complete = false;
-                        break;
-                    };
-                    sum += value;
-                    count += 1;
-                }
-            }
-            if complete && count > 0 {
-                let average = sum / count as f64;
-                state.last_brightness = Some(average);
-                if let Some(lighting) = lighting.as_mut() {
-                    lighting.brightness_percent = Some(average);
-                }
-            }
-        } else if has_brightness
-            && power == Power::Off
+        if has_brightness
+            && all_power_known
             && let Some(lighting) = lighting.as_mut()
         {
-            lighting.brightness_percent = state.last_brightness;
+            lighting.brightness_percent = members
+                .iter()
+                .filter(|member| power == Power::Off || member.snapshot.power == Power::On)
+                .try_fold((0.0, 0), |(sum, count), member| {
+                    let value = member.snapshot.lighting?.brightness_percent?;
+                    Some((sum + value, count + 1))
+                })
+                .map(|(sum, count)| sum / count as f64);
         }
 
         let mut representative = None;

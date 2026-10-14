@@ -1065,16 +1065,25 @@ impl StructuralAction {
                     endpoint,
                     (data.data_ver.unwrap(), data.data.bool().unwrap()),
                 );
-            } else if cluster == 0x1d
-                && attribute == 1
-                && let Ok(array) = data.data.array()
-            {
-                let list = array
-                    .iter()
-                    .filter_map(|value| value.ok()?.u16().ok())
-                    .map(u32::from)
-                    .collect();
-                self.server_lists.insert(endpoint, list);
+            } else if cluster == 0x1d && attribute == 1 {
+                if let Some(index) = &data.path.list_index {
+                    // A chunked list starts with an array and appends scalar
+                    // items using a null ListIndex in subsequent reports.
+                    assert!(index.is_none());
+                    self.server_lists
+                        .get_mut(&endpoint)
+                        .expect("ServerList must begin with its array report")
+                        .push(data.data.u32().unwrap());
+                } else {
+                    let list = data
+                        .data
+                        .array()
+                        .unwrap()
+                        .iter()
+                        .map(|value| value.unwrap().u32().unwrap())
+                        .collect();
+                    self.server_lists.insert(endpoint, list);
+                }
             }
         }
     }
@@ -1951,7 +1960,10 @@ fn run_rebuild_during_report(kind: ChunkedReport) {
                                         .unwrap()
                                 };
                                 assert_eq!(report.versions, [baseline.get() + 1], "{report:?}");
-                                assert!(report.server_lists[&parent.get()].contains(&0x39));
+                                assert!(
+                                    report.server_lists[&parent.get()].contains(&0x39),
+                                    "{report:?}"
+                                );
                                 assert_eq!(
                                     report.powers.keys().copied().collect::<Vec<_>>(),
                                     [parent.get()]

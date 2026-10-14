@@ -79,6 +79,7 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
         ),
     ] {
         setup_light!(true, executor, device, receiver, registry, handler, ctx);
+        device.set_availability(Availability::Available);
         let function = device.functions()[0].clone();
         function
             .observe_light(LightPatch {
@@ -176,6 +177,7 @@ fn ct_projection_reads_ignore_inactive_rgb_and_rgb_keeps_its_ct_cache_readable()
     use crate::device::{LightMode, Rgb};
 
     setup_light!(true, executor, device, receiver, registry, handler, ctx);
+    device.set_availability(Availability::Available);
     let function = device.functions()[0].clone();
     function
         .observe_light(LightPatch {
@@ -277,6 +279,7 @@ fn light_unfiltered_reads_use_new_versions_and_encoded_equal_values_keep_version
     use crate::device::{LightMode, Rgb};
 
     setup_light!(true, executor, device, receiver, registry, handler, ctx);
+    device.set_availability(Availability::Available);
     let function = device.functions()[0].clone();
     function
         .observe_light(LightPatch {
@@ -347,6 +350,7 @@ fn light_unknown_projection_edges_invalidate_filters_before_run() {
     use crate::device::{LightMode, Rgb};
 
     setup_light!(true, executor, device, receiver, registry, handler, ctx);
+    device.set_availability(Availability::Available);
     let function = device.functions()[0].clone();
     block_on(async {
         let level_before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());

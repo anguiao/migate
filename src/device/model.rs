@@ -363,9 +363,8 @@ pub struct LightPatch {
     pub color: Option<Rgb>,
     pub mode: Option<LightMode>,
 }
-/// A function snapshot filtered to observations that are still valid: fields
-/// whose only value predates a reachability loss are unknown again, while the
-/// single-light cache behind [`FunctionSnapshot`] keeps them.
+/// Observations from a reachable, open function. Unavailable or closed
+/// functions expose unknown values; structural color modes remain known.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreshSnapshot {
     pub key: FunctionKey,

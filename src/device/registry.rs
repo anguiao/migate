@@ -50,8 +50,7 @@ impl fmt::Debug for PendingConfiguration {
 }
 
 /// One applied group: the committed relation and derived capability shape plus
-/// a stable aggregate handle. The handle survives membership updates so the
-/// process-local all-off brightness memory is preserved.
+/// an aggregate bound to that configuration's member instances.
 #[derive(Clone)]
 pub struct AppliedGroup {
     pub key: DeviceKey,
@@ -136,7 +135,7 @@ pub struct RegistrySnapshot {
     pub revision: u64,
     /// Real source devices currently holding control paths.
     pub devices: Vec<PhysicalDevice>,
-    /// Applied publication set sharing stable aggregate handles.
+    /// Applied publication set sharing its aggregate handles.
     pub applied: AppliedConfiguration,
     /// Latest confirmed configuration staged for the apply boundary.
     pub pending: Option<PendingConfiguration>,
@@ -562,24 +561,12 @@ fn apply_configuration(
             .iter()
             .map(|device| device.functions()[0].clone())
             .collect();
-        let handle = match state
-            .applied
-            .groups
-            .iter()
-            .find(|present| present.key == group.key)
-            .map(|present| present.handle.clone())
-        {
-            Some(handle) => {
-                handle.replace_validated(group.label.clone(), functions, group.capabilities);
-                handle
-            }
-            None => Group::from_validated(
-                group.key.clone(),
-                group.label.clone(),
-                functions,
-                group.capabilities,
-            ),
-        };
+        let handle = Group::from_validated(
+            group.key.clone(),
+            group.label.clone(),
+            functions,
+            group.capabilities,
+        );
         applied.push(AppliedGroup {
             key: group.key,
             label: group.label,

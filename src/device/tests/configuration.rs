@@ -114,7 +114,7 @@ fn staged_configuration_keeps_the_applied_view_until_the_boundary() {
 }
 
 #[test]
-fn applying_new_members_reuses_the_group_handle_and_brightness_memory() {
+fn applying_new_members_installs_a_new_binding_and_uses_current_brightness() {
     let registry = DeviceRegistry::new();
     let (first, _first_receiver) = ready_dimmable("first");
     let (second, _second_receiver) = ready_dimmable("second");
@@ -132,40 +132,19 @@ fn applying_new_members_reuses_the_group_handle_and_brightness_memory() {
     for (member, brightness) in [(&first, 40.0), (&second, 60.0)] {
         member.functions()[0]
             .observe_light(LightPatch {
-                power: Some(true),
                 brightness_percent: Some(brightness),
                 ..Default::default()
             })
             .unwrap();
     }
-    // Aggregate once while both members are on so the all-off memory exists.
+    let previous = applied_group(&registry, "group");
     assert_eq!(
-        applied_group(&registry, "group")
-            .snapshot()
-            .lighting
-            .unwrap()
-            .brightness_percent,
-        Some(50.0)
-    );
-    for member in [&first, &second] {
-        member.functions()[0]
-            .observe_light(LightPatch {
-                power: Some(false),
-                ..Default::default()
-            })
-            .unwrap();
-    }
-    assert_eq!(
-        applied_group(&registry, "group")
-            .snapshot()
-            .lighting
-            .unwrap()
-            .brightness_percent,
+        previous.snapshot().lighting.unwrap().brightness_percent,
         Some(50.0)
     );
 
-    // The next apply drops a member but keeps the stable aggregate handle, so
-    // the all-off brightness memory survives.
+    // A captured applied view retains its binding; the new configuration uses
+    // the current observations of its own member set, including while all off.
     let updated = group("group", &[&second]);
     let groups = vec![configuration(&updated, &[&second])];
     registry.apply_configuration(2, groups, &[], &[]).unwrap();
@@ -173,6 +152,11 @@ fn applying_new_members_reuses_the_group_handle_and_brightness_memory() {
     assert_eq!(group.members, vec![key("second")]);
     assert_eq!(
         group.snapshot().lighting.unwrap().brightness_percent,
+        Some(60.0)
+    );
+    assert_eq!(previous.handle().keys().len(), 2);
+    assert_eq!(
+        previous.snapshot().lighting.unwrap().brightness_percent,
         Some(50.0)
     );
     assert_eq!(registry.snapshot().applied.confirmed, Some(2));

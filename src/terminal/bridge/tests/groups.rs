@@ -155,7 +155,7 @@ fn pending_membership_keeps_the_applied_shape_and_aggregate() {
         );
         assert!(
             list.contains(
-                "~ group.1 (Reading lamp): members: one (Lamp one), three (Lamp three) (applied: one (Lamp one), two (Lamp two))."
+                "Configuration: confirmed changes are pending application; applied version 1."
             ),
             "{list}"
         );
@@ -174,7 +174,10 @@ fn pending_membership_keeps_the_applied_shape_and_aggregate() {
             ),
             "{selected}"
         );
-        assert!(selected.contains("~ group.1"), "{selected}");
+        assert!(
+            selected.contains("confirmed changes are pending application"),
+            "{selected}"
+        );
     });
 }
 
@@ -310,16 +313,6 @@ fn pending_deletion_renders_a_revoked_member_without_panicking() {
             ),
             "{list}"
         );
-        assert!(
-            list.contains(
-                "~ group.1 (Reading lamp): members: two (Lamp two) (applied: one (Lamp one), two (Lamp two))."
-            ),
-            "{list}"
-        );
-        assert!(
-            list.contains("confirmed removed devices: one (Lamp one)"),
-            "{list}"
-        );
 
         let selected = terminal
             .handle_line("status group.1", 0)
@@ -346,8 +339,7 @@ fn pending_deletion_renders_a_revoked_member_without_panicking() {
             member.contains("one (Lamp one): removed from source"),
             "{member}"
         );
-        // The pending summary names the surviving member relation, but only
-        // the selected member gets a state block.
+        // Only the selected member gets a state block.
         assert!(!member.contains("two (Lamp two): available"), "{member}");
     });
 }
@@ -488,9 +480,7 @@ fn a_lone_pending_candidate_is_shown_as_not_published_and_never_commands_members
             "{list}"
         );
         assert!(
-            list.contains(
-                "+ group.1 (Reading lamp): new group; members: one (Lamp one), two (Lamp two); capabilities: on/off, brightness."
-            ),
+            list.contains("group.1 (Reading lamp): waiting to apply; not published."),
             "{list}"
         );
 
@@ -503,14 +493,6 @@ fn a_lone_pending_candidate_is_shown_as_not_published_and_never_commands_members
             selected.contains("group.1 (Reading lamp): waiting to apply; not published."),
             "{selected}"
         );
-        assert!(
-            selected.contains("  Capabilities: on/off, brightness."),
-            "{selected}"
-        );
-        assert!(
-            selected.contains("  Members: one (Lamp one), two (Lamp two)."),
-            "{selected}"
-        );
         assert!(!selected.contains("command accepted"), "{selected}");
 
         for line in ["on group.1", "off group.1"] {
@@ -521,33 +503,6 @@ fn a_lone_pending_candidate_is_shown_as_not_published_and_never_commands_members
             assert!(poll_once(one_receiver.next()).await.is_none(), "{line}");
             assert!(poll_once(two_receiver.next()).await.is_none(), "{line}");
         }
-    });
-}
-
-#[test]
-fn applied_without_a_candidate_never_claims_a_pending_apply() {
-    block_on(async {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let status = status_for(&directory);
-        let registry = DeviceRegistry::new();
-        let terminal = Terminal::new(&registry, &store.devices(), &status);
-        let (one, _one_receiver) = light(
-            "one",
-            "Lamp one",
-            vec![Capability::OnOff, Capability::Brightness],
-        );
-        registry.insert(one.clone());
-        registry
-            .apply_configuration(1, Vec::new(), &[key("one")], &[])
-            .unwrap();
-        observe(&one, true, Some(25.0), None);
-        publish_diagnostics(&status, &registry);
-
-        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
-        assert!(list.contains("one (Lamp one): available"), "{list}");
-        assert!(!list.contains("waiting to apply"), "{list}");
-        assert!(!list.contains("Configuration:"), "{list}");
     });
 }
 
@@ -701,255 +656,6 @@ fn an_apply_error_without_a_pending_configuration_is_not_shown() {
         );
         // Reading the diagnostic does not clear it.
         assert!(registry.apply_error().is_some());
-    });
-}
-
-#[test]
-fn pending_summary_only_names_groups_whose_observable_fields_changed() {
-    block_on(async {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let status = status_for(&directory);
-        let registry = DeviceRegistry::new();
-        let terminal = Terminal::new(&registry, &store.devices(), &status);
-        let capabilities = vec![Capability::OnOff, Capability::Brightness];
-        let (one, _one_receiver) = light("one", "Lamp one", capabilities.clone());
-        let (two, _two_receiver) = light("two", "Lamp two", capabilities.clone());
-        let (three, _three_receiver) = light("three", "Lamp three", capabilities.clone());
-        let (four, _four_receiver) = light("four", "Lamp four", capabilities);
-        for device in [&one, &two, &three, &four] {
-            registry.insert(device.clone());
-        }
-        registry
-            .apply_configuration(
-                1,
-                vec![
-                    configuration("group.1", "Reading lamp", &[&one, &two]),
-                    configuration("group.2", "Hall lamp", &[&three, &four]),
-                ],
-                &[],
-                &[],
-            )
-            .unwrap();
-        observe(&one, true, Some(40.0), None);
-
-        // The complete candidate set is staged again; only group.2 changed.
-        registry
-            .stage_configuration(
-                scope(),
-                vec![
-                    composition("group.1", "Reading lamp", &[&one, &two]),
-                    composition("group.2", "Cloud rename", &[&three]),
-                ],
-                Vec::new(),
-            )
-            .unwrap();
-
-        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
-        assert!(
-            list.contains("~ group.2 (Hall lamp): members: three (Lamp three) (applied: four (Lamp four), three (Lamp three))."),
-            "{list}"
-        );
-        assert!(!list.contains("~ group.1"), "{list}");
-        assert!(!list.contains("source instances changed"), "{list}");
-
-        let unchanged = terminal
-            .handle_line("status group.1", 0)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            unchanged.contains("group.1 (Reading lamp): relation and description unchanged."),
-            "{unchanged}"
-        );
-        assert!(
-            !unchanged.contains("source instances changed"),
-            "{unchanged}"
-        );
-
-        let changed = terminal
-            .handle_line("status group.2", 0)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            changed.contains("~ group.2 (Hall lamp): members: three (Lamp three) (applied: four (Lamp four), three (Lamp three))."),
-            "{changed}"
-        );
-    });
-}
-
-#[test]
-fn pending_dissolution_is_visible_on_the_applied_group_status() {
-    block_on(async {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let status = status_for(&directory);
-        let registry = DeviceRegistry::new();
-        let terminal = Terminal::new(&registry, &store.devices(), &status);
-        let capabilities = vec![Capability::OnOff, Capability::Brightness];
-        let (one, _one_receiver) = light("one", "Lamp one", capabilities.clone());
-        let (two, _two_receiver) = light("two", "Lamp two", capabilities);
-        registry.insert(one.clone());
-        registry.insert(two.clone());
-        registry
-            .apply_configuration(
-                1,
-                vec![configuration("group.1", "Reading lamp", &[&one, &two])],
-                &[],
-                &[],
-            )
-            .unwrap();
-        registry
-            .stage_configuration(scope(), Vec::new(), Vec::new())
-            .unwrap();
-
-        let selected = terminal
-            .handle_line("status group.1", 0)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            selected.contains(
-                "Configuration: confirmed changes are pending application; applied version 1."
-            ),
-            "{selected}"
-        );
-        assert!(
-            selected.contains("- group.1 (Reading lamp): group removed."),
-            "{selected}"
-        );
-        assert!(
-            selected
-                .contains("group.1 (Reading lamp): group; members: one (Lamp one), two (Lamp two)"),
-            "{selected}"
-        );
-    });
-}
-
-#[test]
-fn moving_a_member_shows_both_the_old_and_new_relations_on_status() {
-    block_on(async {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let status = status_for(&directory);
-        let registry = DeviceRegistry::new();
-        let terminal = Terminal::new(&registry, &store.devices(), &status);
-        let capabilities = vec![Capability::OnOff, Capability::Brightness];
-        let (one, _one_receiver) = light("one", "Lamp one", capabilities.clone());
-        let (two, _two_receiver) = light("two", "Lamp two", capabilities.clone());
-        let (three, _three_receiver) = light("three", "Lamp three", capabilities.clone());
-        let (four, _four_receiver) = light("four", "Lamp four", capabilities);
-        for device in [&one, &two, &three, &four] {
-            registry.insert(device.clone());
-        }
-        registry
-            .apply_configuration(
-                1,
-                vec![
-                    configuration("group.1", "Reading lamp", &[&one, &two]),
-                    configuration("group.2", "Hall lamp", &[&three, &four]),
-                ],
-                &[],
-                &[],
-            )
-            .unwrap();
-        registry
-            .stage_configuration(
-                scope(),
-                vec![
-                    composition("group.1", "Reading lamp", &[&two]),
-                    composition("group.2", "Hall lamp", &[&three, &four, &one]),
-                ],
-                Vec::new(),
-            )
-            .unwrap();
-
-        let member = terminal
-            .handle_line("status one", 0)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            member.contains(
-                "~ group.1 (Reading lamp): members: two (Lamp two) (applied: one (Lamp one), two (Lamp two))."
-            ),
-            "{member}"
-        );
-        assert!(
-            member.contains(
-                "~ group.2 (Hall lamp): members: four (Lamp four), one (Lamp one), three (Lamp three) (applied: four (Lamp four), three (Lamp three))."
-            ),
-            "{member}"
-        );
-    });
-}
-
-#[test]
-fn pending_derived_capability_change_is_summarized_against_the_applied_shape() {
-    block_on(async {
-        use crate::device::NumericRange;
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let status = status_for(&directory);
-        let registry = DeviceRegistry::new();
-        let terminal = Terminal::new(&registry, &store.devices(), &status);
-        let (one, _one_receiver) = light(
-            "one",
-            "Lamp one",
-            vec![Capability::OnOff, Capability::Brightness],
-        );
-        let (two, _two_receiver) = light(
-            "two",
-            "Lamp two",
-            vec![
-                Capability::OnOff,
-                Capability::Brightness,
-                Capability::ColorTemperature(NumericRange {
-                    min: 2700,
-                    max: 6500,
-                    step: 1,
-                }),
-                Capability::ColorRgb,
-            ],
-        );
-        let (four, _four_receiver) = light("four", "Lamp four", vec![Capability::OnOff]);
-        registry.insert(one.clone());
-        registry.insert(two.clone());
-        registry.insert(four.clone());
-        registry
-            .apply_configuration(
-                1,
-                vec![configuration("group.1", "Reading lamp", &[&one, &two])],
-                &[],
-                &[],
-            )
-            .unwrap();
-        registry
-            .stage_configuration(
-                scope(),
-                vec![Composition {
-                    key: key("group.1"),
-                    label: "Reading lamp".into(),
-                    members: vec![key("one"), key("four")],
-                }],
-                Vec::new(),
-            )
-            .unwrap();
-
-        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
-        assert!(
-            list.contains(
-                "~ group.1 (Reading lamp): members: four (Lamp four), one (Lamp one) (applied: one (Lamp one), two (Lamp two)); capabilities: on/off (applied: on/off, brightness)."
-            ),
-            "{list}"
-        );
-        assert!(
-            list.contains(
-                "group.1 (Reading lamp): group; members: one (Lamp one), two (Lamp two)\n  Capabilities: on/off, brightness."
-            ),
-            "{list}"
-        );
     });
 }
 
