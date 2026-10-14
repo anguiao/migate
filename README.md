@@ -2,11 +2,11 @@
 
 MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（Xiaomi/MIoT）设备映射为标准 Matter 设备，接入 Apple Home 等生态。
 
-当前在 macOS / Apple Silicon 本机前台运行，首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持插座和单灯，并按本地优先选择控制与通知路径。支持 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3` 的单路主电源，以及 `cuco.plug.cp7pd` 的开关 1、开关 2、USB 三路独立控制。单灯包含 `devcea.light.ls2307`、`yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`lemesh.light.wy0c15` 七个代表描述样本，按实际开关、亮度、色温和 RGB 能力组合接入，不设型号白名单或样本数量上限；这些型号是解析样本，不构成兼容性保证。灯组按当前家庭内扁平、互不重叠且成员全部可作为单灯发布的关系接入，米家物理组和虚拟组采用同一规则；成员能力可以不同，并保留各自实际具备的灯光能力。
+当前在 macOS / Apple Silicon 本机前台运行，首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持插座和单灯，并按本地优先选择控制与通知路径。支持 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3` 的单路主电源，以及 `cuco.plug.cp7pd` 的开关 1、开关 2、USB 三路独立控制。单灯包含 `devcea.light.ls2307`、`yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`lemesh.light.wy0c15` 七个代表描述样本，按实际开关、亮度、色温和 RGB 能力组合接入，不设型号白名单或样本数量上限；这些型号是解析样本，不构成兼容性保证。灯组按当前家庭内扁平且成员全部可作为单灯发布的关系接入，米家物理组和虚拟组采用同一规则；成员能力可以不同，同一成员可以属于多个组，并保留各自实际具备的灯光能力。
 
-按实际能力提供开关、亮度、色温和 RGB 控制，以及软件渐变与连续控制、主动通知、统一选路、断线恢复、运行中自动加入和删除，以及持久化身份、名称和配对。单灯统一为 `main`；同时具备色温与色彩的灯在选择时自动切换模式。灯组只发布组合关系：MiGate 发布仅承载组身份的父端点与保留各自能力的成员子端点，不建立可控制的总灯端点，也不聚合整组状态；Apple Home 中每组一个入口并单独控制成员是本轮交付要求，实际界面在 `review` 阶段真机验收。终端保留定向 on/off 控制，用 `list` / `status` 查看统一灯具快照、动作结果、实际批属性与路径，同时显示组与成员关系、关系未发布的原因；无写入帧与动作受理分开显示。中国大陆服务区的 OAuth 令牌与本地客户端证书独立维护。已准备账号可以先运行空网桥，再等待设备接入。云端可能仍依赖物理网关，具体边界见已知限制。
+按实际能力提供开关、亮度、色温和 RGB 控制，以及软件渐变与连续控制、主动通知、统一选路、断线恢复、运行中自动加入和删除，以及持久化身份、名称和配对。单灯统一为 `main`；同时具备色温与色彩的灯在选择时自动切换模式。灯组按成员能力的交集与共同色温范围发布一个普通虚拟灯端点，复用成员读取、订阅和控制路径：至少一个成员完整受理即返回组成功，其余成员继续执行；实际状态只汇总成员的实际快照。成员关系、物理实例、发布集合或固定描述变化时自动重建 Matter 服务，允许整桥短时中断；未完成的灯光动作可能中断且不会自动续跑，米家连接、身份和配对保留。成员在 Apple Home 中隐藏，成员单控仍在米家进行。终端保留定向 on/off 控制，并对已发布的组 DID 执行整组 on/off（不带通道）；用 `list` / `status` 查看统一灯具快照、组派生能力与共同范围、实际聚合、成员当前状态、路径与已有请求诊断、关系未发布原因；无写入帧与动作受理分开显示。中国大陆服务区的 OAuth 令牌与本地客户端证书独立维护。已准备账号可以先运行空网桥，再等待设备接入。云端可能仍依赖物理网关，具体边界见已知限制。
 
-单路插座在同一端点承载 Bridged Node 与 On/Off Plug-in Unit（`0x010A`，revision 3）；多路插座使用一个物理父节点和三个独立开关子节点，总控只触发内部状态刷新。具备开关的灯按实际能力选择 On/Off Light（`0x0100`，revision 3）、Dimmable Light（`0x0101`，revision 3）、Color Temperature Light（`0x010C`，revision 4）或 Extended Color Light（`0x010D`，revision 4）；有亮度才发布 LevelControl，有色温或 RGB 才发布 ColorControl，CT 与 XY／HS（色相／饱和度）按真实能力选择。纯开关灯仍是 On/Off Light，不套用插座类型；缺少开关或色温量程无法映射为标准灯的灯保留实际能力与身份，但不会出现在 Apple Home 中。灯组使用一个仅含 Descriptor 与 Bridged Device Basic Information 的 Bridged Node 父端点承载组身份，成员作为子端点保留各自灯型与实际灯光能力，不重复声明桥接身份。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的实际呈现、组入口自动形成、成员单控与整组／成员颜色控件、固件模式联动及基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
+单路插座在同一端点承载 Bridged Node 与 On/Off Plug-in Unit（`0x010A`，revision 3）；多路插座使用一个物理父节点和三个独立开关子节点，总控只触发内部状态刷新。具备开关的灯按实际能力选择 On/Off Light（`0x0100`，revision 3）、Dimmable Light（`0x0101`，revision 3）、Color Temperature Light（`0x010C`，revision 4）或 Extended Color Light（`0x010D`，revision 4）；有亮度才发布 LevelControl，有色温或 RGB 才发布 ColorControl，CT 与 XY／HS（色相／饱和度）按真实能力选择。纯开关灯仍是 On/Off Light，不套用插座类型；缺少开关或色温量程无法映射为标准灯的灯保留实际能力与身份，但不会出现在 Apple Home 中。灯组在单一虚拟灯端点上保留 Descriptor、Bridged Device Basic Information、Groups、Identify 与派生灯光控制能力；当前成员不发布为 Matter 端点，其端点编号与身份继续预留，退出最后一个已发布组后恢复原独立灯结构。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 中的组入口、组控件与状态汇总、固件模式联动及基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
 
 ```sh
 cargo run --locked -- auth login
@@ -36,9 +36,10 @@ cargo run --locked
 | 目录 | 职责 |
 | --- | --- |
 | `src/device/` | 通用设备模型、共享状态与通知、命令队列及其生命周期。 |
+| `src/lighting/` | 单灯与灯组共用的照明执行器：目标与渐变、连续动作、接管及动作生命周期。 |
 | `src/runtime/` | 网桥启动与任务生命周期、进程退出信号。 |
 | `src/matter/` | Matter 服务、端点与处理器、配对及协议存储适配。 |
-| `src/storage/` | SQLite 连接与迁移、目录和进程锁、各类持久化记录。 |
+| `src/storage/` | SQLite 连接与当前格式初始化、目录和进程锁、各类持久化记录。 |
 | `src/xiaomi/auth/` | 认证服务、登录、检查与刷新、状态报告。 |
 | `src/xiaomi/cloud/` | HTTP 请求、响应解析、云端目录、OAuth 与 MQTT 通知。 |
 | `src/xiaomi/capability/`、`src/xiaomi/catalog/` | MIoT 能力解析与当前本地家庭的设备描述加载。 |
