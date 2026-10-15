@@ -62,22 +62,22 @@ fn gray_and_black_are_identifiably_achromatic() {
 
 #[test]
 fn hue_paths_preserve_direction_longest_and_equal_distance_up() {
-    close(hue_delta(250.0, 4.0, DirectionEnum::Shortest), 8.0);
-    close(hue_delta(250.0, 4.0, DirectionEnum::Longest), -246.0);
-    close(hue_delta(4.0, 250.0, DirectionEnum::Up), 246.0);
-    close(hue_delta(4.0, 250.0, DirectionEnum::Down), -8.0);
-    for direction in [DirectionEnum::Shortest, DirectionEnum::Longest] {
+    close(hue_delta(250.0, 4.0, Direction::Shortest), 8.0);
+    close(hue_delta(250.0, 4.0, Direction::Longest), -246.0);
+    close(hue_delta(4.0, 250.0, Direction::Up), 246.0);
+    close(hue_delta(4.0, 250.0, Direction::Down), -8.0);
+    for direction in [Direction::Shortest, Direction::Longest] {
         close(hue_delta(200.0, 73.0, direction), 127.0);
     }
-    close(hue_delta(40.0, 40.0, DirectionEnum::Shortest), 0.0);
-    close(hue_delta(40.0, 40.0, DirectionEnum::Longest), 254.0);
-    let short = HueAxis::move_to(250.0, 4.0, DirectionEnum::Shortest, 1000);
-    let long = HueAxis::move_to(250.0, 4.0, DirectionEnum::Longest, 1000);
+    close(hue_delta(40.0, 40.0, Direction::Shortest), 0.0);
+    close(hue_delta(40.0, 40.0, Direction::Longest), 254.0);
+    let short = HueAxis::move_to(250.0, 4.0, Direction::Shortest, 1000);
+    let long = HueAxis::move_to(250.0, 4.0, Direction::Longest, 1000);
     close(short.frame(500), 0.0);
     close(long.frame(500), 127.0);
     close(short.frame(1000), 4.0);
     close(long.frame(1000), 4.0);
-    let exact_target = HueAxis::move_to(250.0, 254.0, DirectionEnum::Up, 1000);
+    let exact_target = HueAxis::move_to(250.0, 254.0, Direction::Up, 1000);
     close(exact_target.frame(1000), 254.0);
 }
 
@@ -118,13 +118,13 @@ fn saturation_stops_at_its_bound_and_has_an_exact_final_frame() {
 #[test]
 fn replacing_one_axis_preserves_the_others_original_deadline() {
     let first = HsTask {
-        hue: HueAxis::move_to(20.0, 120.0, DirectionEnum::Up, 2000),
+        hue: HueAxis::move_to(20.0, 120.0, Direction::Up, 2000),
         saturation: SaturationAxis::move_to(50.0, 250.0, 4000),
     };
     let mut next = first.resume(1000);
     close(next.frame(0).0.hue, 70.0);
     close(next.frame(0).0.saturation, 100.0);
-    next.hue = HueAxis::move_to(70.0, 90.0, DirectionEnum::Up, 500);
+    next.hue = HueAxis::move_to(70.0, 90.0, Direction::Up, 500);
     assert_eq!(next.duration(), 3000);
     let (middle, ended) = next.frame(1000);
     assert!(!ended);

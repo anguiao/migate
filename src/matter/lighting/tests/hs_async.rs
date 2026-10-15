@@ -1,6 +1,6 @@
-use super::super::controllers::hs;
 use super::*;
 use crate::device::{CommandReceiver, LightTarget};
+use crate::lighting::hs;
 use c::ClusterAsyncHandler as _;
 
 fn white_state(function: &Function) {
@@ -32,7 +32,7 @@ fn red_target() -> ColorTask {
 fn color_task(use_hs: bool, transition_ms: u64) -> ColorTask {
     if use_hs {
         ColorTask::Hs(hs::HsTask {
-            hue: hs::HueAxis::move_to(0.0, 85.0, c::DirectionEnum::Shortest, transition_ms),
+            hue: hs::HueAxis::move_to(0.0, 85.0, hs::Direction::Shortest, transition_ms),
             saturation: hs::SaturationAxis::Hold(254.0),
         })
     } else {

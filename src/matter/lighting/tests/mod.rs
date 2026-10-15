@@ -1,123 +1,15 @@
-use super::controllers::{
-    RemainingTime,
-    color::{self, Task as ColorTask},
-    level::{LevelControlState, Task},
+use super::settings::level::LevelControlState;
+use crate::{
+    device::Rgb,
+    lighting::{
+        color::Task as ColorTask,
+        level::{Direction, Task},
+    },
 };
-use crate::device::Rgb;
 use rs_matter::{
     dm::clusters::decl::level_control::{MoveModeEnum, StepModeEnum},
     error::ErrorCode,
 };
-
-#[test]
-fn srgb_xy_uses_65536_inverse_gamma_and_deterministic_black() {
-    assert_eq!(
-        color::rgb_to_xy(Rgb {
-            red: 0,
-            green: 255,
-            blue: 0
-        }),
-        Some((19661, 39322))
-    );
-    assert_eq!(
-        color::rgb_to_xy(Rgb {
-            red: 0,
-            green: 0,
-            blue: 255
-        }),
-        Some((9830, 3932))
-    );
-    for y in 1..=6 {
-        let rgb = color::xy_to_rgb(30000, y);
-        assert_ne!(
-            rgb,
-            Rgb {
-                red: 0,
-                green: 0,
-                blue: 0
-            }
-        );
-        assert_eq!(color::xy_to_rgb(30000, y), rgb);
-    }
-    assert_eq!(
-        color::rgb_to_xy(Rgb {
-            red: 20,
-            green: 20,
-            blue: 20
-        }),
-        color::rgb_to_xy(Rgb {
-            red: 255,
-            green: 255,
-            blue: 255
-        })
-    );
-    assert_eq!(
-        color::rgb_to_xy(Rgb {
-            red: 255,
-            green: 0,
-            blue: 0
-        }),
-        Some((41943, 21627))
-    );
-    assert_eq!(
-        color::rgb_to_xy(Rgb {
-            red: 255,
-            green: 255,
-            blue: 255
-        }),
-        Some((20493, 21561))
-    );
-    assert_eq!(
-        color::rgb_to_xy(Rgb {
-            red: 255,
-            green: 128,
-            blue: 64
-        }),
-        Some((33935, 25220))
-    );
-    assert_eq!(
-        color::rgb_to_xy(Rgb {
-            red: 0,
-            green: 0,
-            blue: 0
-        }),
-        None
-    );
-    assert_eq!(
-        color::xy_to_rgb(30000, 0),
-        Rgb {
-            red: 0,
-            green: 0,
-            blue: 0
-        }
-    );
-    let color = color::xy_to_rgb(33935, 25220);
-    assert!((color.red as i16 - 255).abs() <= 1);
-    assert!((color.green as i16 - 128).abs() <= 1);
-    assert!((color.blue as i16 - 64).abs() <= 1);
-}
-
-#[test]
-fn short_level_transition_uses_deadline_and_move_does_not_follow_slow_ack() {
-    let task = Task::MoveToLevel {
-        with_on_off: true,
-        start: 1,
-        target: 254,
-        transition_ms: 100,
-    };
-    assert_eq!(task.frame(0), (1, false, Some(true)));
-    assert_eq!(task.frame(20).0, 51);
-    assert!(!task.frame(99).1);
-    assert_eq!(task.frame(100), (254, true, Some(true)));
-    let task = Task::Move {
-        with_on_off: false,
-        start: 100,
-        move_mode: MoveModeEnum::Up,
-        rate: 10,
-    };
-    assert_eq!(task.frame(1000).0, 110);
-    assert_eq!(task.frame(2000).0, 120);
-}
 
 #[test]
 fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks() {
@@ -171,28 +63,11 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
     assert_eq!(task.duration(), u16::MAX as u64 * 154 / 255 * 100);
 }
 
-#[test]
-fn long_color_move_remaining_time_saturates_without_wrapping() {
-    let task = ColorTask::XyMove {
-        start_x: 0,
-        start_y: 0,
-        rate_x: 1,
-        rate_y: 0,
-    };
-    assert_eq!(task.duration(), 65279000);
-    assert_eq!(task.frame(65279000), (color::Target::Xy(65279, 0), true));
-    let mut remaining = RemainingTime::default();
-    assert!(remaining.write(task.duration(), true, 0xfffe));
-    assert_eq!(remaining.value, 0xfffe);
-    assert!(!remaining.write(1000, false, 0xfffe));
-    assert!(remaining.write(0, false, 0xfffe));
-}
-
 use super::{
     Lighting, Task as LightingTask,
-    controllers::clock::Clock,
     handlers::{ColorHandler, LevelHandler},
 };
+use crate::lighting::clock::Clock;
 use crate::{
     device::{
         Availability, CommandError, DeviceRequest, Function, LightColorTarget, LightDimension,
@@ -400,7 +275,7 @@ fn malformed_stop_with_onoff_does_not_cancel_active_action() {
             LightingTask::Level(Task::Move {
                 with_on_off: false,
                 start: 100,
-                move_mode: MoveModeEnum::Up,
+                move_mode: Direction::Up,
                 rate: 1,
             }),
             None,
@@ -418,19 +293,6 @@ fn malformed_stop_with_onoff_does_not_cancel_active_action() {
         assert!(frame(&mut receiver).await.is_current());
     });
     assert_eq!(clock.now(), 0);
-}
-
-#[test]
-fn short_remaining_time_is_readable_without_subscription_reports() {
-    let mut remaining = RemainingTime::default();
-    assert!(!remaining.write(100, true, 0xfffe));
-    assert_eq!(remaining.value, 1);
-    assert!(!remaining.write(0, false, 0xfffe));
-    assert!(!remaining.write(1000, true, 0xfffe));
-    assert!(remaining.write(0, false, 0xfffe));
-    assert!(remaining.write(2000, true, 0xfffe));
-    assert!(!remaining.write(100, false, 0xfffe));
-    assert!(remaining.write(0, false, 0xfffe));
 }
 
 #[test]
@@ -527,7 +389,7 @@ fn startup_waiter_does_not_block_ticks_merge_or_final_and_sent_stop_retains_rece
                 LightingTask::Level(Task::Move {
                     with_on_off: false,
                     start: 254,
-                    move_mode: MoveModeEnum::Down,
+                    move_mode: Direction::Down,
                     rate: 1,
                 }),
                 None,
@@ -562,7 +424,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
                 LightingTask::Level(Task::Move {
                     with_on_off: false,
                     start: 100,
-                    move_mode: MoveModeEnum::Up,
+                    move_mode: Direction::Up,
                     rate: 10,
                 }),
                 None,
@@ -579,7 +441,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
         light.advance();
         assert!(poll_once(receiver.next_operation()).await.is_none());
         assert!(action.ended().await.is_err());
-        assert_eq!(light.level.borrow().remaining_time.value, 0);
+        assert_eq!(light.remaining_time(LightDimension::Brightness), 0);
         let before = function.snapshot().lighting.unwrap().brightness_percent;
         assert_eq!(
             light.refresh().level,
@@ -590,7 +452,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
                 LightingTask::Level(Task::Move {
                     with_on_off: false,
                     start: 100,
-                    move_mode: MoveModeEnum::Up,
+                    move_mode: Direction::Up,
                     rate: 1,
                 }),
                 None,
@@ -699,12 +561,35 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
             attributes.sort_unstable();
             assert_eq!(attributes, if rgb { vec![0, 1, 3, 4] } else { vec![7] });
         });
-        let old = light.color_version.get();
-        light.update_remaining(LightDimension::Color, 10000, true);
-        light.remaining_dirty.set([false, false]);
-        light.update_remaining(LightDimension::Color, 9900, false);
-        assert_ne!(light.color_version.get(), old);
-        assert_eq!(light.color.borrow().remaining_time.value, 99);
+        // A long CT trajectory whose first tick still rounds to the current
+        // value advances RemainingTime's DataVersion without a quiet report.
+        let action = light
+            .begin(
+                LightingTask::Color(ColorTask::ColorTemperatureMoveTo {
+                    start: 200,
+                    target_mireds: 201,
+                    transition_ms: 10000,
+                }),
+                None,
+            )
+            .unwrap();
+        block_on(async {
+            accept(&function, frame(&mut receiver).await);
+            action.accepted().await.unwrap();
+            light.reports(&ctx);
+            ctx.changes.borrow_mut().clear();
+            let old = light.color_version.get();
+            assert_eq!(light.remaining_time(LightDimension::Color), 100);
+
+            clock.set(1100);
+            light.advance();
+            assert!(poll_once(receiver.next_operation()).await.is_none());
+            assert_eq!(light.remaining_time(LightDimension::Color), 99);
+            light.sync_versions();
+            assert_ne!(light.color_version.get(), old);
+            light.reports(&ctx);
+            assert!(ctx.changes.borrow().is_empty());
+        });
     }
 }
 
@@ -859,7 +744,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
                 LightingTask::Level(Task::Move {
                     with_on_off: false,
                     start: 75,
-                    move_mode: MoveModeEnum::Up,
+                    move_mode: Direction::Up,
                     rate: 1,
                 }),
                 None,
@@ -898,37 +783,6 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
     });
     assert_eq!(clock.now(), 0);
     assert!(ctx.changes.borrow().is_empty());
-}
-
-#[test]
-fn ct_motion_outside_caller_bounds_never_reverses_or_jumps_on_first_frame() {
-    let up = ColorTask::ColorTemperatureMove {
-        start: 250,
-        rate_mireds_per_sec: 10,
-        min_mireds: 150,
-        max_mireds: 200,
-    };
-    assert_eq!(up.duration(), 0);
-    assert_eq!(up.frame(0), (color::Target::Temperature(250), true));
-    let down = ColorTask::ColorTemperatureMove {
-        start: 100,
-        rate_mireds_per_sec: -10,
-        min_mireds: 150,
-        max_mireds: 200,
-    };
-    assert_eq!(down.duration(), 0);
-    assert_eq!(down.frame(0), (color::Target::Temperature(100), true));
-    let entering = ColorTask::ColorTemperatureMove {
-        start: 100,
-        rate_mireds_per_sec: 10,
-        min_mireds: 150,
-        max_mireds: 200,
-    };
-    assert_eq!(entering.frame(0), (color::Target::Temperature(100), false));
-    assert_eq!(
-        entering.frame(10000),
-        (color::Target::Temperature(200), true)
-    );
 }
 
 #[test]
@@ -1068,7 +922,7 @@ fn unsupported_coupling_command_override_is_rejected_before_takeover() {
             LightingTask::Level(Task::Move {
                 with_on_off: false,
                 start: 100,
-                move_mode: MoveModeEnum::Up,
+                move_mode: Direction::Up,
                 rate: 1,
             }),
             None,

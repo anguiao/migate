@@ -3,13 +3,15 @@ use std::{
     pin::Pin,
     time::{Duration, Instant},
 };
-pub(in crate::matter::lighting) trait Clock {
+
+pub(crate) trait Clock {
     fn now(&self) -> u64;
     fn wait_until(&self, deadline: u64) -> Pin<Box<dyn Future<Output = ()> + '_>>;
 }
-pub(in crate::matter::lighting) struct SystemClock(Instant);
+
+pub(crate) struct SystemClock(Instant);
 impl SystemClock {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Instant::now())
     }
 }

@@ -1,5 +1,6 @@
 pub mod config;
 pub mod device;
+mod lighting;
 pub mod matter;
 pub mod runtime;
 pub mod storage;

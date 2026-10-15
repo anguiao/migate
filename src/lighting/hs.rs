@@ -1,34 +1,39 @@
 use crate::device::Rgb;
-use rs_matter::dm::clusters::decl::color_control::DirectionEnum;
 
 const HUE_PERIOD: f64 = 254.0;
 const SATURATION_MAX: f64 = 254.0;
 
+/// Protocol-neutral hue direction. Matter's DirectionEnum conversion stays at
+/// the Matter boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Direction {
+    Up,
+    Down,
+    Shortest,
+    Longest,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::matter::lighting) struct Hs {
+pub(crate) struct Hs {
     pub hue: f64,
     pub saturation: f64,
 }
 
 /// Preserve the selected path, including the long way around the hue circle.
-pub(in crate::matter::lighting) fn hue_delta(
-    start: f64,
-    target: f64,
-    direction: DirectionEnum,
-) -> f64 {
+pub(crate) fn hue_delta(start: f64, target: f64, direction: Direction) -> f64 {
     let up = (target - start).rem_euclid(HUE_PERIOD);
     let down = if up == 0.0 { 0.0 } else { up - HUE_PERIOD };
     match direction {
-        DirectionEnum::Up => up,
-        DirectionEnum::Down => down,
-        DirectionEnum::Shortest => {
+        Direction::Up => up,
+        Direction::Down => down,
+        Direction::Shortest => {
             if up <= HUE_PERIOD / 2.0 {
                 up
             } else {
                 down
             }
         }
-        DirectionEnum::Longest => {
+        Direction::Longest => {
             if up == 0.0 {
                 HUE_PERIOD
             } else if up >= HUE_PERIOD / 2.0 {
@@ -41,7 +46,7 @@ pub(in crate::matter::lighting) fn hue_delta(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::matter::lighting) enum HueAxis {
+pub(crate) enum HueAxis {
     Hold(f64),
     MoveTo {
         start: f64,
@@ -58,7 +63,12 @@ pub(in crate::matter::lighting) enum HueAxis {
 }
 
 impl HueAxis {
-    pub fn move_to(start: f64, target: f64, direction: DirectionEnum, transition_ms: u64) -> Self {
+    pub(crate) fn move_to(
+        start: f64,
+        target: f64,
+        direction: Direction,
+        transition_ms: u64,
+    ) -> Self {
         Self::MoveTo {
             start,
             delta: hue_delta(start, target, direction),
@@ -68,7 +78,7 @@ impl HueAxis {
         }
     }
 
-    pub fn step(start: f64, delta: f64, transition_ms: u64) -> Self {
+    pub(crate) fn step(start: f64, delta: f64, transition_ms: u64) -> Self {
         Self::MoveTo {
             start,
             delta,
@@ -78,7 +88,7 @@ impl HueAxis {
         }
     }
 
-    pub fn move_at(start: f64, rate: f64) -> Self {
+    pub(crate) fn move_at(start: f64, rate: f64) -> Self {
         Self::Move {
             start,
             rate,
@@ -145,7 +155,7 @@ impl HueAxis {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::matter::lighting) enum SaturationAxis {
+pub(crate) enum SaturationAxis {
     Hold(f64),
     MoveTo {
         start: f64,
@@ -161,7 +171,7 @@ pub(in crate::matter::lighting) enum SaturationAxis {
 }
 
 impl SaturationAxis {
-    pub fn move_to(start: f64, target: f64, transition_ms: u64) -> Self {
+    pub(crate) fn move_to(start: f64, target: f64, transition_ms: u64) -> Self {
         Self::MoveTo {
             start,
             target,
@@ -170,7 +180,7 @@ impl SaturationAxis {
         }
     }
 
-    pub fn move_at(start: f64, rate: f64) -> Self {
+    pub(crate) fn move_at(start: f64, rate: f64) -> Self {
         Self::Move {
             start,
             rate,
@@ -247,20 +257,20 @@ impl SaturationAxis {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::matter::lighting) struct HsTask {
+pub(crate) struct HsTask {
     pub hue: HueAxis,
     pub saturation: SaturationAxis,
 }
 
 impl HsTask {
-    pub fn stationary(value: Hs) -> Self {
+    pub(crate) fn stationary(value: Hs) -> Self {
         Self {
             hue: HueAxis::Hold(value.hue),
             saturation: SaturationAxis::Hold(value.saturation),
         }
     }
 
-    pub fn frame(self, elapsed_ms: u64) -> (Hs, bool) {
+    pub(crate) fn frame(self, elapsed_ms: u64) -> (Hs, bool) {
         let duration = self.duration();
         (
             Hs {
@@ -271,16 +281,16 @@ impl HsTask {
         )
     }
 
-    pub fn duration(self) -> u64 {
+    pub(crate) fn duration(self) -> u64 {
         self.hue.duration().max(self.saturation.duration())
     }
 
-    pub fn is_achromatic(self) -> bool {
+    pub(crate) fn is_achromatic(self) -> bool {
         self.saturation.duration() == 0 && self.saturation.frame(0) == 0.0
     }
 
     /// A new single-axis command retains the other axis's original timeline.
-    pub fn resume(self, elapsed_ms: u64) -> Self {
+    pub(crate) fn resume(self, elapsed_ms: u64) -> Self {
         Self {
             hue: self.hue.resume(elapsed_ms),
             saturation: self.saturation.resume(elapsed_ms),
@@ -290,7 +300,7 @@ impl HsTask {
 
 /// HSV over encoded sRGB, with brightness kept in the independent level channel.
 /// Achromatic RGB has no unique hue; the caller can retain its accepted hue.
-pub(in crate::matter::lighting) fn rgb_to_hs(rgb: Rgb) -> Hs {
+pub(crate) fn rgb_to_hs(rgb: Rgb) -> Hs {
     let (r, g, b) = (rgb.red as f64, rgb.green as f64, rgb.blue as f64);
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
@@ -314,7 +324,7 @@ pub(in crate::matter::lighting) fn rgb_to_hs(rgb: Rgb) -> Hs {
     }
 }
 
-pub(in crate::matter::lighting) fn hs_to_rgb(hs: Hs) -> Rgb {
+pub(crate) fn hs_to_rgb(hs: Hs) -> Rgb {
     let sextant = hs.hue.rem_euclid(HUE_PERIOD) / HUE_PERIOD * 6.0;
     let chroma = hs.saturation / SATURATION_MAX;
     let second = chroma * (1.0 - (sextant.rem_euclid(2.0) - 1.0).abs());

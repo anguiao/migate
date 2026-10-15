@@ -1,100 +1,29 @@
-mod controllers;
 mod handlers;
+mod settings;
 #[cfg(test)]
 mod tests;
 
 use crate::device::{
-    ActionToken, Command, CommandError, Function, LightAction, LightColorTarget, LightDimension,
-    LightMode, LightProfile, LightTarget, NumericRange, brightness_from_matter_level,
-    brightness_to_matter_level,
+    Command, CommandError, Function, LightAction, LightDimension, LightMode, LightProfile,
+    NumericRange, brightness_to_matter_level,
 };
-use controllers::{
+use crate::lighting::{
+    Scheduler, Task,
     clock::{Clock, SystemClock},
-    color::{self, ColorControlState},
-    hs,
-    level::{self, LevelControlState},
+    color, hs, level,
 };
 use futures_lite::future::or;
-use futures_util::FutureExt;
 pub(super) use handlers::{ColorHandler, LevelHandler, OnOffHandler};
 use rs_matter::{
     dm::{Dataver, HandlerContext},
     error::{Error, ErrorCode},
 };
+use settings::{color::ColorControlState, level::LevelControlState};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
 
-#[derive(Clone, Copy)]
-enum Task {
-    Level(level::Task),
-    Color(color::Task),
-}
-impl Task {
-    fn dimension(self) -> LightDimension {
-        match self {
-            Self::Level(_) => LightDimension::Brightness,
-            Self::Color(_) => LightDimension::Color,
-        }
-    }
-    fn duration(self) -> u64 {
-        match self {
-            Self::Level(task) => task.duration(),
-            Self::Color(task) => task.duration(),
-        }
-    }
-    fn frame(
-        self,
-        elapsed: u64,
-        range: Option<NumericRange>,
-    ) -> Result<(LightTarget, bool), Error> {
-        match self {
-            Self::Level(task) => {
-                let (level, end, power) = task.frame(elapsed);
-                Ok((
-                    LightTarget {
-                        power,
-                        brightness_percent: Some(
-                            brightness_from_matter_level(level).map_err(command_error)?,
-                        ),
-                        color: None,
-                    },
-                    end,
-                ))
-            }
-            Self::Color(task) => {
-                let (target, end) = task.frame(elapsed);
-                let color = match target {
-                    color::Target::Xy(x, y) => LightColorTarget::Rgb(color::xy_to_rgb(x, y)),
-                    color::Target::Hs(value) => LightColorTarget::Rgb(hs::hs_to_rgb(value)),
-                    color::Target::Temperature(mireds) => {
-                        let range = range.ok_or(ErrorCode::InvalidState)?;
-                        LightColorTarget::Temperature(
-                            range.kelvin_from_mireds(mireds).map_err(command_error)?,
-                        )
-                    }
-                };
-                Ok((
-                    LightTarget {
-                        color: Some(color),
-                        ..Default::default()
-                    },
-                    end,
-                ))
-            }
-        }
-    }
-}
-struct Active {
-    task: Task,
-    token: ActionToken,
-    action: Rc<LightAction>,
-    start: u64,
-    last: LightTarget,
-    final_submitted: bool,
-    accepted: bool,
-}
 #[derive(Clone, Copy, Default)]
 struct Projection {
     power: Option<bool>,
@@ -117,10 +46,9 @@ pub(super) struct Lighting {
     profile: LightProfile,
     range: Option<NumericRange>,
     bounds: Option<(u16, u16)>,
-    clock: Rc<dyn Clock>,
+    scheduler: Scheduler,
     level: RefCell<LevelControlState>,
     color: RefCell<ColorControlState>,
-    active: RefCell<[Option<Active>; 2]>,
     rgb_mode: Cell<u8>,
     hue_hint: Cell<f64>,
     pub(super) on_off_version: Dataver,
@@ -132,7 +60,7 @@ pub(super) struct Lighting {
     color_dirty: Cell<bool>,
     last_level_report: Cell<u64>,
     last_color_report: Cell<u64>,
-    remaining_dirty: Cell<[bool; 2]>,
+    remaining_versions: Cell<[u64; 2]>,
 }
 pub(super) fn command_error(error: CommandError) -> Error {
     log::warn!("Matter lighting command failed: {error}");
@@ -177,16 +105,16 @@ impl Lighting {
         let bounds = range
             .map(|range| range.mired_bounds().map_err(command_error))
             .transpose()?;
+        let scheduler = Scheduler::new(function.clone(), range, clock);
         let result = Self {
             function,
             endpoint,
             profile,
             range,
             bounds,
-            clock,
+            scheduler,
             level: RefCell::new(LevelControlState::default()),
             color: RefCell::new(ColorControlState::default()),
-            active: RefCell::new([None, None]),
             rgb_mode: Cell::new(0),
             hue_hint: Cell::new(0.0),
             on_off_version: on_off,
@@ -198,7 +126,7 @@ impl Lighting {
             color_dirty: Cell::new(false),
             last_level_report: Cell::new(0),
             last_color_report: Cell::new(0),
-            remaining_dirty: Cell::new([false, false]),
+            remaining_versions: Cell::new([0, 0]),
         };
         let projection = result.refresh();
         result.versioned.set(projection);
@@ -280,20 +208,18 @@ impl Lighting {
         let mut value = hs::rgb_to_hs(rgb);
         // RGB cannot encode a hue at zero saturation. Retain accepted hue
         // selections, including a hue-only trajectory through neutral white.
-        if let Some(active) = &self.active.borrow()[1]
-            && active.accepted
-            && let Task::Color(color::Task::Hs(task)) = active.task
+        if let Some(observation) = self.scheduler.observe(LightDimension::Color)
+            && observation.accepted
+            && let Task::Color(color::Task::Hs(task)) = observation.task
         {
-            let finished = active.final_submitted
-                && matches!(active.action.ended().now_or_never(), Some(Ok(_)));
+            let finished = observation.final_submitted && observation.ended_ok;
             let elapsed = if finished {
                 task.duration()
             } else {
-                self.clock.now().saturating_sub(active.start)
+                observation.elapsed
             };
             let requested = task.frame(elapsed).0;
-            if (finished
-                || (value.saturation == 0.0 && self.function.light_action_current(active.token)))
+            if (finished || (value.saturation == 0.0 && observation.current))
                 && hs::hs_to_rgb(requested) == rgb
             {
                 self.hue_hint.set(requested.hue);
@@ -307,22 +233,16 @@ impl Lighting {
         value
     }
     fn accept_color_metadata(&self) {
-        let mut actions = self.active.borrow_mut();
-        let Some(active) = &mut actions[1] else {
+        let Some(acceptance) = self.scheduler.accept_color() else {
             return;
         };
-        let ended = active.action.ended().now_or_never();
-        if active.accepted || !active.action.accepted_while_current() {
-            return;
-        }
         // Receipt ownership outlives the Invoke waiter. The runner and getters
         // commit representation metadata even if that waiter has been dropped.
-        active.accepted = true;
-        match active.task {
+        match acceptance.task {
             Task::Color(color::Task::Hs(task)) => {
                 self.rgb_mode.set(0);
                 self.hue_hint.set(
-                    task.frame(if matches!(ended, Some(Ok(_))) {
+                    task.frame(if acceptance.ended_ok {
                         task.duration()
                     } else {
                         0
@@ -349,29 +269,20 @@ impl Lighting {
     }
     fn continuing_hs(&self) -> Result<(hs::HsTask, hs::Hs), Error> {
         let start = self.hs_start()?;
-        let actions = self.active.borrow();
-        let task = match &actions[1] {
-            Some(active) if self.function.light_action_current(active.token) => {
-                if let Task::Color(color::Task::Hs(task)) = active.task {
-                    task.resume(self.clock.now().saturating_sub(active.start))
-                } else {
-                    hs::HsTask::stationary(start)
-                }
-            }
-            _ => hs::HsTask::stationary(start),
-        };
-        Ok((task, start))
+        Ok((self.scheduler.continue_hs(start), start))
     }
     fn stop_hs(&self) -> Result<(), Error> {
-        let is_hs = self.active.borrow()[1]
-            .as_ref()
-            .is_some_and(|active| matches!(active.task, Task::Color(color::Task::Hs(_))));
+        let is_hs = self
+            .scheduler
+            .observe(LightDimension::Color)
+            .is_some_and(|observation| matches!(observation.task, Task::Color(color::Task::Hs(_))));
         if is_hs {
             self.stop(LightDimension::Color)?;
         }
         Ok(())
     }
     fn sync_versions(&self) -> Projection {
+        self.sync_remaining_versions();
         let current = self.refresh();
         let old = self.versioned.replace(current);
         // The generated handler filters by DataVersion before calling a getter.
@@ -392,64 +303,29 @@ impl Lighting {
         }
         current
     }
-    fn update_remaining(&self, dimension: LightDimension, millis: u64, start: bool) {
-        let index = if dimension == LightDimension::Brightness {
-            0
-        } else {
-            1
-        };
-        let (old, new, report) = if index == 0 {
-            let mut level = self.level.borrow_mut();
-            let old = level.remaining_time.value;
-            let report = level.remaining_time.write(millis, start, u16::MAX);
-            (old, level.remaining_time.value, report)
-        } else {
-            let mut color = self.color.borrow_mut();
-            let old = color.remaining_time.value;
-            let report = color.remaining_time.write(millis, start, 0xfffe);
-            (old, color.remaining_time.value, report)
-        };
-        if old != new {
-            if index == 0 {
-                self.level_version.changed();
-            } else {
-                self.color_version.changed();
+    fn sync_remaining_versions(&self) {
+        for (index, dimension) in [(0, LightDimension::Brightness), (1, LightDimension::Color)] {
+            let revision = self.scheduler.remaining_revision(dimension);
+            if revision != self.remaining_versions.get()[index] {
+                if index == 0 {
+                    self.level_version.changed();
+                } else {
+                    self.color_version.changed();
+                }
+                let mut versions = self.remaining_versions.get();
+                versions[index] = revision;
+                self.remaining_versions.set(versions);
             }
         }
-        if report {
-            let mut dirty = self.remaining_dirty.get();
-            dirty[index] = true;
-            self.remaining_dirty.set(dirty);
-        }
+    }
+    fn remaining_time(&self, dimension: LightDimension) -> u16 {
+        self.scheduler.remaining_time(dimension)
     }
     fn begin(&self, task: Task, forced_power: Option<bool>) -> Result<Rc<LightAction>, Error> {
         self.refresh();
-        let (mut target, final_frame) = task.frame(0, self.range)?;
-        if forced_power.is_some() {
-            target.power = forced_power;
-        }
-        let dimension = task.dimension();
-        let action = Rc::new(
-            self.function
-                .begin_light_action(dimension, target, final_frame)
-                .map_err(command_error)?,
-        );
-        let index = if dimension == LightDimension::Brightness {
-            0
-        } else {
-            1
-        };
-        self.active.borrow_mut()[index] = Some(Active {
-            task,
-            token: action.token(),
-            action: action.clone(),
-            start: self.clock.now(),
-            last: target,
-            final_submitted: final_frame,
-            accepted: false,
-        });
-        self.update_remaining(dimension, task.duration(), true);
-        Ok(action)
+        self.scheduler
+            .begin(task, forced_power)
+            .map_err(command_error)
     }
     async fn execute_level(&self, task: Option<level::Task>) -> Result<(), Error> {
         if let Some(task) = task {
@@ -505,76 +381,14 @@ impl Lighting {
     }
     fn stop(&self, dimension: LightDimension) -> Result<(), Error> {
         self.refresh();
-        self.function.stop_light(dimension).map_err(command_error)?;
-        let index = if dimension == LightDimension::Brightness {
-            0
-        } else {
-            1
-        };
-        self.active.borrow_mut()[index] = None;
-        self.update_remaining(dimension, 0, false);
-        Ok(())
+        self.scheduler.stop(dimension).map_err(command_error)
     }
     fn advance(&self) {
         self.refresh();
-        let now = self.clock.now();
-        for index in 0..2 {
-            let mut actions = self.active.borrow_mut();
-            let Some(active) = actions[index].as_mut() else {
-                continue;
-            };
-            let dimension = active.task.dimension();
-            if !self.function.light_action_current(active.token) {
-                actions[index] = None;
-                drop(actions);
-                self.update_remaining(dimension, 0, false);
-                continue;
-            }
-            if active.final_submitted {
-                continue;
-            }
-            let elapsed = now.saturating_sub(active.start);
-            let (target, final_frame) = active
-                .task
-                .frame(elapsed, self.range)
-                .expect("validated controller task");
-            let mut remaining = active.task.duration().saturating_sub(elapsed);
-            let local_startup = !active.accepted
-                && matches!(active.task, Task::Color(color::Task::Hs(task)) if task.is_achromatic());
-            if final_frame || target != active.last || local_startup {
-                let submitted = self
-                    .function
-                    .submit_light_frame(active.token, target, final_frame)
-                    .and_then(|()| {
-                        if local_startup {
-                            // A preceding write may have prevented local acceptance
-                            // at startup. Recheck after its gate has settled, even
-                            // when all subsequent RGB frames are identical.
-                            self.function
-                                .accept_light_state_only_startup(active.token)
-                                .map(|_| ())
-                        } else {
-                            Ok(())
-                        }
-                    });
-                match submitted {
-                    Ok(()) => {
-                        active.last = target;
-                        active.final_submitted = final_frame;
-                    }
-                    Err(error) => {
-                        log::warn!("Matter lighting action ended: {error}");
-                        actions[index] = None;
-                        remaining = 0;
-                    }
-                }
-            }
-            drop(actions);
-            self.update_remaining(dimension, remaining, false);
-        }
+        self.scheduler.advance();
     }
     fn reports(&self, ctx: &impl HandlerContext) {
-        let now = self.clock.now();
+        let now = self.scheduler.now();
         let current = self.sync_versions();
         let old = self.observed.replace(current);
         if old.power != current.power {
@@ -586,9 +400,10 @@ impl Lighting {
                 self.last_level_report.set(now.saturating_sub(1000));
             }
         }
-        let level_end = self.active.borrow()[0]
-            .as_ref()
-            .is_none_or(|a| a.final_submitted && !self.function.light_action_current(a.token));
+        let level_end = self
+            .scheduler
+            .observe(LightDimension::Brightness)
+            .is_none_or(|observation| observation.final_submitted && !observation.current);
         if self.level_dirty.get()
             && (level_end
                 || now.saturating_sub(self.last_level_report.get()) >= 1000
@@ -614,9 +429,10 @@ impl Lighting {
             ctx.notify_attr_changed(self.endpoint, 0x300, 8);
             ctx.notify_attr_changed(self.endpoint, 0x300, 0x4001);
         }
-        let color_end = self.active.borrow()[1]
-            .as_ref()
-            .is_none_or(|a| a.final_submitted && !self.function.light_action_current(a.token));
+        let color_end = self
+            .scheduler
+            .observe(LightDimension::Color)
+            .is_none_or(|observation| observation.final_submitted && !observation.current);
         let unknown_edge = match current.mode {
             Some(LightMode::Temperature) => {
                 value_changed && (old.temperature.is_none() || current.temperature.is_none())
@@ -647,11 +463,13 @@ impl Lighting {
             self.color_dirty.set(false);
             self.last_color_report.set(now);
         }
-        let dirty = self.remaining_dirty.replace([false, false]);
-        if dirty[0] {
+        if self
+            .scheduler
+            .take_remaining_report(LightDimension::Brightness)
+        {
             ctx.notify_attr_changed(self.endpoint, 8, 1);
         }
-        if dirty[1] {
+        if self.scheduler.take_remaining_report(LightDimension::Color) {
             ctx.notify_attr_changed(self.endpoint, 0x300, 2);
         }
     }
@@ -664,18 +482,9 @@ impl Lighting {
         loop {
             self.advance();
             self.reports(&ctx);
-            let ticking = self.active.borrow().iter().any(Option::is_some)
-                || self.level_dirty.get()
-                || self.color_dirty.get();
-            let now = self.clock.now();
-            let deadline = self
-                .active
-                .borrow()
-                .iter()
-                .flatten()
-                .filter(|a| !a.final_submitted)
-                .map(|a| a.start.saturating_add(a.task.duration()))
-                .fold(now.saturating_add(20), u64::min);
+            let ticking =
+                self.scheduler.is_ticking() || self.level_dirty.get() || self.color_dirty.get();
+            let deadline = self.scheduler.deadline();
             or(
                 or(
                     async {
@@ -687,7 +496,7 @@ impl Lighting {
                 ),
                 async {
                     if ticking {
-                        self.clock.wait_until(deadline).await;
+                        self.scheduler.wait_until(deadline).await;
                     } else {
                         std::future::pending::<()>().await;
                     }

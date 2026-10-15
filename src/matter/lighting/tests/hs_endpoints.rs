@@ -1,5 +1,5 @@
-use super::super::controllers::hs;
 use super::*;
+use crate::lighting::hs;
 use c::ClusterAsyncHandler as _;
 
 #[derive(Clone, Copy)]

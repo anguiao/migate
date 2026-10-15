@@ -1,8 +1,6 @@
-use super::{
-    Lighting,
-    controllers::{self, color, hs},
-};
+use super::{Lighting, settings};
 use crate::device::{Command, LightDimension};
+use crate::lighting::{color, hs};
 use rs_matter::{
     dm::{
         Cluster, HandlerContext, InvokeContext, ReadContext, WriteContext,
@@ -155,10 +153,10 @@ macro_rules! level_stop {
                 request.options_override()?.bits(),
             );
             if $with {
-                controllers::validate_options(mask, override_)?;
+                settings::validate_options(mask, override_)?;
             }
             if !$with
-                && !controllers::should_continue(
+                && !settings::should_continue(
                     power,
                     self.0.level.borrow().options,
                     mask,
@@ -202,7 +200,7 @@ impl l::ClusterAsyncHandler for LevelHandler<'_> {
         Ok(254)
     }
     async fn remaining_time(&self, _ctx: impl ReadContext) -> Result<u16, Error> {
-        Ok(self.0.level.borrow().remaining_time.value)
+        Ok(self.0.remaining_time(LightDimension::Brightness))
     }
     async fn options(&self, _ctx: impl ReadContext) -> Result<l::OptionsBitmap, Error> {
         Ok(l::OptionsBitmap::from_bits_retain(
@@ -260,6 +258,15 @@ impl l::ClusterAsyncHandler for LevelHandler<'_> {
     }
 }
 
+fn hs_direction(direction: c::DirectionEnum) -> hs::Direction {
+    match direction {
+        c::DirectionEnum::Up => hs::Direction::Up,
+        c::DirectionEnum::Down => hs::Direction::Down,
+        c::DirectionEnum::Shortest => hs::Direction::Shortest,
+        c::DirectionEnum::Longest => hs::Direction::Longest,
+    }
+}
+
 macro_rules! unsupported_color {
     ($($name:ident:$request:ident),* $(,)?) => {$ (
         async fn $name(&self,_ctx:impl InvokeContext,_request:c::$request<'_>)->Result<(),Error>{Err(ErrorCode::CommandNotFound.into())}
@@ -268,7 +275,7 @@ macro_rules! unsupported_color {
 impl<const RGB: bool> ColorHandler<'_, RGB> {
     fn proceed(&self, mask: c::OptionsBitmap, override_: c::OptionsBitmap) -> Result<bool, Error> {
         let power = self.0.refresh().power;
-        controllers::should_continue(
+        settings::should_continue(
             power,
             self.0.color.borrow().options,
             mask.bits(),
@@ -380,7 +387,7 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         self.0.color_version.changed();
     }
     async fn remaining_time(&self, _ctx: impl ReadContext) -> Result<u16, Error> {
-        Ok(self.0.color.borrow().remaining_time.value)
+        Ok(self.0.remaining_time(LightDimension::Color))
     }
     async fn current_hue(&self, _ctx: impl ReadContext) -> Result<u8, Error> {
         self.0
@@ -496,7 +503,12 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             return Ok(());
         }
         let (mut task, start) = self.0.continuing_hs()?;
-        task.hue = hs::HueAxis::move_to(start.hue, hue as f64, direction, duration as u64 * 100);
+        task.hue = hs::HueAxis::move_to(
+            start.hue,
+            hue as f64,
+            hs_direction(direction),
+            duration as u64 * 100,
+        );
         self.0.execute_color(color::Task::Hs(task)).await
     }
     async fn handle_move_hue(
@@ -652,7 +664,7 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
                 hue: hs::HueAxis::move_to(
                     start.hue,
                     target.hue,
-                    c::DirectionEnum::Shortest,
+                    hs::Direction::Shortest,
                     duration as u64 * 100,
                 ),
                 saturation: hs::SaturationAxis::move_to(

@@ -1,6 +1,6 @@
-use super::super::controllers::hs;
 use super::*;
 use crate::device::LightTarget;
+use crate::lighting::hs;
 use c::ClusterAsyncHandler as _;
 use rs_matter::error::Error;
 

@@ -5,12 +5,12 @@
 // commit 3f3528ef5c492b6feb0a2e043264dc47e9da4340. Apache-2.0.
 // Retains CT/XY interpolation; HS adds independent hue/saturation trajectories.
 // Accepted snapshots replace device-hook state. Scenes remain outside this profile.
-use super::{RemainingTime, hs};
+use super::hs;
 use crate::device::Rgb;
 
-pub(in crate::matter::lighting) const XY_MAX: u16 = 0xfeff;
+pub(crate) const XY_MAX: u16 = 0xfeff;
 #[derive(Clone, Copy, Debug)]
-pub(in crate::matter::lighting) enum Task {
+pub(crate) enum Task {
     Hs(hs::HsTask),
     XyMoveTo {
         start_x: u16,
@@ -38,7 +38,7 @@ pub(in crate::matter::lighting) enum Task {
     },
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::matter::lighting) enum Target {
+pub(crate) enum Target {
     Hs(hs::Hs),
     Xy(u16, u16),
     Temperature(u16),
@@ -62,7 +62,7 @@ fn interpolate(start: u16, target: u16, elapsed: u64, total: u64) -> u16 {
     (start as i128 + (target as i128 - start as i128) * elapsed as i128 / total as i128) as u16
 }
 impl Task {
-    pub fn duration(self) -> u64 {
+    pub(crate) fn duration(self) -> u64 {
         match self {
             Self::Hs(task) => task.duration(),
             Self::XyMoveTo {
@@ -108,7 +108,7 @@ impl Task {
             } => axis_duration(start, rate_mireds_per_sec, min_mireds, max_mireds),
         }
     }
-    pub fn frame(self, elapsed: u64) -> (Target, bool) {
+    pub(crate) fn frame(self, elapsed: u64) -> (Target, bool) {
         if let Self::Hs(task) = self {
             let (target, end) = task.frame(elapsed);
             return (Target::Hs(target), end);
@@ -161,7 +161,7 @@ impl Task {
 
 /// Planckian-locus approximation adapted from rs-matter's CT conversion.
 /// This projects a known white-light state when starting a color command.
-pub(in crate::matter::lighting) fn temperature_to_xy(mireds: u16) -> (u16, u16) {
+pub(crate) fn temperature_to_xy(mireds: u16) -> (u16, u16) {
     let t = 1_000_000.0 / f64::from(mireds);
     let t2 = t * t;
     let u = (0.860117757 + 1.54118254e-4 * t + 1.28641212e-7 * t2)
@@ -178,19 +178,11 @@ pub(in crate::matter::lighting) fn temperature_to_xy(mireds: u16) -> (u16, u16) 
             .clamp(0.0, f64::from(XY_MAX)) as u16,
     )
 }
-#[derive(Default)]
-pub(in crate::matter::lighting) struct ColorControlState {
-    pub xy: Option<(u16, u16)>,
-    pub color_temperature_mireds: Option<u16>,
-    pub mode: Option<crate::device::LightMode>,
-    pub options: u8,
-    pub remaining_time: RemainingTime,
-}
 
 // The upstream linear RGB/XYZ pair is replaced by the paired sRGB D65 matrices
 // from https://www.w3.org/TR/css-color-4/#color-conversion-code. Matter XY
 // uses 1/65536 units; XY_MAX limits valid values, not the conversion scale.
-pub(in crate::matter::lighting) fn rgb_to_xy(rgb: Rgb) -> Option<(u16, u16)> {
+pub(crate) fn rgb_to_xy(rgb: Rgb) -> Option<(u16, u16)> {
     let linear = |value: u8| {
         let c = value as f64 / 255.0;
         if c <= 0.04045 {
@@ -211,7 +203,7 @@ pub(in crate::matter::lighting) fn rgb_to_xy(rgb: Rgb) -> Option<(u16, u16)> {
         )
     })
 }
-pub(in crate::matter::lighting) fn xy_to_rgb(x: u16, y: u16) -> Rgb {
+pub(crate) fn xy_to_rgb(x: u16, y: u16) -> Rgb {
     if y == 0 {
         return Rgb {
             red: 0,

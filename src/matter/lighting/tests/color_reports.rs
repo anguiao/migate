@@ -1,5 +1,5 @@
-use super::super::controllers::hs;
 use super::*;
+use crate::lighting::hs;
 use c::ClusterAsyncHandler as _;
 
 fn reported<H>(ctx: &Context<'_, H>) -> Vec<u32> {
@@ -402,7 +402,7 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
         assert_eq!(handler.current_hue(&ctx).await.unwrap(), 170);
         assert_eq!(handler.current_saturation(&ctx).await.unwrap(), 0);
         light.advance();
-        assert!(light.active.borrow()[1].is_none());
+        assert!(light.scheduler.observe(LightDimension::Color).is_none());
         let rgb_cache = function.snapshot().lighting.unwrap().color;
 
         function
