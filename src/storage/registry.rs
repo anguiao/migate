@@ -58,6 +58,7 @@ pub struct StoredDevice {
     pub label: String,
     pub functions: Vec<StoredFunction>,
     pub published: bool,
+    pub configuration_version: u32,
 }
 impl StoredDevice {
     /// Build runtime metadata from the identity and names committed at admission.
@@ -393,6 +394,7 @@ fn create_record(
         label,
         functions,
         published: true,
+        configuration_version: 1,
     })
 }
 fn reserve_endpoint(
@@ -407,10 +409,17 @@ fn reserve_endpoint(
     )?;
     Ok(())
 }
+pub(super) fn load_stored(
+    connection: &Connection,
+    key: &DeviceKey,
+) -> rusqlite::Result<Option<StoredDevice>> {
+    Ok(load_record(connection, key)?.map(|record| record.device))
+}
+
 fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Option<Record>> {
     let identity = connection
         .query_row(
-            "SELECT unique_id, endpoint, label, published FROM device_identity
+            "SELECT unique_id, endpoint, label, published, configuration_version FROM device_identity
              WHERE source=?1 AND device_id=?2",
             params![key.source, key.id],
             |row| {
@@ -419,17 +428,19 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
                     row.get::<_, u16>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, bool>(3)?,
+                    row.get::<_, u32>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((unique_id, endpoint, label, published)) = identity else {
+    let Some((unique_id, endpoint, label, published, configuration_version)) = identity else {
         return Ok(None);
     };
     let valid_uuid =
         Uuid::parse_str(&unique_id).is_ok_and(|uuid| uuid.simple().to_string() == unique_id);
     if !valid_uuid
         || !(2..=65534).contains(&endpoint)
+        || configuration_version == 0
         || label
             .as_deref()
             .is_some_and(|label| validate_label(label).is_err())
@@ -503,6 +514,7 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
             label: label.unwrap_or_default(),
             functions,
             published,
+            configuration_version,
         },
     }))
 }

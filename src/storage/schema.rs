@@ -12,7 +12,7 @@ pub(super) const CURRENT_VERSION: i64 = 7;
 
 pub(super) const SCHEMA: &str = concat!(
     include_str!("schema.sql"),
-    include_str!("devices-v4.sql"),
+    include_str!("devices.sql"),
     include_str!("publication.sql")
 );
 

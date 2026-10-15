@@ -5,7 +5,7 @@ use super::{
     identity::{self, Identity},
     lock,
     matter::MatterStore,
-    migration,
+    schema,
     xiaomi::XiaomiStore,
 };
 use rusqlite::Connection;
@@ -29,7 +29,14 @@ struct Inner {
 impl Store {
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, StorageError> {
         let directory = directory.as_ref();
-        prepare_directory(directory)?;
+        // Do not prepare (and chmod) an existing data directory before the
+        // database itself is known to be a supported format.
+        let directory_ready = fs::metadata(directory)
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        if !directory_ready {
+            prepare_directory(directory)?;
+        }
         let path = directory.join("state.db");
         let new = !path
             .try_exists()
@@ -40,6 +47,13 @@ impl Store {
 
         let mut connection = Connection::open(&path)
             .map_err(|e| StorageError::database(&path, "open database", e))?;
+        if !new {
+            // Reject unsupported or damaged databases before changing
+            // permissions, the journal mode or any other file state.
+            schema::validate(&connection)
+                .map_err(|error| StorageError::new(&path, "validate database schema", error))?;
+        }
+        prepare_directory(directory)?;
         private_permissions(&path, 0o600)?;
         connection
             .execute_batch("PRAGMA journal_mode = DELETE; PRAGMA synchronous = EXTRA;")
@@ -47,9 +61,6 @@ impl Store {
         if new {
             initialize(&mut connection)
                 .map_err(|e| StorageError::database(&path, "initialize database", e))?;
-        } else {
-            migration::validate(&connection)
-                .map_err(|error| StorageError::new(&path, "validate database schema", error))?;
         }
         Ok(Self {
             inner: Rc::new(Inner { path, connection }),
@@ -107,7 +118,7 @@ fn require_empty_directory(directory: &Path) -> Result<(), StorageError> {
 
 fn initialize(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
-    transaction.execute_batch(migration::SCHEMA)?;
+    transaction.execute_batch(schema::SCHEMA)?;
     identity::insert(&transaction)?;
     transaction.commit()
 }
