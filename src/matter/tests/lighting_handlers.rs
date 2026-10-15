@@ -2,21 +2,16 @@ use super::*;
 use crate::device::{DeviceRequest, LightDimension, LightPatch};
 
 macro_rules! setup_light {
-    ($rgb:expr, $executor:ident, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
-        setup_light!(@source crate::matter::tests::support::light($rgb),$executor,$device,$receiver,$registry,$handler,$ctx);
+    ($rgb:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
+        setup_light!(@source crate::matter::tests::support::light($rgb),$device,$receiver,$registry,$handler,$ctx);
     };
-    (@caps $capabilities:expr, $executor:ident, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
-        setup_light!(@source crate::matter::tests::support::light_caps("test-light", $capabilities),$executor,$device,$receiver,$registry,$handler,$ctx);
-    };
-    (@source $source:expr, $executor:ident, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
+    (@source $source:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let identity = store.load_identity().unwrap();
         let ($device, mut $receiver) = $source;
-        let $registry = crate::matter::tests::published_registry(&store, &$device);
-        let $executor = crate::matter::tests::support::test_executor();
-        let _ = &$executor;
-        let $handler = model::handler(&$registry, &store, StoreAdapter::new(store.matter()), $executor.clone(), rand::rng(), None).unwrap();
+        let $registry = crate::matter::tests::support::test_registry(&store, &$device);
+        let $handler = model::handler(&$registry, &store, StoreAdapter::new(store.matter()), rand::rng()).unwrap();
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
@@ -78,8 +73,7 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
             8,
         ),
     ] {
-        setup_light!(true, executor, device, receiver, registry, handler, ctx);
-        device.set_availability(Availability::Available);
+        setup_light!(true, device, receiver, registry, handler, ctx);
         let function = device.functions()[0].clone();
         function
             .observe_light(LightPatch {
@@ -176,8 +170,7 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
 fn ct_projection_reads_ignore_inactive_rgb_and_rgb_keeps_its_ct_cache_readable() {
     use crate::device::{LightMode, Rgb};
 
-    setup_light!(true, executor, device, receiver, registry, handler, ctx);
-    device.set_availability(Availability::Available);
+    setup_light!(true, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     function
         .observe_light(LightPatch {
@@ -278,8 +271,7 @@ fn ct_projection_reads_ignore_inactive_rgb_and_rgb_keeps_its_ct_cache_readable()
 fn light_unfiltered_reads_use_new_versions_and_encoded_equal_values_keep_versions() {
     use crate::device::{LightMode, Rgb};
 
-    setup_light!(true, executor, device, receiver, registry, handler, ctx);
-    device.set_availability(Availability::Available);
+    setup_light!(true, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     function
         .observe_light(LightPatch {
@@ -349,8 +341,7 @@ fn light_unfiltered_reads_use_new_versions_and_encoded_equal_values_keep_version
 fn light_unknown_projection_edges_invalidate_filters_before_run() {
     use crate::device::{LightMode, Rgb};
 
-    setup_light!(true, executor, device, receiver, registry, handler, ctx);
-    device.set_availability(Availability::Available);
+    setup_light!(true, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     block_on(async {
         let level_before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
@@ -403,7 +394,7 @@ fn light_unknown_projection_edges_invalidate_filters_before_run() {
 #[test]
 fn light_remaining_time_start_and_stop_change_versions_before_run() {
     for cluster in [8, 0x300] {
-        setup_light!(false, executor, device, receiver, registry, handler, ctx);
+        setup_light!(false, device, receiver, registry, handler, ctx);
         device.set_availability(Availability::Available);
         let function = device.functions()[0].clone();
         function
@@ -480,7 +471,7 @@ fn light_remaining_time_start_and_stop_change_versions_before_run() {
 #[test]
 fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes() {
     for rgb in [false, true] {
-        setup_light!(rgb, executor, device, receiver, registry, handler, ctx);
+        setup_light!(rgb, device, receiver, registry, handler, ctx);
         device.set_availability(Availability::Available);
         block_on(async {
             assert!(
@@ -553,7 +544,7 @@ fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes(
 
 #[test]
 fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
-    setup_light!(false, executor, device, receiver, registry, handler, ctx);
+    setup_light!(false, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     device.set_availability(Availability::Available);
     function
@@ -576,9 +567,7 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
             InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut output))
         ));
         let mut run = pin!(handler.run(&ctx));
-        let mut executor_run = pin!(executor.clone().run());
         assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(poll_once(executor_run.as_mut()).await.is_none());
         assert!(poll_once(invoke.as_mut()).await.is_none());
         let DeviceRequest::Light(first) = receiver.next_operation().await.unwrap() else {
             panic!("missing light startup")
@@ -610,12 +599,7 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
                 }
             },
             async {
-                futures_lite::future::or(run.as_mut(), async {
-                    executor_run.as_mut().await;
-                    Ok::<(), rs_matter::error::Error>(())
-                })
-                .await
-                .unwrap();
+                run.as_mut().await.unwrap();
             },
         )
         .await;
@@ -642,6 +626,48 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
 }
 
 #[test]
+fn light_rebuild_retains_endpoint_and_refreshes_temperature_bounds_and_versions() {
+    setup_light!(false, device, receiver, registry, handler, ctx);
+    device.set_availability(Availability::Available);
+    block_on(async {
+        ctx.attribute = attr(0x300, 0x400b);
+        let mut run = pin!(handler.run(&ctx));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        let before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
+        assert_eq!(
+            report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                .u16()
+                .unwrap(),
+            154
+        );
+        let mut description = device.description();
+        description.functions[0].capabilities[2] =
+            crate::device::Capability::ColorTemperature(crate::device::NumericRange {
+                min: 3000,
+                max: 4000,
+                step: 1,
+            });
+        let (replacement, _receivers) = crate::device::PhysicalDevice::new(description);
+        replacement.set_availability(Availability::Available);
+        registry.remove(device.key()).unwrap();
+        registry.insert(replacement);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(
+            report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                .u16()
+                .unwrap(),
+            250
+        );
+        assert_ne!(
+            report_dataver(&read_bytes(&handler, &ctx).await.unwrap()),
+            before
+        );
+        handler.access(|node| assert!(node.endpoints.iter().any(|e| e.id == 2)));
+        assert!(receiver.next_operation().await.is_none());
+    });
+}
+
+#[test]
 fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_temperature_range() {
     for fixture in [
         include_str!("../../../tests/fixtures/miot/yeelink-light-light3.json"),
@@ -664,7 +690,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                 .collect(),
         };
         let (device, mut receivers) = crate::device::PhysicalDevice::new(description);
-        setup_light!(@source (device,receivers.remove(0)),executor,device,receiver,registry,handler,ctx);
+        setup_light!(@source (device,receivers.remove(0)),device,receiver,registry,handler,ctx);
         let function = device.functions()[0].clone();
         device.set_availability(Availability::Available);
         function.observe(true);
@@ -689,16 +715,9 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                     percent,
                     crate::device::brightness_from_matter_level(111).unwrap()
                 );
-                let raw = binding
-                    .brightness
-                    .as_ref()
-                    .unwrap()
-                    .brightness_to_raw(percent)
-                    .unwrap();
+                let raw = binding.brightness.brightness_to_raw(percent).unwrap();
                 let actual = binding
                     .brightness
-                    .as_ref()
-                    .unwrap()
                     .brightness_from_raw(&serde_json::json!(raw))
                     .unwrap();
                 request.mark_sent().unwrap();
@@ -716,7 +735,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                         .unwrap(),
                     crate::device::brightness_to_matter_level(actual).unwrap()
                 );
-                if binding.brightness.as_ref().unwrap().range.max == 65535 {
+                if binding.brightness.range.max == 65535 {
                     assert!(actual.fract() > 0.0);
                     assert!((actual - percent).abs() < 0.002);
                 }
@@ -726,14 +745,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                 report_value(&read_bytes(&handler, &ctx).await.unwrap())
                     .u16()
                     .unwrap(),
-                binding
-                    .temperature
-                    .as_ref()
-                    .unwrap()
-                    .range
-                    .mired_bounds()
-                    .unwrap()
-                    .0
+                binding.temperature.range.mired_bounds().unwrap().0
             );
             ctx.command.cluster_id = 0x300;
             ctx.command.cmd_id = 10;
@@ -779,7 +791,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
 
 #[test]
 fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_power() {
-    setup_light!(false, executor, device, receiver, registry, handler, ctx);
+    setup_light!(false, device, receiver, registry, handler, ctx);
     let function = device.functions()[0].clone();
     device.set_availability(Availability::Available);
     function
@@ -871,7 +883,7 @@ fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_po
 fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
     use crate::device::{LightColorTarget, LightMode};
 
-    setup_light!(true, executor, device, receiver, registry, handler, ctx);
+    setup_light!(true, device, receiver, registry, handler, ctx);
     device.set_availability(Availability::Available);
     let function = device.functions()[0].clone();
     function.observe(true);
@@ -992,276 +1004,6 @@ fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(ctx.changes.borrow().contains(&(2, 0x300, 0)));
         assert!(ctx.changes.borrow().contains(&(2, 0x300, 1)));
-        assert!(poll_once(receiver.next_operation()).await.is_none());
-    });
-    assert_eq!(registry.list().len(), 1);
-}
-
-#[test]
-fn on_off_only_light_rejects_absent_dimensions_and_keeps_real_power_control() {
-    setup_light!(
-        @caps &[crate::device::Capability::OnOff],
-        executor,
-        device,
-        receiver,
-        registry,
-        handler,
-        ctx
-    );
-    device.set_availability(Availability::Available);
-    let function = device.functions()[0].clone();
-    function.observe(false);
-    block_on(async {
-        ctx.attribute = attr(6, 0);
-        assert!(
-            !report_value(&read_bytes(&handler, &ctx).await.unwrap())
-                .bool()
-                .unwrap()
-        );
-
-        let mut on = Context::new(ctx.base, 6, 0);
-        on.command.cmd_id = 1;
-        on.data = TLVElement::new(&[0x15, 0x18]);
-        let mut out = [0; 128];
-        let mut invoke = pin!(handler.invoke(
-            &on,
-            InvokeReplyInstance::new(&on.command, WriteBuf::new(&mut out))
-        ));
-        assert!(poll_once(invoke.as_mut()).await.is_none());
-        let DeviceRequest::Power(request) = receiver.next_operation().await.unwrap() else {
-            panic!("on/off is not a power frame")
-        };
-        request.mark_sent().unwrap();
-        request.accept().unwrap();
-        invoke.await.unwrap();
-        assert_eq!(function.snapshot().power.value(), Some(true));
-
-        for cluster in [8, 0x300] {
-            ctx.attribute = attr(cluster, 0);
-            assert_eq!(
-                read_bytes(&handler, &ctx).await.unwrap_err().code(),
-                ErrorCode::ClusterNotFound,
-                "read cluster {cluster:#x}"
-            );
-            let mut command = Context::new(ctx.base, cluster, 0);
-            command.command.cmd_id = 0;
-            assert_eq!(
-                handler
-                    .invoke(
-                        &command,
-                        InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut [0; 128]))
-                    )
-                    .await
-                    .unwrap_err()
-                    .code(),
-                ErrorCode::ClusterNotFound,
-                "invoke cluster {cluster:#x}"
-            );
-        }
-        let mut unknown = Context::new(ctx.base, 6, 0);
-        unknown.command.cmd_id = 0x40;
-        assert_eq!(
-            handler
-                .invoke(
-                    &unknown,
-                    InvokeReplyInstance::new(&unknown.command, WriteBuf::new(&mut [0; 128]))
-                )
-                .await
-                .unwrap_err()
-                .code(),
-            ErrorCode::CommandNotFound
-        );
-        // The real Groups cluster keeps its commands on a light without
-        // fabricated dimensions; only an absent command is rejected.
-        ctx.attribute = attr(4, 0xfffc);
-        assert!(!read_bytes(&handler, &ctx).await.unwrap().is_empty());
-        let mut unknown_groups = Context::new(ctx.base, 4, 0);
-        unknown_groups.command.cmd_id = 0x40;
-        assert_eq!(
-            handler
-                .invoke(
-                    &unknown_groups,
-                    InvokeReplyInstance::new(&unknown_groups.command, WriteBuf::new(&mut [0; 128]))
-                )
-                .await
-                .unwrap_err()
-                .code(),
-            ErrorCode::CommandNotFound
-        );
-        assert!(poll_once(receiver.next_operation()).await.is_none());
-    });
-    assert_eq!(registry.list().len(), 1);
-}
-
-#[test]
-fn color_temperature_without_brightness_controls_color_and_rejects_level_and_rgb() {
-    setup_light!(
-        @caps &[
-            crate::device::Capability::OnOff,
-            crate::device::Capability::ColorTemperature(crate::device::NumericRange {
-                min: 2700,
-                max: 6500,
-                step: 1,
-            }),
-        ],
-        executor,
-        device,
-        receiver,
-        registry,
-        handler,
-        ctx
-    );
-    device.set_availability(Availability::Available);
-    let function = device.functions()[0].clone();
-    function
-        .observe_light(LightPatch {
-            power: Some(true),
-            temperature_kelvin: Some(5000),
-            mode: Some(crate::device::LightMode::Temperature),
-            ..Default::default()
-        })
-        .unwrap();
-    block_on(async {
-        ctx.attribute = attr(8, 0);
-        assert_eq!(
-            read_bytes(&handler, &ctx).await.unwrap_err().code(),
-            ErrorCode::ClusterNotFound
-        );
-
-        let mut ct = Context::new(ctx.base, 0x300, 0);
-        ct.command.cmd_id = 0x0a;
-        ct.data = TLVElement::new(&[
-            0x15, 0x25, 0, 200, 0, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
-        ]);
-        let mut out = [0; 128];
-        let mut invoke = pin!(handler.invoke(
-            &ct,
-            InvokeReplyInstance::new(&ct.command, WriteBuf::new(&mut out))
-        ));
-        assert!(poll_once(invoke.as_mut()).await.is_none());
-        let DeviceRequest::Light(frame) = receiver.next_operation().await.unwrap() else {
-            panic!("temperature is not a light frame")
-        };
-        frame.mark_sent().unwrap();
-        frame.accept().unwrap();
-        invoke.await.unwrap();
-
-        for attribute in [0u32, 1, 3, 4] {
-            ctx.attribute = attr(0x300, attribute);
-            assert_eq!(
-                read_bytes(&handler, &ctx).await.unwrap_err().code(),
-                ErrorCode::AttributeNotFound,
-                "attribute {attribute:#x}"
-            );
-        }
-        for command in [0u32, 7] {
-            let mut unsupported = Context::new(ctx.base, 0x300, 0);
-            unsupported.command.cmd_id = command;
-            unsupported.data = TLVElement::new(&[
-                0x15, 0x24, 0, 10, 0x24, 1, 0, 0x25, 2, 0, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
-            ]);
-            assert_eq!(
-                handler
-                    .invoke(
-                        &unsupported,
-                        InvokeReplyInstance::new(
-                            &unsupported.command,
-                            WriteBuf::new(&mut [0; 128])
-                        )
-                    )
-                    .await
-                    .unwrap_err()
-                    .code(),
-                ErrorCode::CommandNotFound,
-                "command {command:#x}"
-            );
-        }
-        assert!(poll_once(receiver.next_operation()).await.is_none());
-    });
-    assert_eq!(registry.list().len(), 1);
-}
-
-#[test]
-fn rgb_without_temperature_or_brightness_controls_hue_and_rejects_ct_and_level() {
-    use crate::device::{LightMode, Rgb};
-
-    setup_light!(
-        @caps &[
-            crate::device::Capability::OnOff,
-            crate::device::Capability::ColorRgb,
-        ],
-        executor,
-        device,
-        receiver,
-        registry,
-        handler,
-        ctx
-    );
-    device.set_availability(Availability::Available);
-    let function = device.functions()[0].clone();
-    function
-        .observe_light(LightPatch {
-            power: Some(true),
-            color: Some(Rgb {
-                red: 255,
-                green: 0,
-                blue: 0,
-            }),
-            mode: Some(LightMode::Rgb),
-            ..Default::default()
-        })
-        .unwrap();
-    block_on(async {
-        ctx.attribute = attr(8, 0);
-        assert_eq!(
-            read_bytes(&handler, &ctx).await.unwrap_err().code(),
-            ErrorCode::ClusterNotFound
-        );
-        ctx.attribute = attr(0x300, 3);
-        assert!(read_bytes(&handler, &ctx).await.is_ok());
-
-        let mut hue = Context::new(ctx.base, 0x300, 0);
-        hue.command.cmd_id = 6;
-        hue.data = TLVElement::new(&[
-            0x15, 0x24, 0, 254, 0x24, 1, 2, 0x25, 2, 0, 0, 0x24, 3, 0, 0x24, 4, 0, 0x18,
-        ]);
-        let mut out = [0; 128];
-        let mut invoke = pin!(handler.invoke(
-            &hue,
-            InvokeReplyInstance::new(&hue.command, WriteBuf::new(&mut out))
-        ));
-        assert!(poll_once(invoke.as_mut()).await.is_none());
-        let DeviceRequest::Light(frame) = receiver.next_operation().await.unwrap() else {
-            panic!("hue is not a light frame")
-        };
-        frame.mark_sent().unwrap();
-        frame.accept().unwrap();
-        invoke.await.unwrap();
-
-        for attribute in [7u32, 0x400b, 0x400c, 0x400d] {
-            ctx.attribute = attr(0x300, attribute);
-            assert_eq!(
-                read_bytes(&handler, &ctx).await.unwrap_err().code(),
-                ErrorCode::AttributeNotFound,
-                "CT attribute {attribute:#x}"
-            );
-        }
-        let mut ct = Context::new(ctx.base, 0x300, 0);
-        ct.command.cmd_id = 0x0a;
-        ct.data = TLVElement::new(&[
-            0x15, 0x25, 0, 200, 0, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
-        ]);
-        assert_eq!(
-            handler
-                .invoke(
-                    &ct,
-                    InvokeReplyInstance::new(&ct.command, WriteBuf::new(&mut [0; 128]))
-                )
-                .await
-                .unwrap_err()
-                .code(),
-            ErrorCode::CommandNotFound
-        );
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
     assert_eq!(registry.list().len(), 1);

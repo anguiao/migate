@@ -432,16 +432,6 @@ impl Function {
             .as_ref()
             .is_some_and(|coordinator| coordinator.current(token).is_some())
     }
-    /// Release only the action owned by a controller that is being destroyed.
-    pub(crate) fn cancel_light_action(&self, token: ActionToken) {
-        let mut state = self.0.state.lock().unwrap();
-        if let Some(coordinator) = state.light_commands.as_mut()
-            && coordinator.current(token).is_some()
-        {
-            coordinator.cancel(token.dimension, CommandError::Cancelled);
-            self.notify_light_actions();
-        }
-    }
     pub fn stop_light(&self, dimension: LightDimension) -> Result<FunctionSnapshot, CommandError> {
         self.cancel_light_dimension(dimension, CommandError::Stopped)
     }
@@ -457,19 +447,6 @@ impl Function {
         dimension: LightDimension,
         error: CommandError,
     ) -> Result<FunctionSnapshot, CommandError> {
-        let description = self.description();
-        let supported = match dimension {
-            LightDimension::Brightness => {
-                description.capabilities.contains(&Capability::Brightness)
-            }
-            LightDimension::Color => {
-                description.temperature_range().is_some()
-                    || description.capabilities.contains(&Capability::ColorRgb)
-            }
-        };
-        if !supported {
-            return Err(CommandError::Unsupported);
-        }
         let mut state = self.0.state.lock().unwrap();
         let Some(coordinator) = state.light_commands.as_mut() else {
             return Err(CommandError::Unsupported);
@@ -478,17 +455,13 @@ impl Function {
         self.notify_light_actions();
         Ok(self.snapshot_locked(&state))
     }
-    /// External off invalidates every lighting dimension and queued power
-    /// operation. Lights without lighting dimensions still release power work;
-    /// the outlet power contract keeps its own queue and rejects this entry.
+    /// External off invalidates both dimensions and queued power operations.
     pub fn take_over_light_all(&self) -> Result<FunctionSnapshot, CommandError> {
         let mut state = self.0.state.lock().unwrap();
-        if self.description().category != Category::Light {
+        let Some(coordinator) = state.light_commands.as_mut() else {
             return Err(CommandError::Unsupported);
-        }
-        if let Some(coordinator) = state.light_commands.as_mut() {
-            coordinator.cancel_all(CommandError::Superseded);
-        }
+        };
+        coordinator.cancel_all(CommandError::Superseded);
         state.queue.invalidate_light_power(CommandError::Superseded);
         for completion in state.queue.drain_pending() {
             completion.finish(Err(CommandError::Superseded));

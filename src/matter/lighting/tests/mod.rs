@@ -1,12 +1,9 @@
 use super::controllers::{
     RemainingTime,
     color::{self, Task as ColorTask},
-    level::LevelControlState,
+    level::{LevelControlState, Task},
 };
-use crate::{
-    device::Rgb,
-    lighting::{Transition, controllers::level::Task},
-};
+use crate::device::Rgb;
 use rs_matter::{
     dm::clusters::decl::level_control::{MoveModeEnum, StepModeEnum},
     error::ErrorCode,
@@ -115,7 +112,7 @@ fn short_level_transition_uses_deadline_and_move_does_not_follow_slow_ack() {
     let task = Task::Move {
         with_on_off: false,
         start: 100,
-        direction: MoveDirection::Up,
+        move_mode: MoveModeEnum::Up,
         rate: 10,
     };
     assert_eq!(task.frame(1000).0, 110);
@@ -134,8 +131,6 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
                 .move_to_level(wire, true, Some(0), 0, 0, Some(true))
                 .unwrap()
                 .unwrap()
-                .resolve(state.current_level)
-                .unwrap()
                 .frame(0),
             (1, true, Some(false))
         );
@@ -143,8 +138,6 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
             state
                 .move_to_level(wire, false, Some(0), 0, 0, Some(true))
                 .unwrap()
-                .unwrap()
-                .resolve(state.current_level)
                 .unwrap()
                 .frame(0),
             (1, true, None)
@@ -174,8 +167,6 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
             Some(true),
         )
         .unwrap()
-        .unwrap()
-        .resolve(state.current_level)
         .unwrap();
     assert_eq!(task.duration(), u16::MAX as u64 * 154 / 255 * 100);
 }
@@ -191,27 +182,22 @@ fn long_color_move_remaining_time_saturates_without_wrapping() {
     assert_eq!(task.duration(), 65279000);
     assert_eq!(task.frame(65279000), (color::Target::Xy(65279, 0), true));
     let mut remaining = RemainingTime::default();
-    let transition = Some(Transition {
-        start: 0,
-        duration: task.duration(),
-    });
-    assert!(remaining.write(transition, 0, 0xfffe));
+    assert!(remaining.write(task.duration(), true, 0xfffe));
     assert_eq!(remaining.value, 0xfffe);
-    assert!(!remaining.write(transition, task.duration() - 1000, 0xfffe));
-    assert!(remaining.write(None, task.duration(), 0xfffe));
+    assert!(!remaining.write(1000, false, 0xfffe));
+    assert!(remaining.write(0, false, 0xfffe));
 }
 
 use super::{
-    Lighting,
+    Lighting, Task as LightingTask,
     controllers::clock::Clock,
     handlers::{ColorHandler, LevelHandler},
 };
 use crate::{
     device::{
-        Availability, CommandError, DeviceRequest, Function, Light, LightColorTarget,
-        LightDimension, LightMode, LightPatch, LightRequest,
+        Availability, CommandError, DeviceRequest, Function, LightColorTarget, LightDimension,
+        LightMode, LightPatch, LightRequest,
     },
-    lighting::{LightingExecutor, Plan as LightingTask, controllers::MoveDirection},
     matter::{
         model,
         storage::StoreAdapter,
@@ -239,13 +225,6 @@ use std::{
     pin::{Pin, pin},
     rc::Rc,
 };
-
-fn color_plan(light: &Lighting, task: ColorTask) -> LightingTask {
-    LightingTask::Color {
-        task,
-        temperature: light.mapping.temperature.map(|published| published.range),
-    }
-}
 
 #[derive(Default)]
 struct TestClock {
@@ -284,14 +263,12 @@ macro_rules! setup {
         let $function = device.functions()[0].clone();
         device.set_availability(Availability::Available);
 
-        let registry = crate::matter::tests::published_registry(&store, &device);
+        let registry = support::test_registry(&store, &device);
         let handler = model::handler(
             &registry,
             &store,
             StoreAdapter::new(store.matter()),
-            support::test_executor(),
             rand::rng(),
-            None,
         )
         .unwrap();
 
@@ -308,16 +285,15 @@ macro_rules! setup {
         let $ctx = Context::new(&im, 8, 0);
 
         let $clock = Rc::new(TestClock::default());
-        let mapping = crate::matter::publication::map_light($function.description()).unwrap();
-        let $light = Lighting::new(
-            Light::Single($function.clone()),
+        let $light = Lighting::with_clock(
+            $function.clone(),
             2,
             Dataver::new(1),
             Dataver::new(2),
             Dataver::new(3),
-            mapping,
-            LightingExecutor::new($clock.clone()),
-        );
+            $clock.clone(),
+        )
+        .unwrap();
     };
 }
 async fn frame(receiver: &mut crate::device::CommandReceiver) -> LightRequest {
@@ -362,7 +338,7 @@ fn ct_wire_zero_clips_and_step_keeps_requested_rate_at_boundary() {
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true, false>(&light);
+        let handler = ColorHandler::<false>(&light);
         let data = TLVElement::new(&[
             0x15, 0x25, 0, 0, 0, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
         ]);
@@ -398,62 +374,13 @@ fn ct_wire_zero_clips_and_step_keeps_requested_rate_at_boundary() {
         accept(&function, request);
         invoke.await.unwrap();
         clock.set(5000);
-        light.executor.advance();
+        light.advance();
         let request = frame(&mut receiver).await;
         assert!(request.final_frame);
         assert_eq!(
             request.target.color,
             Some(LightColorTarget::Temperature(4000))
         );
-    });
-}
-
-#[test]
-fn ct_step_with_narrower_bounds_clamps_the_target_not_the_actual_reading() {
-    use c::ClusterAsyncHandler as _;
-    setup!(false, function, receiver, light, clock, ctx);
-    function
-        .observe_light(LightPatch {
-            power: Some(true),
-            temperature_kelvin: Some(2700),
-            mode: Some(LightMode::Temperature),
-            ..Default::default()
-        })
-        .unwrap();
-    block_on(async {
-        // request bounds 200..300 mireds are narrower than the physical range.
-        let data = [
-            0x15, 0x24, 0, 1, 0x25, 1, 1, 0, 0x25, 2, 10, 0, 0x25, 3, 200, 0, 0x25, 4, 44, 1, 0x24,
-            5, 0, 0x24, 6, 0, 0x18,
-        ];
-        let handler = ColorHandler::<true, false>(&light);
-        let mut invoke = pin!(handler.handle_step_color_temperature(
-            &ctx,
-            c::StepColorTemperatureRequest::new(TLVElement::new(&data))
-        ));
-        let first = poll_once(invoke.as_mut()).await;
-        assert!(first.is_none(), "first poll completed: {first:?}");
-        let request = frame(&mut receiver).await;
-        // The startup frame anchors on the real 2700K reading, not the step
-        // target and not a clamped replacement value.
-        assert!(matches!(
-            request.target.color,
-            Some(LightColorTarget::Temperature(2703))
-        ));
-        assert_eq!(
-            function.snapshot().lighting.unwrap().temperature_kelvin,
-            Some(2700)
-        );
-        accept(&function, request);
-        invoke.await.unwrap();
-        clock.set(70_000);
-        light.executor.advance();
-        let request = frame(&mut receiver).await;
-        assert!(request.final_frame);
-        assert!(matches!(
-            request.target.color,
-            Some(LightColorTarget::Temperature(3333))
-        ));
     });
 }
 
@@ -473,7 +400,7 @@ fn malformed_stop_with_onoff_does_not_cancel_active_action() {
             LightingTask::Level(Task::Move {
                 with_on_off: false,
                 start: 100,
-                direction: MoveDirection::Up,
+                move_mode: MoveModeEnum::Up,
                 rate: 1,
             }),
             None,
@@ -496,33 +423,14 @@ fn malformed_stop_with_onoff_does_not_cancel_active_action() {
 #[test]
 fn short_remaining_time_is_readable_without_subscription_reports() {
     let mut remaining = RemainingTime::default();
-    let short = Some(Transition {
-        start: 0,
-        duration: 100,
-    });
-    assert!(!remaining.write(short, 0, 0xfffe));
+    assert!(!remaining.write(100, true, 0xfffe));
     assert_eq!(remaining.value, 1);
-    assert!(!remaining.write(None, 100, 0xfffe));
-    let boundary = Some(Transition {
-        start: 100,
-        duration: 1000,
-    });
-    assert!(!remaining.write(boundary, 100, 0xfffe));
-    assert!(remaining.write(None, 1100, 0xfffe));
-    let long = Some(Transition {
-        start: 1100,
-        duration: 2000,
-    });
-    assert!(remaining.write(long, 1100, 0xfffe));
-    assert!(!remaining.write(long, 3000, 0xfffe));
-    assert!(remaining.write(None, 3100, 0xfffe));
-    // An external long action first observed near its end is still long.
-    let delayed = Some(Transition {
-        start: 3100,
-        duration: 2000,
-    });
-    assert!(!remaining.write(delayed, 5000, 0xfffe));
-    assert!(remaining.write(None, 5100, 0xfffe));
+    assert!(!remaining.write(0, false, 0xfffe));
+    assert!(!remaining.write(1000, true, 0xfffe));
+    assert!(remaining.write(0, false, 0xfffe));
+    assert!(remaining.write(2000, true, 0xfffe));
+    assert!(!remaining.write(100, false, 0xfffe));
+    assert!(remaining.write(0, false, 0xfffe));
 }
 
 #[test]
@@ -547,11 +455,10 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
         );
         assert_eq!(function.snapshot().power.value(), Some(true));
         let task = light
-            .level_state()
+            .level
+            .borrow()
             .move_level(false, MoveModeEnum::Up, Some(1), 0, 0, Some(true))
             .unwrap()
-            .unwrap()
-            .resolve(light.level_state().current_level)
             .unwrap();
         assert_eq!(task.frame(0).0, 1);
         let action = light.begin(LightingTask::Level(task), None).unwrap();
@@ -560,7 +467,7 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
         accept(&function, request);
         action.accepted().await.unwrap();
         clock.set(1000);
-        light.executor.advance();
+        light.advance();
         let request = frame(&mut receiver).await;
         assert!(request.target.brightness_percent.unwrap() > 1.0);
     });
@@ -597,14 +504,12 @@ fn startup_waiter_does_not_block_ticks_merge_or_final_and_sent_stop_retains_rece
         let mut run = pin!(light.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         clock.set(20);
-        light.executor.advance();
         assert!(poll_once(run.as_mut()).await.is_none());
         let request = frame(&mut receiver).await;
         assert_eq!(request.token, action.token());
         request.mark_sent().unwrap();
         for now in [40, 80, 100] {
             clock.set(now);
-            light.executor.advance();
             assert!(poll_once(run.as_mut()).await.is_none());
         }
         assert!(poll_once(accepted.as_mut()).await.is_none());
@@ -622,7 +527,7 @@ fn startup_waiter_does_not_block_ticks_merge_or_final_and_sent_stop_retains_rece
                 LightingTask::Level(Task::Move {
                     with_on_off: false,
                     start: 254,
-                    direction: MoveDirection::Down,
+                    move_mode: MoveModeEnum::Down,
                     rate: 1,
                 }),
                 None,
@@ -630,13 +535,12 @@ fn startup_waiter_does_not_block_ticks_merge_or_final_and_sent_stop_retains_rece
             .unwrap();
         let request = frame(&mut receiver).await;
         request.mark_sent().unwrap();
-        light.stop(LightDimension::Brightness).await.unwrap();
+        light.stop(LightDimension::Brightness).unwrap();
         let mut accepted = pin!(action.accepted());
         assert!(poll_once(accepted.as_mut()).await.is_none());
         request.accept().unwrap();
         accepted.await.unwrap();
         clock.set(10000);
-        light.executor.advance();
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
@@ -658,7 +562,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
                 LightingTask::Level(Task::Move {
                     with_on_off: false,
                     start: 100,
-                    direction: MoveDirection::Up,
+                    move_mode: MoveModeEnum::Up,
                     rate: 10,
                 }),
                 None,
@@ -667,16 +571,15 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
         accept(&function, frame(&mut receiver).await);
         action.accepted().await.unwrap();
         clock.set(1000);
-        light.executor.advance();
+        light.advance();
         let request = frame(&mut receiver).await;
         request.mark_sent().unwrap();
         request.reject(CommandError::Rejected("later failure".into()));
         clock.set(2000);
-        light.executor.advance();
-        light.progress();
+        light.advance();
         assert!(poll_once(receiver.next_operation()).await.is_none());
         assert!(action.ended().await.is_err());
-        assert_eq!(light.level_state().remaining_time.value, 0);
+        assert_eq!(light.level.borrow().remaining_time.value, 0);
         let before = function.snapshot().lighting.unwrap().brightness_percent;
         assert_eq!(
             light.refresh().level,
@@ -687,7 +590,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
                 LightingTask::Level(Task::Move {
                     with_on_off: false,
                     start: 100,
-                    direction: MoveDirection::Up,
+                    move_mode: MoveModeEnum::Up,
                     rate: 1,
                 }),
                 None,
@@ -702,16 +605,15 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
                 ..Default::default()
             })
             .unwrap();
-        light.executor.advance();
+        light.advance();
         assert!(!function.light_action_current(action.token()));
         assert!(poll_once(receiver.next_operation()).await.is_none());
         let projected = light.refresh().level.unwrap();
         let next = light
-            .level_state()
+            .level
+            .borrow()
             .move_level(false, MoveModeEnum::Down, Some(2), 0, 0, Some(true))
             .unwrap()
-            .unwrap()
-            .resolve(light.level_state().current_level)
             .unwrap();
         assert_eq!(next.frame(0).0, projected);
         assert!(ctx.changes.borrow().is_empty());
@@ -762,7 +664,7 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
                 max_mireds: 370,
             }
         };
-        let action = light.begin(color_plan(&light, task), None).unwrap();
+        let action = light.begin(LightingTask::Color(task), None).unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
@@ -770,7 +672,7 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
             ctx.changes.borrow_mut().clear();
             for now in [100, 200, 300, 900] {
                 clock.set(now);
-                light.executor.advance();
+                light.advance();
                 accept(&function, frame(&mut receiver).await);
                 light.reports(&ctx);
             }
@@ -783,7 +685,7 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
                 0
             );
             clock.set(1000);
-            light.executor.advance();
+            light.advance();
             accept(&function, frame(&mut receiver).await);
             light.reports(&ctx);
             let mut attributes: Vec<_> = ctx
@@ -798,16 +700,11 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
             assert_eq!(attributes, if rgb { vec![0, 1, 3, 4] } else { vec![7] });
         });
         let old = light.color_version.get();
-        let transition = Some(Transition {
-            start: clock.now(),
-            duration: 10000,
-        });
-        light.update_remaining(LightDimension::Color, transition);
+        light.update_remaining(LightDimension::Color, 10000, true);
         light.remaining_dirty.set([false, false]);
-        clock.set(clock.now() + 100);
-        light.update_remaining(LightDimension::Color, transition);
+        light.update_remaining(LightDimension::Color, 9900, false);
         assert_ne!(light.color_version.get(), old);
-        assert_eq!(light.color_state().remaining_time.value, 99);
+        assert_eq!(light.color.borrow().remaining_time.value, 99);
     }
 }
 
@@ -835,14 +732,11 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
                 transition_ms: 1500,
             })
         } else {
-            color_plan(
-                &light,
-                ColorTask::ColorTemperatureMoveTo {
-                    start: 200,
-                    target_mireds: 300,
-                    transition_ms: 1500,
-                },
-            )
+            LightingTask::Color(ColorTask::ColorTemperatureMoveTo {
+                start: 200,
+                target_mireds: 300,
+                transition_ms: 1500,
+            })
         };
         let action = light.begin(task, None).unwrap();
         block_on(async {
@@ -857,12 +751,12 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
             };
             for now in [100, 900, 1000, 1100, 1500] {
                 clock.set(now);
-                light.executor.advance();
+                light.advance();
                 accept(&function, frame(&mut receiver).await);
                 if dimension == LightDimension::Brightness {
                     LevelHandler(&light).dataver();
                 } else {
-                    ColorHandler::<true, false>(&light).dataver();
+                    ColorHandler::<false>(&light).dataver();
                 }
                 assert!(ctx.changes.borrow().is_empty());
                 light.reports(&ctx);
@@ -900,7 +794,7 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
             ..Default::default()
         })
         .unwrap();
-    ColorHandler::<true, true>(&light).dataver();
+    ColorHandler::<true>(&light).dataver();
     assert!(ctx.changes.borrow().is_empty());
     light.reports(&ctx);
     assert!(ctx.changes.borrow().contains(&(2, 0x300, 3)));
@@ -919,7 +813,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
             ..Default::default()
         })
         .unwrap();
-    light.level_state_mut().on_level = Some(1);
+    light.level.borrow_mut().on_level = Some(1);
     block_on(async {
         let mut on = pin!(light.power(Command::On));
         assert!(poll_once(on.as_mut()).await.is_none());
@@ -942,8 +836,6 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
             }
             _ => panic!("repeated on reapplied preset"),
         };
-        // The caller waker wakes this waiter at the physical acceptance;
-        // no runner tick is required for a single dispatch.
         repeated.await.unwrap();
         assert_eq!(
             function.snapshot().lighting.unwrap().brightness_percent,
@@ -967,7 +859,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
                 LightingTask::Level(Task::Move {
                     with_on_off: false,
                     start: 75,
-                    direction: MoveDirection::Up,
+                    move_mode: MoveModeEnum::Up,
                     rate: 1,
                 }),
                 None,
@@ -987,7 +879,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
             function.snapshot().lighting.unwrap().brightness_percent,
             Some(30.0)
         );
-        light.level_state_mut().on_level = None;
+        light.level.borrow_mut().on_level = None;
         function
             .observe_light(LightPatch {
                 power: Some(true),
@@ -1052,15 +944,12 @@ fn ct_stop_parses_all_fields_before_cancellation_and_ignores_motion_only_bounds(
         .unwrap();
     let action = light
         .begin(
-            color_plan(
-                &light,
-                ColorTask::ColorTemperatureMove {
-                    start: 200,
-                    rate_mireds_per_sec: 1,
-                    min_mireds: 154,
-                    max_mireds: 370,
-                },
-            ),
+            LightingTask::Color(ColorTask::ColorTemperatureMove {
+                start: 200,
+                rate_mireds_per_sec: 1,
+                min_mireds: 154,
+                max_mireds: 370,
+            }),
             None,
         )
         .unwrap();
@@ -1074,7 +963,7 @@ fn ct_stop_parses_all_fields_before_cancellation_and_ignores_motion_only_bounds(
                 0x18,
             ][..],
         ] {
-            let result = ColorHandler::<true, false>(&light)
+            let result = ColorHandler::<false>(&light)
                 .handle_move_color_temperature(
                     &ctx,
                     c::MoveColorTemperatureRequest::new(TLVElement::new(bytes)),
@@ -1087,7 +976,7 @@ fn ct_stop_parses_all_fields_before_cancellation_and_ignores_motion_only_bounds(
             0x15, 0x24, 0, 0, 0x25, 1, 0, 0, 0x25, 2, 250, 0, 0x25, 3, 200, 0, 0x24, 4, 0, 0x24, 5,
             0, 0x18,
         ];
-        ColorHandler::<true, false>(&light)
+        ColorHandler::<false>(&light)
             .handle_move_color_temperature(
                 &ctx,
                 c::MoveColorTemperatureRequest::new(TLVElement::new(&bytes)),
@@ -1113,7 +1002,7 @@ fn clipped_ct_step_reaches_two_mired_boundary_in_two_milliseconds_and_equal_targ
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true, true>(&light);
+        let handler = ColorHandler::<true>(&light);
         let bytes = [
             0x15, 0x24, 0, 1, 0x25, 1, 100, 0, 0x25, 2, 1, 0, 0x25, 3, 0, 0, 0x25, 4, 202, 0, 0x24,
             5, 0, 0x24, 6, 0, 0x18,
@@ -1130,7 +1019,6 @@ fn clipped_ct_step_reaches_two_mired_boundary_in_two_milliseconds_and_equal_targ
         let mut run = pin!(light.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         clock.set(2);
-        light.executor.advance();
         assert!(poll_once(run.as_mut()).await.is_none());
         let final_request = frame(&mut receiver).await;
         assert!(final_request.final_frame);
@@ -1180,7 +1068,7 @@ fn unsupported_coupling_command_override_is_rejected_before_takeover() {
             LightingTask::Level(Task::Move {
                 with_on_off: false,
                 start: 100,
-                direction: MoveDirection::Up,
+                move_mode: MoveModeEnum::Up,
                 rate: 1,
             }),
             None,
@@ -1224,15 +1112,12 @@ fn ignored_ct_step_still_validates_required_bounds_before_success() {
         .unwrap();
     let action = light
         .begin(
-            color_plan(
-                &light,
-                ColorTask::ColorTemperatureMove {
-                    start: 200,
-                    rate_mireds_per_sec: 1,
-                    min_mireds: 154,
-                    max_mireds: 370,
-                },
-            ),
+            LightingTask::Color(ColorTask::ColorTemperatureMove {
+                start: 200,
+                rate_mireds_per_sec: 1,
+                min_mireds: 154,
+                max_mireds: 370,
+            }),
             None,
         )
         .unwrap();
@@ -1250,7 +1135,7 @@ fn ignored_ct_step_still_validates_required_bounds_before_success() {
                 0x24, 5, 0, 0x24, 6, 0, 0x18,
             ][..],
         ] {
-            let result = ColorHandler::<true, false>(&light)
+            let result = ColorHandler::<false>(&light)
                 .handle_step_color_temperature(
                     &ctx,
                     c::StepColorTemperatureRequest::new(TLVElement::new(bytes)),
@@ -1263,7 +1148,7 @@ fn ignored_ct_step_still_validates_required_bounds_before_success() {
             0x15, 0x24, 0, 1, 0x25, 1, 1, 0, 0x25, 2, 0, 0, 0x25, 3, 44, 1, 0x25, 4, 200, 0, 0x24,
             5, 0, 0x24, 6, 0, 0x18,
         ];
-        ColorHandler::<true, false>(&light)
+        ColorHandler::<false>(&light)
             .handle_step_color_temperature(
                 &ctx,
                 c::StepColorTemperatureRequest::new(TLVElement::new(&bytes)),
@@ -1278,8 +1163,6 @@ fn ignored_ct_step_still_validates_required_bounds_before_success() {
 
 mod hs_handlers;
 
-mod group;
-
 mod hs_lifecycle;
 
 mod hs_endpoints;
@@ -1287,5 +1170,3 @@ mod hs_endpoints;
 mod hs_async;
 
 mod color_reports;
-
-mod lifecycle;

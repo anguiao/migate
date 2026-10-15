@@ -7,7 +7,6 @@ use super::{
 use crate::{
     RuntimeError,
     device::DeviceRegistry,
-    lighting::LightingExecutor,
     storage::{Identity, StorageError, Store},
 };
 use rs_matter::{
@@ -23,7 +22,7 @@ use rs_matter::{
         MATTER_SOCKET_BIND_ADDR, exchange::MatterBuffers, network::mdns::astro::AstroMdns,
     },
 };
-use std::{net::UdpSocket, rc::Rc, time::Duration};
+use std::{net::UdpSocket, time::Duration};
 
 const WINDOW_SECONDS: u16 = 900;
 
@@ -32,21 +31,14 @@ pub struct Bridge<'a> {
     registry: DeviceRegistry,
     storage: Store,
     identity: &'a Identity,
-    executor: Rc<LightingExecutor>,
     pub(super) store: StoreAdapter,
 }
 impl<'a> Bridge<'a> {
-    pub(crate) fn new(
-        registry: &DeviceRegistry,
-        store: &Store,
-        identity: &'a Identity,
-        executor: Rc<LightingExecutor>,
-    ) -> Self {
+    pub fn new(registry: &DeviceRegistry, store: &Store, identity: &'a Identity) -> Self {
         Self {
             registry: registry.clone(),
             storage: store.clone(),
             identity,
-            executor,
             store: StoreAdapter::new(store.matter()),
         }
     }
@@ -59,32 +51,12 @@ impl<'a> Bridge<'a> {
     /// Run protocol services on the caller's local executor until failure or cancellation.
     /// Bind the requested UDP port; zero asks the OS to choose an available port.
     /// Report pairing window changes through the caller's output callback.
-    /// A relation, source-instance or fixed-description change replaces Matter and cancels its
-    /// unfinished lighting schedules while source connections keep running.
     /// After dropping this future, call `check_failure` before treating cancellation as success.
     pub async fn run(
         &self,
         port: u16,
         report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
     ) -> Result<(), RuntimeError> {
-        let mut retry = None;
-        loop {
-            let rebuild = self.run_instance(port, &report_pairing, retry).await?;
-            // The old instance and all of its tasks and sockets have been
-            // dropped. No old exchange can observe this configuration commit.
-            log::info!("Matter configuration changed; rebuilding protocol services");
-            retry = rebuild.apply();
-        }
-    }
-
-    // Returning drops every object belonging to the old protocol instance
-    // before the caller resolves and installs the latest configuration.
-    async fn run_instance(
-        &self,
-        port: u16,
-        report_pairing: &impl Fn(PairingEvent) -> std::io::Result<()>,
-        retry: Option<model::Retry>,
-    ) -> Result<model::Rebuild, RuntimeError> {
         self.check_failure()?;
         let store = &self.store;
         let missing_basic_info = !store
@@ -103,14 +75,7 @@ impl<'a> Bridge<'a> {
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let handler = model::handler(
-            &self.registry,
-            &self.storage,
-            store.clone(),
-            self.executor.clone(),
-            crypto.rand()?,
-            retry,
-        )?;
+        let handler = model::handler(&self.registry, &self.storage, store.clone(), crypto.rand()?)?;
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         store.with_context("restore Matter model", im.startup().await)?;
         // Initialize only after every existing blob has been restored successfully.
@@ -118,7 +83,6 @@ impl<'a> Bridge<'a> {
             "initialize the default Matter node label",
             initialize_basic_info(&matter, &kv, missing_basic_info),
         )?;
-        store.with_context("initialize Matter topology", handler.initialize(&im))?;
         log::info!("Matter UDP listening on port {bound_port}");
         let responder = DefaultResponder::new(&im);
         let opened = !matter.has_fabrics();
@@ -167,9 +131,6 @@ impl<'a> Bridge<'a> {
         .await;
         // A protocol task may return an error before the storage watcher is polled again.
         self.check_failure()?;
-        result?;
-        handler
-            .take_rebuild()
-            .ok_or_else(|| "Matter services ended without a requested rebuild".into())
+        result
     }
 }

@@ -20,7 +20,7 @@ pub(super) fn cached_bridge_device(uid: &str) -> crate::storage::CachedPhysicalD
                     category: crate::device::Category::Outlet,
                     capabilities: vec![crate::device::Capability::OnOff],
                 },
-                power: Some(crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 }),
+                power: crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
                 lighting: None,
             }],
             refresh_trigger: None,

@@ -1,7 +1,7 @@
 use super::{
     StorageError,
     device::{
-        CachedPhysicalDevice, DeviceStore, load_cached, save_cached, validate_cached, validate_key,
+        CachedPhysicalDevice, DeviceStore, save_cached, validate_cached, validate_key,
         validate_text,
     },
 };
@@ -78,8 +78,6 @@ impl StoredDevice {
         }
     }
 
-    /// Compare static function semantics, including physical ranges, while
-    /// allowing an equivalent capability list in a different order.
     pub(crate) fn matches_functions(&self, functions: &[FunctionDescription]) -> bool {
         self.functions.len() == functions.len()
             && self.functions.iter().all(|stored| {
@@ -87,14 +85,18 @@ impl StoredDevice {
                     stored.key.id == function.id
                         && stored.category == function.category
                         && stored.capabilities.len() == function.capabilities.len()
-                        && stored
-                            .capabilities
-                            .iter()
-                            .all(|capability| function.capabilities.contains(capability))
+                        && stored.capabilities.iter().zip(&function.capabilities).all(
+                            |(old, new)| std::mem::discriminant(old) == std::mem::discriminant(new),
+                        )
                 })
             })
     }
 }
+struct Record {
+    device: StoredDevice,
+    named: bool,
+}
+
 /// Import a name without splitting a UTF-8 character. Protocol writes use validation instead.
 pub fn import_label(label: &str) -> String {
     let mut end = label.len().min(32);
@@ -123,7 +125,13 @@ impl DeviceStore {
                 continue;
             };
             let functions = cached.physical_description("").functions;
-            if !stored.matches_functions(&functions) {
+            if !stored.matches_functions(&functions)
+                || stored.functions.iter().any(|stored| {
+                    !functions.iter().any(|function| {
+                        stored.key.id == function.id && stored.capabilities == function.capabilities
+                    })
+                })
+            {
                 return Err(self.invalid(
                     "restore Xiaomi device topology",
                     "Cached functions differ from the published identity",
@@ -183,30 +191,36 @@ impl DeviceStore {
             .map_err(|error| self.store.database_error(operation, error))?;
         match record {
             Some(mut record) => {
-                if !record.matches_functions(&description.functions) {
+                if !record.device.matches_functions(&description.functions) {
                     return Err(AdmissionError::IncompatibleFunctions);
+                }
+                if !record.named {
+                    record.device.label = import_label(&description.label);
                 }
                 connection
                     .execute(
-                        "UPDATE device_identity SET published=1 WHERE source=?1 AND device_id=?2",
-                        params![description.key.source, description.key.id],
+                        "UPDATE device_identity SET label=?3,published=1 WHERE source=?1 AND device_id=?2",
+                        params![description.key.source, description.key.id, record.device.label],
                     )
                     .map_err(|error| self.store.database_error(operation, error))?;
-                record.published = true;
-                Ok(record)
+                for function in &description.functions {
+                    let capabilities =
+                        serde_json::to_string(&function.capabilities).map_err(|_| {
+                            self.invalid(operation, "Device capabilities cannot be encoded")
+                        })?;
+                    connection.execute("UPDATE device_function SET capabilities=?4 WHERE source=?1 AND device_id=?2 AND function_id=?3", params![description.key.source, description.key.id, function.id, capabilities]).map_err(|error| self.store.database_error(operation, error))?;
+                    record
+                        .device
+                        .functions
+                        .iter_mut()
+                        .find(|stored| stored.key.id == function.id)
+                        .expect("compatible function exists")
+                        .capabilities = function.capabilities.clone();
+                }
+                record.device.published = true;
+                Ok(record.device)
             }
             None => {
-                // A reserved group identity cannot become an ordinary device.
-                let reserved: bool = connection
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM group_identity WHERE source=?1 AND device_id=?2)",
-                        params![description.key.source, description.key.id],
-                        |row| row.get(0),
-                    )
-                    .map_err(|error| self.store.database_error(operation, error))?;
-                if reserved {
-                    return Err(AdmissionError::IncompatibleFunctions);
-                }
                 let required = if description.functions.len() == 1 {
                     1
                 } else {
@@ -232,7 +246,7 @@ impl DeviceStore {
         validate_key(key).map_err(|error| self.invalid(operation, error))?;
         let record = load_record(self.store.connection(), key)
             .map_err(|error| self.store.database_error(operation, error))?;
-        Ok(record.and_then(|record| record.published.then_some(record)))
+        Ok(record.and_then(|record| record.device.published.then_some(record.device)))
     }
     pub fn list_published(&self) -> Result<Vec<StoredDevice>, StorageError> {
         let operation = "list published device identities";
@@ -257,9 +271,22 @@ impl DeviceStore {
             .map(|key| {
                 load_record(self.store.connection(), key)
                     .and_then(|record| record.ok_or(rusqlite::Error::InvalidQuery))
+                    .map(|record| record.device)
                     .map_err(|error| self.store.database_error(operation, error))
             })
             .collect()
+    }
+    pub fn remove(&self, key: &DeviceKey) -> Result<(), StorageError> {
+        let operation = "remove published device";
+        validate_key(key).map_err(|error| self.invalid(operation, error))?;
+        self.store
+            .connection()
+            .execute(
+                "UPDATE device_identity SET published=0 WHERE source=?1 AND device_id=?2",
+                params![key.source, key.id],
+            )
+            .map(|_| ())
+            .map_err(|error| self.store.database_error(operation, error))
     }
     pub fn set_device_label(&self, key: &DeviceKey, label: &str) -> Result<(), StorageError> {
         let operation = "write device label";
@@ -280,37 +307,6 @@ impl DeviceStore {
         Ok(())
     }
 }
-/// A composition member is usable only when its cached description and its
-/// published identity are a compatible single main light in the same scope.
-pub(super) fn compatible_light_member(
-    connection: &Connection,
-    uid: &str,
-    home_id: &str,
-    key: &DeviceKey,
-) -> rusqlite::Result<bool> {
-    let Some(cached) = load_cached(connection, uid, home_id, key)? else {
-        return Ok(false);
-    };
-    if cached.device.functions.len() != 1
-        || cached.device.functions[0].description.id != "main"
-        || cached.device.functions[0].description.category != Category::Light
-    {
-        return Ok(false);
-    }
-    // A member must stay standalone publishable through the shared Matter
-    // mapping, not only generically valid.
-    if crate::matter::publication::map_light(&cached.device.functions[0].description).is_err() {
-        return Ok(false);
-    }
-    let Some(record) = load_record(connection, key)? else {
-        return Ok(false);
-    };
-    if !record.published {
-        return Ok(false);
-    }
-    Ok(record.matches_functions(&cached.physical_description("").functions))
-}
-
 fn validate_description(description: &PhysicalDeviceDescription) -> Result<(), &'static str> {
     validate_key(&description.key)?;
     if description.functions.is_empty() {
@@ -402,7 +398,7 @@ fn create_record(
         published: true,
     })
 }
-pub(super) fn reserve_endpoint(
+fn reserve_endpoint(
     connection: &Connection,
     key: &DeviceKey,
     slot: &str,
@@ -414,7 +410,7 @@ pub(super) fn reserve_endpoint(
     )?;
     Ok(())
 }
-fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Option<StoredDevice>> {
+fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Option<Record>> {
     let identity = connection
         .query_row(
             "SELECT unique_id, endpoint, label, published FROM device_identity
@@ -424,7 +420,7 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, u16>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(2)?,
                     row.get::<_, bool>(3)?,
                 ))
             },
@@ -435,7 +431,13 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
     };
     let valid_uuid =
         Uuid::parse_str(&unique_id).is_ok_and(|uuid| uuid.simple().to_string() == unique_id);
-    if !valid_uuid || !(2..=65534).contains(&endpoint) || validate_label(&label).is_err() {
+    if !valid_uuid
+        || !(2..=65534).contains(&endpoint)
+        || label
+            .as_deref()
+            .is_some_and(|label| validate_label(label).is_err())
+        || published && label.is_none()
+    {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let functions = connection
@@ -495,13 +497,16 @@ fn load_record(connection: &Connection, key: &DeviceKey) -> rusqlite::Result<Opt
         }
         check_allocation(connection, key, &function.key.id, function.endpoint)?;
     }
-    Ok(Some(StoredDevice {
-        key: key.clone(),
-        unique_id,
-        endpoint,
-        label,
-        functions,
-        published,
+    Ok(Some(Record {
+        named: label.is_some(),
+        device: StoredDevice {
+            key: key.clone(),
+            unique_id,
+            endpoint,
+            label: label.unwrap_or_default(),
+            functions,
+            published,
+        },
     }))
 }
 fn check_allocation(

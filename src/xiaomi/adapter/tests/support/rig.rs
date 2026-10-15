@@ -1,24 +1,8 @@
 use super::*;
 
 #[derive(Default)]
-pub(in super::super) struct GroupFixture {
-    pub(in super::super) members: Vec<String>,
-    pub(in super::super) physical: bool,
-    pub(in super::super) missing: bool,
-}
-
-/// One cloud group relation in a rig's selected home.
-pub(in super::super) struct GroupSpec<'a> {
-    pub(in super::super) did: &'a str,
-    pub(in super::super) model: &'a str,
-    pub(in super::super) members: &'a [&'a str],
-    pub(in super::super) label: &'a str,
-}
-
-#[derive(Default)]
 pub(in super::super) struct CloudState {
     pub(in super::super) members: Vec<String>,
-    pub(in super::super) groups: BTreeMap<String, GroupFixture>,
     pub(in super::super) names: BTreeMap<String, String>,
     pub(in super::super) status: u16,
     pub(in super::super) home_delay: Duration,
@@ -30,15 +14,6 @@ pub(in super::super) struct CloudState {
     pub(in super::super) partial: bool,
     pub(in super::super) unsupported: BTreeSet<String>,
     pub(in super::super) detail_status: u16,
-    /// Per-DID device-description HTTP failures that leave other reads intact.
-    pub(in super::super) detail_failures: BTreeMap<String, u16>,
-    /// Per-DID device-description response gates for partial-refresh tests.
-    pub(in super::super) detail_gates: BTreeMap<String, flume::Receiver<()>>,
-    /// DIDs whose directory record is absent from device-information responses
-    /// while the owned-home membership still confirms them.
-    pub(in super::super) missing_records: BTreeSet<String>,
-    /// Device-description requests observed for each DID.
-    pub(in super::super) detail_counts: BTreeMap<String, usize>,
     pub(in super::super) detail_delay: Duration,
     pub(in super::super) detail_gate: Option<flume::Receiver<()>>,
     pub(in super::super) details: usize,
@@ -97,9 +72,6 @@ pub(in super::super) struct Control {
     pub(in super::super) data: Vec<CachedPhysicalDevice>,
     pub(in super::super) cloud: Arc<Mutex<CloudState>>,
     pub(in super::super) clock: Arc<TestClock>,
-    /// Whether the harness applies staged configuration through the real
-    /// prepare/commit interface without running Matter services.
-    pub(in super::super) auto_apply: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Rig {
     pub(in super::super) fn new(restore: bool, members: &[&str]) -> Self {
@@ -108,104 +80,7 @@ impl Rig {
     pub(in super::super) fn light(model: &str) -> Self {
         Self::build(true, &["one"], Some(model))
     }
-    /// A restored scope with published single-light members and one confirmed
-    /// physical group relation already committed before adapter bootstrap.
-    pub(in super::super) fn restored_group(
-        members: &[&str],
-        did: &str,
-        model: &str,
-        label: &str,
-    ) -> Self {
-        Self::build_groups(
-            true,
-            &[],
-            &[GroupSpec {
-                did,
-                model,
-                members,
-                label,
-            }],
-            Some("yeelink.light.light3"),
-            &[],
-        )
-    }
-    /// A live selected home whose cloud directory confirms one group relation.
-    pub(in super::super) fn group(members: &[&str], did: &str, model: &str) -> Self {
-        Self::build_groups(
-            false,
-            &[],
-            &[GroupSpec {
-                did,
-                model,
-                members,
-                label: "Reading lamp",
-            }],
-            Some("yeelink.light.light3"),
-            &[],
-        )
-    }
-    /// A live selected home whose cloud directory confirms several group relations.
-    pub(in super::super) fn groups(groups: &[GroupSpec<'_>]) -> Self {
-        Self::build_groups(false, &[], groups, Some("yeelink.light.light3"), &[])
-    }
-    /// A live selected home with one group whose members use distinct light models.
-    pub(in super::super) fn group_mixed(members: &[(&str, &str)], did: &str, model: &str) -> Self {
-        let member_dids = members.iter().map(|(did, _)| *did).collect::<Vec<_>>();
-        Self::build_groups(
-            false,
-            &[],
-            &[GroupSpec {
-                did,
-                model,
-                members: &member_dids,
-                label: "Mixed group",
-            }],
-            None,
-            members,
-        )
-    }
-    /// A live selected home with separate record members and one explicit
-    /// group relation over a subset of them, applying per-member model
-    /// overrides. A record outside the group stays a standalone candidate.
-    pub(in super::super) fn group_with_members(
-        records: &[&str],
-        group_members: &[&str],
-        did: &str,
-        model: &str,
-        overrides: &[(&str, &str)],
-    ) -> Self {
-        Self::build_groups(
-            false,
-            records,
-            &[GroupSpec {
-                did,
-                model,
-                members: group_members,
-                label: "Mixed group",
-            }],
-            None,
-            overrides,
-        )
-    }
-    /// A live selected home with separate record members and several explicit
-    /// group relations, applying per-member model overrides.
-    pub(in super::super) fn groups_with_members(
-        records: &[&str],
-        groups: &[GroupSpec<'_>],
-        overrides: &[(&str, &str)],
-    ) -> Self {
-        Self::build_groups(false, records, groups, None, overrides)
-    }
     fn build(restore: bool, members: &[&str], light: Option<&str>) -> Self {
-        Self::build_groups(restore, members, &[], light, &[])
-    }
-    fn build_groups(
-        restore: bool,
-        members: &[&str],
-        groups: &[GroupSpec<'_>],
-        light: Option<&str>,
-        overrides: &[(&str, &str)],
-    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let tls = TlsFixture::new(false);
@@ -214,70 +89,23 @@ impl Rig {
         credentials.tokens.refresh_at = now + 1_000_000;
         credentials.tokens.expires_at = now + 2_000_000;
         store.xiaomi().replace(&credentials).unwrap();
-        let group_ids = groups
-            .iter()
-            .map(|group| group.did.to_string())
-            .collect::<BTreeSet<_>>();
-        let mut record_members = BTreeSet::new();
-        record_members.extend(members.iter().map(|did| (*did).to_string()));
-        for group in groups {
-            for member in group.members {
-                // A nested group DID is a relation source, never a light member.
-                if !group_ids.contains(*member) {
-                    record_members.insert((*member).to_string());
-                }
-            }
-        }
         let mut data = vec![
             cached(&tls.credentials.uid, "one", false),
             cached(&tls.credentials.uid, "multi", true),
             cached(&tls.credentials.uid, "two", false),
         ];
-        for did in &record_members {
+        for did in members {
             if !data.iter().any(|record| record.device.key.id == *did) {
                 data.push(cached(&tls.credentials.uid, did, false));
             }
         }
-        for group in groups {
-            debug_assert!(!data.iter().any(|record| record.device.key.id == group.did));
-            // Group records are cloud metadata carriers only; never parsed as MIoT devices.
-            let mut record = cached(&tls.credentials.uid, "group-placeholder", false);
-            record.device.key = DeviceKey::new("xiaomi", group.did);
-            record.model = group.model.into();
-            data.push(record);
-        }
         if let Some(model) = light {
-            let instance: Value = light_instance(model);
-            for did in &record_members {
-                let record = data
-                    .iter_mut()
-                    .find(|record| record.device.key.id == *did)
-                    .unwrap();
-                // The default multi-function outlet stays a deliberate
-                // unsupported member rather than being rewritten as a light.
-                if record.model == "cuco.plug.cp7pd" {
-                    continue;
-                }
-                record.model = model.into();
-                record.instance_type = instance["type"].as_str().unwrap().into();
-                record.device = crate::xiaomi::capability::parse_device_for_model(
-                    DeviceKey::new("xiaomi", did),
-                    model,
-                    &instance,
-                )
-                .unwrap();
-            }
-        }
-        for (did, model) in overrides {
-            let instance: Value = light_instance(model);
-            let record = data
-                .iter_mut()
-                .find(|record| record.device.key.id == *did)
-                .unwrap();
-            record.model = (*model).into();
-            record.instance_type = instance["type"].as_str().unwrap().into();
-            record.device = crate::xiaomi::capability::parse_device_for_model(
-                DeviceKey::new("xiaomi", *did),
+            let text = light_fixture(model);
+            let instance: Value = serde_json::from_str(text).unwrap();
+            data[0].model = model.into();
+            data[0].instance_type = instance["type"].as_str().unwrap().into();
+            data[0].device = crate::xiaomi::capability::parse_device_for_model(
+                DeviceKey::new("xiaomi", "one"),
                 model,
                 &instance,
             )
@@ -289,79 +117,16 @@ impl Rig {
                 .save_scope(&scope(&tls.credentials.uid))
                 .unwrap();
             for record in &data {
-                if record_members.contains(&record.device.key.id) {
+                if members.contains(&record.device.key.id.as_str()) {
                     store
                         .devices()
                         .publish_cached(record, &format!("name {}", record.device.key.id))
                         .unwrap();
                 }
             }
-            let compositions = groups
-                .iter()
-                .filter(|group| !group.members.is_empty())
-                .map(|group| crate::device::Composition {
-                    key: DeviceKey::new("xiaomi", group.did),
-                    label: group.label.into(),
-                    members: group
-                        .members
-                        .iter()
-                        .map(|member| DeviceKey::new("xiaomi", *member))
-                        .collect(),
-                })
-                .collect::<Vec<_>>();
-            if !compositions.is_empty() {
-                let registry = crate::device::DeviceRegistry::new();
-                for member in &record_members {
-                    let stored = store
-                        .devices()
-                        .load_published(&DeviceKey::new("xiaomi", member))
-                        .unwrap()
-                        .unwrap();
-                    let (device, _) = crate::device::PhysicalDevice::new(stored.description());
-                    registry.insert(device);
-                }
-                let scope = scope(&tls.credentials.uid);
-                registry
-                    .stage_configuration(
-                        crate::device::ConfigurationScope {
-                            uid: scope.uid,
-                            home_id: scope.home_id,
-                            group_id: scope.group_id,
-                        },
-                        compositions,
-                        Vec::new(),
-                    )
-                    .unwrap();
-                store
-                    .devices()
-                    .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))
-                    .unwrap();
-            }
         }
-        let home = record_members
-            .iter()
-            .cloned()
-            .chain(groups.iter().map(|group| group.did.to_string()))
-            .collect::<Vec<_>>();
         let cloud = Arc::new(Mutex::new(CloudState {
-            members: home.clone(),
-            groups: groups
-                .iter()
-                .map(|group| {
-                    (
-                        group.did.to_string(),
-                        GroupFixture {
-                            members: group
-                                .members
-                                .iter()
-                                .map(|member| (*member).to_string())
-                                .collect(),
-                            physical: true,
-                            missing: false,
-                        },
-                    )
-                })
-                .collect(),
+            members: members.iter().map(|v| v.to_string()).collect(),
             status: 200,
             home_status: 200,
             detail_status: 200,
@@ -374,7 +139,8 @@ impl Rig {
             ..Default::default()
         }));
         let info_dids = if restore {
-            home.iter()
+            members
+                .iter()
                 .map(|did| (*did).to_string())
                 .collect::<BTreeSet<_>>()
         } else {
@@ -413,8 +179,7 @@ impl Rig {
                 let items = body["params"].as_array().unwrap();
                 let light = records.iter().any(|record| {
                     record.device.key.id == items[0]["did"].as_str().unwrap()
-                        && record.device.functions[0].description.category
-                            == crate::device::Category::Light
+                        && record.device.functions[0].lighting.is_some()
                 });
                 if light {
                     state
@@ -474,24 +239,14 @@ impl Rig {
                 }
             } else if request.target.ends_with("/device_list_page") {
                 let body: Value = serde_json::from_str(&request.body).unwrap();
-                let dids = body["dids"]
+                if body["dids"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|did| did.as_str().unwrap().to_string())
-                    .collect::<Vec<_>>();
-                for did in &dids {
-                    *state.detail_counts.entry(did.clone()).or_default() += 1;
-                }
-                let failed = dids
-                    .iter()
-                    .find_map(|did| state.detail_failures.get(did).copied());
-                if dids.iter().all(|did| info_dids.contains(did)) {
+                    .all(|did| info_dids.contains(did.as_str().unwrap()))
+                {
                     state.infos += 1;
-                    if let Some(status) = failed {
-                        return MockResponse::json(status, "{}");
-                    }
-                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id) && !state.missing_records.contains(&record.device.key.id)).map(|record|record_value(&state, record)).collect::<Vec<_>>(),"has_more":state.info_partial}});
+                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>(),"has_more":state.info_partial}});
                     let mut response = MockResponse::json(state.info_status, &value.to_string());
                     if let Some(gate) = state.info_gate.clone() {
                         response = response.gated(gate);
@@ -499,15 +254,6 @@ impl Rig {
                     return response;
                 }
                 state.details += 1;
-                if let Some(status) = failed {
-                    let mut response = MockResponse::json(status, "{}")
-                        .delayed(state.detail_delay)
-                        .on_sent(move || detail_finished.lock().unwrap().detail_done += 1);
-                    if let Some(gate) = state.detail_gate.clone() {
-                        response = response.gated(gate);
-                    }
-                    return response;
-                }
                 if state.detail_status != 200 {
                     let mut response = MockResponse::json(state.detail_status, "{}")
                         .delayed(state.detail_delay)
@@ -517,36 +263,19 @@ impl Rig {
                     }
                     return response;
                 }
-                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id) && !state.missing_records.contains(&record.device.key.id)).map(|record|record_value(&state, record)).collect::<Vec<_>>()}})
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
-                let requested = request
-                    .target
-                    .split("type=")
-                    .nth(1)
-                    .and_then(|rest| rest.split('&').next())
-                    .unwrap_or_default()
-                    .replace("%3A", ":")
-                    .replace("%3a", ":");
                 let multi = request.target.contains("cuco-cp7pd");
-                let light = records.iter().find(|record| {
-                    record.instance_type == requested
-                        && record.device.functions.first().is_some_and(|function| {
-                            function.description.category == crate::device::Category::Light
-                        })
-                });
-                let mut value: Value = if let Some(record) = light {
-                    light_instance(&record.model)
-                } else if multi {
-                    serde_json::from_str(include_str!(
-                        "../../../../../tests/fixtures/miot/cuco-cp7pd.json"
-                    ))
-                    .unwrap()
-                } else {
-                    serde_json::from_str(include_str!(
-                        "../../../../../tests/fixtures/miot/outlet.json"
-                    ))
-                    .unwrap()
-                };
+                let mut value: Value = serde_json::from_str(
+                    if records[0].device.functions[0].lighting.is_some() && !multi {
+                        light_fixture(&records[0].model)
+                    } else if multi {
+                        include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
+                    } else {
+                        include_str!("../../../../../tests/fixtures/miot/outlet.json")
+                    },
+                )
+                .unwrap();
                 if state
                     .unsupported
                     .contains(if multi { "multi" } else { "one" })
@@ -575,17 +304,7 @@ impl Rig {
                 }
                 response
             } else if request.target.ends_with("/device_list_page") {
-                let body: Value = serde_json::from_str(&request.body).unwrap();
-                let gate = body["dids"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find_map(|did| state.detail_gates.get(did.as_str().unwrap()).cloned());
-                let mut response = response.delayed(state.detail_delay);
-                if let Some(gate) = gate {
-                    response = response.gated(gate);
-                }
-                response
+                response.delayed(state.detail_delay)
             } else if request.target.ends_with("/get_central_crt") {
                 if let Some(gate) = state.cert_gate.clone() {
                     response.gated(gate)
@@ -638,7 +357,6 @@ impl Rig {
         let keep_events = self.events.clone();
         let context = self.source.context.clone();
         let clock = self.clock.clone();
-        let auto_apply = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let running = self.source.run(|_| {});
         let discovering = async {
             self.driver.run().await?;
@@ -647,7 +365,7 @@ impl Rig {
         let testing = test(Control {
             ready: Some(self.ready),
             store: self.store,
-            context: context.clone(),
+            context,
             discovery: self.discovery,
             events: self.events,
             listener: self.listener,
@@ -655,7 +373,6 @@ impl Rig {
             data: self.data,
             cloud: self.cloud,
             clock: self.clock,
-            auto_apply: auto_apply.clone(),
         });
         let ticking = async {
             loop {
@@ -665,26 +382,13 @@ impl Rig {
                 }
             }
         };
-        // Drive the storage/registry apply boundary without Matter services.
-        // Pending tests pause this driver to inspect the staged state.
-        let applying = async {
-            loop {
-                async_io::Timer::after(Duration::from_millis(1)).await;
-                if auto_apply.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = context.apply_pending_configuration(Vec::new(), Vec::new());
-                }
-            }
-        };
         let result = future::or(
             ticking,
             future::or(
-                future::or(
-                    future::or(future::or(running, discovering), applying),
-                    async {
-                        testing.await;
-                        Ok(())
-                    },
-                ),
+                future::or(future::or(running, discovering), async {
+                    testing.await;
+                    Ok(())
+                }),
                 async {
                     async_io::Timer::after(Duration::from_secs(5)).await;
                     panic!("source scenario stalled");
@@ -697,29 +401,6 @@ impl Rig {
     }
 }
 impl Control {
-    /// Pause automatic application so a test can inspect the pending configuration.
-    pub(in super::super) fn hold_apply(&self) {
-        self.auto_apply
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Run the real apply interface once without changing the harness mode.
-    pub(in super::super) fn apply_now(&self) {
-        let _ = self
-            .context
-            .apply_pending_configuration(Vec::new(), Vec::new());
-    }
-
-    /// Run the real apply interface once and surface its result.
-    pub(in super::super) fn try_apply(
-        &self,
-    ) -> Result<
-        Option<crate::storage::ConfirmedComposition>,
-        crate::xiaomi::adapter::model::AdapterError,
-    > {
-        self.context
-            .apply_pending_configuration(Vec::new(), Vec::new())
-    }
     pub(in super::super) fn announce(&self) {
         self.events
             .send(announcement(
@@ -751,74 +432,6 @@ impl Control {
     }
 }
 
-fn record_value(state: &CloudState, record: &CachedPhysicalDevice) -> Value {
-    let did = record.device.key.id.as_str();
-    let mut value = json!({
-        "did": did,
-        "name": state.names.get(did).cloned().unwrap_or_else(|| format!("name {did}")),
-        "model": record.model,
-        "spec_type": record.instance_type,
-        "isOnline": state.online.contains(did),
-    });
-    if let Some(group) = state.groups.get(did)
-        && !group.missing
-    {
-        let member_ship = group
-            .members
-            .iter()
-            .map(|member| (member.clone(), Value::String("1".into())))
-            .collect::<serde_json::Map<_, _>>();
-        value["extra"] = json!({
-            "member_list": {
-                "group_did": did,
-                "status": "1",
-                "member_ship": member_ship,
-                "is_physical": group.physical,
-            }
-        });
-    }
-    value
-}
-
-/// Instance JSON for a member model. `synthetic.light.ct:<min>-<max>` builds a
-/// synthetic on/off plus temperature light with that physical range; every
-/// other model resolves to its fixed fixture.
-fn light_instance(model: &str) -> Value {
-    if let Some(range) = model.strip_prefix("synthetic.light.ct:")
-        && let Some((min, max)) = range.split_once('-')
-        && let (Ok(min), Ok(max)) = (min.parse::<u32>(), max.parse::<u32>())
-    {
-        return json!({
-            "type": format!("urn:miot-spec-v2:device:light:0000A001:synthetic-ct-{min}-{max}:1"),
-            "description": "Synthetic color temperature light",
-            "services": [{
-                "iid": 2,
-                "type": "urn:miot-spec-v2:service:light:00007802:synthetic-ct:1",
-                "description": "Light",
-                "properties": [
-                    {
-                        "iid": 1,
-                        "type": "urn:miot-spec-v2:property:on:00000006:synthetic-ct:1",
-                        "description": "Power",
-                        "format": "bool",
-                        "access": ["read", "write", "notify"]
-                    },
-                    {
-                        "iid": 3,
-                        "type": "urn:miot-spec-v2:property:color-temperature:0000000F:synthetic-ct:1",
-                        "description": "Color temperature",
-                        "format": "uint16",
-                        "unit": "kelvin",
-                        "access": ["read", "write", "notify"],
-                        "value-range": [min, max, 1]
-                    }
-                ]
-            }]
-        });
-    }
-    serde_json::from_str(light_fixture(model)).unwrap()
-}
-
 fn light_fixture(model: &str) -> &'static str {
     match model {
         "devcea.light.ls2307" => {
@@ -842,40 +455,6 @@ fn light_fixture(model: &str) -> &'static str {
         "lemesh.light.wy0c15" => {
             include_str!("../../../../../tests/fixtures/miot/lemesh-light-wy0c15.json")
         }
-        "synthetic.light.onoff" => {
-            include_str!("../../../../../tests/fixtures/miot/synthetic-onoff-light.json")
-        }
-        "synthetic.light.ct" => {
-            include_str!("../../../../../tests/fixtures/miot/synthetic-ct-light.json")
-        }
-        "synthetic.light.rgb" => {
-            include_str!("../../../../../tests/fixtures/miot/synthetic-rgb-light.json")
-        }
-        "synthetic.light.rgbonly" => {
-            include_str!("../../../../../tests/fixtures/miot/synthetic-rgbonly-light.json")
-        }
         _ => panic!("unknown light fixture"),
-    }
-}
-
-impl crate::xiaomi::adapter::state::Context {
-    /// Apply a source candidate through the production storage/registry transaction.
-    pub(in super::super) fn apply_pending_configuration(
-        &self,
-        versions: Vec<crate::storage::ConfigurationVersion>,
-        blobs: Vec<crate::storage::BlobChange>,
-    ) -> Result<
-        Option<crate::storage::ConfirmedComposition>,
-        crate::xiaomi::adapter::model::AdapterError,
-    > {
-        use crate::storage::CompositionCommitError;
-        use crate::xiaomi::adapter::model::AdapterError;
-        self.store
-            .devices()
-            .apply_pending_configuration(&self.registry, |_| Ok((versions, blobs)))
-            .map_err(|error| match error {
-                CompositionCommitError::Storage(error) => AdapterError::Storage(error),
-                error => AdapterError::Unavailable(error.to_string()),
-            })
     }
 }

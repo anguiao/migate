@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn restored_topology_is_the_selected_scope() {
+fn restored_topology_is_the_selected_scope_and_published_intersection() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let tls = TlsFixture::new(false);
@@ -12,6 +12,9 @@ fn restored_topology_is_the_selected_scope() {
         .unwrap();
     let kept = cached(&tls.credentials.uid, "kept", true);
     store.devices().publish_cached(&kept, "saved name").unwrap();
+    let deleted = cached(&tls.credentials.uid, "deleted", false);
+    store.devices().publish_cached(&deleted, "deleted").unwrap();
+    store.devices().remove(&deleted.device.key).unwrap();
     let mut other = cached(&tls.credentials.uid, "other-home", false);
     other.home_id = "other".into();
     other.group_id = group_id(&other.uid, &other.home_id);
@@ -49,6 +52,65 @@ fn prepared_accounts_can_deliver_an_empty_registry() {
         let registry = c.ready.take().unwrap().wait().await.unwrap();
         assert!(registry.list().is_empty());
     }));
+}
+
+#[test]
+fn cached_light_groups_are_unpublished_before_restore_without_losing_identity() {
+    let rig = Rig::light("xiaomi.light.ceil04");
+    let mut groups = Vec::new();
+    for (did, model) in [
+        ("group.42", "xiaomi.light.ceil04"),
+        ("43", "mijia.light.group3"),
+    ] {
+        let mut group = rig.data[0].clone();
+        group.device.key.id = did.into();
+        group.model = model.into();
+        let stored = rig
+            .store
+            .devices()
+            .publish_cached(&group, "Saved group")
+            .unwrap();
+        groups.push((group, stored));
+    }
+    let single = rig.store.devices().list_published().unwrap()[0].clone();
+    for _ in 0..2 {
+        let (source, ready) = XiaomiAdapter::build(
+            rig.store.clone(),
+            rig.source.cloud.clone(),
+            rig.discovery.clone(),
+            rig.clock.clone(),
+        )
+        .unwrap();
+        let registry = block_on(poll_once(ready.wait())).unwrap().unwrap();
+        assert_eq!(registry.list().len(), 1);
+        assert!(registry.get(&single.key).is_some());
+        assert_eq!(
+            rig.store.devices().list_published().unwrap().as_slice(),
+            std::slice::from_ref(&single)
+        );
+        for (group, _) in &groups {
+            assert!(registry.get(&group.device.key).is_none());
+            assert_eq!(
+                rig.store
+                    .devices()
+                    .load_parsed(&group.uid, &group.home_id, &group.device.key)
+                    .unwrap(),
+                Some(group.clone())
+            );
+        }
+        drop(source);
+    }
+    // A future admission can reuse the withdrawn identity and endpoint allocation.
+    for (group, stored) in groups {
+        assert_eq!(
+            rig.store
+                .devices()
+                .publish_cached(&group, "New name")
+                .unwrap(),
+            stored
+        );
+    }
+    assert_eq!(rig.cloud.lock().unwrap().homes, 0);
 }
 
 #[test]
@@ -151,113 +213,4 @@ fn corrupt_saved_credentials_or_cached_topology_fail_before_network_requests() {
         assert!(matches!(result, Err(AdapterError::Storage(_))));
         assert_eq!(rig.cloud.lock().unwrap().homes, 0);
     }
-}
-
-#[test]
-fn unmappable_light_restores_a_reservation_without_controls() {
-    let rig = Rig::light("synthetic.light.rgbonly");
-    let key = DeviceKey::new("xiaomi", "one");
-    let stored = rig.store.devices().load_published(&key).unwrap().unwrap();
-    block_on(rig.run(|c| async move {
-        c.announce();
-        until(|| {
-            c.context
-                .status
-                .borrow()
-                .pending
-                .iter()
-                .any(|pending| pending.did == "one" && pending.reason.contains("on/off"))
-        })
-        .await;
-        assert!(c.context.registry.get(&key).is_none());
-        assert!(c.context.live.borrow().devices["one"].unpublished.is_some());
-        assert_eq!(
-            c.store.devices().load_published(&key).unwrap().unwrap(),
-            stored
-        );
-    }));
-}
-
-#[test]
-fn committed_standalone_configuration_restores_its_applied_set_at_startup() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    let tls = TlsFixture::new(false);
-    store.xiaomi().replace(&tls.credentials).unwrap();
-    store
-        .devices()
-        .save_scope(&scope(&tls.credentials.uid))
-        .unwrap();
-    let kept = cached(&tls.credentials.uid, "kept", true);
-    let stored = store.devices().publish_cached(&kept, "saved name").unwrap();
-    let registry = DeviceRegistry::new();
-    let (device, _receivers) = crate::device::PhysicalDevice::new(stored.description());
-    registry.insert(device);
-    let scope = scope(&tls.credentials.uid);
-    registry
-        .stage_configuration(
-            crate::device::ConfigurationScope {
-                uid: scope.uid,
-                home_id: scope.home_id,
-                group_id: scope.group_id,
-            },
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap();
-    store
-        .devices()
-        .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))
-        .unwrap();
-    let (base, _requests) = dynamic_mock_server(1, |_| MockResponse::json(503, "{}"));
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let (_events, receiver) = flume::unbounded();
-    let (discovery, _driver) = Discovery::with_events(receiver);
-    let (_source, ready) = XiaomiAdapter::new(store, cloud, discovery).unwrap();
-    let registry = block_on(poll_once(ready.wait()))
-        .expect("cache readiness is synchronous")
-        .unwrap();
-    let snapshot = registry.snapshot();
-    assert_eq!(snapshot.applied.confirmed, Some(1));
-    assert_eq!(
-        snapshot
-            .applied
-            .devices
-            .iter()
-            .map(|device| device.key().clone())
-            .collect::<Vec<_>>(),
-        vec![DeviceKey::new("xiaomi", "kept")]
-    );
-    assert!(snapshot.applied.groups.is_empty());
-}
-
-#[test]
-fn committed_empty_configuration_restores_its_version_at_startup() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    let tls = TlsFixture::new(false);
-    store.xiaomi().replace(&tls.credentials).unwrap();
-    store
-        .devices()
-        .save_scope(&scope(&tls.credentials.uid))
-        .unwrap();
-    rusqlite::Connection::open(store.path())
-        .unwrap()
-        .execute(
-            "INSERT INTO group_snapshot VALUES(?1,?2,3)",
-            rusqlite::params![tls.credentials.uid, "local"],
-        )
-        .unwrap();
-    let (base, _requests) = dynamic_mock_server(1, |_| MockResponse::json(503, "{}"));
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let (_events, receiver) = flume::unbounded();
-    let (discovery, _driver) = Discovery::with_events(receiver);
-    let (_source, ready) = XiaomiAdapter::new(store, cloud, discovery).unwrap();
-    let registry = block_on(poll_once(ready.wait()))
-        .expect("cache readiness is synchronous")
-        .unwrap();
-    let snapshot = registry.snapshot();
-    assert_eq!(snapshot.applied.confirmed, Some(3));
-    assert!(snapshot.applied.groups.is_empty());
-    assert!(snapshot.applied.devices.is_empty());
 }

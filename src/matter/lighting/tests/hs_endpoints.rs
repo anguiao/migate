@@ -23,7 +23,7 @@ fn check_hue_254_endpoint(outcome: FinalOutcome) {
         })
         .unwrap();
     block_on(async {
-        let handler = ColorHandler::<true, true>(&light);
+        let handler = ColorHandler::<true>(&light);
         // MoveToHue(254, Up, 1 second). The encoded endpoint 254 and
         // canonical RGB red (hue 0) are physically equivalent.
         let data = [
@@ -39,12 +39,12 @@ fn check_hue_254_endpoint(outcome: FinalOutcome) {
         invoke.await.unwrap();
 
         clock.set(500);
-        light.executor.advance();
+        light.advance();
         accept(&function, frame(&mut receiver).await);
         assert_eq!(handler.current_hue(&ctx).await.unwrap(), 247);
 
         clock.set(1000);
-        light.executor.advance();
+        light.advance();
         let final_frame = frame(&mut receiver).await;
         assert_eq!(final_frame.token, token);
         assert!(final_frame.final_frame);
@@ -69,7 +69,7 @@ fn check_hue_254_endpoint(outcome: FinalOutcome) {
                 final_frame.reject(CommandError::Rejected("final write rejected".into()));
             }
             FinalOutcome::Stopped => {
-                light.stop(LightDimension::Color).await.unwrap();
+                light.stop(LightDimension::Color).unwrap();
                 // The transport receipt still completes its original frame.
                 final_frame.accept().unwrap();
             }
@@ -81,7 +81,7 @@ fn check_hue_254_endpoint(outcome: FinalOutcome) {
             0
         };
         assert_eq!(handler.current_hue(&ctx).await.unwrap(), expected);
-        light.executor.advance();
+        light.advance();
         assert_eq!(handler.current_hue(&ctx).await.unwrap(), expected);
         assert_eq!(handler.current_saturation(&ctx).await.unwrap(), 254);
         assert!(poll_once(receiver.next_operation()).await.is_none());

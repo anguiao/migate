@@ -36,7 +36,7 @@ fn four_single_outlet_models_accept_their_public_instance_urns() {
             .unwrap_or_else(|error| panic!("{model}: {error}"));
         assert_eq!(
             outlet.functions[0].power,
-            Some(PropertyBinding { siid: 2, piid: 1 })
+            PropertyBinding { siid: 2, piid: 1 }
         );
         let device = parse_device(key(), &model_description(model)).unwrap();
         assert_eq!(device.functions.len(), 1);
@@ -67,17 +67,9 @@ fn cp7pd_exposes_three_independent_channels_and_observes_total_control_internall
             ))
             .collect::<Vec<_>>(),
         [
-            (
-                "outlet_1",
-                "开关 1",
-                Some(PropertyBinding { siid: 3, piid: 1 })
-            ),
-            (
-                "outlet_2",
-                "开关 2",
-                Some(PropertyBinding { siid: 4, piid: 1 })
-            ),
-            ("usb", "USB", Some(PropertyBinding { siid: 9, piid: 1 })),
+            ("outlet_1", "开关 1", PropertyBinding { siid: 3, piid: 1 }),
+            ("outlet_2", "开关 2", PropertyBinding { siid: 4, piid: 1 }),
+            ("usb", "USB", PropertyBinding { siid: 9, piid: 1 }),
         ]
     );
     assert_eq!(
@@ -88,7 +80,7 @@ fn cp7pd_exposes_three_independent_channels_and_observes_total_control_internall
         device
             .functions
             .iter()
-            .all(|function| function.power.is_some_and(|power| power.siid != 2))
+            .all(|function| function.power.siid != 2)
     );
 }
 
@@ -343,7 +335,7 @@ fn public_spec_selects_main_switch_and_ignores_indicator_and_vendor_switches() {
     );
     assert_eq!(
         outlet.functions[0].power,
-        Some(PropertyBinding { siid: 2, piid: 1 })
+        PropertyBinding { siid: 2, piid: 1 }
     );
 }
 
@@ -352,7 +344,7 @@ fn standard_semantics_work_with_other_vendor_and_instance_ids() {
     let outlet = parse_device(key(), &minimal_description()).unwrap();
     assert_eq!(
         outlet.functions[0].power,
-        Some(PropertyBinding { siid: 42, piid: 19 })
+        PropertyBinding { siid: 42, piid: 19 }
     );
 }
 
@@ -365,7 +357,7 @@ fn descriptions_and_instance_order_do_not_determine_the_main_power() {
     }
     assert_eq!(
         parse_device(key(), &description).unwrap().functions[0].power,
-        Some(PropertyBinding { siid: 2, piid: 1 })
+        PropertyBinding { siid: 2, piid: 1 }
     );
 }
 

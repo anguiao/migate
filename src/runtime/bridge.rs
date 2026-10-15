@@ -1,7 +1,6 @@
 use crate::{
     RuntimeError,
     device::DeviceRegistry,
-    lighting::{LightingExecutor, clock::SystemClock},
     matter::{Bridge, PairingEvent},
     storage::{Identity, Store},
     terminal::{self, AuthStatus},
@@ -10,7 +9,7 @@ use futures_lite::{
     future,
     io::{AsyncBufRead, AsyncWrite},
 };
-use std::{future::Future, rc::Rc};
+use std::future::Future;
 
 pub struct BridgeOptions<'a> {
     pub store: &'a Store,
@@ -49,24 +48,18 @@ pub async fn run_prepared_bridge(
     };
     let registry = prepared;
     log::info!("MiGate bridge_id={}", options.identity.bridge_id);
-    let executor = LightingExecutor::new(Rc::new(SystemClock::new()));
-    let bridge = Bridge::new(&registry, options.store, options.identity, executor.clone());
-    let terminal = terminal::Terminal::with_executor(
-        &registry,
-        &options.store.devices(),
-        options.status,
-        executor.clone(),
-    );
-    let executor_run = async move {
-        executor.run().await;
-        Err::<(), RuntimeError>("Lighting executor ended unexpectedly".into())
-    };
+    let bridge = Bridge::new(&registry, options.store, options.identity);
     let result = {
         let input = async {
-            terminal
-                .run_input(input, output)
-                .await
-                .map_err(|error| format!("Terminal I/O failed: {error}"))?;
+            terminal::bridge::run_input(
+                &registry,
+                &options.store.devices(),
+                options.status,
+                input,
+                output,
+            )
+            .await
+            .map_err(|error| format!("Terminal I/O failed: {error}"))?;
             log::info!("Terminal input ended; bridge is still running");
             future::pending::<Result<(), RuntimeError>>().await
         };
@@ -74,10 +67,7 @@ pub async fn run_prepared_bridge(
             interrupt.as_mut(),
             future::or(
                 source.as_mut(),
-                future::or(
-                    bridge.run(options.port, pairing),
-                    future::or(executor_run, input),
-                ),
+                future::or(bridge.run(options.port, pairing), input),
             ),
         )
         .await

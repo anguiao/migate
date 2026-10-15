@@ -134,7 +134,7 @@ impl DeviceWork {
             .find(|function| super::lighting::bindings(function).contains(&binding))
         {
             let id = function.description.id.clone();
-            let light = function.description.category == crate::device::Category::Light;
+            let light = function.lighting.is_some();
             drop(cached);
             if light {
                 let origin = if cached_report {
@@ -235,9 +235,8 @@ impl DeviceWork {
             .iter()
             .find(|function| function.description.id == id)
             .unwrap()
-            .description
-            .category
-            == crate::device::Category::Light;
+            .lighting
+            .is_some();
         if light {
             super::lighting::observe(self, id, binding, value, super::lighting::Origin::Read)?;
         } else {

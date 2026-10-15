@@ -1,4 +1,3 @@
-use crate::device::{Capability, RegistrySnapshot};
 use crate::xiaomi::{
     adapter::{
         AdapterStatus, ChannelCommands, CommandStatus, DeviceStatus, GatewayStatus, PathKind,
@@ -69,43 +68,15 @@ impl AuthStatus {
         report
     }
 
-    pub fn render_devices(
-        &self,
-        now: i64,
-        did: Option<&str>,
-        registry: &RegistrySnapshot,
-    ) -> String {
-        self.render_devices_matching(
-            now,
-            |device| did.is_none_or(|did| device.did == did),
-            registry,
-        )
-    }
-
-    /// Render one status block per selected member DID in adapter order.
-    pub(super) fn render_group_devices(
-        &self,
-        now: i64,
-        members: &[String],
-        registry: &RegistrySnapshot,
-    ) -> String {
-        self.render_devices_matching(
-            now,
-            |device| members.iter().any(|member| member == &device.did),
-            registry,
-        )
-    }
-
-    fn render_devices_matching(
-        &self,
-        now: i64,
-        selected: impl Fn(&DeviceStatus) -> bool,
-        registry: &RegistrySnapshot,
-    ) -> String {
+    pub fn render_devices(&self, now: i64, did: Option<&str>) -> String {
         let mut report = self.render(now);
         if let Some(adapter) = &*self.adapter.borrow() {
-            for device in adapter.devices.iter().filter(|device| selected(device)) {
-                let _ = write!(report, "\n{}", format_device(device, registry));
+            for device in adapter
+                .devices
+                .iter()
+                .filter(|device| did.is_none_or(|did| device.did == did))
+            {
+                let _ = write!(report, "\n{}", format_device(device));
             }
         }
         report
@@ -257,7 +228,7 @@ fn format_routing(status: &RoutingStatus) -> String {
     report
 }
 
-fn format_device(status: &DeviceStatus, registry: &RegistrySnapshot) -> String {
+fn format_device(status: &DeviceStatus) -> String {
     let paths = status
         .usable_control_paths
         .iter()
@@ -302,12 +273,7 @@ fn format_device(status: &DeviceStatus, registry: &RegistrySnapshot) -> String {
             let _ = write!(report, "\n  {}", format_command(channel, "last", command));
         }
         if let Some(actions) = light_actions {
-            let dimensions = supported_dimensions(registry, &status.did, channel);
-            let _ = write!(
-                report,
-                "\n  {}",
-                format_actions(channel, actions, dimensions)
-            );
+            let _ = write!(report, "\n  {}", format_actions(channel, actions));
         }
     }
     report
@@ -338,36 +304,7 @@ fn dimension(dimension: crate::device::LightDimension) -> &'static str {
         crate::device::LightDimension::Color => "color",
     }
 }
-/// Light dimensions the published function actually declares for one channel.
-/// A diagnostic whose function is no longer present keeps only its real
-/// receipt and last-action information.
-fn supported_dimensions(
-    registry: &RegistrySnapshot,
-    did: &str,
-    channel: &str,
-) -> Option<(bool, bool)> {
-    let function = registry
-        .devices
-        .iter()
-        .find(|device| device.key().id == did)?
-        .function(channel)?;
-    let description = function.description();
-    Some((
-        description.capabilities.contains(&Capability::Brightness),
-        description.capabilities.iter().any(|capability| {
-            matches!(
-                capability,
-                Capability::ColorTemperature(_) | Capability::ColorRgb
-            )
-        }),
-    ))
-}
-
-fn format_actions(
-    channel: &str,
-    actions: &crate::device::LightActionDiagnostics,
-    dimensions: Option<(bool, bool)>,
-) -> String {
+fn format_actions(channel: &str, actions: &crate::device::LightActionDiagnostics) -> String {
     use crate::device::CommandError;
     let awaiting = actions.awaiting_startup.map_or_else(
         || "none".into(),
@@ -396,32 +333,19 @@ fn format_actions(
             format!("{} {result}", dimension(last.token.dimension()))
         },
     );
-    let mut states = Vec::new();
-    if let Some((brightness, color)) = dimensions {
-        if brightness {
-            states.push(format!(
-                "brightness {}",
-                if actions.brightness.is_some() {
-                    "active"
-                } else {
-                    "idle"
-                }
-            ));
-        }
-        if color {
-            states.push(format!(
-                "color {}",
-                if actions.color.is_some() {
-                    "active"
-                } else {
-                    "idle"
-                }
-            ));
-        }
-    }
-    states.push(format!("awaiting startup receipt {awaiting}"));
-    states.push(format!("last {last}"));
-    format!("{channel} actions: {}.", states.join("; "))
+    format!(
+        "{channel} actions: brightness {}; color {}; awaiting startup receipt {awaiting}; last {last}.",
+        if actions.brightness.is_some() {
+            "active"
+        } else {
+            "idle"
+        },
+        if actions.color.is_some() {
+            "active"
+        } else {
+            "idle"
+        },
+    )
 }
 
 fn format_authentication(authentication: &AuthenticationState) -> String {

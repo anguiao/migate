@@ -1,13 +1,13 @@
 use super::{
     model::AdapterError,
-    state::{Backoff, Context, GroupMeta, Lifetime},
+    state::{Backoff, Context, Lifetime},
 };
 use crate::{
-    storage::{CachedScope, XiaomiRecord},
+    storage::CachedScope,
     xiaomi::{
         auth::{AuthenticationState, FailureReason},
-        catalog::{self, CatalogEntry, CatalogError},
-        cloud::{CloudClient, OwnedHome},
+        catalog::{self, CatalogError},
+        cloud::CloudClient,
         discovery::Discovery,
     },
 };
@@ -28,25 +28,6 @@ pub(super) enum CloudSync {
     Paused,
 }
 pub(super) const MEMBER_INTERVAL: Duration = Duration::from_secs(300);
-
-/// Group identities are known from the DID convention, a classified relation,
-/// or an authoritative published composition restored from storage.
-fn known_group_identity(context: &Context, did: &str, published: &BTreeSet<String>) -> bool {
-    did.starts_with("group.")
-        || published.contains(did)
-        || context.live.borrow().devices[did].group.is_some()
-}
-
-fn published_group_identities(context: &Context) -> BTreeSet<String> {
-    context
-        .registry
-        .snapshot()
-        .applied
-        .groups
-        .into_iter()
-        .map(|group| group.key.id)
-        .collect()
-}
 pub(super) async fn run(
     cloud: &CloudClient,
     discovery: &Discovery,
@@ -134,6 +115,7 @@ pub(super) async fn run(
             due = context.clock.now() + MEMBER_INTERVAL;
             continue;
         }
+        let expected_scope = context.live.borrow().scope.clone();
         let selected = {
             let live = context.live.borrow();
             if let Some(scope) = &live.scope {
@@ -157,66 +139,6 @@ pub(super) async fn run(
                 continue;
             }
         };
-        // A full sync invalidates relation freshness for every known group;
-        // only a successful read in this cycle may count as a fresh confirmed
-        // replacement, while the last confirmed relation stays authoritative.
-        {
-            let mut live = context.live.borrow_mut();
-            for slot in live.devices.values_mut() {
-                if let Some(meta) = &mut slot.group {
-                    meta.relation = None;
-                }
-            }
-        }
-        let scope = CachedScope {
-            uid: home.uid.clone(),
-            home_id: home.home_id.clone(),
-            group_id: home.group_id.clone(),
-        };
-        context.store.devices().save_scope(&scope)?;
-        let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
-        let membership_changed = context.live.borrow().devices.keys().ne(members.iter());
-        let removed_keys = {
-            let live = context.live.borrow();
-            live.devices
-                .keys()
-                .filter(|did| !members.contains(*did))
-                .map(|did| crate::device::DeviceKey::new("xiaomi", did.clone()))
-                .collect::<Vec<_>>()
-        };
-        context.live.borrow_mut().scope = Some(scope.clone());
-        context.live.borrow_mut().complete = true;
-        // Revoke confirmed whole-home deletions before device-detail reads.
-        // Their durable removal is committed with the pending configuration.
-        if !removed_keys.is_empty() {
-            context.reconcile_groups_removed(&removed_keys)?;
-        }
-        for did in &members {
-            context
-                .live
-                .borrow_mut()
-                .devices
-                .entry(did.clone())
-                .or_default();
-        }
-        // Group metadata refreshes run before the ordinary access batch: one
-        // malformed or failed device-detail batch must not block unrelated
-        // group relations from being refreshed on their normal schedule. A
-        // restored published composition is authoritative for numeric group
-        // identities before their slot metadata is populated.
-        let published_groups = published_group_identities(&context);
-        for did in &members {
-            let group_identity = known_group_identity(&context, did, &published_groups);
-            if !group_identity {
-                continue;
-            }
-            if context.live.borrow().devices[did].loading.is_some() {
-                // A read from a previous cycle is still outstanding; its
-                // completion owns the loading marker and freshness result.
-                continue;
-            }
-            start_entry_load(&context, cloud, &credentials, &home, did, true);
-        }
         let requested = {
             let live = context.live.borrow();
             live.devices
@@ -238,7 +160,7 @@ pub(super) async fn run(
         else {
             continue;
         };
-        if !context.current_token(token) || context.live.borrow().scope.as_ref() != Some(&scope) {
+        if !context.current_token(token) || context.live.borrow().scope != expected_scope {
             continue;
         }
         let infos = match infos {
@@ -256,6 +178,34 @@ pub(super) async fn run(
                 continue;
             }
         };
+        let scope = CachedScope {
+            uid: home.uid.clone(),
+            home_id: home.home_id.clone(),
+            group_id: home.group_id.clone(),
+        };
+        context.store.devices().save_scope(&scope)?;
+        let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
+        let membership_changed = context.live.borrow().devices.keys().ne(members.iter());
+        let removed = {
+            let live = context.live.borrow();
+            live.devices
+                .keys()
+                .filter(|did| !members.contains(*did))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        context.live.borrow_mut().scope = Some(scope.clone());
+        for did in removed {
+            context.remove(&did)?;
+        }
+        for did in &members {
+            context
+                .live
+                .borrow_mut()
+                .devices
+                .entry(did.clone())
+                .or_default();
+        }
         {
             let mut live = context.live.borrow_mut();
             for (did, slot) in &mut live.devices {
@@ -275,106 +225,75 @@ pub(super) async fn run(
         if membership_changed {
             super::local::refresh_access(&context);
         }
-        let published_groups = published_group_identities(&context);
         for did in members {
-            let group_identity = known_group_identity(&context, &did, &published_groups);
-            if group_identity {
-                continue;
-            }
             let prepare = context.live.borrow().devices[&did].needs_description();
             if !prepare {
                 context.reconcile(&did)?;
                 continue;
             }
-            start_entry_load(&context, cloud, &credentials, &home, &did, false);
+            let life = Rc::new(Lifetime::default());
+            context
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut(&did)
+                .unwrap()
+                .loading = Some(life.clone());
+            let current = context.clone();
+            let client = cloud.clone();
+            let credentials = credentials.clone();
+            let home = home.clone();
+            let task = async move {
+                let Some(result) = future::or(
+                    async {
+                        life.ended().await;
+                        None
+                    },
+                    async { Some(catalog::load_device(&client, &credentials, &home, &did).await) },
+                )
+                .await
+                else {
+                    return Ok(());
+                };
+                current
+                    .live
+                    .borrow_mut()
+                    .devices
+                    .get_mut(&did)
+                    .unwrap()
+                    .loading = None;
+                match result {
+                    Ok(candidate) => {
+                        {
+                            let mut live = current.live.borrow_mut();
+                            let slot = live.devices.get_mut(&did).unwrap();
+                            slot.blocked = None;
+                            slot.candidate = Some(candidate);
+                        }
+                        current.reconcile(&did)?;
+                        current.request_sync();
+                    }
+                    Err(error) => {
+                        match &error {
+                            CatalogError::Cloud(_) => {
+                                current.problem(&did, Some(error.to_string()))
+                            }
+                            _ => current.block_device(&did, error.to_string()),
+                        }
+                        if let CatalogError::Cloud(error) = &error {
+                            current.cloud_error(
+                                &credentials.tokens.access_token,
+                                Some(&did),
+                                error,
+                            )?;
+                        }
+                    }
+                }
+                Ok(())
+            };
+            context.tasks.spawn(task);
+            context.changed.notify(usize::MAX);
         }
         due = context.clock.now() + MEMBER_INTERVAL;
     }
-}
-
-/// Both refresh phases share one cancellable catalog task. Known groups keep
-/// their identity; ordinary cloud failures preserve an admitted control path.
-fn start_entry_load(
-    context: &Rc<Context>,
-    cloud: &CloudClient,
-    credentials: &XiaomiRecord,
-    home: &OwnedHome,
-    did: &str,
-    known_group: bool,
-) {
-    let life = Rc::new(Lifetime::default());
-    context
-        .live
-        .borrow_mut()
-        .devices
-        .get_mut(did)
-        .unwrap()
-        .loading = Some(life.clone());
-    let current = context.clone();
-    let client = cloud.clone();
-    let credentials = credentials.clone();
-    let home = home.clone();
-    let did = did.to_owned();
-    context.tasks.spawn(async move {
-        let Some(result) = future::or(
-            async {
-                life.ended().await;
-                None
-            },
-            async { Some(catalog::load_entry(&client, &credentials, &home, &did).await) },
-        )
-        .await
-        else {
-            return Ok(());
-        };
-        current
-            .live
-            .borrow_mut()
-            .devices
-            .get_mut(&did)
-            .unwrap()
-            .loading = None;
-        match result {
-            Ok(CatalogEntry::Group { model, group, .. }) => {
-                {
-                    let mut live = current.live.borrow_mut();
-                    let slot = live.devices.get_mut(&did).unwrap();
-                    slot.blocked = None;
-                    slot.candidate = None;
-                    slot.group = Some(GroupMeta {
-                        model,
-                        relation: Some(group),
-                    });
-                }
-                current.reconcile_groups()?;
-            }
-            Ok(CatalogEntry::Device { .. }) if known_group => current.problem(
-                &did,
-                Some("known group identity is no longer a confirmed group".into()),
-            ),
-            Ok(CatalogEntry::Device { cached, name }) => {
-                {
-                    let mut live = current.live.borrow_mut();
-                    let slot = live.devices.get_mut(&did).unwrap();
-                    slot.blocked = None;
-                    slot.candidate = Some((cached, name));
-                }
-                current.reconcile(&did)?;
-                current.request_sync();
-            }
-            Err(error) => {
-                if !known_group && matches!(&error, CatalogError::Cloud(_)) {
-                    current.problem(&did, Some(error.to_string()));
-                } else {
-                    // Keep the last valid description and confirmed relation.
-                    current.block_device(&did, error.to_string());
-                }
-                if let CatalogError::Cloud(error) = &error {
-                    current.cloud_error(&credentials.tokens.access_token, Some(&did), error)?;
-                }
-            }
-        }
-        Ok(())
-    });
-    context.changed.notify(usize::MAX);
 }

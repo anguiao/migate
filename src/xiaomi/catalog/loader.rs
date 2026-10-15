@@ -5,7 +5,7 @@ use crate::{
     storage::{CachedPhysicalDevice, CachedScope, XiaomiRecord},
     xiaomi::{
         capability::{CapabilityError, parse_device_for_model},
-        cloud::{CloudClient, CloudError, CloudGroup, OwnedHome},
+        cloud::{CloudClient, CloudError, OwnedHome},
         discovery::DiscoverySnapshot,
     },
 };
@@ -75,30 +75,14 @@ pub fn current_home(homes: &[OwnedHome], scope: &CachedScope) -> Result<OwnedHom
         .ok_or(CatalogError::NoLocalHome)
 }
 
-/// A selected-home member as classified by its cloud record. Group entries
-/// carry only relation metadata and never enter MIoT parsing or runtime
-/// device publication.
-#[derive(Debug)]
-pub enum CatalogEntry {
-    Device {
-        cached: CachedPhysicalDevice,
-        name: Option<String>,
-    },
-    Group {
-        name: Option<String>,
-        model: String,
-        group: CloudGroup,
-    },
-}
-
-/// Load a selected home's member classification and description.
+/// Load a selected home's member description and optional cloud name.
 /// Persistence and availability belong to the adapter.
-pub async fn load_entry(
+pub async fn load_device(
     cloud: &CloudClient,
     credentials: &XiaomiRecord,
     home: &OwnedHome,
     did: &str,
-) -> Result<CatalogEntry, CatalogError> {
+) -> Result<(CachedPhysicalDevice, Option<String>), CatalogError> {
     if home.uid != credentials.uid {
         return Err(CatalogError::InvalidScope);
     }
@@ -110,23 +94,14 @@ pub async fn load_entry(
         .await
         .map_err(CatalogError::Cloud)?
         .ok_or(CatalogError::TargetMissing)?;
-    // A member list marks a Xiaomi group even when its DID or model would
-    // otherwise pass ordinary light parsing; never read its MIoT description.
-    if let Some(group) = details.group {
-        return Ok(CatalogEntry::Group {
-            name: details.name,
-            model: details.model,
-            group,
-        });
-    }
     let instance = cloud
         .get_instance(&details.instance_type)
         .await
         .map_err(CatalogError::Cloud)?;
     let device = parse_device_for_model(DeviceKey::new("xiaomi", did), &details.model, &instance)
         .map_err(CatalogError::Capability)?;
-    Ok(CatalogEntry::Device {
-        cached: CachedPhysicalDevice {
+    Ok((
+        CachedPhysicalDevice {
             uid: home.uid.clone(),
             home_id: home.home_id.clone(),
             group_id: home.group_id.clone(),
@@ -134,6 +109,6 @@ pub async fn load_entry(
             instance_type: details.instance_type,
             device,
         },
-        name: details.name,
-    })
+        details.name,
+    ))
 }

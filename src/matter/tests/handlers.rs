@@ -3,7 +3,6 @@ use super::super::{
     model::{self, basic_info},
     storage::StoreAdapter,
 };
-use super::support::{read_bytes, report_dataver, report_value};
 use crate::{
     device::{Availability, CommandError, Power},
     storage::Store,
@@ -30,7 +29,7 @@ use rs_matter::{
         encoding::{EventPriority, IMBuffer},
         events::EventTLVWrite,
     },
-    persist::{BASIC_INFO_KEY, KvBlobStoreAccess},
+    persist::KvBlobStoreAccess,
     tlv::{TLVElement, TLVTag, TLVWrite, TLVWriteParent, Utf8StrBuilder},
     transport::exchange::{Exchange, MatterBuffers},
     utils::storage::{WriteBuf, pooled::Buffers},
@@ -98,7 +97,6 @@ impl<H: HandlerContext> HandlerContext for Context<'_, H> {
     fn im_stats(&self) -> impl ImStats + '_ {
         self.base.im_stats()
     }
-
     fn notify_fabric_removed(&self, fab_idx: NonZeroU8) {
         self.base.notify_fabric_removed(fab_idx);
     }
@@ -228,14 +226,12 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let registry = super::published_registry(&store, &device);
+    let registry = super::test_registry(&store, &device);
     let handler = model::handler(
         &registry,
         &store,
         StoreAdapter::new(store.matter()),
-        crate::matter::tests::support::test_executor(),
         rand::rng(),
-        None,
     )
     .unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
@@ -354,7 +350,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let registry = super::published_registry(&store, &device);
+    let registry = super::test_registry(&store, &device);
     let physical = registry.get(device.key()).unwrap();
     let stored = store
         .devices()
@@ -362,11 +358,9 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         .unwrap()
         .unwrap();
     let bridged = BridgedHandler::new(
-        crate::matter::bridged_info::Target::Device(physical),
+        physical,
         Dataver::new(1),
-        1,
-        stored.endpoint,
-        stored.unique_id.clone(),
+        &stored,
         store.devices(),
         StoreAdapter::new(store.matter()),
     );
@@ -374,9 +368,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         &registry,
         &store,
         StoreAdapter::new(store.matter()),
-        crate::matter::tests::support::test_executor(),
         rand::rng(),
-        None,
     )
     .unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
@@ -420,38 +412,44 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     assert_eq!(renamed.endpoint, stored.endpoint);
 }
 
-fn cached_outlet(device: &crate::device::PhysicalDevice) -> crate::storage::CachedPhysicalDevice {
-    crate::storage::CachedPhysicalDevice {
-        uid: "uid".into(),
-        home_id: "local".into(),
-        group_id: crate::xiaomi::cloud::group_id("uid", "local"),
-        model: "cuco.cp7pd".into(),
-        instance_type: "urn:miot-spec-v2:device:outlet:0000A002:cuco-v3:2".into(),
-        device: crate::xiaomi::capability::ParsedDevice {
-            key: device.key().clone(),
-            functions: device
-                .description()
-                .functions
-                .into_iter()
-                .enumerate()
-                .map(
-                    |(index, description)| crate::xiaomi::capability::ParsedFunction {
-                        description,
-                        power: Some(crate::xiaomi::capability::PropertyBinding {
-                            siid: 2,
-                            piid: index as u32 + 1,
-                        }),
-                        lighting: None,
-                    },
-                )
-                .collect(),
-            refresh_trigger: None,
-        },
-    }
+async fn read_bytes(
+    handler: &impl AsyncHandler,
+    ctx: &Context<'_, impl HandlerContext>,
+) -> Result<Vec<u8>, Error> {
+    let mut buffer = [0; 4096];
+    let mut write = WriteBuf::new(&mut buffer);
+    handler
+        .read(ctx, ReadReplyInstance::new(&ctx.attribute, &mut write))
+        .await?;
+    Ok(write.as_slice().to_vec())
+}
+fn report_value(bytes: &[u8]) -> TLVElement<'_> {
+    TLVElement::new(bytes)
+        .structure()
+        .unwrap()
+        .find_ctx(1)
+        .unwrap()
+        .structure()
+        .unwrap()
+        .find_ctx(2)
+        .unwrap()
+}
+fn report_dataver(bytes: &[u8]) -> u32 {
+    TLVElement::new(bytes)
+        .structure()
+        .unwrap()
+        .find_ctx(1)
+        .unwrap()
+        .structure()
+        .unwrap()
+        .find_ctx(0)
+        .unwrap()
+        .u32()
+        .unwrap()
 }
 
 #[test]
-fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
+fn dynamic_topology_channels_and_coalesced_rejoin_share_canonical_state() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -465,18 +463,10 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
         let protocol = StoreAdapter::new(store.matter());
         let kv = matter.kv(protocol.clone());
         let registry = crate::device::DeviceRegistry::new();
-        let handler = model::handler(
-            &registry,
-            &store,
-            protocol.clone(),
-            crate::matter::tests::support::test_executor(),
-            rand::rng(),
-            None,
-        )
-        .unwrap();
+        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         let ctx = Context::new(&im, 6, 0);
-        let mut run = Box::pin(handler.run(&ctx));
+        let mut run = pin!(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(
             handler.access(|node| node
@@ -486,66 +476,16 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
                 .collect::<Vec<_>>()),
             [0, 1]
         );
-        let scope = crate::device::ConfigurationScope {
-            uid: "uid".into(),
-            home_id: "local".into(),
-            group_id: crate::xiaomi::cloud::group_id("uid", "local"),
-        };
-
-        macro_rules! rebuild {
-            ($matter:ident, $buffers:ident, $state:ident, $kv:ident, $handler:ident, $im:ident, $ctx:ident, $run:ident) => {
-                poll_once($run.as_mut()).await.unwrap().unwrap();
-                let rebuild = $handler.take_rebuild().unwrap();
-                drop($run);
-                drop($ctx);
-                drop($im);
-                drop($handler);
-                drop($kv);
-                drop($matter);
-                assert!(rebuild.apply().is_none());
-                let $matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-                let $buffers: MatterBuffers = MatterBuffers::new();
-                let $state: EthInteractionModelState =
-                    EthInteractionModelState::new(EthNetwork::new_default());
-                let $kv = $matter.kv(protocol.clone());
-                $matter.startup(&$kv).unwrap();
-                let $handler = model::handler(
-                    &registry,
-                    &store,
-                    protocol.clone(),
-                    super::support::test_executor(),
-                    rand::rng(),
-                    None,
-                )
-                .unwrap();
-                let $im =
-                    InteractionModel::new(&$matter, &crypto, &$buffers, &$handler, &$kv, &$state);
-                let $ctx = Context::new(&$im, 6, 0);
-                let mut $run = Box::pin($handler.run(&$ctx));
-                assert!(poll_once($run.as_mut()).await.is_none());
-            };
-        }
-
-        // Admission publishes the single and multi-channel outlets after rebuild.
+        let root = Context::at(&im, 0, 0x1d, 3);
+        let root_before = report_dataver(&read_bytes(&handler, &root).await.unwrap());
         let (single, mut single_receivers) = super::physical("single", false);
-        let single_cached = cached_outlet(&single);
-        let single_stored = store
-            .devices()
-            .publish_cached(&single_cached, "single")
-            .unwrap();
+        let single_stored = store.devices().publish(&single.description()).unwrap();
         assert_eq!(single_stored.endpoint, 2);
         registry.insert(single.clone());
         let (multi, mut receivers) = super::physical("multi", true);
-        let multi_cached = cached_outlet(&multi);
-        let stored = store
-            .devices()
-            .publish_cached(&multi_cached, "multi")
-            .unwrap();
+        let stored = store.devices().publish(&multi.description()).unwrap();
         registry.insert(multi.clone());
-        registry
-            .stage_configuration(scope.clone(), Vec::new(), Vec::new())
-            .unwrap();
-        rebuild!(matter, buffers, state, kv, handler, im, ctx, run);
+        assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(
             handler.access(|node| node
                 .endpoints
@@ -553,6 +493,10 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
                 .map(|endpoint| endpoint.id)
                 .collect::<Vec<_>>()),
             [0, 1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(
+            report_dataver(&read_bytes(&handler, &root).await.unwrap()),
+            root_before.wrapping_add(1)
         );
         for (endpoint, expected) in [
             (0, vec![1, 2, 3, 4, 5, 6]),
@@ -571,10 +515,23 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
                 .collect::<Vec<_>>();
             assert_eq!(parts, expected);
         }
+        for (index, function) in stored.functions.iter().enumerate() {
+            let bytes = read_bytes(&handler, &Context::at(&im, function.endpoint, 0x1d, 4))
+                .await
+                .unwrap();
+            let list = report_value(&bytes);
+            let tag = list.array().unwrap().iter().next().unwrap().unwrap();
+            let tag = tag.structure().unwrap();
+            assert_eq!(tag.find_ctx(1).unwrap().u8().unwrap(), 7);
+            assert_eq!(tag.find_ctx(2).unwrap().u8().unwrap(), index as u8 + 1);
+            assert_eq!(tag.find_ctx(3).unwrap().utf8().unwrap(), function.label);
+        }
         handler.access(|node| {
             assert!(node.endpoint(3).unwrap().cluster(6).is_none());
             for (index, function) in stored.functions.iter().enumerate() {
                 let endpoint = node.endpoint(function.endpoint).unwrap();
+                assert_eq!(endpoint.device_types.len(), 1);
+                assert_eq!(endpoint.device_types[0].dtype, 0x010a);
                 assert!(endpoint.cluster(0x39).is_none());
                 assert_eq!(endpoint.semantic_tags[0].namespace_id, 7);
                 assert_eq!(endpoint.semantic_tags[0].tag, index as u8 + 1);
@@ -582,6 +539,13 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
                     endpoint.semantic_tags[0].label,
                     Some(function.label.as_str())
                 );
+                let descriptor = endpoint.cluster(0x1d).unwrap();
+                assert_ne!(
+                    descriptor.feature_map
+                        & rs_matter::dm::clusters::desc::Feature::TAG_LIST.bits(),
+                    0
+                );
+                assert!(descriptor.attribute(4).is_some());
             }
         });
         multi.set_availability(Availability::Available);
@@ -599,29 +563,47 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
         for (index, function) in stored.functions.iter().enumerate() {
             let mut command = Context::at(&im, function.endpoint, 6, 0);
             command.command.cmd_id = 1;
+            assert_eq!(
+                read_bytes(&handler, &command).await.unwrap_err().code(),
+                ErrorCode::Failure
+            );
             let mut out = [0; 128];
-            let mut invoke = Box::pin(handler.invoke(
+            let mut invoke = pin!(handler.invoke(
                 &command,
-                InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out)),
+                InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
             receivers[index].next().await.unwrap().accept().unwrap();
             invoke.await.unwrap();
+            assert!(
+                report_value(&read_bytes(&handler, &command).await.unwrap())
+                    .bool()
+                    .unwrap()
+            );
+            for other in index + 1..3 {
+                assert_eq!(multi.functions()[other].snapshot().power, Power::Unknown);
+            }
+            assert_eq!(single.functions()[0].snapshot().power, Power::Unknown);
         }
-
-        // Rejoining rebuilds with the reserved endpoint and saved name;
-        // only the newly admitted instance owns the command queue.
-        let baseline = store.matter().get(BASIC_INFO_KEY).unwrap();
-        let single_version = store.devices().configuration_version(2).unwrap();
+        let single_context = Context::at(&im, 2, 6, 0);
+        let before = read_bytes(&handler, &single_context).await.unwrap_err();
+        assert_eq!(before.code(), ErrorCode::Failure);
+        single.functions()[0].observe(false);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        let before = report_dataver(&read_bytes(&handler, &single_context).await.unwrap());
+        single.functions()[0].observe(true);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(
+            report_dataver(&read_bytes(&handler, &single_context).await.unwrap()),
+            before.wrapping_add(1)
+        );
         store
             .devices()
             .set_device_label(&single_stored.key, "Retained name")
             .unwrap();
-        registry.revoke(&single_stored.key);
-        let restored = store
-            .devices()
-            .publish_cached(&single_cached, "single")
-            .unwrap();
+        store.devices().remove(&single_stored.key).unwrap();
+        registry.remove(&single_stored.key);
+        let restored = store.devices().publish(&single.description()).unwrap();
         let (rejoined, mut replacement_receivers) =
             crate::device::PhysicalDevice::new(restored.description());
         assert_eq!(restored.unique_id, single_stored.unique_id);
@@ -630,16 +612,7 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
         rejoined.set_availability(Availability::Available);
         rejoined.functions()[0].observe(false);
         registry.insert(rejoined.clone());
-        registry
-            .stage_configuration(scope.clone(), Vec::new(), Vec::new())
-            .unwrap();
-        rebuild!(matter, buffers, state, kv, handler, im, ctx, run);
-        assert_eq!(store.matter().get(BASIC_INFO_KEY).unwrap(), baseline);
-        assert_eq!(
-            store.devices().configuration_version(2).unwrap(),
-            single_version
-        );
-        let single_context = Context::at(&im, 2, 6, 0);
+        assert!(poll_once(run.as_mut()).await.is_none());
         assert!(
             !report_value(&read_bytes(&handler, &single_context).await.unwrap())
                 .bool()
@@ -651,12 +624,14 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
                 .flatten()
                 .is_none()
         );
+        ctx.changes.borrow_mut().clear();
+        let rebound_version = report_dataver(&read_bytes(&handler, &single_context).await.unwrap());
         let mut command = Context::at(&im, 2, 6, 0);
         command.command.cmd_id = 1;
         let mut out = [0; 128];
-        let mut invoke = Box::pin(handler.invoke(
+        let mut invoke = pin!(handler.invoke(
             &command,
-            InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out)),
+            InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
         ));
         assert!(poll_once(invoke.as_mut()).await.is_none());
         replacement_receivers[0]
@@ -666,13 +641,15 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
             .accept()
             .unwrap();
         invoke.await.unwrap();
-
-        // Removing the multi-channel device rebuilds without its parent or children.
-        registry.revoke(&stored.key);
-        registry
-            .stage_configuration(scope.clone(), Vec::new(), vec![stored.key.clone()])
-            .unwrap();
-        rebuild!(matter, buffers, state, kv, handler, im, ctx, run);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
+        assert_eq!(
+            report_dataver(&read_bytes(&handler, &single_context).await.unwrap()),
+            rebound_version.wrapping_add(1)
+        );
+        store.devices().remove(&stored.key).unwrap();
+        registry.remove(&stored.key);
+        assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(
             read_bytes(&handler, &Context::at(&im, 4, 6, 0))
                 .await
@@ -688,7 +665,13 @@ fn rebuilt_publication_and_same_shape_rejoin_preserve_canonical_state() {
                 .collect::<Vec<_>>()),
             [0, 1, 2]
         );
-
+        for index in 0..20 {
+            let (device, _receivers) = super::physical(&format!("extra-{index}"), false);
+            store.devices().publish(&device.description()).unwrap();
+            registry.insert(device);
+        }
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(handler.access(|node| node.endpoints.len()), 23);
         protocol.check_failure().unwrap();
     });
 }
@@ -727,23 +710,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         let second_stored = store.devices().publish(&second.description()).unwrap();
         registry.insert(first.clone());
         registry.insert(second.clone());
-        registry
-            .apply_configuration(
-                0,
-                Vec::new(),
-                &[first.key().clone(), second.key().clone()],
-                &[],
-            )
-            .unwrap();
-        let handler = model::handler(
-            &registry,
-            &store,
-            protocol.clone(),
-            crate::matter::tests::support::test_executor(),
-            rand::rng(),
-            None,
-        )
-        .unwrap();
+        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         write_label(&handler, &im, first_stored.endpoint, "Renamed first")
             .await

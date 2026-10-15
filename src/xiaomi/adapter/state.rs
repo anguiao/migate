@@ -13,7 +13,7 @@ use crate::{
         capability::PropertyBinding,
         central::{CentralError, DeviceAccess, SessionHandle},
         certificate::CertificateValidity,
-        cloud::{CloudClient, CloudDeviceInfo, CloudGroup},
+        cloud::{CloudClient, CloudDeviceInfo},
     },
 };
 use event_listener::Event;
@@ -56,41 +56,16 @@ pub(super) struct DeviceRecord {
     pub(super) physical: PhysicalDevice,
 }
 impl DeviceRecord {
-    /// A diagnostic/primary binding for one function. Every valid function has
-    /// at least one controllable binding: power for outlets and On/Off lights,
-    /// or the first present light dimension otherwise.
     pub(super) fn binding(&self, id: &str) -> PropertyBinding {
-        let cached = self.cached.borrow();
-        let function = cached
+        self.cached
+            .borrow()
             .device
             .functions
             .iter()
             .find(|function| function.description.id == id)
-            .expect("function exists");
-        function
+            .unwrap()
             .power
-            .or_else(|| {
-                function.lighting.as_ref().and_then(|light| {
-                    light
-                        .brightness
-                        .as_ref()
-                        .map(|binding| binding.property)
-                        .or_else(|| light.temperature.as_ref().map(|binding| binding.property))
-                        .or_else(|| light.color.as_ref().map(|binding| binding.property))
-                        .or_else(|| light.mode.as_ref().map(|binding| binding.property))
-                })
-            })
-            .expect("valid device function has a binding")
     }
-}
-/// Cloud relation metadata for one group identity in the selected home.
-#[derive(Clone)]
-pub(super) struct GroupMeta {
-    pub(super) model: String,
-    /// The relation confirmed by the current directory read. `None` while a
-    /// read is pending or after a failed read, so only the last published
-    /// relation stays authoritative instead of a stale candidate relation.
-    pub(super) relation: Option<CloudGroup>,
 }
 /// One entry owns all preparation and admission state for a current home member.
 #[derive(Default)]
@@ -104,11 +79,6 @@ pub(super) struct DeviceSlot {
     pub(super) loading: Option<Rc<Lifetime>>,
     pub(super) access: Option<Result<DeviceAccess, CentralError>>,
     pub(super) blocked: Option<String>,
-    /// A valid description that is not Matter-publishable. The reservation and
-    /// actual bindings stay in `admitted`, but no endpoint or consumers exist.
-    pub(super) unpublished: Option<String>,
-    /// Latest cloud relation metadata when this member is a known group identity.
-    pub(super) group: Option<GroupMeta>,
     pub(super) last_switch_reason: Option<String>,
 }
 impl DeviceSlot {
@@ -120,23 +90,6 @@ impl DeviceSlot {
                 cached: RefCell::new(cached),
                 physical,
             })),
-            ..Self::default()
-        }
-    }
-    /// A valid cached identity without a supported Matter mapping.
-    pub(super) fn unpublished(
-        cached: CachedPhysicalDevice,
-        physical: PhysicalDevice,
-        reason: String,
-    ) -> Self {
-        Self {
-            admitted: Some(Rc::new(DeviceRecord {
-                life: Lifetime::default(),
-                binding_generation: Cell::new(0),
-                cached: RefCell::new(cached),
-                physical,
-            })),
-            unpublished: Some(reason),
             ..Self::default()
         }
     }
@@ -291,9 +244,6 @@ impl AccessRefresh {
 pub(super) struct Live {
     pub(super) credentials: Option<XiaomiRecord>,
     pub(super) scope: Option<CachedScope>,
-    /// The runtime map covers the whole current-home membership from a
-    /// complete directory read; before that, absence is not deletion evidence.
-    pub(super) complete: bool,
     pub(super) devices: BTreeMap<String, DeviceSlot>,
     pub(super) session: Option<Session>,
 }

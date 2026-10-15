@@ -41,7 +41,7 @@ fn hs_transition_from_temperature_ignores_the_inactive_rgb_cache() {
             })
             .unwrap();
         block_on(async {
-            let handler = ColorHandler::<true, true>(&light);
+            let handler = ColorHandler::<true>(&light);
             let data = hs_to(170, 254, 20);
             let mut invoke = pin!(handler.handle_move_to_hue_and_saturation(
                 &ctx,
@@ -64,7 +64,7 @@ fn hs_transition_from_temperature_ignores_the_inactive_rgb_cache() {
                 c::ColorModeEnum::CurrentHueAndCurrentSaturation
             );
             clock.set(2000);
-            light.executor.advance();
+            light.advance();
             let final_request = frame(&mut receiver).await;
             assert!(final_request.final_frame);
             let Some(LightColorTarget::Rgb(end)) = final_request.target.color else {
@@ -96,7 +96,7 @@ fn gray_hue_motion_accepts_without_a_write_and_stop_preserves_the_hue_for_satura
             })
             .unwrap();
         block_on(async {
-            let handler = ColorHandler::<true, true>(&light);
+            let handler = ColorHandler::<true>(&light);
             let data = if continuous {
                 axis_move(1, 60)
             } else {
@@ -125,7 +125,7 @@ fn gray_hue_motion_accepts_without_a_write_and_stop_preserves_the_hue_for_satura
 
             for (millis, hue) in [(500, 30), (1000, 60)] {
                 clock.set(millis);
-                light.executor.advance();
+                light.advance();
                 assert_eq!(handler.current_hue(&ctx).await.unwrap(), hue);
                 assert_eq!(handler.current_saturation(&ctx).await.unwrap(), 0);
                 assert_eq!(function.snapshot().lighting.unwrap().color, Some(white));
@@ -138,7 +138,7 @@ fn gray_hue_motion_accepts_without_a_write_and_stop_preserves_the_hue_for_satura
                 .unwrap();
             assert!(!function.light_action_current(token));
             clock.set(4000);
-            light.executor.advance();
+            light.advance();
             assert_eq!(handler.current_hue(&ctx).await.unwrap(), 60);
             assert_eq!(handler.remaining_time(&ctx).await.unwrap(), 0);
             assert!(poll_once(receiver.next_operation()).await.is_none());
@@ -183,7 +183,7 @@ fn a_cancelled_hs_startup_receipt_cannot_restore_its_mode_or_gray_hue_over_a_rep
                 })
                 .unwrap();
             block_on(async {
-                let handler = ColorHandler::<true, true>(&light);
+                let handler = ColorHandler::<true>(&light);
                 let data = hs_to(84, 254, 0);
                 let mut old = pin!(handler.handle_move_to_hue_and_saturation(
                     &ctx,
@@ -205,7 +205,7 @@ fn a_cancelled_hs_startup_receipt_cannot_restore_its_mode_or_gray_hue_over_a_rep
                         })
                         .unwrap();
                 } else {
-                    light.stop(LightDimension::Color).await.unwrap();
+                    light.stop(LightDimension::Color).unwrap();
                 }
                 assert!(poll_once(old.as_mut()).await.is_none());
                 let data = if replacement_hs {
@@ -253,7 +253,7 @@ fn a_cancelled_hs_startup_receipt_cannot_restore_its_mode_or_gray_hue_over_a_rep
                 assert_eq!(handler.color_mode(&ctx).await.unwrap(), expected_mode);
                 assert_eq!(handler.current_hue(&ctx).await.unwrap(), hue);
                 clock.set(10_000);
-                light.executor.advance();
+                light.advance();
                 assert!(poll_once(receiver.next_operation()).await.is_none());
             });
         }
@@ -271,7 +271,7 @@ fn a_cancelled_hs_receipt_without_a_new_command_does_not_change_the_last_accepte
             })
             .unwrap();
         block_on(async {
-            let handler = ColorHandler::<true, true>(&light);
+            let handler = ColorHandler::<true>(&light);
             let data = [
                 0x15, 0x25, 0, 0xCD, 0x4C, 0x25, 1, 0x9A, 0x99, 0x25, 2, 0, 0, 0x24, 3, 0, 0x24, 4,
                 0, 0x18,
@@ -304,7 +304,7 @@ fn a_cancelled_hs_receipt_without_a_new_command_does_not_change_the_last_accepte
                     })
                     .unwrap();
             } else {
-                light.stop(LightDimension::Color).await.unwrap();
+                light.stop(LightDimension::Color).unwrap();
             }
             old_request.accept().unwrap();
             old.await.unwrap();
@@ -313,7 +313,7 @@ fn a_cancelled_hs_receipt_without_a_new_command_does_not_change_the_last_accepte
                 c::ColorModeEnum::CurrentXAndCurrentY
             );
             clock.set(1000);
-            light.executor.advance();
+            light.advance();
             assert!(poll_once(receiver.next_operation()).await.is_none());
         });
     }
@@ -354,7 +354,7 @@ fn an_external_rgb_change_versions_and_reports_the_hs_attributes() {
     assert!(ctx.changes.borrow().contains(&(2, 0x300, 0)));
     assert!(ctx.changes.borrow().contains(&(2, 0x300, 1)));
     block_on(async {
-        let handler = ColorHandler::<true, true>(&light);
+        let handler = ColorHandler::<true>(&light);
         assert!(handler.current_hue(&ctx).await.unwrap().abs_diff(85) <= 1);
         assert!(
             handler

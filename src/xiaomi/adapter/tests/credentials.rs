@@ -395,7 +395,7 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
 }
 
 #[test]
-fn an_old_directory_round_applies_its_deletion_and_cannot_clear_new_http_pause() {
+fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
     let rig = Rig::new(true, &["one", "two"]);
     rig.cloud
         .lock()
@@ -461,20 +461,18 @@ fn an_old_directory_round_applies_its_deletion_and_cannot_clear_new_http_pause()
         old_release.send(()).unwrap();
         async_io::Timer::after(Duration::from_millis(30)).await;
         assert!(c.context.http_paused.get());
-        // The complete home directory of the first round confirmed the
-        // deletion before its stale device-information response arrived.
         assert!(
             c.context
                 .registry
                 .get(&DeviceKey::new("xiaomi", "two"))
-                .is_none()
+                .is_some()
         );
         assert!(
             c.store
                 .devices()
                 .load_published(&DeviceKey::new("xiaomi", "two"))
                 .unwrap()
-                .is_none()
+                .is_some()
         );
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
         assert_eq!(c.cloud.lock().unwrap().tokens, 1);

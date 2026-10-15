@@ -13,7 +13,7 @@ async fn cloud_ready(c: &Control, dids: &[&str]) {
 }
 
 #[test]
-fn http_temporary_failure_pauses_the_account_and_keeps_confirmed_deletion() {
+fn http_temporary_failure_pauses_the_account_until_a_complete_scoped_sync() {
     let rig = Rig::new(true, &["one", "two"]);
     rig.cloud
         .lock()
@@ -47,15 +47,12 @@ fn http_temporary_failure_pauses_the_account_and_keeps_confirmed_deletion() {
         c.clock.advance(Duration::from_secs(1));
         until(|| c.cloud.lock().unwrap().infos > infos).await;
         until(|| c.context.status.borrow().catalog_problem.is_some()).await;
-        // The complete home directory confirms the deletion even though the
-        // device-information batch failed afterwards.
-        until(|| {
+        assert!(
             c.context
                 .registry
                 .get(&DeviceKey::new("xiaomi", "two"))
-                .is_none()
-        })
-        .await;
+                .is_some()
+        );
         assert!(matches!(
             one.snapshot().availability,
             Availability::Unavailable(_)
@@ -225,9 +222,7 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
         c.cloud.lock().unwrap().members = vec!["one".into()];
         c.context.request_sync();
         until(|| c.context.registry.get(&key).is_none()).await;
-        // The durable removal lands with the same configuration commit as the rest of
-        // the applied configuration.
-        until(|| c.store.devices().load_published(&key).unwrap().is_none()).await;
+        assert!(c.store.devices().load_published(&key).unwrap().is_none());
         assert_eq!(
             usb.execute(Command::On).await,
             Err(crate::device::CommandError::Cancelled)
@@ -431,7 +426,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
                     record.binding_generation.get(),
                 )
             };
-            changed.device.functions[0].power.as_mut().unwrap().siid = 7;
+            changed.device.functions[0].power.siid = 7;
             changed.instance_type = "urn:miot-spec-v2:device:outlet:0000A002:cuco-v3:2".into();
             {
                 let mut live = c.context.live.borrow_mut();

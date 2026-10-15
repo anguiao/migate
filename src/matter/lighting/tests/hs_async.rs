@@ -32,7 +32,7 @@ fn red_target() -> ColorTask {
 fn color_task(use_hs: bool, transition_ms: u64) -> ColorTask {
     if use_hs {
         ColorTask::Hs(hs::HsTask {
-            hue: hs::HueAxis::move_to(0.0, 85.0, hs::HueDirection::Shortest, transition_ms),
+            hue: hs::HueAxis::move_to(0.0, 85.0, c::DirectionEnum::Shortest, transition_ms),
             saturation: hs::SaturationAxis::Hold(254.0),
         })
     } else {
@@ -65,7 +65,7 @@ fn accepted_color_mode_survives_dropped_hs_and_xy_invoke_waiters() {
             setup!(true, function, receiver, light, clock, ctx);
             white_state(&function);
             block_on(async {
-                let handler = ColorHandler::<true, true>(&light);
+                let handler = ColorHandler::<true>(&light);
                 // Establish the opposite representation with a real accepted
                 // command, so the default mode cannot make the assertion pass.
                 accepted_color(&light, &function, &mut receiver, color_task(!use_hs, 0)).await;
@@ -85,7 +85,7 @@ fn accepted_color_mode_survives_dropped_hs_and_xy_invoke_waiters() {
                 // Drop the owned future, not only a Pin<&mut _> reference.
                 drop(invoke);
                 accept(&function, startup);
-                light.executor.advance();
+                light.advance();
                 let expected = if use_hs {
                     c::ColorModeEnum::CurrentHueAndCurrentSaturation
                 } else {
@@ -108,7 +108,7 @@ fn accepted_startup_keeps_its_mode_when_a_later_frame_fails_before_invoke_resume
         setup!(true, function, receiver, light, clock, ctx);
         white_state(&function);
         block_on(async {
-            let handler = ColorHandler::<true, true>(&light);
+            let handler = ColorHandler::<true>(&light);
             accepted_color(&light, &function, &mut receiver, color_task(!use_hs, 0)).await;
             let previous = handler.color_mode(&ctx).await.unwrap();
             let expected = if use_hs {
@@ -124,7 +124,7 @@ fn accepted_startup_keeps_its_mode_when_a_later_frame_fails_before_invoke_resume
             let token = startup.token;
             startup.mark_sent().unwrap();
             clock.set(500);
-            light.executor.advance();
+            light.advance();
 
             // The device accepts startup while its action still owns Color.
             // Neither the invoke future nor controller/getters run between
@@ -159,7 +159,7 @@ fn gray_hue_waits_for_older_red_receipt_and_rejects_failed_white_correction() {
 
         let mut new_invoke = pin!(light.execute_color(gray_hue_move()));
         assert!(poll_once(new_invoke.as_mut()).await.is_none());
-        light.executor.advance();
+        light.advance();
         assert!(poll_once(new_invoke.as_mut()).await.is_none());
         assert!(poll_once(receiver.next_operation()).await.is_none());
 
@@ -168,7 +168,7 @@ fn gray_hue_waits_for_older_red_receipt_and_rejects_failed_white_correction() {
         let red = Rgb::from_packed(0xff0000).unwrap();
         assert_eq!(function.snapshot().lighting.unwrap().color, Some(red));
         clock.set(1000);
-        light.executor.advance();
+        light.advance();
         assert!(poll_once(new_invoke.as_mut()).await.is_none());
         let correction = frame(&mut receiver).await;
         assert_eq!(
@@ -178,11 +178,11 @@ fn gray_hue_waits_for_older_red_receipt_and_rejects_failed_white_correction() {
         correction.mark_sent().unwrap();
         correction.reject(CommandError::Rejected("white correction rejected".into()));
         assert_eq!(new_invoke.await.unwrap_err().code(), ErrorCode::Failure);
-        light.executor.advance();
+        light.advance();
         assert_eq!(function.snapshot().lighting.unwrap().color, Some(red));
         assert!(poll_once(receiver.next_operation()).await.is_none());
         assert_eq!(
-            ColorHandler::<true, true>(&light)
+            ColorHandler::<true>(&light)
                 .current_hue(&ctx)
                 .await
                 .unwrap(),
@@ -206,7 +206,7 @@ fn failed_older_write_allows_gray_hue_startup_to_be_accepted_on_advance() {
         old.reject(CommandError::Rejected("old red write rejected".into()));
         assert!(old_invoke.await.is_err());
         clock.set(1000);
-        light.executor.advance();
+        light.advance();
         poll_once(new_invoke.as_mut())
             .await
             .expect("advance must retry local startup acceptance")
@@ -220,7 +220,7 @@ fn failed_older_write_allows_gray_hue_startup_to_be_accepted_on_advance() {
         // known physical state white, and the gray trajectory stays white.
         unchanged.skip_unchanged().unwrap();
         assert_eq!(
-            ColorHandler::<true, true>(&light)
+            ColorHandler::<true>(&light)
                 .current_hue(&ctx)
                 .await
                 .unwrap(),
@@ -254,7 +254,7 @@ fn skipped_older_frame_allows_gray_hue_startup_to_be_accepted_on_advance() {
         old_action.ended().await.unwrap();
 
         clock.set(1000);
-        light.executor.advance();
+        light.advance();
         poll_once(new_invoke.as_mut())
             .await
             .expect("advance must retry local startup acceptance")
@@ -262,7 +262,7 @@ fn skipped_older_frame_allows_gray_hue_startup_to_be_accepted_on_advance() {
         let unchanged = frame(&mut receiver).await;
         unchanged.skip_unchanged().unwrap();
         assert_eq!(
-            ColorHandler::<true, true>(&light)
+            ColorHandler::<true>(&light)
                 .current_hue(&ctx)
                 .await
                 .unwrap(),

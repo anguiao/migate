@@ -1,15 +1,16 @@
 use super::{StorageError, Store};
 use crate::{
-    device::{Capability, Category, DeviceKey, PhysicalDeviceDescription},
+    device::{Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription},
     xiaomi::{
         capability::{
-            ParsedDevice, ParsedFunction, PropertyBinding, is_light_group, is_light_type,
-            is_outlet_type,
+            NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, is_light_type,
+            is_ls2307_type, is_outlet_type,
         },
         cloud::group_id,
     },
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedPhysicalDevice {
@@ -43,6 +44,13 @@ pub struct CachedScope {
 #[derive(Clone)]
 pub struct DeviceStore {
     pub(super) store: Store,
+}
+#[derive(Serialize, Deserialize)]
+struct CachedFunction {
+    id: String,
+    label: String,
+    siid: u32,
+    piid: u32,
 }
 impl DeviceStore {
     pub(super) fn new(store: Store) -> Self {
@@ -105,11 +113,7 @@ impl DeviceStore {
         StorageError::new(self.store.path(), operation, error)
     }
 }
-pub(super) fn validate_scope(
-    uid: &str,
-    home_id: &str,
-    stored_group_id: &str,
-) -> Result<(), &'static str> {
+fn validate_scope(uid: &str, home_id: &str, stored_group_id: &str) -> Result<(), &'static str> {
     validate_text(uid)?;
     validate_text(home_id)?;
     if stored_group_id != group_id(uid, home_id) {
@@ -133,12 +137,9 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
     validate_text(&cached.model)?;
     validate_text(&cached.instance_type)?;
     validate_key(&cached.device.key)?;
-    let light = is_light_type(&cached.instance_type);
-    if is_light_group(&cached.device.key, &cached.model) {
-        return Err("Xiaomi light groups cannot be cached as physical devices");
-    }
-    if cached.device.key.source != "xiaomi"
-        || !(is_outlet_type(&cached.instance_type) || light)
+    if cached.model == "devcea.light.ls2307" && !is_ls2307_type(&cached.instance_type)
+        || cached.device.key.source != "xiaomi"
+        || !(is_outlet_type(&cached.instance_type) || is_light_type(&cached.instance_type))
         || cached.device.functions.is_empty()
     {
         return Err("Stored Xiaomi device description is invalid");
@@ -147,81 +148,68 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
     let mut bindings = std::collections::HashSet::new();
     for function in &cached.device.functions {
         validate_text(&function.description.id)?;
-        if !ids.insert(&function.description.id) || !function.description.valid_capabilities() {
-            return Err("Stored Xiaomi function description is invalid");
-        }
-        let on_off = function
-            .description
-            .capabilities
-            .contains(&Capability::OnOff);
-        if function.power.is_some() != on_off {
-            return Err("Stored Xiaomi power binding does not match its capability");
-        }
-        if let Some(power) = function.power
-            && (power.siid == 0 || power.piid == 0 || !bindings.insert((power.siid, power.piid)))
+        if !ids.insert(&function.description.id)
+            || !bindings.insert((function.power.siid, function.power.piid))
+            || !function.description.valid_capabilities()
+            || function.power.siid == 0
+            || function.power.piid == 0
         {
             return Err("Stored Xiaomi function description is invalid");
-        }
-        let (brightness, temperature, color, mode) = match &function.lighting {
-            Some(lighting) => {
-                if !lighting.valid() {
-                    return Err("Stored Xiaomi light bindings are invalid");
-                }
-                (
-                    lighting.brightness.as_ref(),
-                    lighting.temperature.as_ref(),
-                    lighting.color.as_ref(),
-                    lighting.mode.as_ref(),
-                )
-            }
-            None => (None, None, None, None),
-        };
-        if function
-            .description
-            .capabilities
-            .contains(&Capability::Brightness)
-            != brightness.is_some()
-            || function.description.temperature_range() != temperature.map(|binding| binding.range)
-            || function
-                .description
-                .capabilities
-                .contains(&Capability::ColorRgb)
-                != color.is_some()
-        {
-            return Err("Stored Xiaomi light bindings do not match their capabilities");
-        }
-        for binding in [
-            brightness.map(|binding| binding.property),
-            temperature.map(|binding| binding.property),
-            color.map(|binding| binding.property),
-            mode.map(|binding| binding.property),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if binding.siid == 0
-                || binding.piid == 0
-                || !bindings.insert((binding.siid, binding.piid))
-            {
-                return Err("Stored Xiaomi light bindings overlap");
-            }
-        }
-        if function.description.category
-            != if light {
-                Category::Light
-            } else {
-                Category::Outlet
-            }
-        {
-            return Err("Stored Xiaomi function category is invalid");
         }
     }
-    if light {
+    if is_light_type(&cached.instance_type) {
         if cached.device.functions.len() != 1
             || cached.device.functions[0].description.id != "main"
             || cached.device.refresh_trigger.is_some()
         {
             return Err("Stored Xiaomi light topology is invalid");
+        }
+        let function = &cached.device.functions[0];
+        let Some(lighting) = &function.lighting else {
+            return Err("Stored Xiaomi light bindings are missing");
+        };
+        if function.description.category != Category::Light
+            || !lighting.valid()
+            || function.description.temperature_range() != Some(lighting.temperature.range)
+            || function
+                .description
+                .capabilities
+                .contains(&Capability::ColorRgb)
+                != lighting.color.is_some()
+            || cached.model == "devcea.light.ls2307" && lighting.color.is_none()
+            || lighting.color.is_some() && cached.model != "devcea.light.ls2307"
+        {
+            return Err("Stored Xiaomi light bindings are invalid");
+        }
+        if cached.model == "devcea.light.ls2307" {
+            let color = lighting.color.as_ref().expect("validated color exists");
+            let mode = lighting.mode.as_ref().expect("validated mode exists");
+            if !is_ls2307_type(&cached.instance_type)
+                || function.power != (PropertyBinding { siid: 2, piid: 1 })
+                || lighting.brightness.property != (PropertyBinding { siid: 2, piid: 2 })
+                || lighting.temperature.property != (PropertyBinding { siid: 2, piid: 3 })
+                || color.property != (PropertyBinding { siid: 4, piid: 1 })
+                || color.format != NumericFormat::Uint32
+                || mode.property != (PropertyBinding { siid: 4, piid: 2 })
+                || mode.format != NumericFormat::Uint8
+                || mode.temperature_value != 0
+                || mode.rgb_value != 1
+            {
+                return Err("Stored Xiaomi ls2307 adapter is incompatible");
+            }
+        }
+        for binding in [
+            Some(lighting.brightness.property),
+            Some(lighting.temperature.property),
+            lighting.color.as_ref().map(|color| color.property),
+            lighting.mode.as_ref().map(|mode| mode.property),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !bindings.insert((binding.siid, binding.piid)) {
+                return Err("Stored Xiaomi light bindings overlap");
+            }
         }
     } else if cached.device.functions.iter().any(|function| {
         function.description.category != Category::Outlet || function.lighting.is_some()
@@ -347,4 +335,35 @@ pub(super) fn load_cached(
     };
     validate_cached(&cached).map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(Some(cached))
+}
+
+pub(super) fn migrate_functions_v4(functions: &str) -> rusqlite::Result<String> {
+    let functions: Vec<CachedFunction> =
+        serde_json::from_str(functions).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let functions = functions
+        .into_iter()
+        .map(|function| ParsedFunction {
+            description: FunctionDescription {
+                id: function.id,
+                label: function.label,
+                category: Category::Outlet,
+                capabilities: vec![Capability::OnOff],
+            },
+            power: PropertyBinding {
+                siid: function.siid,
+                piid: function.piid,
+            },
+            lighting: None,
+        })
+        .collect::<Vec<_>>();
+    if functions.is_empty()
+        || functions.iter().any(|function| {
+            function.description.id.is_empty()
+                || function.power.siid == 0
+                || function.power.piid == 0
+        })
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    serde_json::to_string(&functions).map_err(|_| rusqlite::Error::InvalidQuery)
 }

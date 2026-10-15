@@ -648,11 +648,6 @@ fn bridge_helper_child() {
             let mut receiver = receivers.remove(0);
             let registry = DeviceRegistry::new();
             registry.insert(physical.clone());
-            // The terminal renders the applied publication set; the isolated
-            // bridge applies the fake outlet exactly like a real admission.
-            registry
-                .apply_configuration(1, Vec::new(), &[physical.key().clone()], &[])
-                .unwrap();
             let source_device = physical;
             let gate = directory.join("source-ready");
             let initial =

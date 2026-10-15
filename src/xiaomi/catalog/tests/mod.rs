@@ -1,4 +1,4 @@
-use super::{CatalogEntry, CatalogError, current_home, load_entry, select_local_home};
+use super::{CatalogError, current_home, load_device, select_local_home};
 use crate::{
     device::DeviceKey,
     storage::{CachedScope, Store, XiaomiRecord},
@@ -156,15 +156,9 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
     let records = block_on(async {
         let mut records = Vec::new();
         for did in &selected.dids {
-            let CatalogEntry::Device {
-                cached: record,
-                name,
-            } = load_entry(&cloud, &credentials(), &selected, did)
+            let (record, name) = load_device(&cloud, &credentials(), &selected, did)
                 .await
-                .unwrap()
-            else {
-                panic!("ordinary device classified as a group");
-            };
+                .unwrap();
             assert_eq!(name, None);
             records.push(record);
         }
@@ -180,8 +174,8 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
             .iter()
             .map(|function| (
                 function.description.id.as_str(),
-                function.power.unwrap().siid,
-                function.power.unwrap().piid
+                function.power.siid,
+                function.power.piid
             ))
             .collect::<Vec<_>>(),
         [("outlet_1", 3, 1), ("outlet_2", 4, 1), ("usb", 9, 1)]
@@ -233,14 +227,14 @@ fn scoped_load_rejects_foreign_accounts_and_members_without_network_requests() {
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     let local = home("local", &["target"]);
     assert!(matches!(
-        block_on(load_entry(&cloud, &credentials(), &local, "remote-only")),
+        block_on(load_device(&cloud, &credentials(), &local, "remote-only")),
         Err(CatalogError::TargetMissing)
     ));
     let mut foreign = local.clone();
     foreign.uid = "foreign".into();
     foreign.group_id = group_id("foreign", "local");
     assert!(matches!(
-        block_on(load_entry(&cloud, &credentials(), &foreign, "target")),
+        block_on(load_device(&cloud, &credentials(), &foreign, "target")),
         Err(CatalogError::InvalidScope)
     ));
     assert_eq!(requests.try_iter().count(), 0);
@@ -256,7 +250,7 @@ fn fixed_home_load_reports_incompatible_capability() {
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     assert!(matches!(
-        block_on(load_entry(
+        block_on(load_device(
             &cloud,
             &credentials(),
             &home("local", &["target"]),
@@ -291,8 +285,8 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
     .unwrap();
     assert_eq!(cached.home_id, "local");
     assert_eq!(cached.group_id, group_id("account", "local"));
-    assert_eq!(cached.device.functions[0].power.unwrap().siid, 2);
-    assert_eq!(cached.device.functions[0].power.unwrap().piid, 1);
+    assert_eq!(cached.device.functions[0].power.siid, 2);
+    assert_eq!(cached.device.functions[0].power.piid, 1);
     assert_eq!(name.as_deref(), Some("Cloud outlet"));
     let captured = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(captured.len(), 3);
@@ -448,12 +442,7 @@ async fn load_local(
     cloud: &CloudClient,
 ) -> Result<(crate::storage::CachedPhysicalDevice, Option<String>), CatalogError> {
     let home = select_local_home(snapshot, homes, &credentials.uid)?;
-    let CatalogEntry::Device { cached, name } =
-        load_entry(cloud, credentials, &home, &key.id).await?
-    else {
-        panic!("ordinary device classified as a group");
-    };
-    Ok((cached, name))
+    load_device(cloud, credentials, &home, &key.id).await
 }
 
 #[test]
@@ -467,15 +456,13 @@ fn light_catalog_uses_cloud_model_for_the_exact_ls2307_color_adapter() {
         MockResponse::json(200, &instance.to_string()),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let CatalogEntry::Device { cached, name } = block_on(load_entry(
+    let (cached, name) = block_on(load_device(
         &cloud,
         &credentials(),
         &home("local", &["target"]),
         "target",
     ))
-    .unwrap() else {
-        panic!("ordinary device classified as a group");
-    };
+    .unwrap();
     assert_eq!(name.as_deref(), Some("Bedroom light"));
     assert_eq!(cached.device.functions.len(), 1);
     let lighting = cached.device.functions[0].lighting.as_ref().unwrap();
@@ -485,143 +472,27 @@ fn light_catalog_uses_cloud_model_for_the_exact_ls2307_color_adapter() {
 }
 
 #[test]
-fn confirmed_group_metadata_is_not_parsed_as_an_ordinary_light() {
-    let group = json!({
-        "did":"42",
-        "model":"xiaomi.light.ceil04",
-        "spec_type":"urn:miot-spec-v2:device:light:0000A001:xiaomi:3:0000C802",
-        "name":"Grouped lights",
-        "extra":{"member_list":{
-            "group_did":"42",
-            "status":"1",
-            "member_ship":{"member-a":"1"},
-            "is_physical":true
-        }}
-    });
-    let (base, requests) = mock_server(vec![MockResponse::json(
-        200,
-        &json!({"code":0,"result":{"list":[group]}}).to_string(),
-    )]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    assert!(matches!(
-        block_on(load_entry(
-            &cloud,
-            &credentials(),
-            &home("local", &["42"]),
-            "42"
-        )),
-        Ok(CatalogEntry::Group { .. })
-    ));
-    assert_eq!(requests.try_iter().count(), 1);
-}
-
-#[test]
-fn group_entries_keep_typed_metadata_without_reading_miot() {
-    let group = json!({
-        "did":"42",
-        "model":"xiaomi.light.ceil04",
-        "spec_type":"urn:miot-spec-v2:device:light:0000A001:xiaomi:3:0000C802",
-        "name":"Grouped lights",
-        "extra":{"member_list":{
-            "group_did":"42",
-            "status":"1",
-            "member_ship":{"member-a":"1"},
-            "is_physical":true
-        }}
-    });
-    let (base, requests) = mock_server(vec![MockResponse::json(
-        200,
-        &json!({"code":0,"result":{"list":[group]}}).to_string(),
-    )]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    match block_on(load_entry(
-        &cloud,
-        &credentials(),
-        &home("local", &["42"]),
-        "42",
-    ))
-    .unwrap()
-    {
-        CatalogEntry::Group { name, model, group } => {
-            assert_eq!(name.as_deref(), Some("Grouped lights"));
-            assert_eq!(model, "xiaomi.light.ceil04");
-            assert_eq!(
-                group,
-                crate::xiaomi::cloud::CloudGroup::Confirmed {
-                    did: "42".into(),
-                    name: Some("Grouped lights".into()),
-                    physical: true,
-                    members: vec!["member-a".into()],
-                }
-            );
-        }
-        CatalogEntry::Device { .. } => panic!("confirmed group classified as an ordinary device"),
-    }
-    // Group classification stops before any MIoT instance request.
-    assert_eq!(requests.try_iter().count(), 1);
-
-    for (did, model) in [
-        ("group.42", "mijia.light.group3"),
-        ("group.42", "xiaomi.light.ceil04"),
-    ] {
-        let (base, requests) = mock_server(vec![MockResponse::json(
-            200,
-            &json!({"code":0,"result":{"list":[{"did":did,"model":model,"spec_type":"instance","name":"Grouped lights"}]}}).to_string(),
-        )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        match block_on(load_entry(
-            &cloud,
-            &credentials(),
-            &home("local", &[did]),
-            did,
-        ))
-        .unwrap()
-        {
-            CatalogEntry::Group { group, .. } => {
-                assert_eq!(
-                    group,
-                    crate::xiaomi::cloud::CloudGroup::Unconfirmed,
-                    "{did}"
-                );
-            }
-            CatalogEntry::Device { .. } => panic!("known group classified as an ordinary device"),
-        }
-        assert_eq!(requests.try_iter().count(), 1);
-    }
-}
-
-#[test]
-fn known_groups_without_member_metadata_are_not_parsed_as_ordinary_lights() {
-    let instance: Value = serde_json::from_str(include_str!(
+fn light_catalog_rejects_virtual_groups_with_standard_light_descriptions() {
+    let mut instance: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/xiaomi-light-ceil04.json"
     ))
     .unwrap();
-    for (did, model) in [
-        ("group.42", "mijia.light.group3"),
-        ("group.42", "xiaomi.light.ceil04"),
-        ("42", "mijia.light.group3"),
-    ] {
-        let (base, requests) = mock_server(vec![MockResponse::json(
-            200,
-            &json!({"code":0,"result":{"list":[{"did":did,"model":model,"spec_type":instance["type"],"name":"Grouped lights"}]}}).to_string(),
-        )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        assert!(
-            matches!(
-                block_on(load_entry(
-                    &cloud,
-                    &credentials(),
-                    &home("local", &[did]),
-                    did
-                )),
-                Ok(CatalogEntry::Group {
-                    group: crate::xiaomi::cloud::CloudGroup::Unconfirmed,
-                    ..
-                })
-            ),
-            "{did} {model}"
-        );
-        // Group classification needs no MIoT instance request.
-        assert_eq!(requests.try_iter().count(), 1);
-    }
+    instance["type"] = json!("urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802");
+    let (base, requests) = mock_server(vec![
+        MockResponse::json(200, &json!({"code":0,"result":{"list":[{"did":"group.42","model":"mijia.light.group3","spec_type":instance["type"],"name":"Grouped lights"}]}}).to_string()),
+        MockResponse::json(200, &instance.to_string()),
+    ]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    assert!(matches!(
+        block_on(load_device(
+            &cloud,
+            &credentials(),
+            &home("local", &["group.42"]),
+            "group.42"
+        )),
+        Err(CatalogError::Capability(
+            crate::xiaomi::capability::CapabilityError::UnsupportedLightGroup
+        ))
+    ));
+    assert_eq!(requests.try_iter().count(), 2);
 }

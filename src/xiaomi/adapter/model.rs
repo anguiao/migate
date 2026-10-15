@@ -89,8 +89,6 @@ pub struct PendingDevice {
     pub did: String,
     pub name: String,
     pub reason: String,
-    /// A known light-group identity rather than an ordinary device.
-    pub group: bool,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathKind {

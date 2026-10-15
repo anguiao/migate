@@ -1,48 +1,4 @@
-use super::handlers::Context;
 use super::*;
-use rs_matter::{
-    dm::{AsyncHandler, HandlerContext, ReadReplyInstance},
-    error::Error,
-    utils::storage::WriteBuf,
-};
-
-pub(super) async fn read_bytes(
-    handler: &impl AsyncHandler,
-    ctx: &Context<'_, impl HandlerContext>,
-) -> Result<Vec<u8>, Error> {
-    let mut buffer = [0; 8192];
-    let mut write = WriteBuf::new(&mut buffer);
-    handler
-        .read(ctx, ReadReplyInstance::new(&ctx.attribute, &mut write))
-        .await?;
-    Ok(write.as_slice().to_vec())
-}
-
-pub(super) fn report_value(bytes: &[u8]) -> TLVElement<'_> {
-    TLVElement::new(bytes)
-        .structure()
-        .unwrap()
-        .find_ctx(1)
-        .unwrap()
-        .structure()
-        .unwrap()
-        .find_ctx(2)
-        .unwrap()
-}
-
-pub(super) fn report_dataver(bytes: &[u8]) -> u32 {
-    TLVElement::new(bytes)
-        .structure()
-        .unwrap()
-        .find_ctx(1)
-        .unwrap()
-        .structure()
-        .unwrap()
-        .find_ctx(0)
-        .unwrap()
-        .u32()
-        .unwrap()
-}
 
 pub(super) fn physical(
     id: &str,
@@ -87,36 +43,27 @@ pub(crate) fn test_device() -> (PhysicalDevice, CommandReceiver) {
     (device, receivers.remove(0))
 }
 
-pub(in crate::matter) fn light_caps(
-    id: &str,
-    capabilities: &[Capability],
-) -> (PhysicalDevice, CommandReceiver) {
-    let mut description = physical(id, false).0.description();
+pub(in crate::matter) fn light(rgb: bool) -> (PhysicalDevice, CommandReceiver) {
+    let mut description = physical("test-light", false).0.description();
     let function = &mut description.functions[0];
     function.category = Category::Light;
-    function.capabilities = capabilities.to_vec();
-    let (device, mut receivers) = PhysicalDevice::new(description);
-    (device, receivers.remove(0))
-}
-
-pub(in crate::matter) fn light(rgb: bool) -> (PhysicalDevice, CommandReceiver) {
-    let mut capabilities = vec![
-        Capability::OnOff,
+    function.capabilities.extend([
         Capability::Brightness,
         Capability::ColorTemperature(crate::device::NumericRange {
             min: 2700,
             max: 6500,
             step: 1,
         }),
-    ];
+    ]);
     if rgb {
-        capabilities.push(Capability::ColorRgb);
+        function.capabilities.push(Capability::ColorRgb);
     }
-    light_caps("test-light", &capabilities)
+    let (device, mut receivers) = PhysicalDevice::new(description);
+    (device, receivers.remove(0))
 }
 pub(super) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Option<String> {
     use crate::{
-        terminal::AuthStatus,
+        terminal::{self, AuthStatus},
         xiaomi::auth::{AuthReport, AuthenticationState, CertificateUpdate},
     };
     let report = AuthReport::for_test(
@@ -134,20 +81,16 @@ pub(super) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
     } else {
         line.into()
     };
-    let terminal = crate::terminal::Terminal::new(&registry, &store.devices(), &status);
-    terminal.handle_line(&line, 0).await.unwrap()
+    terminal::handle_line(&registry, &store.devices(), &status, &line, 0)
+        .await
+        .unwrap()
 }
 
-pub(in crate::matter) fn test_executor() -> std::rc::Rc<crate::lighting::LightingExecutor> {
-    crate::lighting::LightingExecutor::new(std::rc::Rc::new(
-        crate::lighting::clock::SystemClock::new(),
-    ))
-}
 pub(super) fn startup_error(store: &Store) -> RuntimeError {
     let identity = store.load_identity().unwrap();
     let (device, _receiver) = test_device();
     let registry = test_registry(store, &device);
-    let bridge = Bridge::new(&registry, store, &identity, test_executor());
+    let bridge = Bridge::new(&registry, store, &identity);
     block_on(or(bridge.run(0, |_| Ok(())), async {
         async_io::Timer::after(std::time::Duration::from_secs(5)).await;
         panic!("startup did not report invalid storage");

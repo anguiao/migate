@@ -1,6 +1,3 @@
-use migate as library;
-#[path = "../src/storage/tests/support.rs"]
-mod configuration_support;
 use migate::{
     device::{Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription},
     storage::{CachedPhysicalDevice, CachedScope, Store},
@@ -44,32 +41,13 @@ fn cached(uid: &str, home: &str) -> CachedPhysicalDevice {
                         category: Category::Outlet,
                         capabilities: vec![Capability::OnOff],
                     },
-                    power: Some(PropertyBinding { siid, piid: 1 }),
+                    power: PropertyBinding { siid, piid: 1 },
                     lighting: None,
                 })
                 .collect(),
             refresh_trigger: Some(PropertyBinding { siid: 2, piid: 1 }),
         },
     }
-}
-
-fn remove_devices(store: &Store, removed: &[DeviceKey], retained: &[DeviceKey]) {
-    let (registry, _receivers) = configuration_support::stage_configuration(
-        &store.devices(),
-        &CachedScope {
-            uid: "account".into(),
-            home_id: "home".into(),
-            group_id: group_id("account", "home"),
-        },
-        &[],
-        removed,
-        retained,
-    )
-    .unwrap();
-    store
-        .devices()
-        .apply_pending_configuration(&registry, |_| Ok((Vec::new(), Vec::new())))
-        .unwrap();
 }
 
 #[test]
@@ -91,7 +69,7 @@ fn physical_and_function_identities_names_and_historical_endpoints_survive_remov
         .devices()
         .set_device_label(&desc.key, "Home name")
         .unwrap();
-    remove_devices(&store, std::slice::from_ref(&desc.key), &[]);
+    store.devices().remove(&desc.key).unwrap();
     assert!(store.devices().list_published().unwrap().is_empty());
     let other = store.devices().publish(&description("other")).unwrap();
     assert_eq!(other.endpoint, 6);
@@ -212,7 +190,7 @@ fn canonical_cache_and_selected_scope_are_account_and_home_scoped() {
     let store = Store::open(dir.path()).unwrap();
     let first = cached("account", "home-one");
     let mut second = cached("account", "home-two");
-    second.device.functions[0].power.as_mut().unwrap().siid = 30;
+    second.device.functions[0].power.siid = 30;
     store.devices().publish_cached(&first, "Outlet").unwrap();
     store.devices().publish_cached(&second, "Outlet").unwrap();
     store
@@ -362,11 +340,7 @@ fn restoration_uses_committed_names_and_checks_only_published_topology() {
     let mut deleted = original.clone();
     deleted.device.key.id = "deleted".into();
     store.devices().publish_cached(&deleted, "Deleted").unwrap();
-    remove_devices(
-        &store,
-        std::slice::from_ref(&deleted.device.key),
-        std::slice::from_ref(&original.device.key),
-    );
+    store.devices().remove(&deleted.device.key).unwrap();
     // A valid cached candidate cannot silently change a published function identity.
     let mut candidate = original.clone();
     candidate.device.functions.reverse();
@@ -397,7 +371,7 @@ fn restoration_uses_committed_names_and_checks_only_published_topology() {
         [],
     ).unwrap();
     assert!(store.devices().restore_cached("account", "home").is_err());
-    remove_devices(&store, std::slice::from_ref(&original.device.key), &[]);
+    store.devices().remove(&original.device.key).unwrap();
     assert!(
         store
             .devices()

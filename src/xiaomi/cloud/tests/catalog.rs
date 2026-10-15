@@ -380,33 +380,6 @@ fn device_lookup_reads_past_empty_and_overlapping_pages_without_broadening_dids(
 }
 
 #[test]
-fn duplicate_device_records_across_pages_are_rejected_as_ambiguous() {
-    let home = OwnedHome {
-        uid: "account".into(),
-        home_id: "home".into(),
-        group_id: group_id("account", "home"),
-        dids: vec!["target".into()],
-    };
-    let responses = [
-        json!({"list":[{"did":"target","model":"vendor.plug","spec_type":"instance-type"}],"has_more":true,"next_start_did":"one"}),
-        json!({"list":[{"did":"target","model":"vendor.plug","spec_type":"instance-type"}],"has_more":false}),
-    ];
-    let (base, _) = mock_server(
-        responses
-            .into_iter()
-            .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
-            .collect(),
-    );
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    assert_eq!(
-        future::block_on(cloud.get_device("token", &home, "target"))
-            .unwrap_err()
-            .kind(),
-        &CloudErrorKind::Protocol
-    );
-}
-
-#[test]
 fn device_lookup_leaves_missing_or_unusable_names_unset() {
     let home = OwnedHome {
         uid: "account".into(),
@@ -459,76 +432,6 @@ fn home_and_device_requests_are_minimal_and_bounded() {
     let body: Value = serde_json::from_str(&device_request.body).unwrap();
     assert_eq!(body["dids"].as_array().unwrap().len(), 150);
     assert_eq!(body["limit"], 200);
-}
-
-#[test]
-fn device_lookup_exposes_group_metadata_and_rejects_invalid_states() {
-    let home = OwnedHome {
-        uid: "account".into(),
-        home_id: "home".into(),
-        group_id: group_id("account", "home"),
-        dids: vec!["group.42".into()],
-    };
-    let record = json!({
-        "did":"group.42",
-        "model":"mijia.light.group3",
-        "spec_type":"instance-type",
-        "name":"Grouped",
-        "extra":{"member_list":{
-            "group_did":"group.42",
-            "status":"1",
-            "member_ship":{"member-b":"1","member-a":"1"},
-            "is_physical":false
-        }}
-    });
-    let (base, _) = mock_server(vec![MockResponse::json(
-        200,
-        &json!({"code":0,"result":{"list":[record]}}).to_string(),
-    )]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let device = future::block_on(cloud.get_device("token", &home, "group.42"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(device.name.as_deref(), Some("Grouped"));
-    assert_eq!(
-        device.group,
-        Some(CloudGroup::Confirmed {
-            did: "group.42".into(),
-            name: Some("Grouped".into()),
-            physical: false,
-            members: vec!["member-a".into(), "member-b".into()],
-        })
-    );
-    for (field, value) in [
-        ("status", json!("0")),
-        ("is_physical", json!("false")),
-        ("group_did", json!("group.other")),
-    ] {
-        let mut record = record.clone();
-        record["extra"]["member_list"][field] = value;
-        let (base, _) = mock_server(vec![MockResponse::json(
-            200,
-            &json!({"code":0,"result":{"list":[record]}}).to_string(),
-        )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        assert_eq!(
-            future::block_on(cloud.get_device("token", &home, "group.42"))
-                .unwrap_err()
-                .kind(),
-            &CloudErrorKind::Protocol
-        );
-    }
-    let mut record = record.clone();
-    record.as_object_mut().unwrap().remove("extra");
-    let (base, _) = mock_server(vec![MockResponse::json(
-        200,
-        &json!({"code":0,"result":{"list":[record]}}).to_string(),
-    )]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let device = future::block_on(cloud.get_device("token", &home, "group.42"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(device.group, Some(CloudGroup::Unconfirmed));
 }
 
 #[test]

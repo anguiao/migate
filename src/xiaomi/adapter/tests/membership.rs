@@ -307,15 +307,14 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
             peer.list_changed(&["multi"]);
             until(|| registry.list().is_empty() && peer.state.borrow().unsubscribes.len() == 4)
                 .await;
-            until(|| {
+            assert!(
                 control
                     .store
                     .devices()
                     .load_published(&key)
                     .unwrap()
                     .is_none()
-            })
-            .await;
+            );
             assert_eq!(
                 old.execute(Command::On).await,
                 Err(crate::device::CommandError::Cancelled)

@@ -48,7 +48,7 @@ fn external_cold_white_reports_one_consistent_color_without_changing_the_rgb_cac
     light.reports(&ctx);
     assert_eq!(reported(&ctx), [0, 1, 3, 4, 7, 8, 0x4001]);
     block_on(async {
-        let handler = ColorHandler::<true, true>(&light);
+        let handler = ColorHandler::<true>(&light);
         assert_eq!(handler.color_temperature_mireds(&ctx).await.unwrap(), 154);
         assert!(handler.current_saturation(&ctx).await.unwrap() <= 10);
         assert!((20000..22000).contains(&handler.current_x(&ctx).await.unwrap()));
@@ -76,7 +76,7 @@ fn external_cold_white_reports_one_consistent_color_without_changing_the_rgb_cac
     light.reports(&ctx);
     assert_eq!(reported(&ctx), [0, 1, 3, 4, 7]);
     block_on(async {
-        let handler = ColorHandler::<true, true>(&light);
+        let handler = ColorHandler::<true>(&light);
         assert_eq!(handler.color_temperature_mireds(&ctx).await.unwrap(), 250);
         assert!((15..35).contains(&handler.current_hue(&ctx).await.unwrap()));
         assert!((70..110).contains(&handler.current_saturation(&ctx).await.unwrap()));
@@ -158,11 +158,11 @@ fn inactive_cache_updates_only_version_values_exposed_by_the_current_projection(
             },
         };
         function.observe_light(patch).unwrap();
-        ColorHandler::<true, true>(&light).dataver();
+        ColorHandler::<true>(&light).dataver();
         light.reports(&ctx);
         assert!(reported(&ctx).is_empty());
         block_on(async {
-            let handler = ColorHandler::<true, true>(&light);
+            let handler = ColorHandler::<true>(&light);
             match mode {
                 LightMode::Temperature => {
                     assert_eq!(light.color_version.get(), old_version);
@@ -220,7 +220,7 @@ fn unknown_active_color_reports_its_own_group_without_using_the_other_cache() {
             .unwrap();
         light.reports(&ctx);
         block_on(async {
-            let handler = ColorHandler::<true, true>(&light);
+            let handler = ColorHandler::<true>(&light);
             assert!(handler.current_hue(&ctx).await.is_err());
             assert!(handler.current_saturation(&ctx).await.is_err());
             assert!(handler.current_x(&ctx).await.is_err());
@@ -272,14 +272,14 @@ fn mode_boundary_flushes_the_new_group_and_discards_the_old_quiet_report() {
                 max_mireds: 370,
             }
         };
-        let action = light.begin(color_plan(&light, task), None).unwrap();
+        let action = light.begin(LightingTask::Color(task), None).unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
             light.reports(&ctx);
             reported(&ctx);
             clock.set(100);
-            light.executor.advance();
+            light.advance();
             accept(&function, frame(&mut receiver).await);
             light.reports(&ctx);
             assert!(reported(&ctx).is_empty());
@@ -344,20 +344,20 @@ fn short_color_transitions_report_the_active_group_at_the_end() {
                 transition_ms: 100,
             }
         };
-        let action = light.begin(color_plan(&light, task), None).unwrap();
+        let action = light.begin(LightingTask::Color(task), None).unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
             light.reports(&ctx);
             reported(&ctx);
             clock.set(50);
-            light.executor.advance();
+            light.advance();
             accept(&function, frame(&mut receiver).await);
             light.reports(&ctx);
             assert!(reported(&ctx).is_empty());
 
             clock.set(100);
-            light.executor.advance();
+            light.advance();
             let request = frame(&mut receiver).await;
             assert!(request.final_frame);
             accept(&function, request);
@@ -386,13 +386,10 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
         .unwrap();
     let action = light
         .begin(
-            color_plan(
-                &light,
-                ColorTask::Hs(hs::HsTask::stationary(hs::Hs {
-                    hue: 170.0,
-                    saturation: 0.0,
-                })),
-            ),
+            LightingTask::Color(ColorTask::Hs(hs::HsTask::stationary(hs::Hs {
+                hue: 170.0,
+                saturation: 0.0,
+            }))),
             None,
         )
         .unwrap();
@@ -401,16 +398,11 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
         action.accepted().await.unwrap();
         light.reports(&ctx);
         reported(&ctx);
-        let handler = ColorHandler::<true, true>(&light);
+        let handler = ColorHandler::<true>(&light);
         assert_eq!(handler.current_hue(&ctx).await.unwrap(), 170);
         assert_eq!(handler.current_saturation(&ctx).await.unwrap(), 0);
-        light.executor.advance();
-        assert!(
-            light
-                .executor
-                .remaining_ms(function.function_key(), LightDimension::Color)
-                .is_none()
-        );
+        light.advance();
+        assert!(light.active.borrow()[1].is_none());
         let rgb_cache = function.snapshot().lighting.unwrap().color;
 
         function

@@ -149,90 +149,6 @@ pub struct PhysicalDeviceDescription {
     pub functions: Vec<FunctionDescription>,
 }
 
-/// A confirmed Xiaomi group relation. Members are stable device identities;
-/// the value carries no MIoT bindings, commands or Matter endpoints.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Composition {
-    pub key: DeviceKey,
-    pub label: String,
-    pub members: Vec<DeviceKey>,
-}
-
-/// The account/home that owns a pending or applied publication configuration.
-/// Pending entries carry it so the generic Store/DeviceRegistry apply path can
-/// commit without holding source context.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConfigurationScope {
-    pub uid: String,
-    pub home_id: String,
-    pub group_id: String,
-}
-
-/// One standalone endpoint of an applied publication set. Group endpoints are
-/// carried by their group configuration instead.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PublishedEndpoint {
-    pub key: DeviceKey,
-    pub endpoint: u16,
-}
-
-/// One group's applied configuration: the confirmed relation together with
-/// the capability and range shape derived from its members' real
-/// descriptions. The derived shape is persisted with the relation so an
-/// applied view survives a member description becoming unavailable.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GroupConfiguration {
-    pub key: DeviceKey,
-    pub label: String,
-    pub members: Vec<DeviceKey>,
-    pub capabilities: Vec<Capability>,
-}
-
-/// The group shape rule: each member must have the capability, and the
-/// common temperature interval is the intersection of the adjustable ranges.
-/// Source admission and configuration staging share this rule. Applying a
-/// configuration installs the checked shape in the live group.
-pub fn derive_group_capabilities<'a>(
-    functions: impl IntoIterator<Item = &'a FunctionDescription>,
-) -> Vec<Capability> {
-    let functions = functions.into_iter().collect::<Vec<_>>();
-    let mut capabilities = Vec::new();
-    if functions
-        .iter()
-        .all(|function| function.capabilities.contains(&Capability::OnOff))
-    {
-        capabilities.push(Capability::OnOff);
-    }
-    if functions
-        .iter()
-        .all(|function| function.capabilities.contains(&Capability::Brightness))
-    {
-        capabilities.push(Capability::Brightness);
-    }
-    if let Some(range) = common_temperature(&functions) {
-        capabilities.push(Capability::ColorTemperature(range));
-    }
-    if functions
-        .iter()
-        .all(|function| function.capabilities.contains(&Capability::ColorRgb))
-    {
-        capabilities.push(Capability::ColorRgb);
-    }
-    capabilities
-}
-
-fn common_temperature(functions: &[&FunctionDescription]) -> Option<NumericRange> {
-    let first = functions.first()?.temperature_range()?;
-    let mut min = first.min;
-    let mut max = first.effective_max();
-    for function in &functions[1..] {
-        let range = function.temperature_range()?;
-        min = min.max(range.min);
-        max = max.min(range.effective_max());
-    }
-    (min < max).then_some(NumericRange { min, max, step: 1 })
-}
-
 /// An integer physical range. Every accepted value lies on its declared grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NumericRange {
@@ -363,55 +279,6 @@ pub struct LightPatch {
     pub color: Option<Rgb>,
     pub mode: Option<LightMode>,
 }
-/// Observations from a reachable, open function. Unavailable or closed
-/// functions expose unknown values; structural color modes remain known.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FreshSnapshot {
-    pub key: FunctionKey,
-    pub snapshot: FunctionSnapshot,
-    pub reachable: bool,
-}
-impl Capability {
-    fn index(self) -> usize {
-        match self {
-            Self::OnOff => 0,
-            Self::Brightness => 1,
-            Self::ColorTemperature(_) => 2,
-            Self::ColorRgb => 3,
-        }
-    }
-
-    /// Physical well-formedness only; Matter representability belongs to the
-    /// publication mapping and does not restrict the generic model.
-    fn well_formed(self) -> bool {
-        match self {
-            Self::ColorTemperature(range) => {
-                range.valid() && range.min > 0 && range.max <= 1_000_000
-            }
-            Self::OnOff | Self::Brightness | Self::ColorRgb => true,
-        }
-    }
-}
-
-/// Light capabilities are independent: any nonempty subset of the four kinds
-/// is valid, each kind appears at most once, and declared temperature ranges
-/// only need to be physically well formed.
-fn valid_light_capabilities(capabilities: &[Capability]) -> bool {
-    if capabilities.is_empty() {
-        return false;
-    }
-    let mut seen = [false; 4];
-    for capability in capabilities {
-        if !capability.well_formed() {
-            return false;
-        }
-        if std::mem::replace(&mut seen[capability.index()], true) {
-            return false;
-        }
-    }
-    true
-}
-
 impl FunctionDescription {
     pub fn temperature_range(&self) -> Option<NumericRange> {
         self.capabilities
@@ -421,20 +288,30 @@ impl FunctionDescription {
                 _ => None,
             })
     }
-    /// Capability lists are semantically equal when they contain the same
-    /// definite values regardless of order. Descriptions are validated, so a
-    /// kind appears at most once and value equality is enough.
-    pub fn same_capabilities(&self, other: &Self) -> bool {
-        self.capabilities.len() == other.capabilities.len()
-            && self
-                .capabilities
-                .iter()
-                .all(|capability| other.capabilities.contains(capability))
-    }
     pub fn valid_capabilities(&self) -> bool {
         match self.category {
             Category::Outlet => self.capabilities == [Capability::OnOff],
-            Category::Light => valid_light_capabilities(&self.capabilities),
+            Category::Light => {
+                let Some(range) = self.temperature_range() else {
+                    return false;
+                };
+                range.mired_bounds().is_ok()
+                    && range.min > 0
+                    && range.max <= 1_000_000
+                    && (self.capabilities
+                        == [
+                            Capability::OnOff,
+                            Capability::Brightness,
+                            Capability::ColorTemperature(range),
+                        ]
+                        || self.capabilities
+                            == [
+                                Capability::OnOff,
+                                Capability::Brightness,
+                                Capability::ColorTemperature(range),
+                                Capability::ColorRgb,
+                            ])
+            }
         }
     }
 }

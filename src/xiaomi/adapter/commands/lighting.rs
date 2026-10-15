@@ -98,10 +98,7 @@ fn apply<E>(
     }
     drop(cached);
     let function = work.record.physical.function(id).unwrap();
-    let previous_mode = function
-        .snapshot()
-        .lighting
-        .and_then(|snapshot| snapshot.mode);
+    let previous_mode = function.snapshot().lighting.unwrap().mode;
     function.observe_light(patch).expect("encoded light patch");
     if patch.mode.is_some() {
         super::super::lighting::refresh_missing_active(work, id, previous_mode);
@@ -115,29 +112,18 @@ fn alive(work: &DeviceWork, generation: u64) -> bool {
 
 fn numeric_feedback_bindings(record: &DeviceRecord, id: &str) -> Vec<PropertyBinding> {
     let cached = record.cached.borrow();
-    let mut bindings = Vec::new();
-    if let Some(light) = cached
+    let light = cached
         .device
         .functions
         .iter()
         .find(|function| function.description.id == id)
-        .and_then(|function| function.lighting.as_ref())
-    {
-        // Mode is also an integer, but only continuous values may suppress late reports.
-        bindings.extend(
-            light
-                .brightness
-                .as_ref()
-                .map(|brightness| brightness.property),
-        );
-        bindings.extend(
-            light
-                .temperature
-                .as_ref()
-                .map(|temperature| temperature.property),
-        );
-        bindings.extend(light.color.as_ref().map(|color| color.property));
-    }
+        .unwrap()
+        .lighting
+        .as_ref()
+        .unwrap();
+    // Mode is also an integer, but only continuous values may suppress late reports.
+    let mut bindings = vec![light.brightness.property, light.temperature.property];
+    bindings.extend(light.color.map(|color| color.property));
     bindings
 }
 

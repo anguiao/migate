@@ -24,7 +24,7 @@ pub(super) fn parse_outlet(
                     category: Category::Outlet,
                     capabilities: vec![Capability::OnOff],
                 },
-                power: Some(standard_main_power(instance)?),
+                power: standard_main_power(instance)?,
                 lighting: None,
             }],
             refresh_trigger: None,
@@ -104,7 +104,7 @@ fn parse_cp7pd(
                 category: Category::Outlet,
                 capabilities: vec![Capability::OnOff],
             },
-            power: Some(cp7pd_binding(instance, id, siid, namespace, type_id)?),
+            power: cp7pd_binding(instance, id, siid, namespace, type_id)?,
             lighting: None,
         });
     }

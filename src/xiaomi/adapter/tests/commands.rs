@@ -118,7 +118,7 @@ fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_va
                 .cached
                 .borrow()
                 .clone();
-            changed.device.functions[0].power.as_mut().unwrap().siid = 7;
+            changed.device.functions[0].power.siid = 7;
             control
                 .context
                 .live

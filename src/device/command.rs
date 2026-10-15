@@ -10,7 +10,7 @@ use std::{
 use event_listener::Event;
 
 use super::{
-    model::{Capability, Category, Command, CommandError, FunctionSnapshot},
+    model::{Capability, Command, CommandError, FunctionSnapshot},
     state::{Function, RuntimeState},
 };
 
@@ -215,9 +215,7 @@ impl CommandReceiver {
                     continue;
                 }
             };
-            // Lighting power writes use the same actual-send guard as numeric
-            // frames. Outlet request ownership continues to transfer on dequeue.
-            let flight = (self.function.description().category == Category::Light).then(|| {
+            let flight = state.light_commands.as_ref().map(|_| {
                 Arc::new(PowerFlight {
                     target,
                     completion: pending.completion.clone(),

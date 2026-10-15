@@ -1,21 +1,14 @@
-mod composition;
 mod device;
 mod directory;
 mod error;
 mod identity;
 mod lock;
 mod matter;
+mod migration;
 mod registry;
 mod store;
 mod xiaomi;
 
-#[cfg(test)]
-mod tests;
-
-pub use composition::{
-    BlobChange, CompositionCommitError, ConfigurationVersion, ConfirmedComposition,
-    PreparedConfiguration, StoredGroup, StoredGroupIdentity,
-};
 pub use device::{CachedPhysicalDevice, CachedScope, DeviceStore};
 pub use error::StorageError;
 pub use identity::Identity;

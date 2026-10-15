@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::terminal::Terminal;
+use crate::terminal::bridge;
 use crate::xiaomi::auth::AuthReport;
 
 #[test]
@@ -97,12 +97,17 @@ fn bridge_help_reads_the_latest_report() {
         1_700_000_000,
     );
     let status = AuthStatus::new(checking, "/bin/migate".into(), "/data".into());
-    let terminal = Terminal::new(&registry, &store.devices(), &status);
     assert!(
-        futures_lite::future::block_on(terminal.handle_line("help", 1_700_000_000))
-            .unwrap()
-            .unwrap()
-            .contains("Xiaomi: checking authentication (cn)...")
+        futures_lite::future::block_on(bridge::handle_line(
+            &registry,
+            &store.devices(),
+            &status,
+            "help",
+            1_700_000_000
+        ))
+        .unwrap()
+        .unwrap()
+        .contains("Xiaomi: checking authentication (cn)...")
     );
 
     let authenticated = AuthReport::for_test(
@@ -115,9 +120,15 @@ fn bridge_help_reads_the_latest_report() {
         1_700_000_000,
     );
     assert!(status.replace(authenticated));
-    let help = futures_lite::future::block_on(terminal.handle_line("help", 1_700_000_000))
-        .unwrap()
-        .unwrap();
+    let help = futures_lite::future::block_on(bridge::handle_line(
+        &registry,
+        &store.devices(),
+        &status,
+        "help",
+        1_700_000_000,
+    ))
+    .unwrap()
+    .unwrap();
     assert!(help.contains("Xiaomi: authenticated (cn)."), "{help}");
     assert!(!help.contains("checking authentication"), "{help}");
 
@@ -188,8 +199,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
             }],
         }],
     });
-    let registry = crate::device::DeviceRegistry::new();
-    let output = status.render_devices(1_700_000_000, None, &registry.snapshot());
+    let output = status.render_devices(1_700_000_000, None);
     assert!(
         output.contains("Routing: cloud-first; local connected; business degraded."),
         "{output}"
@@ -269,8 +279,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
             }],
         }],
     });
-    let registry = crate::device::DeviceRegistry::new();
-    let output = status.render_devices(0, Some("one"), &registry.snapshot());
+    let output = status.render_devices(0, Some("one"));
     assert!(output.contains("Local recovery: running."), "{output}");
     assert!(output.contains("Usable control paths: none."), "{output}");
     assert!(output.contains("Selected control: none."), "{output}");
@@ -391,32 +400,21 @@ fn light_diagnostics_fixture() -> (crate::device::Function, crate::device::Comma
 }
 
 fn action_report(function: &crate::device::Function) -> String {
-    use crate::device::*;
-    let (physical, _receivers) = PhysicalDevice::new(PhysicalDeviceDescription {
-        key: function.function_key().device.clone(),
-        label: "Light".into(),
-        functions: vec![function.description().clone()],
-    });
-    let registry = DeviceRegistry::new();
-    registry.insert(physical);
-    format_device(
-        &DeviceStatus {
-            did: function.function_key().device.id.clone(),
-            usable_control_paths: vec![PathKind::Cloud],
-            selected_control: Some(PathKind::Cloud),
-            notification_source: Some(PathKind::Local),
-            unavailable_reason: None,
-            sync_limited_reason: None,
-            last_switch_reason: None,
-            commands: vec![ChannelCommands {
-                channel: "main".into(),
-                light_actions: function.light_action_diagnostics(),
-                inflight: None,
-                last: None,
-            }],
-        },
-        &registry.snapshot(),
-    )
+    format_device(&DeviceStatus {
+        did: "light".into(),
+        usable_control_paths: vec![PathKind::Cloud],
+        selected_control: Some(PathKind::Cloud),
+        notification_source: Some(PathKind::Local),
+        unavailable_reason: None,
+        sync_limited_reason: None,
+        last_switch_reason: None,
+        commands: vec![ChannelCommands {
+            channel: "main".into(),
+            light_actions: function.light_action_diagnostics(),
+            inflight: None,
+            last: None,
+        }],
+    })
 }
 
 #[test]

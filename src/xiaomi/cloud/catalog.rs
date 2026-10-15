@@ -6,7 +6,7 @@ use isahc::Request;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha1::{Digest, Sha1};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use url::Url;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -29,24 +29,6 @@ pub struct CloudDevice {
     pub name: Option<String>,
     pub model: String,
     pub instance_type: String,
-    pub group: Option<CloudGroup>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CloudGroup {
-    /// A complete member relation confirmed by the current directory read.
-    Confirmed {
-        /// Group identity reported inside `extra.member_list`.
-        did: String,
-        /// Usable cloud name when the directory record provides one.
-        name: Option<String>,
-        /// Whether the group is a physical Xiaomi group rather than a virtual one.
-        physical: bool,
-        /// Confirmed member DIDs in deterministic cloud order.
-        members: Vec<String>,
-    },
-    /// A known group identity whose member relation is absent from this read.
-    Unconfirmed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,7 +37,6 @@ pub struct CloudDeviceInfo {
     pub model: String,
     pub instance_type: String,
     pub online: bool,
-    pub group: Option<CloudGroup>,
 }
 
 pub fn group_id(uid: &str, home_id: &str) -> String {
@@ -127,8 +108,6 @@ struct DeviceDetails {
     #[serde(flatten)]
     description: DeviceDescription,
     name: Option<String>,
-    #[serde(default)]
-    extra: Option<DeviceExtra>,
 }
 
 #[derive(Deserialize)]
@@ -144,77 +123,6 @@ struct DeviceInfo {
     description: DeviceDescription,
     #[serde(rename = "isOnline")]
     online: bool,
-    #[serde(default)]
-    name: Option<Value>,
-    #[serde(default)]
-    extra: Option<DeviceExtra>,
-}
-
-#[derive(Deserialize)]
-struct DeviceExtra {
-    #[serde(default)]
-    member_list: Option<MemberList>,
-}
-
-/// The cloud confirms group and member relations only with status `"1"`.
-#[derive(Deserialize)]
-struct MemberList {
-    #[serde(deserialize_with = "description")]
-    group_did: String,
-    status: String,
-    member_ship: BTreeMap<String, String>,
-    is_physical: bool,
-}
-
-impl MemberList {
-    /// `Err` marks a relation the directory must not publish as confirmed.
-    fn into_group(self, name: Option<String>, did: &str) -> Result<CloudGroup, ()> {
-        if self.status != "1" || self.member_ship.values().any(|status| status != "1") {
-            return Err(());
-        }
-        let mut members = Vec::with_capacity(self.member_ship.len());
-        for member in self.member_ship.into_keys() {
-            if !valid_description(&member) {
-                return Err(());
-            }
-            members.push(member);
-        }
-        if self.group_did != did {
-            return Err(());
-        }
-        Ok(CloudGroup::Confirmed {
-            did: self.group_did,
-            name,
-            physical: self.is_physical,
-            members,
-        })
-    }
-}
-
-fn usable_name(name: &str) -> bool {
-    !name.trim().is_empty() && !name.chars().any(char::is_control)
-}
-
-/// Known group identities must never be admitted as ordinary devices, even when
-/// the current directory read cannot confirm their member relation.
-fn is_known_group(did: &str, model: &str) -> bool {
-    did.starts_with("group.") || model == "mijia.light.group3"
-}
-
-fn group_metadata(
-    extra: Option<DeviceExtra>,
-    name: Option<String>,
-    did: &str,
-    model: &str,
-    operation: &'static str,
-) -> Result<Option<CloudGroup>, CloudError> {
-    let Some(member_list) = extra.and_then(|extra| extra.member_list) else {
-        return Ok(is_known_group(did, model).then_some(CloudGroup::Unconfirmed));
-    };
-    member_list
-        .into_group(name, did)
-        .map(Some)
-        .map_err(|()| CloudError::protocol(operation))
 }
 
 #[derive(Default)]
@@ -366,23 +274,11 @@ impl CloudClient {
                     }
                     let details: DeviceInfo = serde_json::from_value(Value::Object(record.details))
                         .map_err(|_| CloudError::protocol(operation))?;
-                    let name = details.name.and_then(|name| match name {
-                        Value::String(name) if usable_name(&name) => Some(name),
-                        _ => None,
-                    });
-                    let group = group_metadata(
-                        details.extra,
-                        name,
-                        &record.did,
-                        &details.description.model,
-                        operation,
-                    )?;
                     devices.push(CloudDeviceInfo {
                         did: record.did,
                         model: details.description.model,
                         instance_type: details.description.spec_type,
                         online: details.online,
-                        group,
                     });
                 }
                 cursor = pages.advance(
@@ -429,27 +325,16 @@ impl CloudClient {
                 .await?;
             for record in result.list {
                 if record.did == did {
-                    if found.is_some() {
-                        // A second record for the same DID is an ambiguous relation.
-                        return Err(CloudError::protocol(operation));
-                    }
                     let details: DeviceDetails =
                         serde_json::from_value(Value::Object(record.details))
                             .map_err(|_| CloudError::protocol(operation))?;
-                    let name = details.name.filter(|name| usable_name(name));
-                    let group = group_metadata(
-                        details.extra,
-                        name.clone(),
-                        &record.did,
-                        &details.description.model,
-                        operation,
-                    )?;
                     found = Some(CloudDevice {
                         did: record.did,
-                        name,
+                        name: details.name.filter(|name| {
+                            !name.trim().is_empty() && !name.chars().any(char::is_control)
+                        }),
                         model: details.description.model,
                         instance_type: details.description.spec_type,
-                        group,
                     });
                 }
             }

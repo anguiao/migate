@@ -381,14 +381,6 @@ fn preserving_acceptance_does_not_restore_a_closed_function() {
     });
 }
 
-mod capabilities;
-
 mod lighting;
 
 mod light_commands;
-
-mod composition;
-
-mod configuration;
-
-mod group;
