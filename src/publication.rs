@@ -103,9 +103,7 @@ impl Publication {
     }
 
     pub(crate) fn stop_actions(&self) {
-        for device in self.current().devices() {
-            device.reset_actions();
-        }
+        self.source.stop_actions();
     }
 
     /// Reacquire this only after the old Matter runner has been dropped when
@@ -283,6 +281,18 @@ impl Publication {
                 .iter()
                 .zip(&snapshot.entries)
                 .any(|(old, new)| old.cached != new.cached);
+        // A restored repaired group already has its ExtendedColor Physical
+        // instance but no installed plan; the reconstructed plan must be
+        // installed before Matter serves without a version bump or rebuild.
+        let repair_changed = current.source.entries.len() != snapshot.entries.len()
+            || current
+                .source
+                .entries
+                .iter()
+                .zip(&snapshot.entries)
+                .any(|(old, new)| {
+                    old.repair != new.repair || old.repair_reason != new.repair_reason
+                });
         let metadata_changed = current.source.relations != snapshot.relations
             || current.source.scope != snapshot.scope;
         if !fixed_changed
@@ -290,6 +300,7 @@ impl Publication {
             && !relation_changed
             && !bindings_changed
             && !metadata_changed
+            && !repair_changed
             && clear_revocations.is_empty()
         {
             self.pending.set(false);

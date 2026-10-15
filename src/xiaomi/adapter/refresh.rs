@@ -348,6 +348,9 @@ fn read_one(
                                         &observed_stamp,
                                         &value,
                                     );
+                                    if observed_validation.borrow().is_ok() {
+                                        result_context.refresh_repair_groups(&observed_id);
+                                    }
                                 }
                             },
                         )
@@ -386,6 +389,9 @@ fn read_one(
                             if !work.life.is_closed() && flight.current(&context, &did) {
                                 validation =
                                     work.observe_read(&read.id, read.binding, &stamp, &value);
+                                if validation.is_ok() {
+                                    context.refresh_repair_groups(&did);
+                                }
                             }
                             Ok(if flight.current(&context, &did) {
                                 match validation {

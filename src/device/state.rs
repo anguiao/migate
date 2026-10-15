@@ -314,6 +314,48 @@ impl Function {
         }
         Ok(self.snapshot_locked(&state))
     }
+    /// Clear repaired color and mode while keeping native power, brightness and
+    /// temperature. Used when a repaired group loses its representative or a
+    /// source loses all paths.
+    pub(crate) fn clear_light_color(&self) -> FunctionSnapshot {
+        let changed = {
+            let mut state = self.0.state.lock().unwrap();
+            let before = (state.power, state.lighting);
+            let mode = self.description().inferred_color_mode();
+            if let Some(lighting) = state.lighting.as_mut() {
+                lighting.color = None;
+                lighting.mode = mode;
+            }
+            let changed = before != (state.power, state.lighting);
+            if changed {
+                state.revision = state.revision.wrapping_add(1);
+            }
+            changed
+        };
+        if changed {
+            self.0.changed.notify(usize::MAX);
+        }
+        self.snapshot()
+    }
+    /// Clear an out-of-publication color temperature to unknown.
+    pub(crate) fn clear_light_temperature(&self) -> FunctionSnapshot {
+        let changed = {
+            let mut state = self.0.state.lock().unwrap();
+            let before = (state.power, state.lighting);
+            if let Some(lighting) = state.lighting.as_mut() {
+                lighting.temperature_kelvin = None;
+            }
+            let changed = before != (state.power, state.lighting);
+            if changed {
+                state.revision = state.revision.wrapping_add(1);
+            }
+            changed
+        };
+        if changed {
+            self.0.changed.notify(usize::MAX);
+        }
+        self.snapshot()
+    }
     pub(super) fn close(&self) {
         let mut state = self.0.state.lock().unwrap();
         state.queue.closed = true;

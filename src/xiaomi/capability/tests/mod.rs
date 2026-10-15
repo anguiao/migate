@@ -476,3 +476,4 @@ fn unsupported_devices_and_malformed_protocol_fields_fail_at_the_boundary() {
 
 mod group;
 mod lighting;
+mod repair;

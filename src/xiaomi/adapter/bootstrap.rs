@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     device::{Availability, DeviceRegistry, PhysicalDevice},
-    storage::Store,
+    storage::{AdmissionError, Store},
     xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
 };
 use event_listener::Event;
@@ -109,6 +109,10 @@ impl XiaomiAdapter {
                     .set_availability(Availability::Unavailable("restoring Xiaomi access".into()));
                 registry.insert(physical.clone());
                 let did = metadata.device.key.id.clone();
+                let incompatible_native = !super::publication::same_shape(
+                    &stored.description(),
+                    &metadata.physical_description(stored.label.clone()),
+                );
                 let mut slot = DeviceSlot::restored(metadata, physical);
                 if let Some(group) = restored_relations
                     .iter()
@@ -124,6 +128,14 @@ impl XiaomiAdapter {
                     };
                     slot.group = Some(group.clone());
                     slot.effective_group = Some(group);
+                } else if incompatible_native {
+                    let reason = AdmissionError::IncompatibleFunctions.to_string();
+                    slot.blocked = Some(reason.clone());
+                    slot.admitted
+                        .as_ref()
+                        .unwrap()
+                        .physical
+                        .set_availability(Availability::Unavailable(reason));
                 }
                 consumers.push((slot.admitted.as_ref().unwrap().clone(), receivers));
                 devices.insert(did, slot);

@@ -41,12 +41,29 @@ impl LightWriteGates {
             .or_insert_with(|| Rc::new(LightWriteGate::new(clock)))
             .clone()
     }
+    /// A binding-authority replacement retires every sent/history/expected
+    /// entry so a late old receipt cannot reintroduce feedback.
+    pub(super) fn clear_authority(&self, did: &str) {
+        if let Some(gate) = self.gates.borrow().get(did) {
+            gate.clear_authority();
+        }
+    }
 }
+/// One native operation's expectation receipt; cleaning it never touches a
+/// concurrent operation on the same shared member.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) struct ExpectedTicket {
+    authority: u64,
+    ticket: u64,
+}
+
 pub(super) struct LightWriteGate {
     busy: Cell<bool>,
     changed: Event,
     clock: Arc<dyn Clock>,
     feedback: RefCell<LightFeedback>,
+    /// Binding-authority epoch; a replacement retires all old feedback.
+    authority: Cell<u64>,
 }
 impl LightWriteGate {
     fn new(clock: Arc<dyn Clock>) -> Self {
@@ -55,6 +72,7 @@ impl LightWriteGate {
             changed: Event::new(),
             clock,
             feedback: RefCell::default(),
+            authority: Cell::new(0),
         }
     }
     async fn acquire(self: &Rc<Self>) -> LightWritePermit {
@@ -66,15 +84,34 @@ impl LightWriteGate {
             changed.await;
         }
     }
-    fn register_feedback(&self, properties: &[(PropertyBinding, serde_json::Value)]) {
-        self.feedback.borrow_mut().sent(properties);
+    pub(super) fn authority(&self) -> u64 {
+        self.authority.get()
     }
-    fn finish_feedback<E>(
+    fn clear_authority(&self) {
+        self.feedback.borrow_mut().clear_all();
+        self.authority.set(self.authority.get() + 1);
+    }
+    fn register_feedback_for(
         &self,
+        authority: u64,
+        properties: &[(PropertyBinding, serde_json::Value)],
+    ) {
+        if authority == self.authority.get() {
+            self.feedback.borrow_mut().sent(properties);
+        }
+    }
+    fn finish_feedback_for<E>(
+        &self,
+        authority: u64,
         properties: &[(PropertyBinding, serde_json::Value)],
         results: &crate::xiaomi::property::PropertyResults<(), E>,
         history_bindings: &[PropertyBinding],
     ) {
+        if authority != self.authority.get() {
+            // Consume the late receipt without writing it into the new authority.
+            self.feedback.borrow_mut().cancel();
+            return;
+        }
         let accepted =
             properties
                 .iter()
@@ -88,6 +125,31 @@ impl LightWriteGate {
     }
     fn cancel_feedback(&self) {
         self.feedback.borrow_mut().cancel();
+    }
+    /// Register native-to-member expectations while the native receipt is
+    /// pending. The ticket scopes later ack/clear to this native operation so
+    /// overlapping groups sharing a member cannot retire each other.
+    pub(super) fn expect_pending(
+        &self,
+        properties: &[(PropertyBinding, serde_json::Value)],
+    ) -> ExpectedTicket {
+        ExpectedTicket {
+            authority: self.authority.get(),
+            ticket: self.feedback.borrow_mut().expect_pending(properties),
+        }
+    }
+    /// Start the short accepted window once this native receipt arrives.
+    pub(super) fn expect_ack(&self, ticket: ExpectedTicket) {
+        if ticket.authority == self.authority.get() {
+            self.feedback
+                .borrow_mut()
+                .expect_ack(ticket.ticket, self.clock.now());
+        }
+    }
+    pub(super) fn clear_expected(&self, ticket: ExpectedTicket) {
+        if ticket.authority == self.authority.get() {
+            self.feedback.borrow_mut().clear_expected(ticket.ticket);
+        }
     }
     pub(super) fn is_feedback(&self, binding: PropertyBinding, value: &serde_json::Value) -> bool {
         self.feedback

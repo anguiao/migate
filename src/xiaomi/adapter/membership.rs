@@ -101,10 +101,7 @@ impl Context {
                 .zip(slot.admitted.as_ref())
                 .is_some_and(|((cached, _), record)| {
                     !super::publication::same_shape(
-                        &record
-                            .cached
-                            .borrow()
-                            .physical_description(record.physical.label()),
+                        &record.physical.description(),
                         &cached.physical_description(record.physical.label()),
                     )
                 })
@@ -162,6 +159,7 @@ impl Context {
         }
         self.changed.notify(usize::MAX);
         self.unavailable_device(did, reason.clone());
+        self.refresh_repair_groups(did);
         self.problem(did, Some(reason));
     }
     pub(super) fn remove(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {

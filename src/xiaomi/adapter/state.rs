@@ -6,11 +6,11 @@ use super::{
     work::DeviceWork,
 };
 use crate::{
-    device::{DeviceRegistry, PhysicalDevice},
+    device::{DeviceKey, DeviceRegistry, PhysicalDevice},
     storage::{CachedPhysicalDevice, CachedScope, Store, XiaomiRecord},
     xiaomi::{
         auth::{AuthenticationState, CertificateUpdate},
-        capability::PropertyBinding,
+        capability::{PropertyBinding, RepairPlan},
         central::{CentralError, DeviceAccess, SessionHandle},
         certificate::CertificateValidity,
         cloud::{CloudClient, CloudDeviceInfo},
@@ -72,6 +72,14 @@ impl DeviceRecord {
 pub(super) struct DeviceSlot {
     pub(super) prepared: Option<Rc<super::publication::SourceEntry>>,
     pub(super) effective_group: Option<GroupSource>,
+    /// Repair plan installed only by a successful configuration commit.
+    pub(super) effective_repair: Option<Rc<RepairPlan>>,
+    /// Latest confirmed description read, including one rejected by the
+    /// independent-lamp contract, retained for confirmed group planning.
+    pub(super) native_confirmed: Option<CachedPhysicalDevice>,
+
+    /// Currently selected confirmed representative member of a repaired group.
+    pub(super) representative: Option<DeviceKey>,
     pub(super) confirmed: bool,
     /// A description awaiting admission; accepted descriptions live only in the record.
     pub(super) candidate: Option<(CachedPhysicalDevice, Option<String>)>,

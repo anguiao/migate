@@ -708,7 +708,7 @@ fn retained_old_color_cannot_block_an_accepted_current_target() {
 }
 
 #[test]
-fn binding_change_preserves_feedback_until_accepted_history_expires() {
+fn binding_change_retires_old_feedback_authority() {
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
@@ -716,12 +716,6 @@ fn binding_change_preserves_feedback_until_accepted_history_expires() {
         c.peer(peer, |peer| async move {
             let old = ready_light(control).await;
             freeze_light_clock(control);
-            let stored = control
-                .store
-                .devices()
-                .load_published(&DeviceKey::new("xiaomi", "one"))
-                .unwrap()
-                .unwrap();
             peer.state.borrow_mut().hold_writes = true;
             let action = old
                 .begin_light_action(LightDimension::Brightness, brightness(60.0), false)
@@ -761,49 +755,19 @@ fn binding_change_preserves_feedback_until_accepted_history_expires() {
             assert_eq!(peer.count("rpcReq", "one", 0), 1);
             assert!(poll_once(next.accepted()).await.is_none());
             assert!(poll_once(action.accepted()).await.is_none());
-            peer.notify_value("one", BRIGHTNESS, json!(60), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
-            assert!(new.light_action_current(next.token()));
-            assert!(poll_once(next.accepted()).await.is_none());
-            assert_eq!(peer.count("rpcReq", "one", 0), 1);
-            peer.notify_value("one", BRIGHTNESS, json!(55), true);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(55.0)).await;
+            // The old receipt lands after the binding authority was replaced;
+            // it must not re-enter the new accepted history.
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
                 .await;
             action.accepted().await.unwrap();
-            let accepted_at = control.clock.now();
             until(|| peer.count("rpcReq", "one", 0) == 2).await;
-            assert_eq!(
-                new.snapshot().lighting.unwrap().brightness_percent,
-                Some(55.0)
-            );
-            assert!(poll_once(next.accepted()).await.is_none());
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
                 .await;
             next.accepted().await.unwrap();
-            assert_eq!(peer.count("rpcReq", "one", 0), 2);
             assert_eq!(
                 new.snapshot().lighting.unwrap().brightness_percent,
                 Some(70.0)
             );
-            let after = control
-                .store
-                .devices()
-                .load_published(&DeviceKey::new("xiaomi", "one"))
-                .unwrap()
-                .unwrap();
-            assert_eq!(stored.unique_id, after.unique_id);
-            assert_eq!(stored.endpoint, after.endpoint);
-            control
-                .clock
-                .advance(accepted_at + Duration::from_millis(2999) - control.clock.now());
-            peer.notify_value("one", BRIGHTNESS, json!(60), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
-            assert!(new.light_action_current(next.token()));
-            peer.notify_value("one", BRIGHTNESS, json!(70), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(70.0)).await;
-            assert!(new.light_action_current(next.token()));
-            control.clock.advance(Duration::from_millis(1));
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
             until(|| !new.light_action_current(next.token())).await;
             assert_eq!(
@@ -821,7 +785,7 @@ fn binding_change_preserves_feedback_until_accepted_history_expires() {
 }
 
 #[test]
-fn retired_work_preserves_accepted_feedback_until_history_expires() {
+fn retired_work_replacement_retires_old_feedback_authority() {
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
@@ -893,23 +857,11 @@ fn retired_work_preserves_accepted_feedback_until_history_expires() {
                 new.snapshot().lighting.unwrap().brightness_percent,
                 Some(70.0)
             );
+            // The replaced binding authority retires the old accepted
+            // history, so a later old-value report is an external operation.
             control
                 .clock
                 .advance(accepted_at + Duration::from_millis(2999) - control.clock.now());
-
-            peer.notify_value("one", BRIGHTNESS, json!(60), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
-            assert!(new.light_action_current(next.token()));
-            peer.notify_value("one", BRIGHTNESS, json!(70), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(70.0)).await;
-            assert!(new.light_action_current(next.token()));
-            peer.notify_value("one", BRIGHTNESS, json!(60), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
-            assert!(new.light_action_current(next.token()));
-            peer.notify_value("one", BRIGHTNESS, json!(70), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(70.0)).await;
-            assert!(new.light_action_current(next.token()));
-            control.clock.advance(Duration::from_millis(1));
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
             until(|| !new.light_action_current(next.token())).await;
             assert_eq!(

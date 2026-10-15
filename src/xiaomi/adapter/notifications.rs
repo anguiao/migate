@@ -277,7 +277,41 @@ impl Context {
                 .as_ref()
                 .is_some_and(|active| active.same(source))
         {
-            work.notify_value(binding, value, cached_report);
+            let is_group = self.is_group(did);
+            let prior = work.confirmed_light();
+            let observed = work.notify_value(binding, value, cached_report);
+            if let Some(observed) = observed {
+                let feedback = work
+                    .light_write
+                    .as_ref()
+                    .is_some_and(|gate| gate.is_feedback(binding, value));
+                let temperature_only = work.record.physical.functions()[0]
+                    .description()
+                    .light_profile()
+                    == Ok(crate::device::LightProfile::ColorTemperature);
+                let mode = prior
+                    .as_ref()
+                    .and_then(|prior| prior.mode)
+                    .or(temperature_only.then_some(crate::device::LightMode::Temperature));
+                let mut operation = observed.patch;
+                if operation.mode.is_none() {
+                    if mode != Some(crate::device::LightMode::Temperature) {
+                        operation.temperature_kelvin = None;
+                    }
+                    if mode != Some(crate::device::LightMode::Rgb) {
+                        operation.color = None;
+                    }
+                }
+                let confirmed_external = prior
+                    .as_ref()
+                    .is_none_or(|prior| super::lighting::confirmed_differs(prior, operation));
+                if !cached_report && !feedback && confirmed_external && !is_group {
+                    self.take_over_member_groups(did, operation);
+                }
+                if !is_group {
+                    self.refresh_repair_groups(did);
+                }
+            }
         }
     }
     fn online_event(&self, handle: &NotificationHandle, did: &str, online: bool) {

@@ -16,6 +16,8 @@ use crate::{
 };
 use event_listener::Event;
 use serde_json::Value;
+
+mod repair;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -104,28 +106,48 @@ fn apply<E>(
         super::super::lighting::refresh_missing_active(work, id, previous_mode);
     }
 }
+fn settle_group_echoes(
+    echoes: &[(
+        PropertyBinding,
+        Rc<super::LightWriteGate>,
+        super::ExpectedTicket,
+    )],
+    settlements: &[(PropertyBinding, Option<bool>)],
+) {
+    for (native, gate, ticket) in echoes {
+        match settlements.iter().find(|(binding, _)| binding == native) {
+            Some((_, Some(false))) => gate.clear_expected(*ticket),
+            Some((_, _)) => gate.expect_ack(*ticket),
+            None => gate.clear_expected(*ticket),
+        }
+    }
+}
+
 fn alive(work: &DeviceWork, generation: u64) -> bool {
     !work.life.is_closed()
         && !work.record.life.is_closed()
         && work.record.binding_generation.get() == generation
 }
 
-fn numeric_feedback_bindings(record: &DeviceRecord, id: &str) -> Vec<PropertyBinding> {
+fn feedback_bindings(record: &DeviceRecord, id: &str, group: bool) -> Vec<PropertyBinding> {
     let cached = record.cached.borrow();
-    let light = cached
+    let function = cached
         .device
         .functions
         .iter()
         .find(|function| function.description.id == id)
-        .unwrap()
-        .lighting
-        .as_ref()
         .unwrap();
-    // Mode is also an integer, but only continuous values may suppress late reports.
+    let light = function.lighting.as_ref().unwrap();
     let mut bindings = Vec::new();
     bindings.extend(light.brightness.as_ref().map(|binding| binding.property));
     bindings.extend(light.temperature.as_ref().map(|binding| binding.property));
     bindings.extend(light.color.as_ref().map(|binding| binding.property));
+    if group {
+        // Group state stays actual after acceptance, so required mode/power
+        // echoes also need the same exact, short receipt window.
+        bindings.push(function.power);
+        bindings.extend(light.mode.as_ref().map(|binding| binding.property));
+    }
     bindings
 }
 
@@ -175,6 +197,12 @@ pub(super) async fn send(
         },
         DeviceRequest::Light(request) => request.target,
     };
+    if current(&request) {
+        context.take_over_related_targets(&did, target);
+    }
+    if let Some(plan) = context.group_repair(&did) {
+        return repair::send(request, context, record, id, gate, plan).await;
+    }
     let properties = match super::super::lighting::encode(&record, id, target) {
         Ok(properties) => properties,
         Err(error) => {
@@ -239,7 +267,22 @@ pub(super) async fn send(
             reject(request, error);
             return Ok(());
         };
-        let history_bindings = numeric_feedback_bindings(&record, id);
+        let history_bindings = feedback_bindings(&record, id, group);
+        let authority = gate.authority();
+        // An ordinary native group also emits converted member echoes; the
+        // same exact matcher keeps its own fade from being read as external.
+        let echoes: Rc<
+            Vec<(
+                PropertyBinding,
+                Rc<super::LightWriteGate>,
+                super::ExpectedTicket,
+            )>,
+        > = Rc::new(if group && context.group_repair(&did).is_none() {
+            repair::register_group_echoes(&context, &record, id, &properties)
+        } else {
+            Vec::new()
+        });
+        let settlements: repair::Settlements = Rc::new(RefCell::new(Vec::new()));
         match path {
             ControlPath::Local(handle) => {
                 let pending = Rc::new(RefCell::new(Some(request)));
@@ -255,6 +298,7 @@ pub(super) async fn send(
                 let capture_id = id.to_owned();
                 let capture_properties = properties.clone();
                 let capture_gate = gate.clone();
+                let result_settlements = settlements.clone();
                 let submitted = operation.0.clone();
                 let stamps = Rc::new(RefCell::new(Vec::new()));
                 let capture_stamps = stamps.clone();
@@ -305,7 +349,7 @@ pub(super) async fn send(
                                 )
                             })
                             .collect();
-                        capture_gate.register_feedback(&capture_properties);
+                        capture_gate.register_feedback_for(authority, &capture_properties);
                     },
                 );
                 handle
@@ -319,12 +363,31 @@ pub(super) async fn send(
                         if outcome.result == Err(CentralError::Withdrawn)
                             && outcome.stage == RequestStage::NotSent
                         {
+                            // A not-sent attempt retires its pending tickets so
+                            // the retry cannot leave indefinite expectations.
+                            for (_, gate, ticket) in echoes.iter() {
+                                gate.clear_expected(*ticket);
+                            }
                             return;
                         }
                         let request = result_pending.borrow_mut().take().unwrap();
                         let result = match outcome.result {
                             Ok(results) => {
-                                result_gate.finish_feedback(
+                                {
+                                    let mut settled = result_settlements.borrow_mut();
+                                    for (index, (binding, _)) in
+                                        result_properties.iter().enumerate()
+                                    {
+                                        let accepted = if results.protocol_error {
+                                            None
+                                        } else {
+                                            results.items.get(index).map(|item| item.is_ok())
+                                        };
+                                        settled.push((*binding, accepted));
+                                    }
+                                }
+                                result_gate.finish_feedback_for(
+                                    authority,
                                     &result_properties,
                                     &results,
                                     &history_bindings,
@@ -369,6 +432,12 @@ pub(super) async fn send(
                                 }
                             }
                             Err(error) => {
+                                if outcome.stage != RequestStage::NotSent {
+                                    let mut settled = result_settlements.borrow_mut();
+                                    for (binding, _) in &result_properties {
+                                        settled.push((*binding, None));
+                                    }
+                                }
                                 result_gate.cancel_feedback();
                                 if outcome.stage == RequestStage::NotSent && !current(&request) {
                                     current_result(&request)
@@ -377,6 +446,7 @@ pub(super) async fn send(
                                 }
                             }
                         };
+                        settle_group_echoes(&echoes, &settlements.borrow());
                         match result {
                             Ok(()) => result_operation.finish(accept(request)),
                             Err(error) => {
@@ -412,7 +482,7 @@ pub(super) async fn send(
                     .iter()
                     .map(|(binding, _)| work.observations.write_stamp(&record, id, *binding))
                     .collect();
-                gate.register_feedback(&properties);
+                gate.register_feedback_for(authority, &properties);
                 operation.0.submitted(PathKind::Cloud);
                 let result = context
                     .cloud
@@ -420,7 +490,23 @@ pub(super) async fn send(
                     .await;
                 let outcome = match &result {
                     Ok(results) => {
-                        gate.finish_feedback(&properties, results, &history_bindings);
+                        {
+                            let mut settled = settlements.borrow_mut();
+                            for (index, (binding, _)) in properties.iter().enumerate() {
+                                let accepted = if results.protocol_error {
+                                    None
+                                } else {
+                                    results.items.get(index).map(|item| item.is_ok())
+                                };
+                                settled.push((*binding, accepted));
+                            }
+                        }
+                        gate.finish_feedback_for(
+                            authority,
+                            &properties,
+                            results,
+                            &history_bindings,
+                        );
                         if context.is_group(&did) {
                             for (binding, _) in &properties {
                                 work.request_dirty_read(id, *binding);
@@ -439,10 +525,17 @@ pub(super) async fn send(
                         }
                     }
                     Err(error) => {
+                        {
+                            let mut settled = settlements.borrow_mut();
+                            for (binding, _) in &properties {
+                                settled.push((*binding, None));
+                            }
+                        }
                         gate.cancel_feedback();
                         Err(cloud_command_error(error))
                     }
                 };
+                settle_group_echoes(&echoes, &settlements.borrow());
                 match outcome {
                     Ok(()) => operation.0.finish(accept(request)),
                     Err(error) => {

@@ -13,15 +13,58 @@ struct Accepted {
     expires: Duration,
 }
 
+struct Pending {
+    binding: PropertyBinding,
+    value: Value,
+    /// `None` until the native receipt arrives.
+    expires: Option<Duration>,
+    ticket: u64,
+}
+
 #[derive(Default)]
 pub(super) struct LightFeedback {
     sent: Vec<(PropertyBinding, Value)>,
     history: VecDeque<Accepted>,
+    /// Expected echoes of native writes that a member did not receive itself.
+    expected: VecDeque<Pending>,
+    next_ticket: u64,
 }
 
 impl LightFeedback {
     pub(super) fn sent(&mut self, properties: &[(PropertyBinding, Value)]) {
         self.sent = properties.to_vec();
+    }
+
+    /// Native-to-member expectations stay pending until the native receipt
+    /// arrives, then live for the short accepted window. A slow receipt must
+    /// not let its own expectation expire before the echo can arrive.
+    pub(super) fn expect_pending(&mut self, properties: &[(PropertyBinding, Value)]) -> u64 {
+        self.next_ticket += 1;
+        let ticket = self.next_ticket;
+        for (binding, value) in properties {
+            self.expected.push_back(Pending {
+                binding: *binding,
+                value: value.clone(),
+                expires: None,
+                ticket,
+            });
+        }
+        while self.expected.len() > CAPACITY {
+            self.expected.pop_front();
+        }
+        ticket
+    }
+
+    pub(super) fn expect_ack(&mut self, ticket: u64, now: Duration) {
+        for expected in &mut self.expected {
+            if expected.ticket == ticket && expected.expires.is_none() {
+                expected.expires = Some(now + RETENTION);
+            }
+        }
+    }
+
+    pub(super) fn clear_expected(&mut self, ticket: u64) {
+        self.expected.retain(|expected| expected.ticket != ticket);
     }
 
     pub(super) fn complete(
@@ -50,6 +93,12 @@ impl LightFeedback {
         self.sent.clear();
     }
 
+    pub(super) fn clear_all(&mut self) {
+        self.sent.clear();
+        self.history.clear();
+        self.expected.clear();
+    }
+
     pub(super) fn matches(
         &mut self,
         binding: PropertyBinding,
@@ -60,6 +109,11 @@ impl LightFeedback {
         self.history
             .iter()
             .any(|accepted| accepted.binding == binding && &accepted.value == value)
+            || self.expected.iter().any(|expected| {
+                expected.binding == binding
+                    && &expected.value == value
+                    && expected.expires.is_none_or(|expires| now < expires)
+            })
             || self
                 .sent
                 .iter()
@@ -68,11 +122,13 @@ impl LightFeedback {
 
     fn prune(&mut self, now: Duration) {
         self.history.retain(|accepted| now < accepted.expires);
+        self.expected
+            .retain(|expected| expected.expires.is_none_or(|expires| now < expires));
     }
 
     pub(super) fn is_empty(&mut self, now: Duration) -> bool {
         self.prune(now);
-        self.sent.is_empty() && self.history.is_empty()
+        self.sent.is_empty() && self.history.is_empty() && self.expected.is_empty()
     }
 }
 

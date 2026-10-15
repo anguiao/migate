@@ -90,6 +90,11 @@ fn configuration_lines(status: &AuthStatus, did: &str) -> Vec<String> {
                     "native group"
                 }
             ));
+            if entry.repair.is_none()
+                && let Some(reason) = &entry.repair_reason
+            {
+                lines.push(format!("  RGB repair: unavailable ({reason})."));
+            }
             if let Some(range) = logical.temperature_range() {
                 lines.push(format!(
                     "  Effective temperature range: {}–{} K.",

@@ -11,6 +11,10 @@ use crate::{
         PhysicalDeviceDescription,
     },
     storage::{CachedPhysicalDevice, CachedScope, PublicationState, StorageError, StoredRelation},
+    xiaomi::capability::{
+        RepairPlan, effective_temperature_range, narrowed_capabilities, plan_rgb_repair,
+        repaired_capabilities,
+    },
 };
 use std::{
     cell::{Cell, RefCell},
@@ -27,6 +31,10 @@ pub(crate) struct SourceEntry {
     pub(crate) physical: PhysicalDevice,
     pub(crate) fresh: bool,
     pub(crate) problem: Option<String>,
+    /// Committed logical repair inputs; `None` means the native profile serves.
+    pub(crate) repair: Option<Rc<RepairPlan>>,
+    /// Reason the native group stays unrepaired, retained for diagnostics only.
+    pub(crate) repair_reason: Option<String>,
     record: Rc<DeviceRecord>,
     receivers: RefCell<Option<Vec<CommandReceiver>>>,
     group: Option<GroupSource>,
@@ -46,6 +54,19 @@ impl SourceHandle {
 
     pub(crate) fn listen(&self) -> event_listener::EventListener {
         self.0.configuration_changed.listen()
+    }
+
+    /// End every serving action and retire unsent repaired-group frames.
+    pub(crate) fn stop_actions(&self) {
+        let live = self.0.live.borrow();
+        for slot in live.devices.values() {
+            if let Some(record) = &slot.admitted {
+                record.physical.reset_actions();
+            }
+            if let Some(work) = &slot.work {
+                work.light_frames.borrow_mut().cancel_all();
+            }
+        }
     }
 
     pub(crate) fn committed(&self) -> Result<(SourceSnapshot, PublicationState), StorageError> {
@@ -74,6 +95,8 @@ impl SourceHandle {
                     physical: record.physical.clone(),
                     fresh: false,
                     problem: slot.blocked.clone(),
+                    repair: slot.effective_repair.clone(),
+                    repair_reason: None,
                     record: record.clone(),
                     receivers: RefCell::new(None),
                     group: slot.effective_group.clone(),
@@ -99,13 +122,41 @@ impl SourceHandle {
             observer();
         }
         let mut live = self.0.live.borrow_mut();
+        let descriptions = live
+            .devices
+            .iter()
+            .filter_map(|(did, slot)| {
+                let cached = slot
+                    .native_confirmed
+                    .clone()
+                    .or_else(|| slot.candidate.as_ref().map(|(cached, _)| cached.clone()))
+                    .or_else(|| {
+                        slot.admitted
+                            .as_ref()
+                            .map(|record| record.cached.borrow().clone())
+                    })?;
+                Some((did.clone(), cached))
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut entries = Vec::new();
         for slot in live.devices.values_mut() {
+            // The latest genuine confirmed source input is authoritative for
+            // planning and persistence, even when the static independent-lamp
+            // contract keeps an older served logical description. A pending
+            // candidate still contributes its catalog name.
             let (cached, name) = match &slot.candidate {
-                Some((cached, name)) => (cached.clone(), name.clone()),
-                None => match &slot.admitted {
-                    Some(record) => (record.cached.borrow().clone(), None),
-                    None => continue,
+                Some((candidate, name)) => (
+                    slot.native_confirmed
+                        .clone()
+                        .unwrap_or_else(|| candidate.clone()),
+                    name.clone(),
+                ),
+                None => match &slot.native_confirmed {
+                    Some(native) => (native.clone(), None),
+                    None => match &slot.admitted {
+                        Some(record) => (record.cached.borrow().clone(), None),
+                        None => continue,
+                    },
                 },
             };
             let label = slot
@@ -123,15 +174,103 @@ impl SourceHandle {
                         })
                 });
             let description = cached.physical_description(label);
+            let native_range = cached
+                .device
+                .functions
+                .first()
+                .and_then(|function| function.lighting.as_ref())
+                .and_then(|light| light.temperature.as_ref())
+                .map(|temperature| temperature.range);
+            let (repair, repair_reason, description) = match (&slot.group, native_range) {
+                (None, _) => (None, None, description),
+                (Some(_), None) => (
+                    None,
+                    Some("native group has no color temperature".to_string()),
+                    description,
+                ),
+                (Some(group), Some(native)) => {
+                    let known = group
+                        .members
+                        .iter()
+                        .map(|did| descriptions.get(did))
+                        .collect::<Option<Vec<_>>>();
+                    match known {
+                        Some(members) => {
+                            let logical = members
+                                .iter()
+                                .map(|cached| {
+                                    cached
+                                        .device
+                                        .functions
+                                        .first()
+                                        .and_then(|function| function.lighting.as_ref())
+                                        .and_then(|light| light.temperature.as_ref())
+                                        .map(|temperature| temperature.range)
+                                })
+                                .collect::<Option<Vec<_>>>()
+                                .map(|ranges| effective_temperature_range(native, &ranges))
+                                .unwrap_or(native);
+                            let function = &cached.device.functions[0];
+                            let (repair, reason, capabilities) = match plan_rgb_repair(
+                                &cached.device,
+                                members.iter().map(|cached| {
+                                    (
+                                        cached.device.key.id.as_str(),
+                                        cached.model.as_str(),
+                                        cached.instance_type.as_str(),
+                                        &cached.device,
+                                    )
+                                }),
+                            ) {
+                                Ok(Some(plan)) => (
+                                    Some(Rc::new(plan)),
+                                    None,
+                                    repaired_capabilities(function, logical),
+                                ),
+                                Ok(None) => (None, None, narrowed_capabilities(function, logical)),
+                                Err(reason) => {
+                                    (None, Some(reason), narrowed_capabilities(function, logical))
+                                }
+                            };
+                            (
+                                repair,
+                                reason,
+                                with_light_capabilities(description, capabilities),
+                            )
+                        }
+                        None => (
+                            None,
+                            Some(
+                                "every effective member needs a description before RGB repair"
+                                    .to_string(),
+                            ),
+                            description,
+                        ),
+                    }
+                }
+            };
             if let Some(prepared) = &slot.prepared
                 && prepared.cached == cached
                 && prepared.group == slot.group
+                && prepared.repair == repair
+                && prepared.repair_reason == repair_reason
+                && same_shape(&prepared.physical.description(), &description)
             {
                 entries.push(prepared.clone());
                 continue;
             }
             let existing = slot.admitted.as_ref().filter(|record| {
                 !record.life.is_closed() && same_shape(&record.physical.description(), &description)
+            });
+            // A confirmed native input rejected by the static independent-lamp
+            // contract keeps its committed logical endpoint; the genuine input
+            // is persisted as the source description instead.
+            let existing = existing.or_else(|| {
+                slot.blocked.as_ref().and_then(|_| {
+                    slot.admitted
+                        .as_ref()
+                        .filter(|record| !record.life.is_closed())
+                })
             });
             let (record, receivers) = match existing {
                 Some(record) => (record.clone(), None),
@@ -153,6 +292,8 @@ impl SourceHandle {
                 physical: record.physical.clone(),
                 fresh: slot.confirmed,
                 problem: slot.blocked.clone(),
+                repair,
+                repair_reason,
                 record,
                 receivers: RefCell::new(receivers),
                 group: slot.group.clone(),
@@ -212,7 +353,9 @@ impl SourceHandle {
                 .as_ref()
                 .is_some_and(|old| !same_bindings(&old.cached.borrow(), &entry.cached));
             let group_changed = self.0.live.borrow().devices[did].effective_group != entry.group;
+            let repair_changed = self.0.live.borrow().devices[did].effective_repair != entry.repair;
             if replaced || bindings_changed {
+                self.0.light_writes.clear_authority(did);
                 self.0.retire_device_notifications(did);
                 let mut live = self.0.live.borrow_mut();
                 if let Some(work) = live.devices.get_mut(did).unwrap().work.take() {
@@ -244,6 +387,10 @@ impl SourceHandle {
                 let slot = live.devices.get_mut(did).unwrap();
                 slot.admitted = Some(entry.record.clone());
                 slot.effective_group = entry.group.clone();
+                if repair_changed {
+                    slot.representative = None;
+                }
+                slot.effective_repair = entry.repair.clone();
                 slot.candidate = None;
                 slot.prepared = None;
             }
@@ -255,6 +402,9 @@ impl SourceHandle {
             self.0.update_availability(did);
             if let Some(work) = self.0.live.borrow().devices[did].work.as_ref() {
                 work.report(&self.0, did);
+            }
+            if entry.repair.is_some() {
+                self.0.refresh_repair_group(did);
             }
             if (old.is_none() || replaced || bindings_changed || group_changed)
                 && let Some(work) = self.0.live.borrow().devices[did].work.as_ref()
@@ -280,6 +430,18 @@ impl SourceHandle {
     pub(crate) fn pending(&self, key: &DeviceKey, reason: String) {
         self.0.problem(&key.id, Some(reason));
     }
+}
+
+fn with_light_capabilities(
+    mut description: PhysicalDeviceDescription,
+    capabilities: Vec<crate::device::Capability>,
+) -> PhysicalDeviceDescription {
+    for function in &mut description.functions {
+        if function.category == crate::device::Category::Light {
+            function.capabilities = capabilities.clone();
+        }
+    }
+    description
 }
 
 pub(super) fn same_shape(a: &PhysicalDeviceDescription, b: &PhysicalDeviceDescription) -> bool {
@@ -319,6 +481,16 @@ impl Context {
         self.changed.notify(usize::MAX);
     }
 
+    /// The committed repair plan for one group; never a prepared candidate.
+    pub(super) fn group_repair(&self, did: &str) -> Option<Rc<RepairPlan>> {
+        self.live
+            .borrow()
+            .devices
+            .get(did)?
+            .effective_repair
+            .clone()
+    }
+
     /// Confirmed removal closes every retained authority before persistence.
     pub(super) fn revoke(&self, did: &str, reason: &str) -> Result<(), AdapterError> {
         let key = DeviceKey::new("xiaomi", did);
@@ -347,6 +519,7 @@ impl Context {
                     reason: reason.into(),
                 }])?;
         }
+        self.refresh_repair_groups(did);
         Ok(())
     }
 }

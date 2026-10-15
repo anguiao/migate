@@ -53,6 +53,8 @@ pub(in super::super) struct CloudState {
     pub(in super::super) catalog_instances: BTreeMap<String, Value>,
     pub(in super::super) catalogs: usize,
     pub(in super::super) catalog_partial: bool,
+    /// Per-DID gates holding that device's property write response.
+    pub(in super::super) write_gates: BTreeMap<String, flume::Receiver<()>>,
 }
 pub(in super::super) struct Rig {
     pub(in super::super) _directory: tempfile::TempDir,
@@ -90,16 +92,38 @@ impl Rig {
     }
     /// A fixture-derived independent light with one of the four standard profiles.
     pub(in super::super) fn profile_light(model: &str, instance: Value) -> Self {
-        Self::build_with(true, &["one"], Some(model), Some(instance))
+        Self::build_with(true, &["one"], Some(model), Some(instance), &[])
+    }
+    /// Several fixture-derived lights with their own DIDs; each gets its real
+    /// parsed description and the catalog can serve its instance type.
+    pub(in super::super) fn lights(models: &[(&str, &str)]) -> Self {
+        let members = models.iter().map(|(did, _)| *did).collect::<Vec<_>>();
+        let instances = models
+            .iter()
+            .map(|(did, model)| {
+                (
+                    *did,
+                    *model,
+                    serde_json::from_str(light_fixture(model)).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        Self::build_with(true, &members, None, None, &instances)
+    }
+    /// Lights with caller-provided parsed instances, for range/boundary cases.
+    pub(in super::super) fn custom_lights(lights: &[(&str, &str, Value)]) -> Self {
+        let members = lights.iter().map(|(did, _, _)| *did).collect::<Vec<_>>();
+        Self::build_with(true, &members, None, None, lights)
     }
     fn build(restore: bool, members: &[&str], light: Option<&str>) -> Self {
-        Self::build_with(restore, members, light, None)
+        Self::build_with(restore, members, light, None, &[])
     }
     fn build_with(
         restore: bool,
         members: &[&str],
         light: Option<&str>,
         custom: Option<Value>,
+        lights: &[(&str, &str, Value)],
     ) -> Self {
         let custom_text = custom.as_ref().map(Value::to_string);
         let directory = tempfile::tempdir().unwrap();
@@ -132,6 +156,25 @@ impl Rig {
             )
             .unwrap();
         }
+        let mut light_instances = Vec::new();
+        for (did, model, instance) in lights {
+            let record = data
+                .iter_mut()
+                .find(|record| record.device.key.id == *did)
+                .unwrap_or_else(|| panic!("missing light DID {did}"));
+            record.model = (*model).into();
+            record.instance_type = instance["type"].as_str().unwrap().into();
+            record.device = crate::xiaomi::capability::parse_device_for_model(
+                DeviceKey::new("xiaomi", *did),
+                model,
+                instance,
+            )
+            .unwrap();
+            light_instances.push((
+                instance["type"].as_str().unwrap().to_string(),
+                instance.clone(),
+            ));
+        }
         if restore {
             store
                 .devices()
@@ -160,6 +203,13 @@ impl Rig {
             catalog_status: 200,
             ..Default::default()
         }));
+        for (urn, instance) in light_instances {
+            cloud
+                .lock()
+                .unwrap()
+                .catalog_instances
+                .insert(urn, instance);
+        }
         let info_dids = if restore {
             members
                 .iter()
@@ -226,8 +276,16 @@ impl Rig {
                     let key=(item["did"].as_str().unwrap().to_owned(),item["siid"].as_u64().unwrap() as u32,item["piid"].as_u64().unwrap() as u32);
                     json!({"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":state.property_codes.get(&key).copied().unwrap_or(state.property_code)})
                 }).collect::<Vec<_>>()});
+                let per_did = items.iter().find_map(|item| {
+                    state
+                        .write_gates
+                        .get(item["did"].as_str().unwrap())
+                        .cloned()
+                });
                 let mut response = MockResponse::json(status, &result.to_string());
-                if let Some(gate) = state.property_gate.clone() {
+                if let Some(gate) = per_did {
+                    response = response.gated(gate);
+                } else if let Some(gate) = state.property_gate.clone() {
                     response = response.gated(gate);
                 }
                 return response;

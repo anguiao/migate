@@ -3,6 +3,7 @@ mod group;
 mod light;
 mod model;
 mod outlet;
+mod repair;
 
 pub(crate) use group::parse_group;
 pub(crate) use light::{is_light_type, is_ls2307_type};
@@ -11,6 +12,10 @@ pub use model::{
     NumericFormat, NumericUnit, ParsedDevice, ParsedFunction, PropertyBinding,
 };
 pub(crate) use outlet::is_outlet_type;
+pub(crate) use repair::{
+    RepairPlan, effective_temperature_range, narrowed_capabilities, plan_rgb_repair,
+    repaired_capabilities,
+};
 
 pub(crate) fn is_light_group(key: &crate::device::DeviceKey, model: &str) -> bool {
     key.id.starts_with("group.") || model == "mijia.light.group3"

@@ -309,6 +309,7 @@ pub(super) async fn run(
                             let mut live = current.live.borrow_mut();
                             let slot = live.devices.get_mut(&did).unwrap();
                             slot.blocked = None;
+                            slot.native_confirmed = Some(candidate.0.clone());
                             slot.candidate = Some(candidate);
                         }
                         current.reconcile(&did)?;

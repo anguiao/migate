@@ -318,25 +318,30 @@ impl Context {
     }
     pub(super) fn update_availability(&self, did: &str) {
         let available = self.control_path(did).is_some();
-        let live = self.live.borrow();
-        let slot = &live.devices[did];
-        let Some(record) = &slot.admitted else {
+        let (record, work, blocked) = {
+            let live = self.live.borrow();
+            let slot = &live.devices[did];
+            (
+                slot.admitted.clone(),
+                slot.work.clone(),
+                slot.blocked.clone(),
+            )
+        };
+        let Some(record) = record else {
             return;
         };
         let was_available = record.physical.availability() == Availability::Available;
         record.physical.set_availability(if available {
             Availability::Available
         } else {
-            Availability::Unavailable(
-                slot.blocked
-                    .clone()
-                    .unwrap_or_else(|| "no usable control path".into()),
-            )
+            Availability::Unavailable(blocked.unwrap_or_else(|| "no usable control path".into()))
         });
-        if available
-            && !was_available
-            && let Some(work) = &slot.work
-        {
+        if !available {
+            if let Some(work) = &work {
+                work.clear_confirmed();
+            }
+            self.refresh_repair_groups(did);
+        } else if !was_available && let Some(work) = &work {
             work.refresh();
         }
     }
