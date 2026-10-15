@@ -1,13 +1,13 @@
 use super::{
     model::AdapterError,
-    state::{Context, DeviceRecord, Lifetime},
+    state::{Context, DeviceRecord},
 };
 use crate::{
-    device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
-    storage::{AdmissionError, CachedPhysicalDevice},
+    device::{Availability, CommandReceiver, DeviceKey},
+    storage::AdmissionError,
     xiaomi::central::DeviceEntry,
 };
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{collections::BTreeMap, rc::Rc};
 impl Context {
     pub(super) fn add_consumers(
         self: &Rc<Self>,
@@ -93,159 +93,43 @@ impl Context {
         if self.live.borrow().devices[did].group.is_some() {
             return self.reconcile_group(did);
         }
-        let (candidate, admitted) = {
+        let incompatible = {
             let live = self.live.borrow();
             let slot = &live.devices[did];
-            (slot.candidate.clone(), slot.admitted.clone())
-        };
-        let Some((cached, name)) = candidate.or_else(|| {
-            admitted
+            slot.candidate
                 .as_ref()
-                .map(|record| (record.cached.borrow().clone(), None))
-        }) else {
-            let reason = self.live.borrow().devices[did]
-                .blocked
-                .clone()
-                .unwrap_or_else(|| "waiting for a complete device description".into());
-            self.problem(did, Some(reason));
-            return Ok(());
+                .zip(slot.admitted.as_ref())
+                .is_some_and(|((cached, _), record)| {
+                    !super::publication::same_shape(
+                        &record
+                            .cached
+                            .borrow()
+                            .physical_description(record.physical.label()),
+                        &cached.physical_description(record.physical.label()),
+                    )
+                })
         };
-        if let Some(record) = admitted {
-            if *record.cached.borrow() != cached {
-                match self
-                    .store
-                    .devices()
-                    .publish_cached(&cached, &record.physical.label())
-                {
-                    Ok(stored) => {
-                        let bindings = |device: &CachedPhysicalDevice| {
-                            device
-                                .device
-                                .functions
-                                .iter()
-                                .map(|function| {
-                                    (
-                                        function.description.id.clone(),
-                                        (
-                                            function.power,
-                                            function.lighting.clone(),
-                                            function.description.capabilities.clone(),
-                                        ),
-                                    )
-                                })
-                                .collect::<BTreeMap<_, _>>()
-                        };
-                        let changed = bindings(&record.cached.borrow()) != bindings(&cached)
-                            || record.cached.borrow().device.refresh_trigger
-                                != cached.device.refresh_trigger;
-                        if changed {
-                            if let Some(session) = &self.live.borrow().session {
-                                drop(session.handle.unsubscribe_properties(did));
-                            }
-                            if let Some(session) = self.notifications.borrow().as_ref() {
-                                drop(session.handle.unsubscribe_properties(did));
-                            }
-                            record
-                                .binding_generation
-                                .set(record.binding_generation.get() + 1);
-                        }
-                        let replace = changed
-                            && cached
-                                .device
-                                .functions
-                                .iter()
-                                .any(|function| function.lighting.is_some());
-                        if replace {
-                            record.life.close();
-                            {
-                                let mut live = self.live.borrow_mut();
-                                if let Some(work) = live.devices.get_mut(did).unwrap().work.take() {
-                                    work.life.close();
-                                }
-                                if let Some(session) = live.session.as_mut() {
-                                    session.devices.remove(did);
-                                }
-                            }
-                            let (physical, receivers) = PhysicalDevice::new(stored.description());
-                            let replacement = Rc::new(DeviceRecord {
-                                life: Lifetime::default(),
-                                binding_generation: std::cell::Cell::new(
-                                    record.binding_generation.get(),
-                                ),
-                                cached: RefCell::new(cached),
-                                physical: physical.clone(),
-                            });
-                            // Observers poll only after the complete replacement; storage identity is unchanged.
-                            self.registry.remove(physical.key());
-                            self.registry.insert(physical);
-                            self.live
-                                .borrow_mut()
-                                .devices
-                                .get_mut(did)
-                                .unwrap()
-                                .admitted = Some(replacement.clone());
-                            self.add_consumers(replacement, receivers);
-                        } else {
-                            *record.cached.borrow_mut() = cached;
-                            if changed && let Some(work) = &self.live.borrow().devices[did].work {
-                                work.bindings_changed();
-                            }
-                        }
-                    }
-                    Err(AdmissionError::Storage(error)) => return Err(error.into()),
-                    Err(error) => {
-                        self.block_device(did, error.to_string());
-                        return Ok(());
-                    }
-                }
+        if incompatible {
+            {
+                let mut live = self.live.borrow_mut();
+                let slot = live.devices.get_mut(did).unwrap();
+                slot.candidate = None;
+                slot.prepared = None;
             }
-        } else {
-            let label = name
-                .as_deref()
-                .map(crate::storage::import_label)
-                .unwrap_or_else(|| crate::runtime::default_device_label(&cached.model, did));
-            let stored = match self.store.devices().publish_cached(&cached, &label) {
-                Ok(stored) => stored,
-                Err(AdmissionError::Storage(error)) => return Err(error.into()),
-                Err(error) => {
-                    self.problem(did, Some(error.to_string()));
-                    return Ok(());
-                }
-            };
-            let (physical, receivers) = PhysicalDevice::new(stored.description());
-            self.registry.insert(physical.clone());
-            let record = Rc::new(DeviceRecord {
-                life: Lifetime::default(),
-                binding_generation: std::cell::Cell::new(0),
-                cached: RefCell::new(cached),
-                physical,
-            });
-            self.live
-                .borrow_mut()
-                .devices
-                .get_mut(did)
-                .unwrap()
-                .admitted = Some(record.clone());
-            self.add_consumers(record, receivers);
+            self.block_device(did, AdmissionError::IncompatibleFunctions.to_string());
+            return Ok(());
         }
-        self.live
-            .borrow_mut()
-            .devices
-            .get_mut(did)
-            .unwrap()
-            .candidate = None;
-        self.install_work(did);
-        self.update_availability(did);
-        let live = self.live.borrow();
-        let slot = &live.devices[did];
-        let diagnostic = slot.work.as_ref().and_then(|work| work.diagnostic());
-        let problem = slot.blocked.clone().or(diagnostic);
-        drop(live);
-        self.problem(did, problem);
-        if let Some(work) = self.live.borrow().devices[did].work.as_ref() {
-            work.retry_subscriptions();
+        if self.live.borrow().devices[did].candidate.is_some() {
+            self.problem(did, Some("configuration pending".into()));
         }
-        self.changed.notify(usize::MAX);
+        if self.live.borrow().devices[did].admitted.is_some() {
+            self.install_work(did);
+            self.update_availability(did);
+            if let Some(work) = self.live.borrow().devices[did].work.as_ref() {
+                work.retry_subscriptions();
+            }
+        }
+        self.stage();
         Ok(())
     }
     pub(super) fn unavailable_device(&self, did: &str, reason: String) {
@@ -291,7 +175,7 @@ impl Context {
             return self.remove_group(did);
         }
         let key = DeviceKey::new("xiaomi", did);
-        self.store.devices().remove(&key)?;
+        self.revoke(did, "device removed from the selected home")?;
         self.registry.remove(&key);
         let handle = {
             let mut live = self.live.borrow_mut();

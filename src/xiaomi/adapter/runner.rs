@@ -23,6 +23,10 @@ pub struct XiaomiAdapter {
     pub(super) request_timeout: Duration,
 }
 impl XiaomiAdapter {
+    pub fn source_handle(&self) -> super::SourceHandle {
+        super::SourceHandle(self.context.clone())
+    }
+
     pub fn new(
         store: Store,
         cloud: CloudClient,

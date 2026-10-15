@@ -48,9 +48,46 @@ pub(super) struct Relations {
 }
 
 impl Relations {
+    pub(super) fn snapshot(&self) -> Vec<ConfirmedGroup> {
+        self.groups.values().cloned().collect()
+    }
+
+    pub(super) fn restored(
+        scope: &CachedScope,
+        relations: &[crate::storage::StoredRelation],
+    ) -> Self {
+        Self {
+            groups: relations
+                .iter()
+                .map(|relation| {
+                    (
+                        relation.group_did.clone(),
+                        ConfirmedGroup {
+                            membership: CloudGroupMembership {
+                                group_did: relation.group_did.clone(),
+                                members: relation.members.clone(),
+                                is_physical: relation.is_physical,
+                            },
+                            scope: scope.clone(),
+                            record_did: relation.record_did.clone(),
+                            model: relation.model.clone(),
+                            instance_type: relation.instance_type.clone(),
+                            name: None,
+                            online: false,
+                            active: relation.active,
+                            error: relation.error.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
     /// Merge one complete account catalog into the confirmed relations.
     /// `home` is the selected home's ordinary DID set; a group is in scope
-    /// when it has at least one member and every member belongs to that home.
+    /// when it has at least one canonical member and at least one of those
+    /// members belongs to that home. Members outside the selected home stay in
+    /// the confirmed list; only a fully-outside group is inactive.
     pub(super) fn apply(
         &mut self,
         catalog: &CloudDeviceCatalog,
@@ -134,7 +171,7 @@ impl Relations {
             if !membership
                 .members
                 .iter()
-                .all(|member| home.contains(member))
+                .any(|member| home.contains(member))
             {
                 let reason = "group members are outside the selected home".to_string();
                 errors.push((group_did.clone(), reason.clone()));

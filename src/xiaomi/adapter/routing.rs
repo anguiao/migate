@@ -204,7 +204,11 @@ impl Context {
         let slot = live.devices.get(did)?;
         // Virtual groups are cloud-only even when a member advertises a local
         // gateway. A physical group uses its own DID's real local route.
-        if slot.group.as_ref().is_some_and(|group| !group.is_physical) {
+        if slot
+            .effective_group
+            .as_ref()
+            .is_some_and(|group| !group.is_physical)
+        {
             return None;
         }
         let record = slot.admitted.as_ref()?;
@@ -228,7 +232,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .is_some_and(|slot| slot.group.is_some())
+            .is_some_and(|slot| slot.effective_group.is_some())
     }
     pub(super) fn cloud_authenticated(&self) -> bool {
         self.cloud_scope_valid.get() && self.token_usable() && {

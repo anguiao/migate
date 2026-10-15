@@ -392,15 +392,26 @@ fn freeze_light_clock(c: &Control) {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 async fn ready_replacement_light(c: &Control) -> crate::device::Function {
-    future::or(ready_light(c), async {
-        // Replacement waits 10 ms for subscriptions, then reads one property
-        // per 200 ms round. Bound recovery below the accepted feedback window.
-        for _ in 0..100 {
-            async_io::Timer::after(Duration::from_millis(1)).await;
-            c.clock.advance(Duration::from_millis(10));
-        }
-        panic!("replacement light did not become ready within one simulated second");
-    })
+    future::or(
+        async {
+            until(|| {
+                c.context.live.borrow().devices["one"].candidate.is_none()
+                    && c.context.active_notification("one")
+                        == Some(super::super::model::PathKind::Local)
+            })
+            .await;
+            ready_light(c).await
+        },
+        async {
+            // Replacement waits 10 ms for subscriptions, then reads one property
+            // per 200 ms round. Bound recovery below the accepted feedback window.
+            for _ in 0..100 {
+                async_io::Timer::after(Duration::from_millis(1)).await;
+                c.clock.advance(Duration::from_millis(10));
+            }
+            panic!("replacement light did not become ready within one simulated second");
+        },
+    )
     .await
 }
 fn accepted_items(items: &[(PropertyBinding, i64)]) -> Value {
@@ -2157,6 +2168,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
             .unwrap()
             .candidate = Some((changed, None));
         c.context.reconcile("one").unwrap();
+        until(|| c.context.live.borrow().devices["one"].candidate.is_none()).await;
         let new = function(&c.context.registry, "one", "main");
         let next = new
             .begin_light_action(LightDimension::Brightness, brightness(70.0), true)

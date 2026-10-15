@@ -70,6 +70,9 @@ impl DeviceRecord {
 /// One entry owns all preparation and admission state for a current home member.
 #[derive(Default)]
 pub(super) struct DeviceSlot {
+    pub(super) prepared: Option<Rc<super::publication::SourceEntry>>,
+    pub(super) effective_group: Option<GroupSource>,
+    pub(super) confirmed: bool,
     /// A description awaiting admission; accepted descriptions live only in the record.
     pub(super) candidate: Option<(CachedPhysicalDevice, Option<String>)>,
     pub(super) admitted: Option<Rc<DeviceRecord>>,
@@ -281,6 +284,9 @@ pub(super) struct Context {
     pub(super) registry: DeviceRegistry,
     pub(super) store: Store,
     pub(super) tasks: TaskSet,
+    pub(super) configuration_changed: Event,
+    #[cfg(test)]
+    pub(super) snapshot_observer: RefCell<Option<Box<dyn FnMut()>>>,
     pub(super) changed: Event,
     pub(super) status: RefCell<AdapterStatus>,
     pub(super) cloud_problem: RefCell<Option<String>>,

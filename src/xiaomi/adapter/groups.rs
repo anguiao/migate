@@ -2,17 +2,17 @@
 //!
 //! A group is admitted only from a confirmed, active catalog relation. Its own
 //! MIoT instance is fetched and parsed exactly like an ordinary light; member
-//! descriptions are never required. Group identity stays in memory for this
-//! source slice (runtime publication will persist it later). Virtual groups
+//! descriptions are never required. Identity and publication are committed by
+//! the runtime configuration boundary. Virtual groups
 //! are cloud-only; physical groups keep their own DID's real route.
 
 use super::{
     model::AdapterError,
     relations::ConfirmedGroup,
-    state::{Context, DeviceRecord, GroupSource, Lifetime},
+    state::{Context, GroupSource, Lifetime},
 };
 use crate::{
-    device::{Availability, DeviceKey, PhysicalDevice},
+    device::DeviceKey,
     storage::CachedPhysicalDevice,
     xiaomi::{
         capability::parse_group,
@@ -20,110 +20,16 @@ use crate::{
     },
 };
 use futures_lite::future;
-use std::{cell::Cell, cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 impl Context {
-    /// Admit or replace one confirmed group in memory. Unlike ordinary
-    /// reconcile this never writes device identity to storage; only the
-    /// confirmed relation and the native descriptor are authoritative here.
+    /// Stage native descriptions; only a committed configuration installs them.
     pub(super) fn reconcile_group(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
-        let (candidate, admitted) = {
-            let live = self.live.borrow();
-            let slot = &live.devices[did];
-            (slot.candidate.clone(), slot.admitted.clone())
-        };
-        let Some((cached, name)) = candidate.or_else(|| {
-            admitted
-                .as_ref()
-                .map(|record| (record.cached.borrow().clone(), None))
-        }) else {
-            let reason = self.live.borrow().devices[did]
-                .blocked
-                .clone()
-                .unwrap_or_else(|| "waiting for a native group description".into());
-            self.problem(did, Some(reason));
-            return Ok(());
-        };
-        let label = name
-            .as_deref()
-            .map(crate::storage::import_label)
-            .unwrap_or_else(|| crate::runtime::default_device_label(&cached.model, did));
-        match admitted {
-            Some(record) => {
-                if *record.cached.borrow() != cached {
-                    // The replaced view must not stay Reachable holding stale
-                    // light state. Runtime publication ownership is 07 work.
-                    record.physical.set_availability(Availability::Unavailable(
-                        "native group description replaced".into(),
-                    ));
-                    // Retire the old work's own subscriptions before the new
-                    // view can receive messages for the same DID.
-                    self.retire_device_notifications(did);
-                    let (physical, receivers) =
-                        PhysicalDevice::new(cached.physical_description(label));
-                    self.registry.remove(record.physical.key());
-                    self.registry.insert(physical.clone());
-                    record.life.close();
-                    {
-                        let mut live = self.live.borrow_mut();
-                        if let Some(work) = live.devices.get_mut(did).unwrap().work.take() {
-                            work.life.close();
-                        }
-                        if let Some(session) = live.session.as_mut() {
-                            session.devices.remove(did);
-                        }
-                    }
-                    let replacement = Rc::new(DeviceRecord {
-                        life: Lifetime::default(),
-                        binding_generation: Cell::new(record.binding_generation.get() + 1),
-                        cached: RefCell::new(cached),
-                        physical,
-                    });
-                    self.live
-                        .borrow_mut()
-                        .devices
-                        .get_mut(did)
-                        .unwrap()
-                        .admitted = Some(replacement.clone());
-                    self.add_consumers(replacement, receivers);
-                }
-            }
-            None => {
-                let (physical, receivers) = PhysicalDevice::new(cached.physical_description(label));
-                self.registry.insert(physical.clone());
-                let record = Rc::new(DeviceRecord {
-                    life: Lifetime::default(),
-                    binding_generation: Cell::new(0),
-                    cached: RefCell::new(cached),
-                    physical,
-                });
-                self.live
-                    .borrow_mut()
-                    .devices
-                    .get_mut(did)
-                    .unwrap()
-                    .admitted = Some(record.clone());
-                self.add_consumers(record, receivers);
-            }
+        if self.live.borrow().devices[did].admitted.is_some() {
+            self.install_work(did);
+            self.update_availability(did);
         }
-        self.live
-            .borrow_mut()
-            .devices
-            .get_mut(did)
-            .unwrap()
-            .candidate = None;
-        self.install_work(did);
-        self.update_availability(did);
-        let live = self.live.borrow();
-        let slot = &live.devices[did];
-        let diagnostic = slot.work.as_ref().and_then(|work| work.diagnostic());
-        let problem = slot.blocked.clone().or(diagnostic);
-        drop(live);
-        self.problem(did, problem);
-        if let Some(work) = self.live.borrow().devices[did].work.as_ref() {
-            work.retry_subscriptions();
-        }
-        self.changed.notify(usize::MAX);
+        self.stage();
         Ok(())
     }
 
@@ -133,17 +39,7 @@ impl Context {
         // Clear the retained physical view and retire the group's own native
         // subscriptions through the existing source mechanisms before the
         // slot disappears.
-        if let Some(record) = self
-            .live
-            .borrow()
-            .devices
-            .get(did)
-            .and_then(|slot| slot.admitted.clone())
-        {
-            record
-                .physical
-                .set_availability(Availability::Unavailable("native group withdrawn".into()));
-        }
+        self.revoke(did, "native group withdrawn")?;
         self.retire_device_notifications(did);
         self.registry.remove(&key);
         {
@@ -212,6 +108,7 @@ impl Context {
                         group.instance_type.clone(),
                     )
                 });
+                slot.confirmed = true;
                 slot.group = Some(GroupSource {
                     record_did: group.record_did.clone(),
                     model: group.model.clone(),
@@ -347,7 +244,16 @@ impl Context {
                                 }
                                 context.reconcile_group(&group_did)?;
                             }
-                            Err(error) => context.problem(&group_did, Some(error.to_string())),
+                            Err(error) => {
+                                {
+                                    let mut live = context.live.borrow_mut();
+                                    let slot = live.devices.get_mut(&group_did).unwrap();
+                                    slot.candidate = None;
+                                    slot.prepared = None;
+                                }
+                                context.block_device(&group_did, error.to_string());
+                                context.stage();
+                            }
                         }
                     }
                     Err(error) => {

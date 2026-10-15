@@ -112,6 +112,7 @@ pub(super) async fn run(
             context.update_all_availability();
             context.update_routing("cloud account identity invalidated");
             context.changed.notify(usize::MAX);
+            context.stage();
             due = context.clock.now() + MEMBER_INTERVAL;
             continue;
         }
@@ -183,8 +184,14 @@ pub(super) async fn run(
             home_id: home.home_id.clone(),
             group_id: home.group_id.clone(),
         };
-        context.store.devices().save_scope(&scope)?;
+        // The complete publication transaction persists the scope.
         let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
+        let scope_changed = context
+            .live
+            .borrow()
+            .scope
+            .as_ref()
+            .is_some_and(|old| old != &scope);
         let membership_changed = context
             .live
             .borrow()
@@ -197,11 +204,14 @@ pub(super) async fn run(
             let live = context.live.borrow();
             live.devices
                 .iter()
-                .filter(|(did, slot)| slot.group.is_none() && !members.contains(*did))
+                .filter(|(did, slot)| {
+                    scope_changed || (slot.group.is_none() && !members.contains(*did))
+                })
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
         };
         context.live.borrow_mut().scope = Some(scope.clone());
+        context.stage();
         for did in removed {
             context.remove(&did)?;
         }
@@ -221,6 +231,7 @@ pub(super) async fn run(
                 if slot.group.is_some() {
                     continue;
                 }
+                slot.confirmed = true;
                 slot.cloud_access = infos.get(did).cloned();
                 slot.cloud_forbidden = false;
             }
@@ -378,6 +389,7 @@ pub(super) async fn run(
                 None => {}
             }
         }
+        context.stage();
         due = context.clock.now() + MEMBER_INTERVAL;
     }
 }

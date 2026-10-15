@@ -6,7 +6,7 @@ use support::*;
 
 use super::{
     Bridge, PairingEvent,
-    model::{self, basic_info, initialize_basic_info},
+    model::{self, basic_info, persist_basic_info, prepare_basic_info},
     pairing,
     storage::StoreAdapter,
 };
@@ -406,7 +406,7 @@ fn cancelled_run_keeps_a_recorded_storage_failure() {
 }
 
 #[test]
-fn default_node_label_uses_upstream_format_and_preserves_existing_settings() {
+fn committed_root_version_is_applied_before_startup_preserving_other_settings() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
@@ -414,20 +414,48 @@ fn default_node_label_uses_upstream_format_and_preserves_existing_settings() {
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let mut protocol = StoreAdapter::new(store.matter());
     let kv = matter.kv(protocol.clone());
-    initialize_basic_info(&matter, &kv, true).unwrap();
+    let prepared = prepare_basic_info(&kv, 7).unwrap();
+    assert_eq!(prepared.node_label.as_str(), "MiGate");
+    assert_eq!(prepared.configuration_version, 7);
+    persist_basic_info(&kv, &prepared).unwrap();
+    assert_eq!(load_basic_info(&mut protocol), prepared);
+
+    // An older blob catches up to the exact committed root; every other field
+    // is preserved.
+    let mut customized = prepared.clone();
+    customized.node_label.clear();
+    customized.node_label.push_str("Custom").unwrap();
+    customized.local_config_disabled = true;
+    customized.configuration_version = 5;
+    rs_matter::persist::Persist::new(&kv)
+        .store_tlv(BASIC_INFO_KEY, &customized)
+        .unwrap();
+    let prepared = prepare_basic_info(&kv, 9).unwrap();
+    assert_eq!(prepared.node_label.as_str(), "Custom");
+    assert!(prepared.local_config_disabled);
+    assert_eq!(prepared.configuration_version, 9);
+    persist_basic_info(&kv, &prepared).unwrap();
+    let settings = load_basic_info(&mut protocol);
+    assert_eq!(settings.node_label.as_str(), "Custom");
+    assert!(settings.local_config_disabled);
+    assert_eq!(settings.configuration_version, 9);
+
+    // A blob newer than the committed root is corruption and is never
+    // overwritten or silently clamped; a rejected prepare persists nothing.
+    let mut newer = settings.clone();
+    newer.configuration_version = 12;
+    rs_matter::persist::Persist::new(&kv)
+        .store_tlv(BASIC_INFO_KEY, &newer)
+        .unwrap();
+    assert!(prepare_basic_info(&kv, 10).is_err());
+    assert_eq!(load_basic_info(&mut protocol).configuration_version, 12);
+}
+
+fn load_basic_info(
+    protocol: &mut StoreAdapter,
+) -> rs_matter::dm::clusters::basic_info::BasicInfoSettings {
     let mut buf = [0; 1024];
-    let before = protocol
-        .load(BASIC_INFO_KEY, &mut buf)
+    let blob = protocol.load(BASIC_INFO_KEY, &mut buf).unwrap().unwrap();
+    rs_matter::dm::clusters::basic_info::BasicInfoSettings::from_tlv(&TLVElement::new(blob))
         .unwrap()
-        .unwrap()
-        .to_vec();
-    let settings =
-        rs_matter::dm::clusters::basic_info::BasicInfoSettings::from_tlv(&TLVElement::new(&before))
-            .unwrap();
-    assert_eq!(settings.node_label.as_str(), "MiGate");
-    initialize_basic_info(&matter, &kv, false).unwrap();
-    assert_eq!(
-        protocol.load(BASIC_INFO_KEY, &mut buf).unwrap().unwrap(),
-        before
-    );
 }

@@ -149,7 +149,7 @@ impl Context {
             if let Some(group) = live
                 .devices
                 .get(did)
-                .and_then(|slot| slot.group.as_ref())
+                .and_then(|slot| slot.effective_group.as_ref())
                 .filter(|group| !group.is_physical)
             {
                 let connected = self
@@ -199,7 +199,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.group.as_ref())
+            .and_then(|slot| slot.effective_group.as_ref())
             .is_some_and(|group| !group.is_physical)
         {
             return None;
@@ -461,7 +461,11 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
 fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
     let live = context.live.borrow();
     let slot = live.devices.get(did)?;
-    if slot.group.as_ref().is_some_and(|group| !group.is_physical) {
+    if slot
+        .effective_group
+        .as_ref()
+        .is_some_and(|group| !group.is_physical)
+    {
         return None;
     }
     let record = slot.admitted.as_ref()?;

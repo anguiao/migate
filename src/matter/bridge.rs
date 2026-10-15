@@ -1,6 +1,6 @@
 use super::{
     PairingEvent,
-    model::{self, basic_info, initialize_basic_info},
+    model::{self, basic_info},
     pairing,
     storage::StoreAdapter,
 };
@@ -26,26 +26,29 @@ use std::{net::UdpSocket, time::Duration};
 
 const WINDOW_SECONDS: u16 = 900;
 
-/// Dynamic device bridge and storage failures that outlive its run future.
+/// One frozen Matter instance and storage failures that outlive its run future.
 pub struct Bridge<'a> {
-    registry: DeviceRegistry,
     storage: Store,
     identity: &'a Identity,
     pub(super) store: StoreAdapter,
+    /// Committed published refs, identities and root version captured at
+    /// construction; a running instance never rereads newer fixed rows.
+    frozen: Result<(Vec<model::FrozenEntry>, u32), StorageError>,
 }
 impl<'a> Bridge<'a> {
     pub fn new(registry: &DeviceRegistry, store: &Store, identity: &'a Identity) -> Self {
         Self {
-            registry: registry.clone(),
             storage: store.clone(),
             identity,
             store: StoreAdapter::new(store.matter()),
+            frozen: model::capture(registry, store),
         }
     }
 
     /// Check for a recorded storage failure, including after cancelling `run`.
     pub fn check_failure(&self) -> Result<(), StorageError> {
-        self.store.check_failure()
+        self.store.check_failure()?;
+        self.frozen.clone().map(|_| ())
     }
 
     /// Run protocol services on the caller's local executor until failure or cancellation.
@@ -58,10 +61,8 @@ impl<'a> Bridge<'a> {
         report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
     ) -> Result<(), RuntimeError> {
         self.check_failure()?;
+        let (frozen, root_version) = self.frozen.clone()?;
         let store = &self.store;
-        let missing_basic_info = !store
-            .storage()
-            .contains(rs_matter::persist::BASIC_INFO_KEY)?;
         let mut bind_addr = MATTER_SOCKET_BIND_ADDR;
         bind_addr.set_port(port);
         let socket = async_io::Async::<UdpSocket>::bind(bind_addr)
@@ -70,18 +71,27 @@ impl<'a> Bridge<'a> {
         let info = basic_info(self.identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, bound_port);
         let kv = matter.kv(store.clone());
+        // Validate every persisted protocol blob first (loads only). Then align
+        // the in-memory BasicInfoSettings to the committed root, start the
+        // interaction model, and persist the complete settings only after all
+        // protocol data has loaded; corruption never leaves a write behind.
         store.with_context("restore Matter data", matter.startup(&kv))?;
+        let settings = store.with_context(
+            "prepare the root ConfigurationVersion",
+            model::prepare_basic_info(&kv, root_version),
+        )?;
+        matter.with_state(|state| state.basic_info_settings = settings.clone());
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let handler = model::handler(&self.registry, &self.storage, store.clone(), crypto.rand()?)?;
+        let handler = model::handler_from(frozen, &self.storage, store.clone(), crypto.rand()?)?;
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         store.with_context("restore Matter model", im.startup().await)?;
-        // Initialize only after every existing blob has been restored successfully.
+        let persist_kv = matter.kv(store.clone());
         store.with_context(
-            "initialize the default Matter node label",
-            initialize_basic_info(&matter, &kv, missing_basic_info),
+            "persist the root ConfigurationVersion",
+            model::persist_basic_info(&persist_kv, &settings),
         )?;
         log::info!("Matter UDP listening on port {bound_port}");
         let responder = DefaultResponder::new(&im);

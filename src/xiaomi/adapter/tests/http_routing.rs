@@ -450,6 +450,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
                 cloud.read_values.insert(("one".into(), 7, 1), true);
             }
             c.context.reconcile("one").unwrap();
+            until(|| c.context.live.borrow().devices["one"].candidate.is_none()).await;
             assert_eq!(
                 c.context.live.borrow().devices["one"]
                     .admitted

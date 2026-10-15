@@ -6,7 +6,7 @@ use futures_lite::{future, io::BufReader};
 use migate::{
     RuntimeError,
     config::{AuthCommand, Command, Config},
-    runtime::{BridgeOptions, run_prepared_bridge, shutdown_signal},
+    runtime::{BridgeOptions, run_xiaomi_bridge, shutdown_signal},
     storage::{InstanceLock, Store, XiaomiStore},
     terminal::{self, AuthStatus},
     xiaomi::{
@@ -119,6 +119,7 @@ fn run_bridge(
     status.log(terminal::current_time());
     let (discovery, driver) = Discovery::start()?;
     let (adapter, ready) = XiaomiAdapter::new(store.clone(), cloud, discovery)?;
+    let source_handle = adapter.source_handle();
     future::block_on(async {
         let interrupt = async {
             let signal = shutdown_signal().await?;
@@ -135,14 +136,14 @@ fn run_bridge(
                 Err::<(), RuntimeError>("Gateway discovery ended unexpectedly".into())
             },
         );
-        run_prepared_bridge(
+        run_xiaomi_bridge(
             BridgeOptions {
                 store: &store,
                 identity: &identity,
                 status: &status,
                 port: matter_port,
             },
-            async { Ok(ready.wait().await?) },
+            async { Ok((source_handle, ready.wait().await?)) },
             networking,
             BufReader::new(blocking::Unblock::new(std::io::stdin())),
             blocking::Unblock::new(std::io::stdout()),

@@ -1,15 +1,13 @@
 use super::{
     model::{AdapterError, AdapterStatus, GatewayStatus, Ready, TopologyReady},
     runner::XiaomiAdapter,
-    state::{Backoff, Context, DeviceSlot, Live},
+    state::{Backoff, Context, DeviceSlot, GroupSource, Live},
     tasks::TaskSet,
 };
 use crate::{
     device::{Availability, DeviceRegistry, PhysicalDevice},
     storage::Store,
-    xiaomi::{
-        auth::AuthService, capability::is_light_group, cloud::CloudClient, discovery::Discovery,
-    },
+    xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
 };
 use event_listener::Event;
 use std::{
@@ -61,10 +59,49 @@ impl XiaomiAdapter {
         let registry = DeviceRegistry::new();
         let mut devices = BTreeMap::new();
         let mut consumers = Vec::new();
+        let mut restored_relations = Vec::new();
         if let Some(scope) = &scope {
-            for (metadata, stored) in store.devices().restore_cached(&scope.uid, &scope.home_id)? {
-                if is_light_group(&metadata.device.key, &metadata.model) {
-                    store.devices().remove(&metadata.device.key)?;
+            let saved = store.devices().load_publication(Some(scope))?;
+            restored_relations = saved.relations;
+            for relation in &mut restored_relations {
+                if let Some(revocation) = saved
+                    .revocations
+                    .iter()
+                    .find(|revocation| revocation.key.id == relation.group_did)
+                {
+                    relation.active = false;
+                    relation.error = Some(revocation.reason.clone());
+                }
+            }
+            let hidden = restored_relations
+                .iter()
+                .filter(|relation| {
+                    saved
+                        .records
+                        .iter()
+                        .any(|record| record.key.id == relation.group_did && record.published)
+                })
+                .flat_map(|relation| relation.members.iter().cloned())
+                .collect::<std::collections::BTreeSet<_>>();
+            for metadata in saved.cached {
+                let Some(stored) = saved
+                    .records
+                    .iter()
+                    .find(|stored| stored.key == metadata.device.key)
+                else {
+                    return Err(crate::storage::StorageError::new(
+                        store.path(),
+                        "restore source configuration",
+                        "Cached source has no reserved identity",
+                    )
+                    .into());
+                };
+                if saved
+                    .revocations
+                    .iter()
+                    .any(|revocation| revocation.key == stored.key)
+                    || (!stored.published && !hidden.contains(&stored.key.id))
+                {
                     continue;
                 }
                 let (physical, receivers) = PhysicalDevice::new(stored.description());
@@ -72,11 +109,30 @@ impl XiaomiAdapter {
                     .set_availability(Availability::Unavailable("restoring Xiaomi access".into()));
                 registry.insert(physical.clone());
                 let did = metadata.device.key.id.clone();
-                let slot = DeviceSlot::restored(metadata, physical);
+                let mut slot = DeviceSlot::restored(metadata, physical);
+                if let Some(group) = restored_relations
+                    .iter()
+                    .find(|group| group.group_did == did)
+                {
+                    let group = GroupSource {
+                        record_did: group.record_did.clone(),
+                        model: group.model.clone(),
+                        instance_type: group.instance_type.clone(),
+                        members: group.members.clone(),
+                        is_physical: group.is_physical,
+                        online: false,
+                    };
+                    slot.group = Some(group.clone());
+                    slot.effective_group = Some(group);
+                }
                 consumers.push((slot.admitted.as_ref().unwrap().clone(), receivers));
                 devices.insert(did, slot);
             }
         }
+        let relations = scope
+            .as_ref()
+            .map(|scope| super::relations::Relations::restored(scope, &restored_relations))
+            .unwrap_or_default();
         let ready = Rc::new(Ready::default());
         if scope.is_some() {
             ready.finish(Ok(registry.clone()));
@@ -86,7 +142,7 @@ impl XiaomiAdapter {
             commands: Rc::new(super::commands::Commands::default()),
             light_writes: super::commands::LightWriteGates::default(),
             watches: RefCell::new(super::watch::Watches::default()),
-            relations: RefCell::new(super::relations::Relations::default()),
+            relations: RefCell::new(relations),
             notifications: RefCell::new(None),
             credentials_changed: Event::new(),
             #[cfg(test)]
@@ -110,6 +166,9 @@ impl XiaomiAdapter {
             registry,
             store,
             tasks: TaskSet::default(),
+            configuration_changed: Event::new(),
+            #[cfg(test)]
+            snapshot_observer: RefCell::new(None),
             changed: Event::new(),
             status: RefCell::new(AdapterStatus {
                 authentication: report,

@@ -836,6 +836,8 @@ struct Observed {
     powers: std::collections::BTreeMap<u16, (u32, bool)>,
     parts: std::collections::BTreeMap<u16, Vec<u16>>,
     versions: std::collections::BTreeMap<u16, u32>,
+    bdbis: std::collections::BTreeMap<u16, (u32, u32)>,
+    roots: std::collections::BTreeMap<u16, (u32, u32)>,
     unsupported: Vec<u16>,
     lighting: std::collections::BTreeMap<(u16, u32, u32), (u32, u16)>,
 }
@@ -864,6 +866,18 @@ impl Observed {
                                         .collect(),
                                 );
                                 self.versions.insert(endpoint, data.data_ver.unwrap());
+                            }
+                            (Some(0x39), Some(24)) => {
+                                self.bdbis.insert(
+                                    endpoint,
+                                    (data.data_ver.unwrap(), data.data.u32().unwrap()),
+                                );
+                            }
+                            (Some(0x28), Some(24)) => {
+                                self.roots.insert(
+                                    endpoint,
+                                    (data.data_ver.unwrap(), data.data.u32().unwrap()),
+                                );
                             }
                             (Some(cluster @ (8 | 0x300)), Some(attribute)) => {
                                 self.lighting.insert(
@@ -993,18 +1007,47 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
     let crypto = test_only_crypto();
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
-    let registry = crate::device::DeviceRegistry::new();
-    let (single, _receivers) = super::physical("dynamic-single", false);
+    let scope = crate::storage::CachedScope {
+        uid: "u".into(),
+        home_id: "h".into(),
+        group_id: crate::xiaomi::cloud::group_id("u", "h"),
+    };
+    let (single, _single_receivers) = super::physical("dynamic-single", false);
     let (multi, _multi_receivers) = super::physical("dynamic-multi", true);
-    for device in [&single, &multi] {
-        device.set_availability(Availability::Available);
-        for function in device.functions() {
-            function.observe(false);
+    if boot == 1 {
+        for device in [&single, &multi] {
+            device.set_availability(Availability::Available);
+            for function in device.functions() {
+                function.observe(false);
+            }
+            store.devices().publish(&device.description()).unwrap();
         }
     }
-    if boot > 1 {
-        registry.insert(single.clone());
+    // Each boot serves exactly the committed published set, frozen.
+    let registry = crate::device::DeviceRegistry::new();
+    let mut single_physical = None;
+    let mut multi_physical = None;
+    let mut multi_stored = None;
+    for stored in store.devices().load_publication(None).unwrap().records {
+        if !stored.published {
+            continue;
+        }
+        let (physical, _receivers) = crate::device::PhysicalDevice::new(stored.description());
+        physical.set_availability(Availability::Available);
+        for function in physical.functions() {
+            function.observe(false);
+        }
+        registry.insert(physical.clone());
+        match stored.key.id.as_str() {
+            "dynamic-single" => single_physical = Some(physical),
+            "dynamic-multi" => {
+                multi_physical = Some(physical);
+                multi_stored = Some(stored);
+            }
+            _ => {}
+        }
     }
+    let single_physical = single_physical.unwrap();
     let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
@@ -1039,95 +1082,90 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
                 AttrPath::from_gp(&GenericPath::new(Some(0), Some(0x1d), Some(3))),
                 AttrPath::from_gp(&GenericPath::new(Some(1), Some(0x1d), Some(3))),
             ];
-            let (id, unique_id) = if boot == 1 {
-                let (initial, empty) = subscribe_paths(&client, &paths).await.unwrap();
-                wait_committed(&state).await;
-                assert!(empty.powers.is_empty());
-                assert_eq!(empty.parts[&0], [1]);
-                let before = empty.versions[&0];
-                store.devices().publish(&single.description()).unwrap();
-                registry.insert(single.clone());
-                let stored = store.devices().publish(&multi.description()).unwrap();
-                assert_eq!(stored.endpoint, 3);
-                registry.insert(multi.clone());
-                let added = receive_observed(&client, initial).await.unwrap();
-                assert_eq!(added.parts[&0], [1, 2, 3, 4, 5, 6]);
-                assert_eq!(added.parts[&1], [2, 3, 4, 5, 6]);
-                assert_eq!(added.versions[&0], before.wrapping_add(1));
-                assert!(added.powers.is_empty());
-                paths.insert(
-                    0,
-                    AttrPath::from_gp(&GenericPath::new(None, Some(6), Some(0))),
-                );
-                paths.push(AttrPath::from_gp(&GenericPath::new(
-                    Some(4),
-                    Some(6),
-                    Some(0),
-                )));
-                let (id, baseline) = subscribe_paths(&client, &paths).await.unwrap();
-                wait_committed(&state).await;
-                assert_eq!(
-                    baseline.powers.keys().copied().collect::<Vec<_>>(),
-                    [2, 4, 5, 6]
-                );
-                assert!(baseline.powers.values().all(|(_, power)| !power));
-                multi.function("usb").unwrap().observe(true);
-                let changed = receive_observed(&client, id).await.unwrap();
-                assert_eq!(
-                    changed.powers[&6],
-                    (baseline.powers[&6].0.wrapping_add(1), true)
-                );
-                assert!(!changed.powers.contains_key(&2));
-                wait_committed(&state).await;
-                store
-                    .devices()
-                    .set_device_label(&stored.key, "Named multi")
-                    .unwrap();
-                store.devices().remove(&stored.key).unwrap();
-                registry.remove(&stored.key);
-                let removed = receive_observed(&client, id).await.unwrap();
-                assert_eq!(removed.parts[&0], [1, 2]);
-                assert_eq!(removed.parts[&1], [2]);
-                assert_eq!(removed.unsupported, [4]);
-                assert!(
-                    !removed
-                        .powers
-                        .keys()
-                        .any(|endpoint| [4, 5, 6].contains(endpoint))
-                );
-                wait_committed(&state).await;
-                (id, stored.unique_id)
-            } else {
-                let (id, unique_id) = previous.unwrap();
-                let restored = receive_observed(&client, id).await.unwrap();
-                assert_eq!(restored.unsupported, [4]);
-                assert_eq!(restored.parts[&0], [1, 2]);
-                assert_eq!(restored.powers.keys().copied().collect::<Vec<_>>(), [2]);
-                wait_committed(&state).await;
-                let readded = store.devices().publish(&multi.description()).unwrap();
-                assert_eq!(readded.unique_id, unique_id);
-                assert_eq!(readded.endpoint, 3);
-                assert_eq!(readded.label, "Named multi");
-                let (multi, _receivers) = crate::device::PhysicalDevice::new(readded.description());
-                multi.set_availability(Availability::Available);
-                for function in multi.functions() {
-                    function.observe(false);
+            let (id, unique_id) = match boot {
+                1 => {
+                    let multi_physical = multi_physical.as_ref().unwrap();
+                    let multi_stored = multi_stored.clone().unwrap();
+                    let (_, first) = subscribe_paths(&client, &paths).await.unwrap();
+                    wait_committed(&state).await;
+                    assert!(first.powers.is_empty());
+                    assert_eq!(first.parts[&0], [1, 2, 3, 4, 5, 6]);
+                    assert_eq!(first.parts[&1], [2, 3, 4, 5, 6]);
+                    paths.insert(
+                        0,
+                        AttrPath::from_gp(&GenericPath::new(None, Some(6), Some(0))),
+                    );
+                    paths.push(AttrPath::from_gp(&GenericPath::new(
+                        Some(4),
+                        Some(6),
+                        Some(0),
+                    )));
+                    paths.push(AttrPath::from_gp(&GenericPath::new(
+                        Some(2),
+                        Some(0x39),
+                        Some(24),
+                    )));
+                    let (id, baseline) = subscribe_paths(&client, &paths).await.unwrap();
+                    wait_committed(&state).await;
+                    assert_eq!(
+                        baseline.powers.keys().copied().collect::<Vec<_>>(),
+                        [2, 4, 5, 6]
+                    );
+                    assert!(baseline.powers.values().all(|(_, power)| !power));
+                    assert_eq!(baseline.bdbis[&2].1, 1);
+                    multi_physical.function("usb").unwrap().observe(true);
+                    let changed = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        changed.powers[&6],
+                        (baseline.powers[&6].0.wrapping_add(1), true)
+                    );
+                    assert!(!changed.powers.contains_key(&2));
+                    wait_committed(&state).await;
+                    store
+                        .devices()
+                        .set_device_label(&multi_stored.key, "Named multi")
+                        .unwrap();
+                    commit_visibility(&store, &scope, "dynamic-multi", false, 2, 2);
+                    (id, multi_stored.unique_id.clone())
                 }
-                registry.insert(multi.clone());
-                let added = receive_observed(&client, id).await.unwrap();
-                assert_eq!(added.parts[&0], [1, 2, 3, 4, 5, 6]);
-                assert_eq!(added.powers.keys().copied().collect::<Vec<_>>(), [4, 5, 6]);
-                wait_committed(&state).await;
-                multi.function("outlet_1").unwrap().observe(true);
-                let changed = receive_observed(&client, id).await.unwrap();
-                assert_eq!(
-                    changed.powers[&4],
-                    (added.powers[&4].0.wrapping_add(1), true)
-                );
-                wait_committed(&state).await;
-                (id, readded.unique_id)
+                2 => {
+                    let (id, unique_id) = previous.unwrap();
+                    let restored = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(restored.unsupported, [4]);
+                    assert_eq!(restored.parts[&0], [1, 2]);
+                    assert_eq!(restored.parts[&1], [2]);
+                    assert_eq!(restored.powers.keys().copied().collect::<Vec<_>>(), [2]);
+                    wait_committed(&state).await;
+                    let readded = store.devices().publish(&multi.description()).unwrap();
+                    assert_eq!(readded.unique_id, unique_id);
+                    assert_eq!(readded.label, "Named multi");
+                    commit_visibility(&store, &scope, "dynamic-multi", true, 3, 3);
+                    (id, readded.unique_id)
+                }
+                _ => {
+                    let multi_physical = multi_physical.as_ref().unwrap();
+                    let (id, unique_id) = previous.unwrap();
+                    let added = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(added.parts[&0], [1, 2, 3, 4, 5, 6]);
+                    assert_eq!(added.parts[&1], [2, 3, 4, 5, 6]);
+                    assert_eq!(
+                        added.powers.keys().copied().collect::<Vec<_>>(),
+                        [2, 4, 5, 6]
+                    );
+                    assert!(!added.powers[&2].1);
+                    assert!(!added.powers[&4].1);
+                    wait_committed(&state).await;
+                    multi_physical.function("outlet_1").unwrap().observe(true);
+                    let changed = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        changed.powers[&4],
+                        (added.powers[&4].0.wrapping_add(1), true)
+                    );
+                    wait_committed(&state).await;
+                    (id, unique_id)
+                }
             };
-            single.functions()[0].observe(true);
+            single_physical.functions()[0].observe(true);
             let changed = receive_observed(&client, id).await.unwrap();
             assert!(changed.powers[&2].1);
             wait_committed(&state).await;
@@ -1151,6 +1189,35 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
     );
     id
 }
+
+fn commit_visibility(
+    store: &Store,
+    scope: &crate::storage::CachedScope,
+    id: &str,
+    published: bool,
+    version: u32,
+    root: u32,
+) {
+    let mut records = store.devices().load_publication(None).unwrap().records;
+    for record in &mut records {
+        if record.key.id == id {
+            record.published = published;
+            record.configuration_version = version;
+        }
+    }
+    store
+        .devices()
+        .apply_publication(&crate::storage::PublicationCommit {
+            scope: scope.clone(),
+            cached: Vec::new(),
+            records,
+            relations: Vec::new(),
+            root_version: root,
+            clear_revocations: Vec::new(),
+        })
+        .unwrap();
+}
+
 #[test]
 fn dynamic_subscription_reports_add_delete_and_restores_deleted_paths_after_restart() {
     std::thread::Builder::new()
@@ -1158,7 +1225,11 @@ fn dynamic_subscription_reports_add_delete_and_restores_deleted_paths_after_rest
         .spawn(|| {
             let directory = tempfile::tempdir().unwrap();
             let id = dynamic_boot(directory.path(), 1, None);
-            assert_eq!(dynamic_boot(directory.path(), 2, Some(id.clone())), id);
+            let (id, unique_id) = dynamic_boot(directory.path(), 2, Some(id));
+            assert_eq!(
+                dynamic_boot(directory.path(), 3, Some((id, unique_id))).0,
+                id
+            );
         })
         .unwrap()
         .join()
@@ -1486,6 +1557,160 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
                 .await;
             });
             protocol.check_failure().unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn frozen_light_boot(directory: &Path, boot: u16, previous: Option<u32>) -> (u32, Observed) {
+    let store = Store::open(directory).unwrap();
+    let identity = store.load_identity().unwrap();
+    let info = basic_info(&identity);
+    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    let protocol = StoreAdapter::new(store.matter());
+    let kv = matter.kv(protocol.clone());
+    matter.startup(&kv).unwrap();
+    let root_version = if boot == 1 { 1 } else { 2 };
+    let settings = model::prepare_basic_info(&kv, root_version).unwrap();
+    matter.with_state(|state| state.basic_info_settings = settings);
+    let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    connect(&matter, SERVER_ID, CLIENT_ID, boot + 30);
+    connect(&client, CLIENT_ID, SERVER_ID, boot + 30);
+    let crypto = test_only_crypto();
+    let buffers: MatterBuffers = MatterBuffers::new();
+    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let (device, _receiver) = super::support::light(false);
+    if boot == 1 {
+        device.set_availability(Availability::Available);
+        store.devices().publish(&device.description()).unwrap();
+    }
+    let stored = store
+        .devices()
+        .load_publication(None)
+        .unwrap()
+        .records
+        .into_iter()
+        .find(|record| record.published)
+        .unwrap();
+    let (physical, _receivers) = crate::device::PhysicalDevice::new(stored.description());
+    physical.set_availability(Availability::Available);
+    let registry = crate::device::DeviceRegistry::new();
+    registry.insert(physical);
+    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+    let incoming = Pipe::default();
+    let outgoing = Pipe::default();
+    let responder = DefaultResponder::new(&im);
+    let (id, observed) = block_on(async {
+        im.startup().await.unwrap();
+        let services = async {
+            or(
+                matter.run(
+                    &crypto,
+                    SendPipe(&outgoing),
+                    ReceivePipe(&incoming),
+                    NoNetwork,
+                ),
+                or(
+                    client.run(
+                        &crypto,
+                        SendPipe(&incoming),
+                        ReceivePipe(&outgoing),
+                        NoNetwork,
+                    ),
+                    or(responder.run::<4, 4>(), im.run()),
+                ),
+            )
+            .await
+            .unwrap();
+            panic!("frozen light services exited");
+        };
+        let controller = async {
+            let paths = [
+                (Some(0), 0x28, Some(24)),
+                (None, 0x39, Some(24)),
+                (None, 0x300, Some(0x400b)),
+                (None, 0x300, Some(0x400c)),
+            ]
+            .map(|(endpoint, cluster, attr)| {
+                AttrPath::from_gp(&GenericPath::new(endpoint, Some(cluster), attr))
+            });
+            match boot {
+                1 => {
+                    let (id, initial) = subscribe_paths(&client, &paths).await.unwrap();
+                    wait_committed(&state).await;
+                    (id, initial)
+                }
+                _ => {
+                    let id = previous.unwrap();
+                    let changed = receive_observed(&client, id).await.unwrap();
+                    wait_committed(&state).await;
+                    (id, changed)
+                }
+            }
+        };
+        or(
+            services,
+            or(controller, async {
+                async_io::Timer::after(Duration::from_secs(5)).await;
+                panic!("frozen light boot {boot} timed out");
+            }),
+        )
+        .await
+    });
+    if boot == 1 {
+        // Commit the fixed change between instances: narrower CT bounds, a
+        // bumped endpoint version and a bumped root version.
+        let mut updated = stored.clone();
+        updated.configuration_version = 2;
+        updated.functions[0].capabilities[2] =
+            crate::device::Capability::ColorTemperature(crate::device::NumericRange {
+                min: 3000,
+                max: 4000,
+                step: 1,
+            });
+        let scope = crate::storage::CachedScope {
+            uid: "u".into(),
+            home_id: "h".into(),
+            group_id: crate::xiaomi::cloud::group_id("u", "h"),
+        };
+        store
+            .devices()
+            .apply_publication(&crate::storage::PublicationCommit {
+                scope,
+                cached: Vec::new(),
+                records: vec![updated],
+                relations: Vec::new(),
+                root_version: 2,
+                clear_revocations: Vec::new(),
+            })
+            .unwrap();
+    }
+    protocol.check_failure().unwrap();
+    (id, observed)
+}
+
+#[test]
+fn frozen_light_report_action_carries_root_bdbi_and_changed_bounds() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let (subscription, before) = frozen_light_boot(directory.path(), 1, None);
+            assert_eq!(before.roots[&0].1, 1);
+            assert_eq!(before.bdbis[&2].1, 1);
+            assert_eq!(before.lighting[&(2, 0x300, 0x400b)].1, 154);
+            assert_eq!(before.lighting[&(2, 0x300, 0x400c)].1, 370);
+
+            let (_, after) = frozen_light_boot(directory.path(), 2, Some(subscription));
+            // One real ReportDataAction (fragments permitted) carries the
+            // committed root, frozen endpoint version and changed effective
+            // bounds coherently through the protocol.
+            assert_eq!(after.roots[&0].1, 2);
+            assert_eq!(after.bdbis[&2].1, 2);
+            assert_eq!(after.lighting[&(2, 0x300, 0x400b)].1, 250);
+            assert_eq!(after.lighting[&(2, 0x300, 0x400c)].1, 333);
         })
         .unwrap()
         .join()

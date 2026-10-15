@@ -27,6 +27,7 @@ pub(super) struct BridgedHandler {
     protocol: super::storage::StoreAdapter,
     dataver: Dataver,
     identity: String,
+    configuration_version: u32,
     reported: std::cell::Cell<bool>,
 }
 
@@ -46,6 +47,7 @@ impl BridgedHandler {
             protocol,
             dataver,
             identity: stored.unique_id.clone(),
+            configuration_version: stored.configuration_version,
             reported,
         }
     }
@@ -54,9 +56,9 @@ impl BridgedHandler {
 impl bridged::ClusterHandler for BridgedHandler {
     const CLUSTER: Cluster<'static> = bridged::FULL_CLUSTER
         .with_features(0)
-        .with_attrs(
-            with!(required; bridged::AttributeId::UniqueID | bridged::AttributeId::NodeLabel),
-        )
+        .with_attrs(with!(required; bridged::AttributeId::UniqueID
+                | bridged::AttributeId::NodeLabel
+                | bridged::AttributeId::ConfigurationVersion))
         .with_cmds(with!())
         .with_events(with!(bridged::EventId::ReachableChanged));
 
@@ -104,6 +106,11 @@ impl bridged::ClusterHandler for BridgedHandler {
         builder: Utf8StrBuilder<P>,
     ) -> Result<P, Error> {
         builder.set(&self.device.label())
+    }
+
+    /// Frozen for this instance: exactly the committed endpoint version.
+    fn configuration_version(&self, _ctx: impl ReadContext) -> Result<u32, Error> {
+        Ok(self.configuration_version)
     }
 
     fn set_node_label(&self, ctx: impl WriteContext, value: Utf8Str<'_>) -> Result<(), Error> {

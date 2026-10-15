@@ -635,28 +635,82 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
 }
 
 #[test]
-fn light_rebuild_retains_endpoint_and_refreshes_temperature_bounds_and_versions() {
-    setup_light!(false, device, receiver, registry, handler, ctx);
+fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let identity = store.load_identity().unwrap();
+    let (device, mut receiver) = crate::matter::tests::support::light(false);
+    let registry = crate::matter::tests::support::test_registry(&store, &device);
+    let handler = model::handler(
+        &registry,
+        &store,
+        StoreAdapter::new(store.matter()),
+        rand::rng(),
+    )
+    .unwrap();
+    let info = basic_info(&identity);
+    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    let buffers: MatterBuffers = MatterBuffers::new();
+    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
+    let kv = matter.kv(StoreAdapter::new(store.matter()));
+    let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+    let mut ctx = Context::new(&im, 8, 0);
     device.set_availability(Availability::Available);
     block_on(async {
         ctx.attribute = attr(0x300, 0x400b);
         let mut run = pin!(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         let before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
+        let descriptor_before = report_dataver(
+            &read_bytes(&handler, &Context::at(&im, 2, 0x1d, 3))
+                .await
+                .unwrap(),
+        );
+        let bridged_before = report_dataver(
+            &read_bytes(&handler, &Context::at(&im, 2, 0x39, 24))
+                .await
+                .unwrap(),
+        );
         assert_eq!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
                 .u16()
                 .unwrap(),
             154
         );
-        let mut description = device.description();
-        description.functions[0].capabilities[2] =
+
+        // Commit a fixed change: narrower CT bounds and a bumped endpoint
+        // version. The running frozen instance must not notice it.
+        let stored = store
+            .devices()
+            .load_published(device.key())
+            .unwrap()
+            .unwrap();
+        let mut updated = stored.clone();
+        updated.configuration_version = 2;
+        updated.functions[0].capabilities[2] =
             crate::device::Capability::ColorTemperature(crate::device::NumericRange {
                 min: 3000,
                 max: 4000,
                 step: 1,
             });
-        let (replacement, _receivers) = crate::device::PhysicalDevice::new(description);
+        let root_version = store.devices().load_publication(None).unwrap().root_version;
+        store
+            .devices()
+            .apply_publication(&crate::storage::PublicationCommit {
+                scope: crate::storage::CachedScope {
+                    uid: "u1".into(),
+                    home_id: "h1".into(),
+                    group_id: crate::xiaomi::cloud::group_id("u1", "h1"),
+                },
+                cached: Vec::new(),
+                records: vec![updated.clone()],
+                relations: Vec::new(),
+                root_version: root_version + 1,
+                clear_revocations: Vec::new(),
+            })
+            .unwrap();
+        let (replacement, _receivers) = crate::device::PhysicalDevice::new(updated.description());
         replacement.set_availability(Availability::Available);
         registry.remove(device.key()).unwrap();
         registry.insert(replacement);
@@ -665,14 +719,95 @@ fn light_rebuild_retains_endpoint_and_refreshes_temperature_bounds_and_versions(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
                 .u16()
                 .unwrap(),
-            250
+            154
         );
-        assert_ne!(
+        assert_eq!(
             report_dataver(&read_bytes(&handler, &ctx).await.unwrap()),
             before
         );
+        assert_eq!(
+            report_dataver(
+                &read_bytes(&handler, &Context::at(&im, 2, 0x1d, 3))
+                    .await
+                    .unwrap()
+            ),
+            descriptor_before
+        );
+        assert_eq!(
+            report_dataver(
+                &read_bytes(&handler, &Context::at(&im, 2, 0x39, 24))
+                    .await
+                    .unwrap()
+            ),
+            bridged_before
+        );
         handler.access(|node| assert!(node.endpoints.iter().any(|e| e.id == 2)));
         assert!(receiver.next_operation().await.is_none());
+
+        // The next frozen instance reads the committed bounds and the frozen
+        // endpoint version from BDBI and the Descriptor cluster. Its root
+        // catches up through the same pre-startup alignment the bridge uses.
+        let settings = model::prepare_basic_info(&kv, root_version + 1).unwrap();
+        matter.with_state(|state| state.basic_info_settings = settings);
+        let replacement_handler = model::handler(
+            &registry,
+            &store,
+            StoreAdapter::new(store.matter()),
+            rand::rng(),
+        )
+        .unwrap();
+        let replacement_im = InteractionModel::new(
+            &matter,
+            &crypto,
+            &buffers,
+            &replacement_handler,
+            &kv,
+            &state,
+        );
+        let mut replacement_ctx = Context::new(&replacement_im, 8, 0);
+        replacement_ctx.attribute = attr(0x300, 0x400b);
+        assert_eq!(
+            report_value(
+                &read_bytes(&replacement_handler, &replacement_ctx)
+                    .await
+                    .unwrap()
+            )
+            .u16()
+            .unwrap(),
+            250
+        );
+        // Live-state DataVersions are independent per instance: the new
+        // instance must not reuse the old instance's numbers even when the
+        // fixed ConfigurationVersion is unchanged or bumped.
+        assert_ne!(
+            report_dataver(
+                &read_bytes(&replacement_handler, &replacement_ctx)
+                    .await
+                    .unwrap()
+            ),
+            before
+        );
+        let version = read_bytes(
+            &replacement_handler,
+            &Context::at(&replacement_im, 2, 0x39, 24),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report_value(&version).u32().unwrap(), 2);
+        assert_ne!(report_dataver(&version), bridged_before);
+        let descriptor = read_bytes(
+            &replacement_handler,
+            &Context::at(&replacement_im, 2, 0x1d, 3),
+        )
+        .await
+        .unwrap();
+        assert_ne!(report_dataver(&descriptor), descriptor_before);
+        // The root BasicInfo ConfigurationVersion catches up to the committed
+        // publication root through the same state the attribute serves.
+        assert_eq!(
+            matter.with_state(|state| state.basic_info_settings.configuration_version),
+            2
+        );
     });
 }
 

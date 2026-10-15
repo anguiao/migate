@@ -10,6 +10,7 @@ mod membership;
 mod model;
 mod notifications;
 mod observations;
+pub(crate) mod publication;
 mod refresh;
 mod relations;
 mod routing;
@@ -23,6 +24,7 @@ pub use model::{
     AdapterError, AdapterStatus, ChannelCommands, CommandStatus, CommandTarget, DeviceStatus,
     GatewayStatus, PathKind, PendingDevice, RecoveryStatus, RoutingStatus, TopologyReady,
 };
+pub use publication::SourceHandle;
 pub use routing::PathPriority;
 pub use runner::XiaomiAdapter;
 

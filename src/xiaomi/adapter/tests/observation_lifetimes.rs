@@ -276,9 +276,16 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
                     .unwrap()
                     .candidate = Some((candidate, None));
                 control.context.reconcile("multi").unwrap();
+                until(|| {
+                    control.context.live.borrow().devices["multi"]
+                        .candidate
+                        .is_none()
+                })
+                .await;
             }
             assert_eq!(work.record.binding_generation.get(), generation + 2);
             assert!(work.subscribed.borrow().is_empty());
+            let current_work = device_work(control, "multi");
             advance_to(
                 &control.clock,
                 control.clock.now() + Duration::from_millis(10),
@@ -300,7 +307,7 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
             let one = function(&control.context.registry, "one", "main");
             peer.notify("one", 2, true);
             until(|| one.snapshot().power == Power::On).await;
-            assert!(!work.subscribed.borrow().contains(&(3, 1)));
+            assert!(!current_work.subscribed.borrow().contains(&(3, 1)));
 
             let index = peer
                 .state
@@ -314,9 +321,13 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
                 current.pkid,
                 vec![SubscribeReasonCode::QoS2],
             )));
-            until(|| work.subscribed.borrow().len() == 4).await;
-            assert!(work.subscribed.borrow().contains(&(3, 1)));
-            assert!(Rc::ptr_eq(&work, &device_work(control, "multi")));
+            until(|| current_work.subscribed.borrow().len() == 4).await;
+            assert!(current_work.subscribed.borrow().contains(&(3, 1)));
+            assert!(
+                work.record
+                    .physical
+                    .same_instance(&current_work.record.physical)
+            );
         })
         .await;
     }));

@@ -38,6 +38,12 @@ fn replacing_a_binding_clears_its_previous_subscription_failure() {
                 .unwrap()
                 .candidate = Some((replacement, None));
             control.context.reconcile("one").unwrap();
+            until(|| {
+                control.context.live.borrow().devices["one"]
+                    .candidate
+                    .is_none()
+            })
+            .await;
             assert!(
                 control
                     .context
@@ -296,34 +302,43 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
 }
 
 #[test]
-fn publication_database_failures_are_fatal_and_do_not_publish_partial_topology() {
+fn publication_database_failure_keeps_the_complete_cached_configuration() {
     let rig = Rig::new(true, &["one"]);
     let store = rig.store.clone();
     rig.cloud.lock().unwrap().members = vec!["one".into(), "multi".into()];
     rusqlite::Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER fail_multi BEFORE INSERT ON device_function WHEN NEW.device_id='multi' BEGIN SELECT RAISE(ABORT,'publication failed'); END;").unwrap();
-    let error = block_on(rig.run_result(|c| async move {
+    block_on(rig.run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        c.peer(peer, |_| future::pending()).await;
-    }))
-    .unwrap_err();
-    assert!(matches!(error, AdapterError::Storage(_)));
-    assert!(
-        store
-            .devices()
-            .load_published(&DeviceKey::new("xiaomi", "multi"))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
-            .devices()
-            .load_parsed(
-                &store.xiaomi().load().unwrap().unwrap().uid,
-                "local",
-                &DeviceKey::new("xiaomi", "multi")
-            )
-            .unwrap()
-            .is_none()
-    );
+        let control = &c;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| control.publication.failure().is_some()).await;
+            assert_eq!(control.context.registry.list().len(), 1);
+            assert!(
+                control
+                    .store
+                    .devices()
+                    .load_published(&DeviceKey::new("xiaomi", "multi"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                control
+                    .store
+                    .devices()
+                    .load_parsed(
+                        &control.data[0].uid,
+                        "local",
+                        &DeviceKey::new("xiaomi", "multi")
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            function(&control.context.registry, "one", "main")
+                .execute(Command::On)
+                .await
+                .unwrap();
+        })
+        .await;
+    }));
 }

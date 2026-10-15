@@ -324,17 +324,6 @@ impl DeviceWork {
         }
         Ok(())
     }
-    pub(super) fn bindings_changed(&self) {
-        self.active.borrow_mut().take();
-        self.local_disconnected();
-        self.cloud_disconnected();
-        self.subscribe_requested.set(true);
-        self.refresh_pending.borrow_mut().clear();
-        self.dirty_again.borrow_mut().clear();
-        self.read_problems.borrow_mut().clear();
-        self.source_changed();
-        self.changed.notify(usize::MAX);
-    }
     pub(super) fn bindings(&self) -> Vec<PropertyBinding> {
         let mut values = self
             .record

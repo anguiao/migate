@@ -164,7 +164,23 @@ impl PhysicalDevice {
             revision: self.inner.state.lock().unwrap().revision,
         }
     }
-    pub(super) fn close(&self) {
+    /// Cancel light actions and unsent frames without closing live consumers.
+    pub(crate) fn reset_actions(&self) {
+        for function in self.functions.iter() {
+            let mut state = function.0.state.lock().unwrap();
+            if let Some(coordinator) = state.light_commands.as_mut() {
+                let error = super::CommandError::Cancelled;
+                coordinator.cancel_all(error.clone());
+                state.queue.invalidate_light_power(error.clone());
+                for completion in state.queue.drain_pending() {
+                    completion.finish(Err(error.clone()));
+                }
+                function.notify_light_actions();
+            }
+        }
+    }
+
+    pub(crate) fn close(&self) {
         for function in self.functions.iter() {
             function.close();
         }

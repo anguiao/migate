@@ -22,9 +22,6 @@ impl StoreAdapter {
             failed: Event::new(),
         }))
     }
-    pub fn storage(&self) -> &MatterStore {
-        &self.0.store
-    }
     pub(super) fn record<T>(&self, result: Result<T, StorageError>) -> Result<T, Error> {
         result.map_err(|error| {
             self.0.failure.borrow_mut().get_or_insert(error);

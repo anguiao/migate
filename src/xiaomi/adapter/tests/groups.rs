@@ -1,4 +1,5 @@
 use super::*;
+use std::cell::Cell;
 
 fn group_record(record_did: &str, group_did: &str, members: &[&str], physical: bool) -> Value {
     let member_ship = members
@@ -21,6 +22,52 @@ fn group_record(record_did: &str, group_did: &str, members: &[&str], physical: b
             }
         }
     })
+}
+
+#[test]
+fn native_group_publication_preserves_complete_configuration_on_storage_failure() {
+    let rig = Rig::new(false, &["one"]);
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/group3-instance.json"
+    ))
+    .unwrap();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.members.push("member-new".into());
+        cloud
+            .catalog_instances
+            .insert(instance["type"].as_str().unwrap().into(), instance);
+        cloud.catalog_groups = vec![group_record("record-1", "group-1", &["one"], false)];
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| c.context.registry.get(&DeviceKey::new("xiaomi", "group-1")).is_some()).await;
+        let key = DeviceKey::new("xiaomi", "group-1");
+        let committed = c.store.devices().load_published(&key).unwrap()
+            .expect("native admission must use the complete configuration commit");
+        let scope = c.context.live.borrow().scope.clone().unwrap();
+        let old = c.store.devices().load_publication(Some(&scope)).unwrap();
+        assert!(old.cached.iter().any(|cached| cached.device.key == key));
+        assert_eq!(old.relations[0].members, ["one"]);
+        assert!(c.store.devices().load_published(&DeviceKey::new("xiaomi", "one")).unwrap().is_none(), "a member of a published group must be hidden");
+
+        let db = rusqlite::Connection::open(c.store.path()).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_configuration BEFORE INSERT ON native_group_member WHEN NEW.member_did = 'member-new' BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        // A newly confirmed member changes the candidate relation; the serving
+        // source, identity and repair inputs must remain on the old full view.
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.catalog_groups = vec![group_record("record-1", "group-1", &["one", "member-new"], false)];
+        }
+        c.context.request_sync();
+        until(|| c.context.relations.borrow().member_watches().contains_key("member-new")).await;
+        until(|| c.publication.failure().is_some()).await;
+        assert_eq!(c.context.live.borrow().devices["group-1"].effective_group.as_ref().unwrap().members, ["one"]);
+        let saved = c.store.devices().load_publication(Some(&scope)).unwrap();
+        assert_eq!(saved.root_version, old.root_version);
+        assert_eq!(saved.relations[0].members, old.relations[0].members);
+        assert_eq!(c.store.devices().load_published(&key).unwrap().unwrap().unique_id, committed.unique_id);
+    }));
 }
 
 #[test]
@@ -609,5 +656,719 @@ fn withdrawn_native_group_clears_retained_view_and_retires_own_subscriptions() {
             ));
         })
         .await;
+    }));
+}
+
+fn free_udp_port() -> u16 {
+    std::net::UdpSocket::bind(std::net::SocketAddrV6::new(
+        std::net::Ipv6Addr::UNSPECIFIED,
+        0,
+        0,
+        0,
+    ))
+    .unwrap()
+    .local_addr()
+    .unwrap()
+    .port()
+}
+
+fn runtime_socket_live(port: u16) -> bool {
+    std::net::UdpSocket::bind(std::net::SocketAddrV6::new(
+        std::net::Ipv6Addr::UNSPECIFIED,
+        port,
+        0,
+        0,
+    ))
+    .is_err()
+}
+
+#[test]
+fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state() {
+    let rig = Rig::new(false, &["one", "two"]);
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/group3-instance.json"
+    ))
+    .unwrap();
+    let urn = instance["type"].as_str().unwrap().to_string();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.catalog_instances.insert(urn, instance);
+        cloud.catalog_groups = vec![group_record("record-1", "group-1", &["one"], false)];
+        cloud.online.insert("two".into());
+        for (piid, value) in [(1, json!(false)), (2, json!(50)), (3, json!(3000))] {
+            cloud.raw_values.insert(("group-1".into(), 2, piid), value);
+        }
+    }
+    block_on(rig.run_result_without_publication(|c| async move {
+        c.announce();
+        until(|| {
+            c.context
+                .relations
+                .borrow()
+                .member_watches()
+                .contains_key("one")
+        })
+        .await;
+        let port = free_udp_port();
+        let store = c.store.clone();
+        let identity = store.load_identity().unwrap();
+        let report = crate::xiaomi::auth::AuthReport::for_test(
+            crate::xiaomi::auth::AuthenticationState::NotSignedIn,
+            None,
+            crate::xiaomi::auth::CertificateUpdate::NotNeeded,
+            0,
+        );
+        let status = crate::terminal::AuthStatus::new(report, "/bin/migate".into(), "/data".into());
+        let handle = crate::xiaomi::adapter::SourceHandle(c.context.clone());
+        let registry = handle.registry();
+        let options = crate::runtime::BridgeOptions {
+            store: &store,
+            identity: &identity,
+            status: &status,
+            port,
+        };
+        let runtime = crate::runtime::run_xiaomi_bridge(
+            options,
+            async move { Ok((handle, registry)) },
+            future::pending::<Result<(), crate::RuntimeError>>(),
+            &b""[..],
+            Vec::new(),
+            future::pending::<Result<(), crate::RuntimeError>>(),
+            |_| Ok(()),
+        );
+        let assertions = async {
+            let group = DeviceKey::new("xiaomi", "group-1");
+            let two = DeviceKey::new("xiaomi", "two");
+            until(|| store.devices().load_published(&group).unwrap().is_some()).await;
+            until(|| runtime_socket_live(port)).await;
+            let publication = status.publication().expect("runtime publication");
+            let root_before = publication.current().root_version;
+            let group_before = store.devices().load_published(&group).unwrap().unwrap();
+            let two_before = publication.current().published.get(&two).unwrap();
+
+            // A small cfg(test) observer records whether the real UDP socket was
+            // free at each snapshot and can inject a late confirmed candidate.
+            let observations = Rc::new(RefCell::new(Vec::new()));
+            let injected = Rc::new(Cell::new(false));
+            let inject_enabled = Rc::new(Cell::new(false));
+            {
+                let weak = Rc::downgrade(&c.context);
+                let observations = observations.clone();
+                let injected = injected.clone();
+                let inject_enabled = inject_enabled.clone();
+                *c.context.snapshot_observer.borrow_mut() = Some(Box::new(move || {
+                    let Some(context) = weak.upgrade() else {
+                        return;
+                    };
+                    let free = !runtime_socket_live(port);
+                    observations.borrow_mut().push(free);
+                    if inject_enabled.get() && free && !injected.get() {
+                        injected.set(true);
+                        let mut live = context.live.borrow_mut();
+                        if let Some(slot) = live.devices.get_mut("group-1") {
+                            let mut cached = slot
+                                .candidate
+                                .clone()
+                                .map(|(cached, _)| cached)
+                                .or_else(|| {
+                                    slot.admitted
+                                        .as_ref()
+                                        .map(|record| record.cached.borrow().clone())
+                                })
+                                .unwrap();
+                            for capability in
+                                &mut cached.device.functions[0].description.capabilities
+                            {
+                                if let crate::device::Capability::ColorTemperature(range) =
+                                    capability
+                                {
+                                    *range = crate::device::NumericRange {
+                                        min: 2700,
+                                        max: 6500,
+                                        step: 1,
+                                    };
+                                }
+                            }
+                            if let Some(temperature) = cached.device.functions[0]
+                                .lighting
+                                .as_mut()
+                                .and_then(|lighting| lighting.temperature.as_mut())
+                            {
+                                temperature.range = crate::device::NumericRange {
+                                    min: 2700,
+                                    max: 6500,
+                                    step: 1,
+                                };
+                            }
+                            slot.prepared = None;
+                            slot.candidate = Some((cached, None));
+                            slot.confirmed = true;
+                        }
+                    }
+                }));
+            }
+
+            // Phase 1: a pure relation change rebuilds but must not bump any
+            // configuration version.
+            c.cloud.lock().unwrap().members.push("member-a".into());
+            c.cloud.lock().unwrap().catalog_groups = vec![group_record(
+                "record-1",
+                "group-1",
+                &["one", "member-a"],
+                false,
+            )];
+            c.context.request_sync();
+            until(|| {
+                store
+                    .devices()
+                    .load_publication(c.context.live.borrow().scope.as_ref())
+                    .unwrap()
+                    .relations
+                    .first()
+                    .is_some_and(|relation| relation.members.iter().any(|m| m == "member-a"))
+            })
+            .await;
+            until(|| runtime_socket_live(port)).await;
+            assert!(!injected.get());
+            assert!(observations.borrow().iter().any(|free| *free));
+            assert_eq!(publication.current().root_version, root_before);
+            let group_after_relation = store.devices().load_published(&group).unwrap().unwrap();
+            assert_eq!(
+                group_after_relation.configuration_version,
+                group_before.configuration_version
+            );
+            // The unchanged outlet keeps serving through the rebuild.
+            let two_after_relation = publication.current().published.get(&two).unwrap();
+            assert!(two_before.same_instance(&two_after_relation));
+            assert_eq!(two_before.label(), two_after_relation.label());
+
+            // A real active group light action is cancelled when the runner is
+            // dropped for the next rebuild.
+            let (id, _) = {
+                let live = c.context.live.borrow();
+                let record = live.devices["group-1"].admitted.as_ref().unwrap();
+                let cached = record.cached.borrow();
+                let light = cached
+                    .device
+                    .functions
+                    .iter()
+                    .find(|function| function.lighting.is_some())
+                    .unwrap();
+                (light.description.id.clone(), light.power)
+            };
+            let light = function(&c.context.registry, "group-1", &id);
+            let action = light
+                .begin_light_action(
+                    crate::device::LightDimension::Brightness,
+                    crate::device::LightTarget {
+                        power: Some(true),
+                        brightness_percent: Some(70.0),
+                        ..Default::default()
+                    },
+                    false,
+                )
+                .unwrap();
+            action.accepted().await.unwrap();
+            let token = action.token();
+            assert!(light.light_action_current(token));
+
+            // Phase 2: the relation returns to its confirmed members while the
+            // late native range candidate changes the published fixed shape.
+            inject_enabled.set(true);
+            c.cloud.lock().unwrap().catalog_groups =
+                vec![group_record("record-1", "group-1", &["one"], false)];
+            c.context.request_sync();
+            until(|| publication.current().root_version > root_before).await;
+            assert!(
+                !light.light_action_current(token),
+                "the rebuild cancelled the active light action"
+            );
+            until(|| runtime_socket_live(port)).await;
+            assert!(injected.get());
+            assert!(publication.failure().is_none());
+            assert_eq!(publication.current().root_version, root_before + 1);
+            let group_after_bounds = store.devices().load_published(&group).unwrap().unwrap();
+            assert_eq!(
+                group_after_bounds.configuration_version,
+                group_before.configuration_version + 1
+            );
+            assert_eq!(group_after_bounds.unique_id, group_before.unique_id);
+            assert_eq!(group_after_bounds.endpoint, group_before.endpoint);
+
+            // The unchanged outlet still accepts real control after the
+            // rebuild: an On/Off round trip reaches the source as property
+            // writes for did "two".
+            let two_id = {
+                let live = c.context.live.borrow();
+                let record = live.devices["two"].admitted.as_ref().unwrap();
+                record.cached.borrow().device.functions[0]
+                    .description
+                    .id
+                    .clone()
+            };
+            let outlet = function(&c.context.registry, "two", &two_id);
+            c.cloud.lock().unwrap().property_writes.clear();
+            outlet.execute(crate::device::Command::On).await.unwrap();
+            until(|| {
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .property_writes
+                    .iter()
+                    .any(|(did, _, _, value, _)| did == "two" && *value)
+            })
+            .await;
+            outlet.execute(crate::device::Command::Off).await.unwrap();
+            until(|| {
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .property_writes
+                    .iter()
+                    .any(|(did, _, _, value, _)| did == "two" && !*value)
+            })
+            .await;
+
+            // Ordinary state changes do not rebuild or touch the socket.
+            let snapshots = observations.borrow().len();
+            let root_settled = publication.current().root_version;
+            light
+                .observe_light(crate::device::LightPatch {
+                    power: Some(true),
+                    ..Default::default()
+                })
+                .unwrap();
+            c.context.changed.notify(usize::MAX);
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(observations.borrow().len(), snapshots);
+            assert_eq!(publication.current().root_version, root_settled);
+            assert!(runtime_socket_live(port));
+
+            // A failed save keeps the whole committed configuration and only
+            // records the retryable failure.
+            let db = rusqlite::Connection::open(store.path()).unwrap();
+            db.execute_batch(
+                "CREATE TRIGGER fail_identity BEFORE UPDATE ON device_identity
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+            c.cloud.lock().unwrap().catalog_groups = vec![group_record(
+                "record-1",
+                "group-1",
+                &["one", "member-a"],
+                false,
+            )];
+            c.context.request_sync();
+            until(|| publication.failure().is_some()).await;
+            assert_eq!(publication.current().root_version, root_settled);
+            let group_after_failure = store.devices().load_published(&group).unwrap().unwrap();
+            assert_eq!(
+                group_after_failure.configuration_version,
+                group_after_bounds.configuration_version
+            );
+            assert_eq!(group_after_failure.unique_id, group_before.unique_id);
+            assert_eq!(group_after_failure.endpoint, group_before.endpoint);
+
+            Ok::<(), crate::RuntimeError>(())
+        };
+        future::or(runtime, assertions).await.unwrap();
+    }))
+    .unwrap();
+}
+
+#[test]
+fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
+    let rig = Rig::new(false, &["one"]);
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/group3-instance.json"
+    ))
+    .unwrap();
+    let urn = instance["type"].as_str().unwrap().to_string();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.catalog_instances.insert(urn, instance);
+        cloud.catalog_groups = vec![group_record("record-1", "group-1", &["one"], false)];
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let store = c.store.clone();
+        let group = DeviceKey::new("xiaomi", "group-1");
+        let one = DeviceKey::new("xiaomi", "one");
+        until(|| {
+            c.context
+                .relations
+                .borrow()
+                .member_watches()
+                .contains_key("one")
+        })
+        .await;
+        until(|| c.store.devices().load_published(&group).unwrap().is_some()).await;
+        until(|| c.publication.current().published.get(&group).is_some()).await;
+        let group_before = store.devices().load_published(&group).unwrap().unwrap();
+        let group_physical = c.publication.current().published.get(&group).unwrap();
+
+        // The real complete-catalog deletion closes the retained authority and
+        // writes its tombstone while the identity update keeps failing.
+        let db = rusqlite::Connection::open(store.path()).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fail_identity BEFORE UPDATE ON device_identity
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .unwrap();
+        c.cloud.lock().unwrap().catalog_groups = vec![];
+        c.context.request_sync();
+        until(|| {
+            store
+                .devices()
+                .load_publication(None)
+                .unwrap()
+                .revocations
+                .iter()
+                .any(|revocation| revocation.key == group)
+        })
+        .await;
+        assert!(matches!(
+            group_physical.availability(),
+            crate::device::Availability::Unavailable(_)
+        ));
+        assert!(
+            group_physical.functions()[0]
+                .execute(crate::device::Command::On)
+                .await
+                .is_err()
+        );
+        let saved = store.devices().load_publication(None).unwrap();
+        assert!(saved.revocations.iter().any(|revocation| {
+            revocation.key == group && revocation.reason == "native group withdrawn"
+        }));
+        assert!(
+            saved
+                .records
+                .iter()
+                .any(|record| record.key == group && record.published)
+        );
+
+        // A real startup while the save still fails must error before it ever
+        // binds or serves the revoked endpoint.
+        let identity = store.load_identity().unwrap();
+        let report = crate::xiaomi::auth::AuthReport::for_test(
+            crate::xiaomi::auth::AuthenticationState::NotSignedIn,
+            None,
+            crate::xiaomi::auth::CertificateUpdate::NotNeeded,
+            0,
+        );
+        let status = crate::terminal::AuthStatus::new(report, "/bin/migate".into(), "/data".into());
+        let startup_port = free_udp_port();
+        let failing = XiaomiAdapter::build(
+            store.clone(),
+            c.context.cloud.clone(),
+            c.discovery.clone(),
+            c.context.clock.clone(),
+        )
+        .unwrap()
+        .0;
+        let failing_handle = crate::xiaomi::adapter::SourceHandle(failing.context.clone());
+        let failing_registry = failing_handle.registry();
+        let error = crate::runtime::run_xiaomi_bridge(
+            crate::runtime::BridgeOptions {
+                store: &store,
+                identity: &identity,
+                status: &status,
+                port: startup_port,
+            },
+            async move { Ok((failing_handle, failing_registry)) },
+            future::pending::<Result<(), crate::RuntimeError>>(),
+            &b""[..],
+            Vec::new(),
+            future::pending::<Result<(), crate::RuntimeError>>(),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("commit published configuration"),
+            "{error}"
+        );
+        assert!(!runtime_socket_live(startup_port));
+
+        // Once the save can succeed, a fresh restart applies the bootstrap
+        // revocation overlay without reviving the group; the hidden member
+        // returns with unknown state and the identity stays reserved. The
+        // whole recovery stays synchronous so the running applier cannot
+        // interleave.
+        let db = rusqlite::Connection::open(store.path()).unwrap();
+        db.execute_batch("DROP TRIGGER fail_identity;").unwrap();
+        let restored = XiaomiAdapter::build(
+            store.clone(),
+            c.context.cloud.clone(),
+            c.discovery.clone(),
+            c.context.clock.clone(),
+        )
+        .unwrap()
+        .0;
+        {
+            let live = restored.context.live.borrow();
+            assert!(
+                live.devices
+                    .get("group-1")
+                    .is_none_or(|slot| slot.admitted.is_none()),
+                "bootstrap overlay must not admit a revoked group"
+            );
+            assert!(
+                live.devices
+                    .get("one")
+                    .is_some_and(|slot| slot.admitted.is_some()),
+                "hidden member is restored"
+            );
+        }
+        let member = restored.context.registry.get(&one).unwrap();
+        assert_eq!(member.functions()[0].snapshot().power, Power::Unknown);
+        let reopened = crate::publication::Publication::open(
+            crate::xiaomi::adapter::SourceHandle(restored.context.clone()),
+            store.clone(),
+        )
+        .unwrap();
+        if let Some(prepared) = reopened.prepare().unwrap() {
+            reopened.apply(prepared).unwrap();
+        }
+        assert!(reopened.current().published.get(&group).is_none());
+        let recovered = store.devices().load_publication(None).unwrap();
+        let reserved = recovered
+            .records
+            .iter()
+            .find(|record| record.key == group)
+            .unwrap();
+        assert!(!reserved.published);
+        assert_eq!(reserved.unique_id, group_before.unique_id);
+        assert_eq!(reserved.endpoint, group_before.endpoint);
+        assert_eq!(
+            reserved.configuration_version,
+            group_before.configuration_version
+        );
+    }));
+}
+
+#[test]
+fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
+    let rig = Rig::new(false, &["one"]);
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/group3-instance.json"
+    ))
+    .unwrap();
+    let urn = instance["type"].as_str().unwrap().to_string();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.catalog_instances.insert(urn, instance);
+        cloud.catalog_groups = vec![group_record("record-1", "group-1", &["one"], false)];
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let store = c.store.clone();
+        let group = DeviceKey::new("xiaomi", "group-1");
+        let one = DeviceKey::new("xiaomi", "one");
+        until(|| c.store.devices().load_published(&group).unwrap().is_some()).await;
+        until(|| c.publication.current().published.get(&group).is_some()).await;
+        let group_before = store.devices().load_published(&group).unwrap().unwrap();
+        // The hidden member keeps a reserved identity as soon as its own
+        // description is admitted (it may lag the group confirmation).
+        until(|| {
+            store
+                .devices()
+                .load_publication(None)
+                .unwrap()
+                .records
+                .iter()
+                .any(|record| record.key == one)
+        })
+        .await;
+        let member_before = store
+            .devices()
+            .load_publication(None)
+            .unwrap()
+            .records
+            .into_iter()
+            .find(|record| record.key == one)
+            .expect("hidden member keeps its reserved identity");
+        assert!(!member_before.published);
+        let root_before = store.devices().load_publication(None).unwrap().root_version;
+        assert!(c.publication.current().published.get(&one).is_none());
+        assert!(
+            c.publication
+                .current()
+                .source
+                .relations
+                .iter()
+                .any(|relation| {
+                    relation.group_did == "group-1"
+                        && relation.members.iter().any(|member| member == "one")
+                })
+        );
+
+        // Terminal renders the effective hidden member and its membership.
+        let status = crate::terminal::AuthStatus::new(
+            crate::xiaomi::auth::AuthReport::for_test(
+                crate::xiaomi::auth::AuthenticationState::NotSignedIn,
+                None,
+                crate::xiaomi::auth::CertificateUpdate::NotNeeded,
+                0,
+            ),
+            "/bin/migate".into(),
+            "/data".into(),
+        );
+        status.set_publication(c.publication.clone());
+        let list = crate::terminal::bridge::handle_line(
+            &crate::device::DeviceRegistry::new(),
+            &store.devices(),
+            &status,
+            "list",
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The effective registry keeps every real source ref; a hidden member
+        // is a normal row marked hidden with its confirmed memberships.
+        assert!(list.contains("one (name one):"), "{list}");
+        assert!(list.contains("Matter: hidden or reserved;"), "{list}");
+        assert!(
+            list.contains("Group group-1 (virtual): published."),
+            "{list}"
+        );
+        let detail = crate::terminal::bridge::handle_line(
+            &crate::device::DeviceRegistry::new(),
+            &store.devices(),
+            &status,
+            "status one",
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            detail.contains("Group group-1 (virtual): published."),
+            "{detail}"
+        );
+
+        // Withdraw the confirmed relation (record present, empty membership);
+        // the group is reserved and the member becomes an ordinary device.
+        c.cloud.lock().unwrap().catalog_groups =
+            vec![group_record("record-1", "group-1", &[], false)];
+        c.context.request_sync();
+        until(|| store.devices().load_published(&group).unwrap().is_none()).await;
+        let root_after = store.devices().load_publication(None).unwrap().root_version;
+        assert!(root_after > root_before);
+        let saved = store.devices().load_publication(None).unwrap();
+        let reserved = saved
+            .records
+            .iter()
+            .find(|record| record.key == group)
+            .unwrap();
+        assert!(!reserved.published);
+        assert_eq!(reserved.unique_id, group_before.unique_id);
+        assert_eq!(reserved.endpoint, group_before.endpoint);
+        assert_eq!(
+            reserved.configuration_version,
+            group_before.configuration_version
+        );
+        until(|| c.publication.current().published.get(&one).is_some()).await;
+        let list = crate::terminal::bridge::handle_line(
+            &crate::device::DeviceRegistry::new(),
+            &store.devices(),
+            &status,
+            "list",
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            list.contains("group-1 (native group): not published (confirmed empty relation)."),
+            "{list}"
+        );
+
+        // A fresh restart restores the withdrawn relation, the published member
+        // with unknown state and the reserved group identity.
+        let restored = XiaomiAdapter::build(
+            store.clone(),
+            c.context.cloud.clone(),
+            c.discovery.clone(),
+            c.context.clock.clone(),
+        )
+        .unwrap()
+        .0;
+        {
+            let live = restored.context.live.borrow();
+            assert!(
+                live.devices
+                    .get("group-1")
+                    .is_none_or(|slot| slot.admitted.is_none()),
+                "a withdrawn group is not admitted"
+            );
+            assert!(
+                live.devices
+                    .get("one")
+                    .is_some_and(|slot| slot.admitted.is_some()),
+                "the former hidden member is restored"
+            );
+        }
+        let member = restored.context.registry.get(&one).unwrap();
+        assert_eq!(member.functions()[0].snapshot().power, Power::Unknown);
+        let opened = crate::publication::Publication::open(
+            crate::xiaomi::adapter::SourceHandle(restored.context.clone()),
+            store.clone(),
+        )
+        .unwrap();
+        // Install the bootstrap relation overlay through the normal boundary.
+        if let Some(prepared) = opened.prepare().unwrap() {
+            opened.apply(prepared).unwrap();
+        }
+        assert_eq!(opened.current().root_version, root_after);
+        assert!(opened.current().published.get(&group).is_none());
+        assert!(opened.current().published.get(&one).is_some());
+        let recovered = store.devices().load_publication(None).unwrap();
+        let reserved = recovered
+            .records
+            .iter()
+            .find(|record| record.key == group)
+            .unwrap();
+        assert!(!reserved.published);
+        assert_eq!(reserved.unique_id, group_before.unique_id);
+        assert_eq!(reserved.endpoint, group_before.endpoint);
+        assert_eq!(
+            reserved.configuration_version,
+            group_before.configuration_version
+        );
+        let member_record = recovered
+            .records
+            .iter()
+            .find(|record| record.key == one)
+            .unwrap();
+        assert_eq!(member_record.unique_id, member_before.unique_id);
+        assert_eq!(member_record.endpoint, member_before.endpoint);
+        let status = crate::terminal::AuthStatus::new(
+            crate::xiaomi::auth::AuthReport::for_test(
+                crate::xiaomi::auth::AuthenticationState::NotSignedIn,
+                None,
+                crate::xiaomi::auth::CertificateUpdate::NotNeeded,
+                0,
+            ),
+            "/bin/migate".into(),
+            "/data".into(),
+        );
+        status.set_publication(Rc::new(opened));
+        let list = crate::terminal::bridge::handle_line(
+            &crate::device::DeviceRegistry::new(),
+            &store.devices(),
+            &status,
+            "list",
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            list.contains("group-1 (native group): not published (native group withdrawn)."),
+            "{list}"
+        );
     }));
 }

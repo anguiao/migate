@@ -69,6 +69,7 @@ pub(in super::super) struct Rig {
     pub(in super::super) clock: Arc<TestClock>,
 }
 pub(in super::super) struct Control {
+    pub(in super::super) publication: Rc<crate::publication::Publication>,
     pub(in super::super) ready: Option<TopologyReady>,
     pub(in super::super) store: Store,
     pub(in super::super) context: Rc<crate::xiaomi::adapter::state::Context>,
@@ -414,9 +415,50 @@ impl Rig {
         F: FnOnce(Control) -> Fut,
         Fut: Future<Output = ()>,
     {
+        self.run_result_mode(true, test).await
+    }
+    /// Run with the production publication applier disabled; the caller drives
+    /// the real configured runtime as the sole publisher.
+    pub(in super::super) async fn run_result_without_publication<F, Fut>(
+        self,
+        test: F,
+    ) -> Result<(), AdapterError>
+    where
+        F: FnOnce(Control) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        self.run_result_mode(false, test).await
+    }
+    async fn run_result_mode<F, Fut>(self, autoapply: bool, test: F) -> Result<(), AdapterError>
+    where
+        F: FnOnce(Control) -> Fut,
+        Fut: Future<Output = ()>,
+    {
         let keep_events = self.events.clone();
         let context = self.source.context.clone();
         let clock = self.clock.clone();
+        let publication = Rc::new(
+            crate::publication::Publication::open(
+                super::super::super::publication::SourceHandle(context.clone()),
+                self.store.clone(),
+            )
+            .unwrap(),
+        );
+        let applying = async {
+            if !autoapply {
+                return future::pending::<Result<(), AdapterError>>().await;
+            }
+            loop {
+                let changed = publication.listen();
+                if let Some(prepared) = publication.prepare()? {
+                    if prepared.rebuild {
+                        publication.stop_actions();
+                    }
+                    let _ = publication.apply(prepared);
+                }
+                changed.await;
+            }
+        };
         let running = self.source.run(|_| {});
         let discovering = async {
             self.driver.run().await?;
@@ -424,6 +466,7 @@ impl Rig {
         };
         let testing = test(Control {
             ready: Some(self.ready),
+            publication: publication.clone(),
             store: self.store,
             context,
             discovery: self.discovery,
@@ -445,10 +488,13 @@ impl Rig {
         let result = future::or(
             ticking,
             future::or(
-                future::or(future::or(running, discovering), async {
-                    testing.await;
-                    Ok(())
-                }),
+                future::or(
+                    future::or(future::or(running, applying), discovering),
+                    async {
+                        testing.await;
+                        Ok(())
+                    },
+                ),
                 async {
                     async_io::Timer::after(Duration::from_secs(5)).await;
                     panic!("source scenario stalled");

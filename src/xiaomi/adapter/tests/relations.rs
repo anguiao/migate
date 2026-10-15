@@ -275,3 +275,28 @@ fn home_switch_scopes_successful_confirmation_and_drops_old_home_retention() {
     assert_eq!(update.active.len(), 1);
     assert_eq!(update.active[0].scope.home_id, "other");
 }
+
+#[test]
+fn mixed_home_members_keep_the_full_confirmed_list_and_stay_active() {
+    let mut relations = Relations::default();
+    let update = relations.apply(
+        &catalog(vec![device(
+            "mixed-record",
+            CloudGroupStatus::Confirmed(membership(
+                "mixed-group",
+                &["member-2", "elsewhere"],
+                false,
+            )),
+        )]),
+        &scope(),
+        &home(&["member-2"]),
+    );
+    // The approved spec scopes a group when it contains at least one member of
+    // the selected home; foreign or unknown members stay in the confirmed list.
+    assert!(update.errors.is_empty(), "{:?}", update.errors);
+    assert_eq!(update.active.len(), 1);
+    assert_eq!(
+        update.active[0].membership.members,
+        vec!["member-2".to_string(), "elsewhere".to_string()]
+    );
+}

@@ -55,7 +55,7 @@ fn prepared_accounts_can_deliver_an_empty_registry() {
 }
 
 #[test]
-fn cached_light_groups_are_unpublished_before_restore_without_losing_identity() {
+fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
     let rig = Rig::light("xiaomi.light.ceil04");
     let mut groups = Vec::new();
     for (did, model) in [
@@ -82,14 +82,16 @@ fn cached_light_groups_are_unpublished_before_restore_without_losing_identity() 
         )
         .unwrap();
         let registry = block_on(poll_once(ready.wait())).unwrap().unwrap();
-        assert_eq!(registry.list().len(), 1);
+        assert_eq!(registry.list().len(), 3);
         assert!(registry.get(&single.key).is_some());
-        assert_eq!(
-            rig.store.devices().list_published().unwrap().as_slice(),
-            std::slice::from_ref(&single)
-        );
+        assert_eq!(rig.store.devices().list_published().unwrap().len(), 3);
         for (group, _) in &groups {
-            assert!(registry.get(&group.device.key).is_none());
+            assert!(registry.get(&group.device.key).is_some());
+            assert!(
+                source.context.live.borrow().devices[&group.device.key.id]
+                    .group
+                    .is_none()
+            );
             assert_eq!(
                 rig.store
                     .devices()

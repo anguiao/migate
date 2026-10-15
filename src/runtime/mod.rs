@@ -1,3 +1,5 @@
+mod configured;
+pub use configured::run_xiaomi_bridge;
 mod bridge;
 mod shutdown;
 
