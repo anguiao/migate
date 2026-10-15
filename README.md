@@ -23,7 +23,7 @@ cargo run --locked
 - [多设备与生命周期方案](docs/specs/2026-10-04-multi-device-channel-bridge/spec.md)
 - [云端接入与统一选路方案](docs/specs/2026-10-06-cloud-access-routing/spec.md)
 - [单灯照明方案](docs/specs/2026-10-08-single-light-control/spec.md)
-- [灯具能力自由组合与灯组接入方案](docs/specs/2026-10-10-light-capabilities-and-groups/spec.md)
+- [米家原生灯组接入与能力修复方案](docs/specs/2026-10-10-native-light-groups-and-capability-repair/spec.md)
 
 米家认证协议参考[小米官方 Home Assistant 集成](https://github.com/XiaoMi/ha_xiaomi_home)，使用该集成的 OAuth 应用配置。MiGate 是个人爱好项目，该授权归属于 HA 应用，不代表小米为 MiGate 提供独立授权或官方支持。参考来源与使用前提见[米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md#认证方案与云端依赖)；注明来源不会扩大[上游许可证](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/LICENSE.md)的授权范围。
 
