@@ -207,6 +207,44 @@ fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
 }
 
 #[test]
+fn on_off_and_dimmable_light_metadata_use_their_standard_device_types() {
+    for (capabilities, device_type, has_level) in [
+        (vec![Capability::OnOff], 0x0100u16, false),
+        (
+            vec![Capability::OnOff, Capability::Brightness],
+            0x0101u16,
+            true,
+        ),
+    ] {
+        let (device, _receiver) = support::light_with(capabilities);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let model = model::handler(
+            &test_registry(&store, &device),
+            &store,
+            StoreAdapter::new(store.matter()),
+            rand::rng(),
+        )
+        .unwrap();
+        model.access(|node| {
+            let endpoint = &node.endpoints[2];
+            assert!(
+                endpoint
+                    .device_types
+                    .iter()
+                    .any(|t| t.dtype == device_type && t.drev == 3)
+            );
+            assert!(endpoint.clusters.iter().any(|cluster| cluster.id == 6));
+            assert_eq!(
+                endpoint.clusters.iter().any(|cluster| cluster.id == 8),
+                has_level
+            );
+            assert!(!endpoint.clusters.iter().any(|cluster| cluster.id == 0x300));
+        });
+    }
+}
+
+#[test]
 fn unused_legacy_scenes_blob_is_preserved_without_loading() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)

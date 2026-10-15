@@ -80,7 +80,20 @@ impl Rig {
     pub(in super::super) fn light(model: &str) -> Self {
         Self::build(true, &["one"], Some(model))
     }
+    /// A fixture-derived independent light with one of the four standard profiles.
+    pub(in super::super) fn profile_light(model: &str, instance: Value) -> Self {
+        Self::build_with(true, &["one"], Some(model), Some(instance))
+    }
     fn build(restore: bool, members: &[&str], light: Option<&str>) -> Self {
+        Self::build_with(restore, members, light, None)
+    }
+    fn build_with(
+        restore: bool,
+        members: &[&str],
+        light: Option<&str>,
+        custom: Option<Value>,
+    ) -> Self {
+        let custom_text = custom.as_ref().map(Value::to_string);
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let tls = TlsFixture::new(false);
@@ -100,8 +113,8 @@ impl Rig {
             }
         }
         if let Some(model) = light {
-            let text = light_fixture(model);
-            let instance: Value = serde_json::from_str(text).unwrap();
+            let instance: Value =
+                custom.unwrap_or_else(|| serde_json::from_str(light_fixture(model)).unwrap());
             data[0].model = model.into();
             data[0].instance_type = instance["type"].as_str().unwrap().into();
             data[0].device = crate::xiaomi::capability::parse_device_for_model(
@@ -267,7 +280,11 @@ impl Rig {
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
                 let multi = request.target.contains("cuco-cp7pd");
                 let mut value: Value = serde_json::from_str(
-                    if records[0].device.functions[0].lighting.is_some() && !multi {
+                    if let Some(instance) = &custom_text
+                        && !multi
+                    {
+                        instance.as_str()
+                    } else if records[0].device.functions[0].lighting.is_some() && !multi {
                         light_fixture(&records[0].model)
                     } else if multi {
                         include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")

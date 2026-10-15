@@ -122,8 +122,10 @@ fn numeric_feedback_bindings(record: &DeviceRecord, id: &str) -> Vec<PropertyBin
         .as_ref()
         .unwrap();
     // Mode is also an integer, but only continuous values may suppress late reports.
-    let mut bindings = vec![light.brightness.property, light.temperature.property];
-    bindings.extend(light.color.map(|color| color.property));
+    let mut bindings = Vec::new();
+    bindings.extend(light.brightness.as_ref().map(|binding| binding.property));
+    bindings.extend(light.temperature.as_ref().map(|binding| binding.property));
+    bindings.extend(light.color.as_ref().map(|binding| binding.property));
     bindings
 }
 

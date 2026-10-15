@@ -51,8 +51,10 @@ fn standard_lights_are_admitted_as_one_main_function() {
         assert_eq!(function.description.id, "main");
         assert_eq!(function.description.category, Category::Light);
         let lighting = function.lighting.as_ref().unwrap();
+        let brightness = lighting.brightness.as_ref().unwrap();
+        let temperature = lighting.temperature.as_ref().unwrap();
         assert_eq!(
-            lighting.brightness.range,
+            brightness.range,
             NumericRange {
                 min: 1,
                 max: brightness_max,
@@ -60,7 +62,7 @@ fn standard_lights_are_admitted_as_one_main_function() {
             }
         );
         assert_eq!(
-            lighting.temperature.range,
+            temperature.range,
             NumericRange {
                 min: min_kelvin,
                 max: max_kelvin,
@@ -72,20 +74,14 @@ fn standard_lights_are_admitted_as_one_main_function() {
             [
                 Capability::OnOff,
                 Capability::Brightness,
-                Capability::ColorTemperature(lighting.temperature.range)
+                Capability::ColorTemperature(temperature.range)
             ]
         );
         assert_eq!(lighting.color, None);
         assert_eq!(lighting.mode, None);
         assert_eq!(function.power, PropertyBinding { siid: 2, piid: 1 });
-        assert_eq!(
-            lighting.brightness.property,
-            PropertyBinding { siid: 2, piid: 2 }
-        );
-        assert_eq!(
-            lighting.temperature.property,
-            PropertyBinding { siid: 2, piid: 3 }
-        );
+        assert_eq!(brightness.property, PropertyBinding { siid: 2, piid: 2 });
+        assert_eq!(temperature.property, PropertyBinding { siid: 2, piid: 3 });
     }
 }
 
@@ -125,7 +121,7 @@ fn parser_and_cached_bindings_reject_unrepresentable_mired_ranges() {
         assert!(parse_device(key(), &instance).is_err(), "{min}..{max}");
         let parsed = parse_device(key(), &original).unwrap();
         let mut bindings = parsed.functions[0].lighting.clone().unwrap();
-        bindings.temperature.range = NumericRange { min, max, step: 1 };
+        bindings.temperature.as_mut().unwrap().range = NumericRange { min, max, step: 1 };
         assert!(!bindings.valid());
     }
 }
@@ -209,12 +205,31 @@ fn incomplete_invalid_or_ambiguous_light_descriptions_are_rejected() {
         invalid["services"][1]["properties"][1][field] = value;
         assert!(parse_device(key(), &invalid).is_err(), "{field}");
     }
-    let mut missing = original.clone();
-    missing["services"][1]["properties"]
+    let mut optional = original.clone();
+    optional["services"][1]["properties"]
         .as_array_mut()
         .unwrap()
-        .remove(2);
-    assert!(parse_device(key(), &missing).is_err());
+        .retain(|property| {
+            !property["type"]
+                .as_str()
+                .is_some_and(|kind| kind.contains(":color-temperature:"))
+        });
+    let parsed = parse_device(key(), &optional).unwrap();
+    assert_eq!(
+        parsed.functions[0].description.capabilities,
+        [Capability::OnOff, Capability::Brightness]
+    );
+    assert!(
+        parsed.functions[0]
+            .lighting
+            .as_ref()
+            .unwrap()
+            .temperature
+            .is_none()
+    );
+    let mut empty = original.clone();
+    empty["services"][1]["properties"] = json!([]);
+    assert!(parse_device(key(), &empty).is_err());
     let mut sensor_only = original.clone();
     sensor_only["services"].as_array_mut().unwrap().remove(1);
     assert!(parse_device(key(), &sensor_only).is_err());
@@ -228,10 +243,204 @@ fn incomplete_invalid_or_ambiguous_light_descriptions_are_rejected() {
     assert!(parse_device(key(), &ambiguous).is_err());
 }
 
+fn profile_description(on: bool, brightness: bool, ct: bool, rgb: bool) -> Value {
+    let mut instance = description("xiaomi.light.ceil04");
+    let properties = instance["services"][1]["properties"]
+        .as_array_mut()
+        .unwrap();
+    properties.retain(|property| {
+        let kind = property["type"].as_str().unwrap_or_default();
+        (on || !kind.contains(":on:"))
+            && (brightness || !kind.contains(":brightness:"))
+            && (ct || !kind.contains(":color-temperature:"))
+    });
+    if rgb {
+        properties.push(json!({
+            "iid": 100,
+            "type": "urn:miot-spec-v2:property:color:0000000E:test-model:1",
+            "description": "RGB",
+            "format": "uint32",
+            "access": ["read", "write", "notify"],
+            "unit": "rgb",
+            "value-range": [0, 16777215, 1]
+        }));
+    }
+    instance
+}
+
+#[test]
+fn four_standard_light_profiles_are_parsed_with_the_right_capabilities() {
+    use crate::device::{LightMode, LightProfile};
+    let ct_range = NumericRange {
+        min: 2700,
+        max: 5700,
+        step: 1,
+    };
+    for (on, brightness, ct, rgb, profile, capabilities) in [
+        (
+            true,
+            false,
+            false,
+            false,
+            LightProfile::OnOff,
+            vec![Capability::OnOff],
+        ),
+        (
+            true,
+            true,
+            false,
+            false,
+            LightProfile::Dimmable,
+            vec![Capability::OnOff, Capability::Brightness],
+        ),
+        (
+            true,
+            true,
+            true,
+            false,
+            LightProfile::ColorTemperature,
+            vec![
+                Capability::OnOff,
+                Capability::Brightness,
+                Capability::ColorTemperature(ct_range),
+            ],
+        ),
+        (
+            true,
+            true,
+            true,
+            true,
+            LightProfile::ExtendedColor,
+            vec![
+                Capability::OnOff,
+                Capability::Brightness,
+                Capability::ColorTemperature(ct_range),
+                Capability::ColorRgb,
+            ],
+        ),
+    ] {
+        let parsed = parse_device(key(), &profile_description(on, brightness, ct, rgb))
+            .unwrap_or_else(|error| {
+                panic!("on={on} brightness={brightness} ct={ct} rgb={rgb}: {error}")
+            });
+        let function = &parsed.functions[0];
+        assert_eq!(
+            function.description.capabilities, capabilities,
+            "on={on} brightness={brightness} ct={ct} rgb={rgb}"
+        );
+        assert_eq!(function.description.light_profile().unwrap(), profile);
+        assert_eq!(function.power, PropertyBinding { siid: 2, piid: 1 });
+        let lighting = function.lighting.as_ref().unwrap();
+        assert_eq!(lighting.brightness.is_some(), brightness);
+        assert_eq!(lighting.temperature.is_some(), ct);
+        assert_eq!(lighting.color.is_some(), rgb);
+        assert!(lighting.valid());
+        assert_eq!(
+            function.description.inferred_color_mode(),
+            if profile == LightProfile::ColorTemperature {
+                Some(LightMode::Temperature)
+            } else {
+                None
+            }
+        );
+    }
+}
+
+#[test]
+fn unsupported_light_profiles_are_rejected_with_a_clear_reason() {
+    for (on, brightness, ct, rgb, reason) in [
+        (false, false, false, false, "require On/Off"),
+        (false, true, false, false, "require On/Off"),
+        (false, true, true, false, "require On/Off"),
+        (false, false, true, false, "require On/Off"),
+        (
+            true,
+            false,
+            true,
+            false,
+            "unsupported light capability combination",
+        ),
+        (
+            true,
+            false,
+            false,
+            true,
+            "unsupported light capability combination",
+        ),
+        (
+            true,
+            true,
+            false,
+            true,
+            "unsupported light capability combination",
+        ),
+    ] {
+        let error = parse_device(key(), &profile_description(on, brightness, ct, rgb)).unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains(reason),
+            "on={on} brightness={brightness} ct={ct} rgb={rgb}: {text}"
+        );
+    }
+}
+
+#[test]
+fn present_invalid_optional_properties_are_rejected_and_scene_modes_are_ignored() {
+    for (kind, field, value) in [
+        (":color:", "unit", json!("kelvin")),
+        (":color:", "format", json!("uint16")),
+        (":color:", "value-range", json!([0, 65535, 1])),
+    ] {
+        let mut invalid = profile_description(true, true, true, true);
+        let property = invalid["services"][1]["properties"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|property| {
+                property["type"]
+                    .as_str()
+                    .is_some_and(|kind_value| kind_value.contains(kind))
+            })
+            .unwrap();
+        property[field] = value;
+        assert!(parse_device(key(), &invalid).is_err(), "{kind} {field}");
+    }
+    let mut mode_only = profile_description(true, true, true, false);
+    mode_only["services"][1]["properties"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "iid": 100,
+            "type": "urn:miot-spec-v2:property:mode:00000008:test-model:1",
+            "description": "Mode",
+            "format": "uint8",
+            "access": ["read", "write", "notify"],
+            "value-list": [
+                {"value": 0, "description": "Warm"},
+                {"value": 1, "description": "Color"}
+            ]
+        }));
+    let parsed = parse_device(key(), &mode_only).unwrap();
+    assert!(
+        parsed.functions[0]
+            .lighting
+            .as_ref()
+            .unwrap()
+            .mode
+            .is_none()
+    );
+}
+
 #[test]
 fn brightness_conversion_retains_precision_and_enforces_declared_steps() {
     let parsed = parse_device(key(), &description("yeelink.light.light3")).unwrap();
-    let binding = &parsed.functions[0].lighting.as_ref().unwrap().brightness;
+    let binding = parsed.functions[0]
+        .lighting
+        .as_ref()
+        .unwrap()
+        .brightness
+        .as_ref()
+        .unwrap();
     assert_eq!(binding.brightness_to_raw(1.0).unwrap(), 1);
     assert_eq!(binding.brightness_to_raw(100.0).unwrap(), 65535);
     for raw in [1, 2, 371, 32768, 65534, 65535] {
@@ -249,7 +458,13 @@ fn brightness_conversion_retains_precision_and_enforces_declared_steps() {
     let mut stepped = description("xiaomi.light.ceil04");
     stepped["services"][1]["properties"][1]["value-range"] = json!([1, 100, 3]);
     let parsed = parse_device(key(), &stepped).unwrap();
-    let binding = &parsed.functions[0].lighting.as_ref().unwrap().brightness;
+    let binding = parsed.functions[0]
+        .lighting
+        .as_ref()
+        .unwrap()
+        .brightness
+        .as_ref()
+        .unwrap();
     assert!(binding.brightness_from_raw(&json!(2)).is_err());
     assert_eq!(binding.brightness_to_raw(50.0).unwrap(), 49);
     assert_eq!(binding.brightness_to_raw(100.0).unwrap(), 100);
@@ -264,13 +479,11 @@ fn temperature_and_rgb_protocol_values_are_validated_and_quantized() {
     )
     .unwrap();
     let lighting = parsed.functions[0].lighting.as_ref().unwrap();
-    assert_eq!(lighting.temperature.temperature_to_raw(1000).unwrap(), 2700);
-    assert_eq!(
-        lighting.temperature.temperature_to_raw(10000).unwrap(),
-        6500
-    );
-    assert!(lighting.temperature.read_raw(&json!(2700.5)).is_err());
-    assert!(lighting.temperature.read_raw(&json!(true)).is_err());
+    let temperature = lighting.temperature.as_ref().unwrap();
+    assert_eq!(temperature.temperature_to_raw(1000).unwrap(), 2700);
+    assert_eq!(temperature.temperature_to_raw(10000).unwrap(), 6500);
+    assert!(temperature.read_raw(&json!(2700.5)).is_err());
+    assert!(temperature.read_raw(&json!(true)).is_err());
     assert!(
         lighting
             .color
@@ -287,7 +500,13 @@ fn zero_based_brightness_preserves_declared_range_and_maps_its_nonzero_grid() {
         let mut instance = description("xiaomi.light.ceil04");
         instance["services"][1]["properties"][1]["value-range"] = json!([0, 100, step]);
         let parsed = parse_device(key(), &instance).unwrap();
-        let binding = &parsed.functions[0].lighting.as_ref().unwrap().brightness;
+        let binding = parsed.functions[0]
+            .lighting
+            .as_ref()
+            .unwrap()
+            .brightness
+            .as_ref()
+            .unwrap();
         assert_eq!(binding.range.min, 0);
         assert_eq!(binding.brightness_to_raw(1.0).unwrap(), step);
         assert_eq!(binding.brightness_to_raw(100.0).unwrap(), 100 / step * step);

@@ -36,38 +36,55 @@ pub(super) fn parse_light(
             ));
         }
     };
-    let power = power_binding(service.iid, standard_property(service, "on", 6)?)?;
-    let brightness = numeric_binding(
-        service.iid,
-        standard_property(service, "brightness", 0x0d)?,
-        NumericUnit::Percentage,
-    )?;
-    let temperature = numeric_binding(
-        service.iid,
-        standard_property(service, "color-temperature", 0x0f)?,
-        NumericUnit::Kelvin,
-    )?;
-    if brightness.range.nonzero_bounds().is_none()
-        || temperature.range.min == 0
-        || temperature.range.max > 1_000_000
-        || temperature.range.mired_bounds().is_err()
-    {
-        return Err(CapabilityError::InvalidLight(
-            "nonzero brightness and Kelvin ranges are required",
-        ));
-    }
+    let power = match optional_standard_property(service, "on", 6)? {
+        Some(property) => power_binding(service.iid, property)?,
+        None => {
+            return Err(CapabilityError::InvalidLight(
+                "standard light profiles require On/Off",
+            ));
+        }
+    };
+    let brightness = optional_standard_property(service, "brightness", 0x0d)?
+        .map(|property| numeric_binding(service.iid, property, NumericUnit::Percentage))
+        .transpose()?;
+    let temperature = optional_standard_property(service, "color-temperature", 0x0f)?
+        .map(|property| numeric_binding(service.iid, property, NumericUnit::Kelvin))
+        .transpose()?;
+    let color = optional_standard_property(service, "color", 0x0e)?
+        .map(|property| numeric_binding(service.iid, property, NumericUnit::Rgb))
+        .transpose()?;
     let (color, mode) = if model == "devcea.light.ls2307" {
+        let (Some(brightness), Some(temperature)) = (brightness, temperature) else {
+            return Err(CapabilityError::IncompatibleModel("devcea.light.ls2307"));
+        };
         ls2307(instance, service, power, brightness, temperature)?
     } else {
-        (None, None)
+        (color, None)
     };
-    let mut capabilities = vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(temperature.range),
-    ];
-    if color.is_some() {
+    let lighting = LightBindings {
+        brightness,
+        temperature,
+        color,
+        mode,
+        brightness_conversion: BrightnessConversion::NonzeroLinear,
+    };
+    if !lighting.valid() {
+        return Err(CapabilityError::InvalidLight(
+            "light binding ranges or mode are invalid",
+        ));
+    }
+    let mut capabilities = vec![Capability::OnOff];
+    if lighting.brightness.is_some() {
+        capabilities.push(Capability::Brightness);
+    }
+    if let Some(temperature) = &lighting.temperature {
+        capabilities.push(Capability::ColorTemperature(temperature.range));
+    }
+    if lighting.color.is_some() {
         capabilities.push(Capability::ColorRgb);
+    }
+    if let Err(reason) = crate::device::standard_light_profile(&capabilities) {
+        return Err(CapabilityError::InvalidLight(reason));
     }
     Ok(ParsedDevice {
         key,
@@ -79,16 +96,27 @@ pub(super) fn parse_light(
                 capabilities,
             },
             power,
-            lighting: Some(LightBindings {
-                brightness,
-                temperature,
-                color,
-                mode,
-                brightness_conversion: BrightnessConversion::NonzeroLinear,
-            }),
+            lighting: Some(lighting),
         }],
         refresh_trigger: None,
     })
+}
+fn optional_standard_property<'a>(
+    service: &'a Service<'a>,
+    name: &str,
+    type_id: u32,
+) -> Result<Option<&'a Property<'a>>, CapabilityError> {
+    let mut matches = service
+        .properties
+        .iter()
+        .filter(|property| property.urn.standard("property", name, type_id));
+    let first = matches.next();
+    if matches.next().is_some() {
+        return Err(CapabilityError::InvalidLight(
+            "standard property is ambiguous",
+        ));
+    }
+    Ok(first)
 }
 fn standard_property<'a>(
     service: &'a Service<'a>,

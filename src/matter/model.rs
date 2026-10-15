@@ -1,6 +1,6 @@
 use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler, storage::StoreAdapter};
 use crate::{
-    device::{Category, DeviceRegistry, Function, PhysicalDevice},
+    device::{Category, DeviceRegistry, Function, LightProfile, PhysicalDevice},
     storage::{Identity, StorageError, Store},
 };
 use futures_util::{
@@ -26,7 +26,10 @@ use rs_matter::{
             groups::{self, ClusterHandler as _},
             identify::{self, ClusterHandler as _},
         },
-        devices::{DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, test::TEST_DEV_DET},
+        devices::{
+            DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_DIMMABLE_LIGHT,
+            DEV_TYPE_ON_OFF_LIGHT, test::TEST_DEV_DET,
+        },
         endpoints,
         networks::SysNetifs,
     },
@@ -71,21 +74,26 @@ const RGB_LIGHT: DeviceType = DeviceType {
 };
 const LIGHT_IDENTIFY: rs_matter::dm::Cluster<'static> = identify::IdentifyHandler::<()>::CLUSTER
     .with_cmds(rs_matter::with!(identify::CommandId::Identify));
-const CT_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
-    desc::DescHandler::CLUSTER,
-    groups::GroupsHandler::CLUSTER,
-    LIGHT_IDENTIFY,
-    BridgedHandler::CLUSTER,
-    lighting::OnOffHandler::CLUSTER,
+macro_rules! light_clusters {
+    ($($extra:expr),* $(,)?) => {
+        clusters!(
+            desc::DescHandler::CLUSTER,
+            groups::GroupsHandler::CLUSTER,
+            LIGHT_IDENTIFY,
+            BridgedHandler::CLUSTER,
+            lighting::OnOffHandler::CLUSTER
+            $(, $extra)*
+        )
+    };
+}
+const O_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = light_clusters!();
+const OB_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
+    light_clusters!(<lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER);
+const OBC_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = light_clusters!(
     <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER,
     <lighting::ColorHandler<false> as color_control::ClusterAsyncHandler>::CLUSTER
 );
-const RGB_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
-    desc::DescHandler::CLUSTER,
-    groups::GroupsHandler::CLUSTER,
-    LIGHT_IDENTIFY,
-    BridgedHandler::CLUSTER,
-    lighting::OnOffHandler::CLUSTER,
+const OBCR_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = light_clusters!(
     <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER,
     <lighting::ColorHandler<true> as color_control::ClusterAsyncHandler>::CLUSTER
 );
@@ -220,14 +228,9 @@ impl Control {
                 Async(identify::HandlerAdaptor(&self.identify)),
             )
             .chain(
-                |_, cluster| cluster == 6,
-                on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(light)),
+                |_, cluster| cluster == 6 || cluster == 8 || cluster == 0x300,
+                LightDispatch(light),
             )
-            .chain(
-                |_, cluster| cluster == 8,
-                level_control::HandlerAsyncAdaptor(lighting::LevelHandler(light)),
-            )
-            .chain(|_, cluster| cluster == 0x300, ColorDispatch(light))
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
         if self.lighting.is_some() {
@@ -248,16 +251,22 @@ impl Control {
             let commands = match ctx.cmd().cluster_id {
                 3 => Some(&LIGHT_IDENTIFY),
                 6 => Some(&lighting::OnOffHandler::CLUSTER),
-                8 => Some(&<lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER),
-                0x300 if light.rgb() => Some(
+                8 if light.level() => {
+                    Some(&<lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER)
+                }
+                0x300 if light.ct() && light.rgb() => Some(
                     &<lighting::ColorHandler<true> as color_control::ClusterAsyncHandler>::CLUSTER,
                 ),
-                0x300 => Some(
+                0x300 if light.ct() => Some(
                     &<lighting::ColorHandler<false> as color_control::ClusterAsyncHandler>::CLUSTER,
                 ),
                 _ => None,
             };
-            if commands.is_some_and(|cluster| cluster.command(ctx.cmd().cmd_id).is_none()) {
+            if let Some(cluster) = commands {
+                if cluster.command(ctx.cmd().cmd_id).is_none() {
+                    return Err(ErrorCode::CommandNotFound.into());
+                }
+            } else if matches!(ctx.cmd().cluster_id, 6 | 8 | 0x300) {
                 return Err(ErrorCode::CommandNotFound.into());
             }
             self.light_handler().invoke(ctx, reply).await
@@ -280,40 +289,87 @@ impl Control {
     }
 }
 struct ControlHandler<'a>(&'a Control);
-struct ColorDispatch<'a>(&'a lighting::Lighting);
-impl AsyncHandler for ColorDispatch<'_> {
+struct LightDispatch<'a>(&'a lighting::Lighting);
+impl AsyncHandler for LightDispatch<'_> {
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        if self.0.rgb() {
-            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
-                .read(ctx, reply)
-                .await
-        } else {
-            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
-                .read(ctx, reply)
-                .await
+        match ctx.attr().cluster_id {
+            6 => {
+                on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(self.0))
+                    .read(ctx, reply)
+                    .await
+            }
+            8 if self.0.level() => {
+                level_control::HandlerAsyncAdaptor(lighting::LevelHandler(self.0))
+                    .read(ctx, reply)
+                    .await
+            }
+            0x300 if self.0.ct() && self.0.rgb() => {
+                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
+                    .read(ctx, reply)
+                    .await
+            }
+            0x300 if self.0.ct() => {
+                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
+                    .read(ctx, reply)
+                    .await
+            }
+            _ => Err(ErrorCode::AttributeNotFound.into()),
         }
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        if self.0.rgb() {
-            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
-                .write(ctx)
-                .await
-        } else {
-            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
-                .write(ctx)
-                .await
+        match ctx.attr().cluster_id {
+            6 => {
+                on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(self.0))
+                    .write(ctx)
+                    .await
+            }
+            8 if self.0.level() => {
+                level_control::HandlerAsyncAdaptor(lighting::LevelHandler(self.0))
+                    .write(ctx)
+                    .await
+            }
+            0x300 if self.0.ct() && self.0.rgb() => {
+                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
+                    .write(ctx)
+                    .await
+            }
+            0x300 if self.0.ct() => {
+                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
+                    .write(ctx)
+                    .await
+            }
+            _ => Err(ErrorCode::UnsupportedAccess.into()),
         }
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        if self.0.rgb() {
-            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
-                .invoke(ctx, reply)
-                .await
-        } else {
-            color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
-                .invoke(ctx, reply)
-                .await
+        match ctx.cmd().cluster_id {
+            6 => {
+                on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(self.0))
+                    .invoke(ctx, reply)
+                    .await
+            }
+            8 if self.0.level() => {
+                level_control::HandlerAsyncAdaptor(lighting::LevelHandler(self.0))
+                    .invoke(ctx, reply)
+                    .await
+            }
+            0x300 if self.0.ct() && self.0.rgb() => {
+                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
+                    .invoke(ctx, reply)
+                    .await
+            }
+            0x300 if self.0.ct() => {
+                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
+                    .invoke(ctx, reply)
+                    .await
+            }
+            _ => Err(ErrorCode::CommandNotFound.into()),
         }
+    }
+    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(self.0))
+            .run(ctx)
+            .await
     }
     fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
     }
@@ -370,6 +426,16 @@ macro_rules! dispatch {
     };
 }
 
+/// Why a light cannot map to any of the four standard Matter light types.
+fn light_publication_problem(
+    description: &crate::device::FunctionDescription,
+) -> Option<&'static str> {
+    if description.category != Category::Light {
+        return None;
+    }
+    description.light_profile().err()
+}
+
 impl Entry {
     fn versions(&self) -> Versions {
         let control = self.role.control();
@@ -397,18 +463,27 @@ impl Entry {
         match &self.role {
             Role::Single { control, .. } => {
                 if let Some(light) = &control.lighting {
-                    if light.rgb() {
-                        Endpoint::new(
+                    match light.profile() {
+                        LightProfile::ExtendedColor => Endpoint::new(
                             self.endpoint,
                             devices!(RGB_LIGHT, DEV_TYPE_BRIDGED_NODE),
-                            RGB_CLUSTERS,
-                        )
-                    } else {
-                        Endpoint::new(
+                            OBCR_CLUSTERS,
+                        ),
+                        LightProfile::ColorTemperature => Endpoint::new(
                             self.endpoint,
                             devices!(CT_LIGHT, DEV_TYPE_BRIDGED_NODE),
-                            CT_CLUSTERS,
-                        )
+                            OBC_CLUSTERS,
+                        ),
+                        LightProfile::Dimmable => Endpoint::new(
+                            self.endpoint,
+                            devices!(DEV_TYPE_DIMMABLE_LIGHT, DEV_TYPE_BRIDGED_NODE),
+                            OB_CLUSTERS,
+                        ),
+                        LightProfile::OnOff => Endpoint::new(
+                            self.endpoint,
+                            devices!(DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_BRIDGED_NODE),
+                            O_CLUSTERS,
+                        ),
                     }
                 } else {
                     Endpoint::new(self.endpoint, SINGLE_TYPES, SINGLE_CLUSTERS)
@@ -457,10 +532,10 @@ impl Entry {
             }
         }
         if let Some(light) = self.role.control().and_then(|c| c.lighting.as_ref()) {
-            if cluster.is_none_or(|id| id == 8) {
+            if light.level() && cluster.is_none_or(|id| id == 8) {
                 light.level_version.changed();
             }
-            if cluster.is_none_or(|id| id == 0x300) {
+            if light.ct() && cluster.is_none_or(|id| id == 0x300) {
                 light.color_version.changed();
             }
         }
@@ -536,6 +611,14 @@ impl Model {
         let mut entries = Vec::new();
         let mut changed = Vec::new();
         for device in devices {
+            if let Some(reason) = device
+                .functions()
+                .iter()
+                .find_map(|function| light_publication_problem(function.description()))
+            {
+                log::warn!("Not publishing Xiaomi device {}: {reason}", device.key().id);
+                continue;
+            }
             let before = entries.len();
             entries.extend(
                 old.iter()

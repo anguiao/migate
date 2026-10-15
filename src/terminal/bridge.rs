@@ -33,8 +33,8 @@ fn render(registry: &DeviceRegistry, did: Option<&str>) -> String {
             };
             lines.push(format!("  {id} ({label}): {power}"));
             if let Some(light) = snapshot.lighting {
-                let capabilities = function
-                    .description()
+                let description = function.description();
+                let capabilities = description
                     .capabilities
                     .iter()
                     .map(|capability| match capability {
@@ -48,25 +48,24 @@ fn render(registry: &DeviceRegistry, did: Option<&str>) -> String {
                     .collect::<Vec<_>>()
                     .join(", ");
                 lines.push(format!("    Capabilities: {capabilities}."));
-                let mut values = vec![
-                    format!(
+                let mut values = Vec::new();
+                if description.has_capability(Capability::Brightness) {
+                    values.push(format!(
                         "Brightness: {}",
                         light
                             .brightness_percent
                             .map_or_else(|| "unknown".into(), |value| format!("{value}%"))
-                    ),
-                    format!(
+                    ));
+                }
+                if description.temperature_range().is_some() {
+                    values.push(format!(
                         "temperature: {}",
                         light
                             .temperature_kelvin
                             .map_or_else(|| "unknown".into(), |value| format!("{value} K"))
-                    ),
-                ];
-                if function
-                    .description()
-                    .capabilities
-                    .contains(&Capability::ColorRgb)
-                {
+                    ));
+                }
+                if description.has_capability(Capability::ColorRgb) {
                     values.push(format!(
                         "RGB: {}",
                         light.color.map_or_else(
@@ -78,15 +77,21 @@ fn render(registry: &DeviceRegistry, did: Option<&str>) -> String {
                         )
                     ));
                 }
-                values.push(format!(
-                    "mode: {}",
-                    match light.mode {
-                        None => "unknown",
-                        Some(LightMode::Temperature) => "temperature",
-                        Some(LightMode::Rgb) => "RGB",
-                    }
-                ));
-                lines.push(format!("    {}.", values.join("; ")));
+                if description.temperature_range().is_some()
+                    || description.has_capability(Capability::ColorRgb)
+                {
+                    values.push(format!(
+                        "mode: {}",
+                        match light.mode {
+                            None => "unknown",
+                            Some(LightMode::Temperature) => "temperature",
+                            Some(LightMode::Rgb) => "RGB",
+                        }
+                    ));
+                }
+                if !values.is_empty() {
+                    lines.push(format!("    {}.", values.join("; ")));
+                }
             }
         }
     }

@@ -512,14 +512,23 @@ fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes(
                 ctx.command.cluster_id = cluster;
                 ctx.command.cmd_id = command;
                 ctx.data = TLVElement::new(data);
-                let error = handler
+                let error = match handler
                     .invoke(
                         &ctx,
                         InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128])),
                     )
                     .await
-                    .unwrap_err();
-                assert_eq!(error.code(), ErrorCode::CommandNotFound);
+                {
+                    Ok(()) => panic!(
+                        "cluster {cluster} command {command} rgb={rgb} unexpectedly succeeded"
+                    ),
+                    Err(error) => error,
+                };
+                assert_eq!(
+                    error.code(),
+                    ErrorCode::CommandNotFound,
+                    "cluster {cluster} command {command} rgb={rgb}"
+                );
                 assert!(poll_once(receiver.next_operation()).await.is_none());
             }
             ctx.attribute = attr(8, 15);
@@ -715,9 +724,16 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                     percent,
                     crate::device::brightness_from_matter_level(111).unwrap()
                 );
-                let raw = binding.brightness.brightness_to_raw(percent).unwrap();
+                let raw = binding
+                    .brightness
+                    .as_ref()
+                    .unwrap()
+                    .brightness_to_raw(percent)
+                    .unwrap();
                 let actual = binding
                     .brightness
+                    .as_ref()
+                    .unwrap()
                     .brightness_from_raw(&serde_json::json!(raw))
                     .unwrap();
                 request.mark_sent().unwrap();
@@ -735,7 +751,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                         .unwrap(),
                     crate::device::brightness_to_matter_level(actual).unwrap()
                 );
-                if binding.brightness.range.max == 65535 {
+                if binding.brightness.as_ref().unwrap().range.max == 65535 {
                     assert!(actual.fract() > 0.0);
                     assert!((actual - percent).abs() < 0.002);
                 }
@@ -745,7 +761,14 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                 report_value(&read_bytes(&handler, &ctx).await.unwrap())
                     .u16()
                     .unwrap(),
-                binding.temperature.range.mired_bounds().unwrap().0
+                binding
+                    .temperature
+                    .as_ref()
+                    .unwrap()
+                    .range
+                    .mired_bounds()
+                    .unwrap()
+                    .0
             );
             ctx.command.cluster_id = 0x300;
             ctx.command.cmd_id = 10;

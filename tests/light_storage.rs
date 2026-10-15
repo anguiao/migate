@@ -17,6 +17,59 @@ fn light(model: &str, fixture: &str) -> CachedPhysicalDevice {
     }
 }
 
+fn profile_light(id: &str, brightness: bool, temperature: bool) -> CachedPhysicalDevice {
+    let mut instance: Value =
+        serde_json::from_str(include_str!("fixtures/miot/xiaomi-light-ceil04.json")).unwrap();
+    instance["services"][1]["properties"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|property| {
+            let kind = property["type"].as_str().unwrap_or_default();
+            kind.contains(":on:")
+                || (brightness && kind.contains(":brightness:"))
+                || (temperature && kind.contains(":color-temperature:"))
+        });
+    CachedPhysicalDevice {
+        uid: "account".into(),
+        home_id: "home".into(),
+        group_id: group_id("account", "home"),
+        model: "xiaomi.light.ceil04".into(),
+        instance_type: instance["type"].as_str().unwrap().into(),
+        device: parse_device_for_model(
+            DeviceKey::new("xiaomi", id),
+            "xiaomi.light.ceil04",
+            &instance,
+        )
+        .unwrap(),
+    }
+}
+
+#[test]
+fn on_off_and_dimmable_profiles_persist_and_restore_static_capabilities() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    for (id, brightness, expected) in [
+        ("profile-switch", false, vec![Capability::OnOff]),
+        (
+            "profile-dimmer",
+            true,
+            vec![Capability::OnOff, Capability::Brightness],
+        ),
+    ] {
+        let cached = profile_light(id, brightness, false);
+        let identity = store.devices().publish_cached(&cached, id).unwrap();
+        assert_eq!(identity.functions[0].capabilities, expected);
+    }
+    let restored = store.devices().restore_cached("account", "home").unwrap();
+    assert_eq!(restored.len(), 2);
+    for (cached, stored) in &restored {
+        assert_eq!(
+            cached.device.functions[0].description.capabilities,
+            stored.functions[0].capabilities
+        );
+    }
+}
+
 #[test]
 fn all_seven_lights_restore_complete_static_bindings_one_endpoint_and_unknown_runtime() {
     let directory = tempfile::tempdir().unwrap();
@@ -96,19 +149,24 @@ fn all_seven_lights_restore_complete_static_bindings_one_endpoint_and_unknown_ru
 }
 
 #[test]
-fn binding_or_range_updates_keep_identity_but_changed_light_features_are_rejected() {
+fn binding_updates_keep_identity_but_range_or_capability_changes_are_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let mut cached = light(
         "xiaomi.light.ceil04",
         include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
     );
+    let original_cached = cached.clone();
     let original = store.devices().publish_cached(&cached, "Original").unwrap();
-    let lighting = cached.device.functions[0].lighting.as_mut().unwrap();
-    lighting.brightness.property.piid = 8;
-    lighting.temperature.range.max = 5600;
-    cached.device.functions[0].description.capabilities[2] =
-        Capability::ColorTemperature(lighting.temperature.range);
+    cached.device.functions[0]
+        .lighting
+        .as_mut()
+        .unwrap()
+        .brightness
+        .as_mut()
+        .unwrap()
+        .property
+        .piid = 8;
     let changed = store
         .devices()
         .publish_cached(&cached, "Changed cloud name")
@@ -121,8 +179,42 @@ fn binding_or_range_updates_keep_identity_but_changed_light_features_are_rejecte
             .temperature_range()
             .unwrap()
             .max,
-        5600
+        5700
     );
+    assert_eq!(
+        store
+            .devices()
+            .load_parsed("account", "home", &cached.device.key)
+            .unwrap()
+            .unwrap()
+            .device
+            .functions[0]
+            .lighting
+            .as_ref()
+            .unwrap()
+            .brightness
+            .as_ref()
+            .unwrap()
+            .property
+            .piid,
+        8
+    );
+    let mut range_changed = cached.clone();
+    let range = &mut range_changed.device.functions[0]
+        .lighting
+        .as_mut()
+        .unwrap()
+        .temperature
+        .as_mut()
+        .unwrap()
+        .range;
+    range.max = 5600;
+    range_changed.device.functions[0].description.capabilities[2] =
+        Capability::ColorTemperature(*range);
+    assert!(matches!(
+        store.devices().publish_cached(&range_changed, "Range"),
+        Err(AdmissionError::IncompatibleFunctions)
+    ));
     let mut incompatible = changed.description();
     incompatible.functions[0]
         .capabilities
@@ -139,7 +231,10 @@ fn binding_or_range_updates_keep_identity_but_changed_light_features_are_rejecte
             .unwrap()
             .is_empty()
     );
-    let rejoined = store.devices().publish_cached(&cached, "New").unwrap();
+    let rejoined = store
+        .devices()
+        .publish_cached(&original_cached, "New")
+        .unwrap();
     assert_eq!(rejoined.unique_id, original.unique_id);
     assert_eq!(rejoined.endpoint, original.endpoint);
 }
@@ -222,7 +317,7 @@ fn cached_and_identity_temperature_ranges_must_match_on_restore() {
 }
 
 #[test]
-fn range_update_restores_identical_cache_and_identity_without_reallocating() {
+fn binding_update_restores_identical_cache_and_identity_without_reallocating() {
     let directory = tempfile::tempdir().unwrap();
     let mut cached = light(
         "xiaomi.light.ceil04",
@@ -232,15 +327,15 @@ fn range_update_restores_identical_cache_and_identity_without_reallocating() {
     {
         let store = Store::open(directory.path()).unwrap();
         original = store.devices().publish_cached(&cached, "Light").unwrap();
-        let range = &mut cached.device.functions[0]
+        cached.device.functions[0]
             .lighting
             .as_mut()
             .unwrap()
-            .temperature
-            .range;
-        range.max = 5600;
-        cached.device.functions[0].description.capabilities[2] =
-            Capability::ColorTemperature(*range);
+            .brightness
+            .as_mut()
+            .unwrap()
+            .property
+            .piid = 8;
         store.devices().publish_cached(&cached, "New name").unwrap();
     }
     let store = Store::open(directory.path()).unwrap();
@@ -248,6 +343,18 @@ fn range_update_restores_identical_cache_and_identity_without_reallocating() {
     assert_eq!(restored[0].1.unique_id, original.unique_id);
     assert_eq!(restored[0].1.endpoint, original.endpoint);
     assert_eq!(restored[0].1.label, original.label);
+    assert_eq!(
+        restored[0].0.device.functions[0]
+            .lighting
+            .as_ref()
+            .unwrap()
+            .brightness
+            .as_ref()
+            .unwrap()
+            .property
+            .piid,
+        8
+    );
     assert_eq!(
         restored[0].0.device.functions[0].description.capabilities,
         restored[0].1.functions[0].capabilities
@@ -311,6 +418,8 @@ fn unrepresentable_mired_ranges_are_rejected_at_publication_and_cache_restore() 
             .as_mut()
             .unwrap()
             .temperature
+            .as_mut()
+            .unwrap()
             .range = range;
         assert!(
             store

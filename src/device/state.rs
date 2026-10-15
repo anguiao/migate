@@ -32,6 +32,29 @@ pub(super) struct Inner {
     pub(super) light_changed: Event,
 }
 
+/// Clear runtime light state in place; outlets keep their existing power cache.
+fn clear_light_state(description: &FunctionDescription, state: &mut RuntimeState) -> bool {
+    if state.lighting.is_none() {
+        return false;
+    }
+    let before = (state.power, state.lighting);
+    state.power = Power::Unknown;
+    let lighting = state
+        .lighting
+        .as_mut()
+        .expect("checked lighting state exists");
+    lighting.brightness_percent = None;
+    lighting.temperature_kelvin = None;
+    lighting.color = None;
+    lighting.mode = description.inferred_color_mode();
+    if before != (state.power, state.lighting) {
+        state.revision = state.revision.wrapping_add(1);
+        true
+    } else {
+        false
+    }
+}
+
 /// A channel's shared state and command boundary for every protocol adapter.
 #[derive(Clone)]
 pub struct Function(pub(super) Arc<Inner>);
@@ -116,15 +139,21 @@ impl PhysicalDevice {
         self.inner.changed.notify(usize::MAX);
         if let Err(error) = result {
             for function in self.functions.iter() {
-                let mut state = function.0.state.lock().unwrap();
-                if let Some(coordinator) = state.light_commands.as_mut() {
-                    coordinator.cancel_all(error.clone());
-                    state.queue.invalidate_light_power(error.clone());
-                    function.notify_light_actions();
-                }
-                let completions = state.queue.drain_pending();
-                for completion in completions {
-                    completion.finish(Err(error.clone()));
+                let changed = {
+                    let mut state = function.0.state.lock().unwrap();
+                    if let Some(coordinator) = state.light_commands.as_mut() {
+                        coordinator.cancel_all(error.clone());
+                        state.queue.invalidate_light_power(error.clone());
+                        function.notify_light_actions();
+                    }
+                    let completions = state.queue.drain_pending();
+                    for completion in completions {
+                        completion.finish(Err(error.clone()));
+                    }
+                    clear_light_state(function.description(), &mut state)
+                };
+                if changed {
+                    function.0.changed.notify(usize::MAX);
                 }
             }
         }
@@ -153,14 +182,7 @@ impl Function {
                 brightness_percent: None,
                 temperature_kelvin: None,
                 color: None,
-                mode: if description
-                    .capabilities
-                    .contains(&super::Capability::ColorRgb)
-                {
-                    None
-                } else {
-                    Some(super::LightMode::Temperature)
-                },
+                mode: description.inferred_color_mode(),
             });
         let function = Self(Arc::new(Inner {
             description,
@@ -223,6 +245,10 @@ impl Function {
         if description.category != super::Category::Light {
             return Err(CommandError::Unsupported);
         }
+        if patch.brightness_percent.is_some() && !description.has_capability(Capability::Brightness)
+        {
+            return Err(CommandError::Unsupported);
+        }
         if let Some(percent) = patch.brightness_percent
             && (!percent.is_finite() || !(0.0..=100.0).contains(&percent))
         {
@@ -230,14 +256,18 @@ impl Function {
                 "brightness is outside 0..100 percent".into(),
             ));
         }
-        if patch.temperature_kelvin.is_some_and(|value| {
-            !description
-                .temperature_range()
-                .is_some_and(|range| range.contains(value))
-        }) {
-            return Err(CommandError::Rejected(
-                "color temperature is outside its physical range".into(),
-            ));
+        if let Some(value) = patch.temperature_kelvin {
+            let Some(range) = description.temperature_range() else {
+                return Err(CommandError::Unsupported);
+            };
+            if !range.contains(value) {
+                return Err(CommandError::Rejected(
+                    "color temperature is outside its physical range".into(),
+                ));
+            }
+        }
+        if patch.mode == Some(LightMode::Temperature) && description.temperature_range().is_none() {
+            return Err(CommandError::Unsupported);
         }
         if !description.capabilities.contains(&Capability::ColorRgb)
             && (patch.color.is_some() || patch.mode == Some(LightMode::Rgb))

@@ -279,7 +279,8 @@ impl<const RGB: bool> ColorHandler<'_, RGB> {
         if target > color::XY_MAX || transition == u16::MAX {
             return Err(ErrorCode::ConstraintError.into());
         }
-        let target = target.clamp(self.0.bounds.0, self.0.bounds.1);
+        let (lo, hi) = self.0.bounds.ok_or(ErrorCode::InvalidState)?;
+        let target = target.clamp(lo, hi);
         let start = if transition == 0 {
             self.0
                 .color
@@ -320,15 +321,16 @@ impl<const RGB: bool> ColorHandler<'_, RGB> {
         if min > color::XY_MAX || max > color::XY_MAX {
             return Err(ErrorCode::ConstraintError.into());
         }
+        let (bound_lo, bound_hi) = self.0.bounds.ok_or(ErrorCode::InvalidState)?;
         let lo = if min == 0 {
-            self.0.bounds.0
+            bound_lo
         } else {
-            min.max(self.0.bounds.0)
+            min.max(bound_lo)
         };
         let hi = if max == 0 {
-            self.0.bounds.1
+            bound_hi
         } else {
-            max.min(self.0.bounds.1)
+            max.min(bound_hi)
         };
         if lo > hi {
             return Err(ErrorCode::InvalidCommand.into());
@@ -452,16 +454,16 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         }))
     }
     async fn color_temp_physical_min_mireds(&self, _ctx: impl ReadContext) -> Result<u16, Error> {
-        Ok(self.0.bounds.0)
+        Ok(self.0.bounds.ok_or(ErrorCode::InvalidState)?.0)
     }
     async fn color_temp_physical_max_mireds(&self, _ctx: impl ReadContext) -> Result<u16, Error> {
-        Ok(self.0.bounds.1)
+        Ok(self.0.bounds.ok_or(ErrorCode::InvalidState)?.1)
     }
     async fn couple_color_temp_to_level_min_mireds(
         &self,
         _ctx: impl ReadContext,
     ) -> Result<u16, Error> {
-        Ok(self.0.bounds.0)
+        Ok(self.0.bounds.ok_or(ErrorCode::InvalidState)?.0)
     }
     async fn set_options(
         &self,

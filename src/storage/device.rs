@@ -153,6 +153,8 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
             || !function.description.valid_capabilities()
             || function.power.siid == 0
             || function.power.piid == 0
+            || (function.description.category == Category::Light
+                && function.light_profile().is_err())
         {
             return Err("Stored Xiaomi function description is invalid");
         }
@@ -168,26 +170,22 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
         let Some(lighting) = &function.lighting else {
             return Err("Stored Xiaomi light bindings are missing");
         };
-        if function.description.category != Category::Light
-            || !lighting.valid()
-            || function.description.temperature_range() != Some(lighting.temperature.range)
-            || function
-                .description
-                .capabilities
-                .contains(&Capability::ColorRgb)
-                != lighting.color.is_some()
-            || cached.model == "devcea.light.ls2307" && lighting.color.is_none()
-            || lighting.color.is_some() && cached.model != "devcea.light.ls2307"
-        {
+        if function.description.category != Category::Light || !lighting.valid() {
             return Err("Stored Xiaomi light bindings are invalid");
         }
         if cached.model == "devcea.light.ls2307" {
-            let color = lighting.color.as_ref().expect("validated color exists");
-            let mode = lighting.mode.as_ref().expect("validated mode exists");
+            let (Some(brightness), Some(temperature), Some(color), Some(mode)) = (
+                &lighting.brightness,
+                &lighting.temperature,
+                &lighting.color,
+                &lighting.mode,
+            ) else {
+                return Err("Stored Xiaomi ls2307 adapter is incompatible");
+            };
             if !is_ls2307_type(&cached.instance_type)
                 || function.power != (PropertyBinding { siid: 2, piid: 1 })
-                || lighting.brightness.property != (PropertyBinding { siid: 2, piid: 2 })
-                || lighting.temperature.property != (PropertyBinding { siid: 2, piid: 3 })
+                || brightness.property != (PropertyBinding { siid: 2, piid: 2 })
+                || temperature.property != (PropertyBinding { siid: 2, piid: 3 })
                 || color.property != (PropertyBinding { siid: 4, piid: 1 })
                 || color.format != NumericFormat::Uint32
                 || mode.property != (PropertyBinding { siid: 4, piid: 2 })
@@ -199,10 +197,13 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
             }
         }
         for binding in [
-            Some(lighting.brightness.property),
-            Some(lighting.temperature.property),
-            lighting.color.as_ref().map(|color| color.property),
-            lighting.mode.as_ref().map(|mode| mode.property),
+            lighting.brightness.as_ref().map(|binding| binding.property),
+            lighting
+                .temperature
+                .as_ref()
+                .map(|binding| binding.property),
+            lighting.color.as_ref().map(|binding| binding.property),
+            lighting.mode.as_ref().map(|binding| binding.property),
         ]
         .into_iter()
         .flatten()

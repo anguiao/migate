@@ -4,8 +4,8 @@ mod handlers;
 mod tests;
 
 use crate::device::{
-    ActionToken, Capability, Command, CommandError, Function, LightAction, LightColorTarget,
-    LightDimension, LightMode, LightTarget, NumericRange, brightness_from_matter_level,
+    ActionToken, Command, CommandError, Function, LightAction, LightColorTarget, LightDimension,
+    LightMode, LightProfile, LightTarget, NumericRange, brightness_from_matter_level,
     brightness_to_matter_level,
 };
 use controllers::{
@@ -44,7 +44,11 @@ impl Task {
             Self::Color(task) => task.duration(),
         }
     }
-    fn frame(self, elapsed: u64, range: NumericRange) -> Result<(LightTarget, bool), Error> {
+    fn frame(
+        self,
+        elapsed: u64,
+        range: Option<NumericRange>,
+    ) -> Result<(LightTarget, bool), Error> {
         match self {
             Self::Level(task) => {
                 let (level, end, power) = task.frame(elapsed);
@@ -64,9 +68,12 @@ impl Task {
                 let color = match target {
                     color::Target::Xy(x, y) => LightColorTarget::Rgb(color::xy_to_rgb(x, y)),
                     color::Target::Hs(value) => LightColorTarget::Rgb(hs::hs_to_rgb(value)),
-                    color::Target::Temperature(mireds) => LightColorTarget::Temperature(
-                        range.kelvin_from_mireds(mireds).map_err(command_error)?,
-                    ),
+                    color::Target::Temperature(mireds) => {
+                        let range = range.ok_or(ErrorCode::InvalidState)?;
+                        LightColorTarget::Temperature(
+                            range.kelvin_from_mireds(mireds).map_err(command_error)?,
+                        )
+                    }
                 };
                 Ok((
                     LightTarget {
@@ -107,9 +114,9 @@ impl Projection {
 pub(super) struct Lighting {
     function: Function,
     endpoint: u16,
-    rgb: bool,
-    range: NumericRange,
-    bounds: (u16, u16),
+    profile: LightProfile,
+    range: Option<NumericRange>,
+    bounds: Option<(u16, u16)>,
     clock: Rc<dyn Clock>,
     level: RefCell<LevelControlState>,
     color: RefCell<ColorControlState>,
@@ -163,15 +170,17 @@ impl Lighting {
         clock: Rc<dyn Clock>,
     ) -> Result<Self, Error> {
         let description = function.description();
-        let range = description
-            .temperature_range()
-            .ok_or(ErrorCode::InvalidState)?;
-        let bounds = range.mired_bounds().map_err(command_error)?;
-        let rgb = description.capabilities.contains(&Capability::ColorRgb);
+        let profile = description
+            .light_profile()
+            .map_err(|_| ErrorCode::InvalidState)?;
+        let range = description.temperature_range();
+        let bounds = range
+            .map(|range| range.mired_bounds().map_err(command_error))
+            .transpose()?;
         let result = Self {
             function,
             endpoint,
-            rgb,
+            profile,
             range,
             bounds,
             clock,
@@ -197,7 +206,22 @@ impl Lighting {
         Ok(result)
     }
     pub(super) fn rgb(&self) -> bool {
-        self.rgb
+        self.profile == LightProfile::ExtendedColor
+    }
+    pub(super) fn ct(&self) -> bool {
+        matches!(
+            self.profile,
+            LightProfile::ColorTemperature | LightProfile::ExtendedColor
+        )
+    }
+    pub(super) fn level(&self) -> bool {
+        matches!(
+            self.profile,
+            LightProfile::Dimmable | LightProfile::ColorTemperature | LightProfile::ExtendedColor
+        )
+    }
+    pub(super) fn profile(&self) -> LightProfile {
+        self.profile
     }
     fn refresh(&self) -> Projection {
         self.accept_color_metadata();
@@ -206,12 +230,14 @@ impl Lighting {
             .lighting
             .as_ref()
             .expect("lighting Function snapshot");
-        let temperature = lighting.temperature_kelvin.map(|value| {
-            self.range
-                .mireds_from_kelvin(value)
-                .expect("validated snapshot temperature")
+        let temperature = self.range.and_then(|range| {
+            lighting.temperature_kelvin.map(|value| {
+                range
+                    .mireds_from_kelvin(value)
+                    .expect("validated snapshot temperature")
+            })
         });
-        let (xy, hs) = if self.rgb {
+        let (xy, hs) = if self.rgb() {
             match lighting.mode {
                 Some(LightMode::Temperature) => {
                     let xy = temperature.map(color::temperature_to_xy);
@@ -613,7 +639,7 @@ impl Lighting {
             if current.mode == Some(LightMode::Temperature) {
                 ctx.notify_attr_changed(self.endpoint, 0x300, 7);
             }
-            if self.rgb {
+            if self.rgb() {
                 for attribute in [0, 1, 3, 4] {
                     ctx.notify_attr_changed(self.endpoint, 0x300, attribute);
                 }

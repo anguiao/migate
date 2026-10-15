@@ -14,9 +14,10 @@ pub(super) fn key(id: &str, binding: PropertyBinding) -> PropertyKey {
 pub(super) fn bindings(function: &ParsedFunction) -> Vec<PropertyBinding> {
     let mut values = vec![function.power];
     if let Some(light) = &function.lighting {
-        values.extend([light.brightness.property, light.temperature.property]);
-        values.extend(light.color.map(|value| value.property));
-        values.extend(light.mode.map(|value| value.property));
+        values.extend(light.brightness.as_ref().map(|binding| binding.property));
+        values.extend(light.temperature.as_ref().map(|binding| binding.property));
+        values.extend(light.color.as_ref().map(|binding| binding.property));
+        values.extend(light.mode.as_ref().map(|binding| binding.property));
     }
     values
 }
@@ -25,10 +26,6 @@ pub(super) fn decode(
     binding: PropertyBinding,
     value: &Value,
 ) -> Result<LightPatch, CapabilityError> {
-    let light = function
-        .lighting
-        .as_ref()
-        .ok_or(CapabilityError::InvalidValue("light"))?;
     let mut patch = LightPatch::default();
     if binding == function.power {
         patch.power = Some(
@@ -36,14 +33,28 @@ pub(super) fn decode(
                 .as_bool()
                 .ok_or(CapabilityError::InvalidValue("power type"))?,
         );
-    } else if binding == light.brightness.property {
-        patch.brightness_percent = Some(light.brightness.brightness_from_raw(value)?);
-    } else if binding == light.temperature.property {
-        patch.temperature_kelvin = Some(light.temperature.read_raw(value)?);
-    } else if light.color.is_some_and(|color| color.property == binding) {
-        patch.color = Rgb::from_packed(light.color.unwrap().read_raw(value)?);
-    } else if light.mode.is_some_and(|mode| mode.property == binding) {
-        patch.mode = Some(light.mode.unwrap().read_mode(value)?);
+        return Ok(patch);
+    }
+    let light = function
+        .lighting
+        .as_ref()
+        .ok_or(CapabilityError::InvalidValue("binding"))?;
+    if let Some(brightness) = &light.brightness
+        && brightness.property == binding
+    {
+        patch.brightness_percent = Some(brightness.brightness_from_raw(value)?);
+    } else if let Some(temperature) = &light.temperature
+        && temperature.property == binding
+    {
+        patch.temperature_kelvin = Some(temperature.read_raw(value)?);
+    } else if let Some(color) = &light.color
+        && color.property == binding
+    {
+        patch.color = Rgb::from_packed(color.read_raw(value)?);
+    } else if let Some(mode) = &light.mode
+        && mode.property == binding
+    {
+        patch.mode = Some(mode.read_mode(value)?);
     } else {
         return Err(CapabilityError::InvalidValue("binding"));
     }
@@ -77,31 +88,26 @@ pub(super) fn encode(
         values.push((function.power, json!(power)));
     }
     if let Some(percent) = target.brightness_percent {
+        let brightness = light.brightness.as_ref().ok_or(CommandError::Unsupported)?;
         values.push((
-            light.brightness.property,
-            json!(
-                light
-                    .brightness
-                    .brightness_to_raw(percent)
-                    .map_err(convert)?
-            ),
+            brightness.property,
+            json!(brightness.brightness_to_raw(percent).map_err(convert)?),
         ));
     }
     let mode = match target.color {
         Some(LightColorTarget::Temperature(kelvin)) => {
+            let temperature = light
+                .temperature
+                .as_ref()
+                .ok_or(CommandError::Unsupported)?;
             values.push((
-                light.temperature.property,
-                json!(
-                    light
-                        .temperature
-                        .temperature_to_raw(kelvin)
-                        .map_err(convert)?
-                ),
+                temperature.property,
+                json!(temperature.temperature_to_raw(kelvin).map_err(convert)?),
             ));
             Some(LightMode::Temperature)
         }
         Some(LightColorTarget::Rgb(rgb)) => {
-            let color = light.color.ok_or(CommandError::Unsupported)?;
+            let color = light.color.as_ref().ok_or(CommandError::Unsupported)?;
             values.push((color.property, json!(rgb.packed())));
             Some(LightMode::Rgb)
         }
@@ -122,20 +128,42 @@ pub(super) fn encode(
     values.retain(|(binding, value)| {
         let current = if *binding == function.power {
             snapshot.power.value().map(Value::Bool)
-        } else if *binding == light.brightness.property {
-            state
-                .brightness_percent
-                .and_then(|percent| light.brightness.brightness_to_raw(percent).ok())
+        } else if light
+            .brightness
+            .as_ref()
+            .is_some_and(|brightness| brightness.property == *binding)
+        {
+            light
+                .brightness
+                .as_ref()
+                .and_then(|brightness| {
+                    state
+                        .brightness_percent
+                        .and_then(|percent| brightness.brightness_to_raw(percent).ok())
+                })
                 .map(|raw| json!(raw))
-        } else if *binding == light.temperature.property {
+        } else if light
+            .temperature
+            .as_ref()
+            .is_some_and(|temperature| temperature.property == *binding)
+        {
             state.temperature_kelvin.map(|value| json!(value))
-        } else if light.color.is_some_and(|color| color.property == *binding) {
+        } else if light
+            .color
+            .as_ref()
+            .is_some_and(|color| color.property == *binding)
+        {
             state.color.map(|value| json!(value.packed()))
-        } else if light.mode.is_some_and(|mode| mode.property == *binding) {
+        } else if light
+            .mode
+            .as_ref()
+            .is_some_and(|mode| mode.property == *binding)
+        {
+            let binding = light.mode.expect("mode binding exists");
             state.mode.map(|mode| {
                 json!(match mode {
-                    LightMode::Temperature => light.mode.unwrap().temperature_value,
-                    LightMode::Rgb => light.mode.unwrap().rgb_value,
+                    LightMode::Temperature => binding.temperature_value,
+                    LightMode::Rgb => binding.rgb_value,
                 })
             })
         } else {
@@ -177,10 +205,13 @@ pub(super) fn refresh_missing_active(
         .as_ref()
         .unwrap();
     let binding = match state.mode {
-        Some(LightMode::Temperature) if state.temperature_kelvin.is_none() => {
-            Some(light.temperature.property)
+        Some(LightMode::Temperature) if state.temperature_kelvin.is_none() => light
+            .temperature
+            .as_ref()
+            .map(|temperature| temperature.property),
+        Some(LightMode::Rgb) if state.color.is_none() => {
+            light.color.as_ref().map(|color| color.property)
         }
-        Some(LightMode::Rgb) if state.color.is_none() => Some(light.color.unwrap().property),
         _ => None,
     };
     drop(cached);

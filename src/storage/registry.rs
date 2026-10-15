@@ -84,10 +84,7 @@ impl StoredDevice {
                 functions.iter().any(|function| {
                     stored.key.id == function.id
                         && stored.category == function.category
-                        && stored.capabilities.len() == function.capabilities.len()
-                        && stored.capabilities.iter().zip(&function.capabilities).all(
-                            |(old, new)| std::mem::discriminant(old) == std::mem::discriminant(new),
-                        )
+                        && stored.capabilities == function.capabilities
                 })
             })
     }

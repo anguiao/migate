@@ -16,6 +16,33 @@ pub struct ParsedFunction {
     pub power: PropertyBinding,
     pub lighting: Option<LightBindings>,
 }
+impl ParsedFunction {
+    /// The single capability description shared by parsing, persistence and publication.
+    pub fn capabilities(&self) -> Vec<crate::device::Capability> {
+        let mut capabilities = vec![crate::device::Capability::OnOff];
+        if let Some(light) = &self.lighting {
+            if light.brightness.is_some() {
+                capabilities.push(crate::device::Capability::Brightness);
+            }
+            if let Some(temperature) = &light.temperature {
+                capabilities.push(crate::device::Capability::ColorTemperature(
+                    temperature.range,
+                ));
+            }
+            if light.color.is_some() {
+                capabilities.push(crate::device::Capability::ColorRgb);
+            }
+        }
+        capabilities
+    }
+    /// Fixed capability description plus one of the four standard light profiles.
+    pub fn light_profile(&self) -> Result<crate::device::LightProfile, &'static str> {
+        if self.capabilities() != self.description.capabilities {
+            return Err("capabilities do not match the real bindings");
+        }
+        self.description.light_profile()
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedDevice {
@@ -184,37 +211,44 @@ impl ModeBinding {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LightBindings {
-    pub brightness: NumericBinding,
-    pub temperature: NumericBinding,
+    pub brightness: Option<NumericBinding>,
+    pub temperature: Option<NumericBinding>,
     pub color: Option<NumericBinding>,
     pub mode: Option<ModeBinding>,
     pub brightness_conversion: BrightnessConversion,
 }
 impl LightBindings {
     pub(crate) fn valid(&self) -> bool {
-        self.brightness.valid(NumericUnit::Percentage)
-            && self.brightness.range.nonzero_bounds().is_some()
-            && self.temperature.valid(NumericUnit::Kelvin)
-            && self.temperature.range.min > 0
-            && self.temperature.range.max <= 1_000_000
-            && self.temperature.range.mired_bounds().is_ok()
-            && match (&self.color, &self.mode) {
-                (None, None) => true,
-                (Some(color), Some(mode)) => {
-                    color.valid(NumericUnit::Rgb)
-                        && color.range
-                            == NumericRange {
-                                min: 0,
-                                max: 0xffffff,
-                                step: 1,
-                            }
-                        && mode.property.siid > 0
-                        && mode.property.piid > 0
-                        && mode.temperature_value != mode.rgb_value
-                        && mode.temperature_value <= mode.format.maximum()
-                        && mode.rgb_value <= mode.format.maximum()
-                }
-                _ => false,
+        let brightness = self.brightness.as_ref().is_none_or(|binding| {
+            binding.valid(NumericUnit::Percentage) && binding.range.nonzero_bounds().is_some()
+        });
+        let temperature = self.temperature.as_ref().is_none_or(|binding| {
+            binding.valid(NumericUnit::Kelvin)
+                && binding.range.min > 0
+                && binding.range.max <= 1_000_000
+                && binding.range.mired_bounds().is_ok()
+        });
+        let color = self.color.as_ref().is_none_or(|binding| {
+            binding.valid(NumericUnit::Rgb)
+                && binding.range
+                    == NumericRange {
+                        min: 0,
+                        max: 0xffffff,
+                        step: 1,
+                    }
+        });
+        let mode = match &self.mode {
+            None => true,
+            Some(mode) => {
+                self.temperature.is_some()
+                    && self.color.is_some()
+                    && mode.property.siid > 0
+                    && mode.property.piid > 0
+                    && mode.temperature_value != mode.rgb_value
+                    && mode.temperature_value <= mode.format.maximum()
+                    && mode.rgb_value <= mode.format.maximum()
             }
+        };
+        brightness && temperature && color && mode
     }
 }

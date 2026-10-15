@@ -279,6 +279,54 @@ pub struct LightPatch {
     pub color: Option<Rgb>,
     pub mode: Option<LightMode>,
 }
+/// One of the four standard light profiles shared by every layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LightProfile {
+    OnOff,
+    Dimmable,
+    ColorTemperature,
+    ExtendedColor,
+}
+
+/// The single standard-profile decision used by parsing, storage and Matter.
+pub fn standard_light_profile(capabilities: &[Capability]) -> Result<LightProfile, &'static str> {
+    let count = |capability: fn(&Capability) -> bool| {
+        capabilities
+            .iter()
+            .filter(|candidate| capability(candidate))
+            .count()
+    };
+    let on_off = count(|capability| matches!(capability, Capability::OnOff));
+    let brightness = count(|capability| matches!(capability, Capability::Brightness));
+    let rgb = count(|capability| matches!(capability, Capability::ColorRgb));
+    let temperatures = capabilities
+        .iter()
+        .filter_map(|capability| match capability {
+            Capability::ColorTemperature(range) => Some(*range),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if on_off > 1 || brightness > 1 || rgb > 1 || temperatures.len() > 1 {
+        return Err("duplicate light capability");
+    }
+    if on_off == 0 {
+        return Err("standard light profiles require On/Off");
+    }
+    let temperature = temperatures.first().copied();
+    if let Some(range) = temperature
+        && (range.mired_bounds().is_err() || range.min == 0 || range.max > 1_000_000)
+    {
+        return Err("color temperature range is not representable");
+    }
+    match (brightness > 0, temperature, rgb > 0) {
+        (false, None, false) => Ok(LightProfile::OnOff),
+        (true, None, false) => Ok(LightProfile::Dimmable),
+        (true, Some(_), false) => Ok(LightProfile::ColorTemperature),
+        (true, Some(_), true) => Ok(LightProfile::ExtendedColor),
+        _ => Err("unsupported light capability combination"),
+    }
+}
+
 impl FunctionDescription {
     pub fn temperature_range(&self) -> Option<NumericRange> {
         self.capabilities
@@ -288,30 +336,26 @@ impl FunctionDescription {
                 _ => None,
             })
     }
+    pub fn has_capability(&self, capability: Capability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+    pub fn light_profile(&self) -> Result<LightProfile, &'static str> {
+        if self.category != Category::Light {
+            return Err("not a light");
+        }
+        standard_light_profile(&self.capabilities)
+    }
+    /// A color temperature profile determines its mode; extended color needs feedback.
+    pub fn inferred_color_mode(&self) -> Option<LightMode> {
+        match self.light_profile() {
+            Ok(LightProfile::ColorTemperature) => Some(LightMode::Temperature),
+            _ => None,
+        }
+    }
     pub fn valid_capabilities(&self) -> bool {
         match self.category {
             Category::Outlet => self.capabilities == [Capability::OnOff],
-            Category::Light => {
-                let Some(range) = self.temperature_range() else {
-                    return false;
-                };
-                range.mired_bounds().is_ok()
-                    && range.min > 0
-                    && range.max <= 1_000_000
-                    && (self.capabilities
-                        == [
-                            Capability::OnOff,
-                            Capability::Brightness,
-                            Capability::ColorTemperature(range),
-                        ]
-                        || self.capabilities
-                            == [
-                                Capability::OnOff,
-                                Capability::Brightness,
-                                Capability::ColorTemperature(range),
-                                Capability::ColorRgb,
-                            ])
-            }
+            Category::Light => self.light_profile().is_ok(),
         }
     }
 }

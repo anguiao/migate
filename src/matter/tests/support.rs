@@ -44,20 +44,28 @@ pub(crate) fn test_device() -> (PhysicalDevice, CommandReceiver) {
 }
 
 pub(in crate::matter) fn light(rgb: bool) -> (PhysicalDevice, CommandReceiver) {
-    let mut description = physical("test-light", false).0.description();
-    let function = &mut description.functions[0];
-    function.category = Category::Light;
-    function.capabilities.extend([
+    let mut capabilities = vec![
+        Capability::OnOff,
         Capability::Brightness,
         Capability::ColorTemperature(crate::device::NumericRange {
             min: 2700,
             max: 6500,
             step: 1,
         }),
-    ]);
+    ];
     if rgb {
-        function.capabilities.push(Capability::ColorRgb);
+        capabilities.push(Capability::ColorRgb);
     }
+    light_with(capabilities)
+}
+
+pub(in crate::matter) fn light_with(
+    capabilities: Vec<Capability>,
+) -> (PhysicalDevice, CommandReceiver) {
+    let mut description = physical("test-light", false).0.description();
+    let function = &mut description.functions[0];
+    function.category = Category::Light;
+    function.capabilities = capabilities;
     let (device, mut receivers) = PhysicalDevice::new(description);
     (device, receivers.remove(0))
 }
