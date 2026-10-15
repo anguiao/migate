@@ -2,11 +2,13 @@
 
 MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（Xiaomi/MIoT）设备映射为标准 Matter 设备，接入 Apple Home 等生态。
 
-当前在 macOS / Apple Silicon 本机前台运行，首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持插座和单灯，并按本地优先选择控制与通知路径。支持 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3` 的单路主电源，以及 `cuco.plug.cp7pd` 的开关 1、开关 2、USB 三路独立控制。单灯包含 `devcea.light.ls2307`、`yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`lemesh.light.wy0c15` 七个描述样本；按完整能力准入，不设置当前样本数量上限。
+当前在 macOS / Apple Silicon 本机前台运行，首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持插座、单灯和米家原生灯组，并按本地优先选择控制与通知路径。支持 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3` 的单路主电源，以及 `cuco.plug.cp7pd` 的开关 1、开关 2、USB 三路独立控制。灯具包含 `devcea.light.ls2307`、`yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`lemesh.light.wy0c15` 七个描述样本；按真实能力准入，不按样本型号建立通用白名单。
 
-提供基础开关、灯具亮度与色温、设备支持的 RGB、软件渐变与连续控制、主动通知、统一选路、断线恢复、运行中自动加入和删除，以及持久化身份、名称和配对。单灯统一为 `main`，选择色温或颜色时自动切换模式。终端保留定向 on/off 控制，用 `list` / `status` 查看统一灯具快照、动作结果、实际批属性与路径；无写入帧与动作受理分开显示。中国大陆服务区的 OAuth 令牌与本地客户端证书独立维护。已准备账号可以先运行空网桥，再等待设备接入。云端可能仍依赖物理网关，具体边界见已知限制。
+提供基础开关、灯具亮度与色温、设备支持的 RGB、软件渐变与连续控制、主动通知、统一选路、断线恢复、运行中自动加入和删除，以及持久化身份、名称和配对。灯具统一为 `main`，选择色温或颜色时自动切换模式。终端保留定向 on/off 控制，用 `list` / `status` 查看统一灯具快照、动作结果、实际批属性与路径；无写入帧与动作受理分开显示。中国大陆服务区的 OAuth 令牌与本地客户端证书独立维护。已准备账号可以先运行空网桥，再等待设备接入。云端可能仍依赖物理网关，具体边界见已知限制。
 
-单路插座在同一端点承载 Bridged Node 与 On/Off Plug-in Unit（`0x010A`，revision 3）；多路插座使用一个物理父节点和三个独立开关子节点，总控只触发内部状态刷新。每盏灯使用一个 Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`）端点，revision 4，声明 CT 或 CT + XY + HS（色相／饱和度）。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的实际呈现、固件模式联动及基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
+每个有效原生灯组在 Apple Home 中显示为一盏普通灯，成员保留米家单控，在 Home 中隐藏。原生功能使用组 DID，`devcea.light.ls2307` 成员的 RGB 与模式缺口由来源适配补齐；状态采用实际反馈。关系和能力变化自动应用，必要时短暂重启 Matter 服务，保留身份、端点与配对。
+
+单路插座在同一端点承载 Bridged Node 与 On/Off Plug-in Unit（`0x010A`，revision 3）；多路插座使用一个物理父节点和三个独立开关子节点，总控只触发内部状态刷新。灯具按真实能力采用 On/Off Light（`0x0100`）、Dimmable Light（`0x0101`）、Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`）。彩灯提供 CT + XY + HS（色相／饱和度）。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的实际呈现、固件模式联动及基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
 
 ```sh
 cargo run --locked -- auth login
@@ -23,6 +25,7 @@ cargo run --locked
 - [多设备与生命周期方案](docs/specs/2026-10-04-multi-device-channel-bridge/spec.md)
 - [云端接入与统一选路方案](docs/specs/2026-10-06-cloud-access-routing/spec.md)
 - [单灯照明方案](docs/specs/2026-10-08-single-light-control/spec.md)
+- [原生灯组与能力修复方案](docs/specs/2026-10-10-native-light-groups-and-capability-repair/spec.md)
 
 米家认证协议参考[小米官方 Home Assistant 集成](https://github.com/XiaoMi/ha_xiaomi_home)，使用该集成的 OAuth 应用配置。MiGate 是个人爱好项目，该授权归属于 HA 应用，不代表小米为 MiGate 提供独立授权或官方支持。参考来源与使用前提见[米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md#认证方案与云端依赖)；注明来源不会扩大[上游许可证](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/LICENSE.md)的授权范围。
 
@@ -35,9 +38,11 @@ cargo run --locked
 | 目录 | 职责 |
 | --- | --- |
 | `src/device/` | 通用设备模型、共享状态与通知、命令队列及其生命周期。 |
+| `src/lighting/` | 灯光目标、每维度轨迹、接管、停止及剩余时间。 |
+| `src/publication.rs` | 已生效发布配置、完整配置提交与固定描述比较。 |
 | `src/runtime/` | 网桥启动与任务生命周期、进程退出信号。 |
 | `src/matter/` | Matter 服务、端点与处理器、配对及协议存储适配。 |
-| `src/storage/` | SQLite 连接与迁移、目录和进程锁、各类持久化记录。 |
+| `src/storage/` | 当前 SQLite 格式、目录和进程锁、配置整体提交及各类持久化记录。 |
 | `src/xiaomi/auth/` | 认证服务、登录、检查与刷新、状态报告。 |
 | `src/xiaomi/cloud/` | HTTP 请求、响应解析、云端目录、OAuth 与 MQTT 通知。 |
 | `src/xiaomi/capability/`、`src/xiaomi/catalog/` | MIoT 能力解析与当前本地家庭的设备描述加载。 |
