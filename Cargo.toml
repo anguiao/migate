@@ -11,7 +11,7 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.23"
 isahc = { version = "2", default-features = false, features = ["rustls-tls-webpki-roots"] }
 rcgen = "0.14"
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 serde = { version = "1", features = ["derive"] }
 sha1 = "0.11"
 time = { version = "0.3", features = ["formatting"] }

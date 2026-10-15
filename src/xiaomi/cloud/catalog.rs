@@ -126,12 +126,12 @@ struct DeviceInfo {
 }
 
 #[derive(Default)]
-struct Pagination {
+pub(super) struct Pagination {
     cursors: HashSet<String>,
 }
 
 impl Pagination {
-    fn advance(
+    pub(super) fn advance(
         &mut self,
         has_more: Option<bool>,
         cursor: Option<String>,

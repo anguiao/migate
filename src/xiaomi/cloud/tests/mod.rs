@@ -11,6 +11,7 @@ use support::*;
 mod catalog;
 mod client;
 mod device_info;
+mod light_groups;
 mod oauth;
 mod properties;
 mod support;

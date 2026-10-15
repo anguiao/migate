@@ -1,0 +1,161 @@
+[
+  {
+    "did": "group-1",
+    "model": "mijia.light.group3",
+    "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
+    "isOnline": true,
+    "extra": {
+      "member_list": {
+        "group_did": "group-1",
+        "status": "1",
+        "display_member_switch": 0,
+        "member_ship": {
+          "member-2": "1",
+          "member-3": "1",
+          "member-4": "1",
+          "member-5": "1"
+        },
+        "is_physical": true
+      }
+    }
+  },
+  {
+    "did": "group-6",
+    "model": "mijia.light.group3",
+    "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
+    "isOnline": true,
+    "extra": {
+      "member_list": {
+        "group_did": "group-6",
+        "status": "1",
+        "display_member_switch": 0,
+        "member_ship": {
+          "member-7": "1",
+          "member-8": "1",
+          "member-9": "1",
+          "member-10": "1"
+        },
+        "is_physical": true
+      }
+    }
+  },
+  {
+    "did": "group-11",
+    "model": "mijia.light.group3",
+    "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
+    "isOnline": true,
+    "extra": {
+      "member_list": {
+        "group_did": "group-11",
+        "status": "1",
+        "display_member_switch": 0,
+        "member_ship": {
+          "member-12": "1",
+          "member-13": "1",
+          "member-14": "1",
+          "member-15": "1"
+        },
+        "is_physical": true
+      }
+    }
+  },
+  {
+    "did": "group-16",
+    "model": "mijia.light.group3",
+    "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
+    "isOnline": true,
+    "extra": {
+      "member_list": {
+        "group_did": "group-16",
+        "status": "1",
+        "display_member_switch": 0,
+        "member_ship": {
+          "member-17": "1",
+          "member-18": "1",
+          "member-19": "1",
+          "member-20": "1",
+          "member-21": "1",
+          "member-22": "1"
+        },
+        "is_physical": true
+      }
+    }
+  },
+  {
+    "did": "group-23",
+    "model": "mijia.light.group3",
+    "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
+    "isOnline": true,
+    "extra": {
+      "member_list": {
+        "group_did": "group-23",
+        "status": "1",
+        "display_member_switch": 0,
+        "member_ship": {
+          "member-24": "1",
+          "member-25": "1",
+          "member-26": "1",
+          "member-27": "1"
+        },
+        "is_physical": true
+      }
+    }
+  },
+  {
+    "did": "group-28",
+    "model": "mijia.light.group3",
+    "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
+    "isOnline": true,
+    "extra": {
+      "member_list": {
+        "group_did": "group-28",
+        "status": "1",
+        "display_member_switch": 0,
+        "member_ship": {
+          "member-29": "1",
+          "member-30": "1"
+        },
+        "is_physical": false
+      }
+    }
+  },
+  {
+    "did": "group-31",
+    "model": "mijia.light.group3",
+    "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
+    "isOnline": true,
+    "extra": {
+      "member_list": {
+        "group_did": "group-31",
+        "status": "1",
+        "display_member_switch": 0,
+        "member_ship": {
+          "member-32": "1",
+          "member-33": "1",
+          "member-34": "1",
+          "member-35": "1"
+        },
+        "is_physical": true
+      }
+    }
+  },
+  {
+    "did": "group-36",
+    "model": "mijia.light.group3",
+    "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
+    "isOnline": true,
+    "extra": {
+      "member_list": {
+        "group_did": "group-36",
+        "status": "1",
+        "display_member_switch": 0,
+        "member_ship": {
+          "member-37": "1",
+          "member-38": "1",
+          "member-39": "1"
+        },
+        "is_physical": true
+      }
+    }
+  }
+]

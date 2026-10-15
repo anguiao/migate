@@ -1,6 +1,6 @@
 use super::{CloudError, CloudErrorKind};
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 
 #[derive(Deserialize)]
 pub(super) struct ApiResponse {
@@ -32,6 +32,27 @@ impl ApiResponse {
         }
         let details: OAuthError = serde_json::from_str(self.message.as_str()?).ok()?;
         Some(details.error)
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct RawApiResponse {
+    code: i64,
+    #[serde(default)]
+    result: Option<Box<RawValue>>,
+}
+
+impl RawApiResponse {
+    /// The account catalog needs the unparsed result so duplicate object keys
+    /// inside group membership are not collapsed before validation.
+    pub fn into_raw_result(self, operation: &'static str) -> Result<Box<RawValue>, CloudError> {
+        if self.code != 0 {
+            return Err(CloudError::new(
+                operation,
+                CloudErrorKind::Business(self.code),
+            ));
+        }
+        self.result.ok_or_else(|| CloudError::protocol(operation))
     }
 }
 

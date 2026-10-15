@@ -1,6 +1,6 @@
 use super::{
     AuthorizationAttempt, CLIENT_ID, CloudError, CloudErrorKind,
-    response::{ApiResponse, Identifier, Members},
+    response::{ApiResponse, Identifier, Members, RawApiResponse},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use isahc::{
@@ -8,7 +8,7 @@ use isahc::{
     config::{Configurable as _, RedirectPolicy},
 };
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value, json, value::RawValue};
 use std::{collections::HashSet, error::Error as StdError, fmt, time::Duration};
 use url::Url;
 
@@ -233,11 +233,40 @@ impl CloudClient {
         body: Value,
         timeout: Duration,
     ) -> Result<T, CloudError> {
+        let request = self.protected_request(operation, path, access_token, body, timeout)?;
+        self.send::<ApiResponse>(request, operation)
+            .await?
+            .into_result(operation)
+    }
+
+    /// Send a protected POST and keep the raw `result` field unparsed so
+    /// duplicate object keys survive until the caller validates them.
+    pub(super) async fn protected_post_raw(
+        &self,
+        operation: &'static str,
+        path: &str,
+        access_token: &str,
+        body: Value,
+    ) -> Result<Box<RawValue>, CloudError> {
+        let request = self.protected_request(operation, path, access_token, body, self.timeout)?;
+        self.send::<RawApiResponse>(request, operation)
+            .await?
+            .into_raw_result(operation)
+    }
+
+    fn protected_request(
+        &self,
+        operation: &'static str,
+        path: &str,
+        access_token: &str,
+        body: Value,
+        timeout: Duration,
+    ) -> Result<Request<String>, CloudError> {
         if access_token.is_empty() {
             return Err(CloudError::input(operation));
         }
         let url = self.endpoint(path, operation)?;
-        let request = Request::builder()
+        Request::builder()
             .method("POST")
             .uri(url.as_str())
             .timeout(timeout.min(self.timeout))
@@ -246,10 +275,7 @@ impl CloudClient {
             .header("X-Client-AppId", CLIENT_ID.to_string())
             .header("Authorization", format!("Bearer{access_token}"))
             .body(body.to_string())
-            .map_err(|_| CloudError::protocol(operation))?;
-        self.send::<ApiResponse>(request, operation)
-            .await?
-            .into_result(operation)
+            .map_err(|_| CloudError::protocol(operation))
     }
 
     fn endpoint(&self, path: &str, operation: &'static str) -> Result<Url, CloudError> {
