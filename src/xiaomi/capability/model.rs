@@ -63,6 +63,7 @@ pub enum CapabilityError {
     MissingFunction(&'static str),
     IncompatibleModel(&'static str),
     InvalidLight(&'static str),
+    InvalidGroup(&'static str),
     InvalidValue(&'static str),
 }
 
@@ -88,6 +89,7 @@ impl fmt::Display for CapabilityError {
                 write!(formatter, "required outlet binding is missing: {id}")
             }
             Self::InvalidLight(field) => write!(formatter, "invalid light capability: {field}"),
+            Self::InvalidGroup(field) => write!(formatter, "invalid native light group: {field}"),
             Self::InvalidValue(field) => write!(formatter, "invalid light property value: {field}"),
             Self::IncompatibleModel(model) => {
                 write!(formatter, "unsupported MIoT description for {model}")

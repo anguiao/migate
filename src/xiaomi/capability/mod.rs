@@ -1,8 +1,10 @@
 mod description;
+mod group;
 mod light;
 mod model;
 mod outlet;
 
+pub(crate) use group::parse_group;
 pub(crate) use light::{is_light_type, is_ls2307_type};
 pub use model::{
     BrightnessConversion, CapabilityError, LightBindings, ModeBinding, NumericBinding,
@@ -25,9 +27,8 @@ pub fn parse_device_for_model(
     model: &str,
     instance: &serde_json::Value,
 ) -> Result<ParsedDevice, CapabilityError> {
-    if is_light_group(&key, model) {
-        return Err(CapabilityError::UnsupportedLightGroup);
-    }
+    // Groups are never classified here: admission comes only from confirmed
+    // catalog relations, which call `parse_group` directly.
     let description = description::Description::parse(instance)?;
     if model == "devcea.light.ls2307"
         && !instance

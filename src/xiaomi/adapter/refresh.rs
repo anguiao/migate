@@ -223,6 +223,8 @@ impl Drop for ReadCleanup {
                 .borrow_mut()
                 .remove(&self.read.key());
         }
+        self.work
+            .finish_dirty_read(&self.read.id, self.read.binding);
         if self.retry
             && !self.work.life.is_closed()
             && self.work.record.binding_generation.get() == self.generation

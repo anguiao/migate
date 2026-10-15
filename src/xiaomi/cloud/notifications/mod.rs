@@ -30,6 +30,17 @@ pub enum NotificationEvent {
         binding: PropertyBinding,
         value: serde_json::Value,
     },
+    /// A valid property event from a device without a parsed description.
+    /// Used only to mark native groups dirty; never interpreted as device state.
+    MemberProperty {
+        did: String,
+        siid: u32,
+        piid: u32,
+        value: serde_json::Value,
+        /// Retained MQTT snapshot. Kept so later external-operation detection
+        /// can distinguish replayed state from a new external event.
+        retained: bool,
+    },
     Online {
         did: String,
         online: bool,

@@ -535,12 +535,15 @@ pub(super) async fn consume(
                                 .set_property(&credentials.access_token, &did, binding, target)
                                 .await
                             {
-                                Ok(()) => command.0.finish(work.observations.accept_write(
-                                    &record,
-                                    &function_id,
-                                    &stamp,
-                                    request,
-                                )),
+                                Ok(()) => {
+                                    let result = work.observations.accept_write(
+                                        &record,
+                                        &function_id,
+                                        &stamp,
+                                        request,
+                                    );
+                                    command.0.finish(result)
+                                }
                                 Err(error) => {
                                     let command_error = match error.kind() {
                                         crate::xiaomi::cloud::CloudErrorKind::Timeout => {

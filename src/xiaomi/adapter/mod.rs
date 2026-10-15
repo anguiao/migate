@@ -3,6 +3,7 @@ mod cloud;
 mod commands;
 mod credentials;
 mod diagnostics;
+mod groups;
 mod lighting;
 mod local;
 mod membership;
@@ -10,10 +11,12 @@ mod model;
 mod notifications;
 mod observations;
 mod refresh;
+mod relations;
 mod routing;
 mod runner;
 mod state;
 mod tasks;
+mod watch;
 mod work;
 
 pub use model::{

@@ -167,6 +167,7 @@ pub(super) async fn send(
     gate: Rc<super::LightWriteGate>,
 ) -> Result<(), AdapterError> {
     let did = record.physical.key().id.clone();
+    let group = context.is_group(&did);
     let target = match &request {
         DeviceRequest::Power(request) => LightTarget {
             power: Some(request.target),
@@ -328,13 +329,19 @@ pub(super) async fn send(
                                     &results,
                                     &history_bindings,
                                 );
-                                apply(
-                                    &result_work,
-                                    &result_id,
-                                    &result_properties,
-                                    &stamps.borrow(),
-                                    &results,
-                                );
+                                if group {
+                                    for (binding, _) in &result_properties {
+                                        result_work.request_dirty_read(&result_id, *binding);
+                                    }
+                                } else {
+                                    apply(
+                                        &result_work,
+                                        &result_id,
+                                        &result_properties,
+                                        &stamps.borrow(),
+                                        &results,
+                                    );
+                                }
                                 for error in results
                                     .items
                                     .iter()
@@ -414,7 +421,13 @@ pub(super) async fn send(
                 let outcome = match &result {
                     Ok(results) => {
                         gate.finish_feedback(&properties, results, &history_bindings);
-                        apply(&work, id, &properties, &stamps, results);
+                        if context.is_group(&did) {
+                            for (binding, _) in &properties {
+                                work.request_dirty_read(id, *binding);
+                            }
+                        } else {
+                            apply(&work, id, &properties, &stamps, results);
+                        }
                         if results.protocol_error {
                             Err(CommandError::SendFailed("invalid cloud response".into()))
                         } else if let Some(error) =

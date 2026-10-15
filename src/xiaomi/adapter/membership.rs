@@ -90,6 +90,9 @@ impl Context {
         Ok(())
     }
     pub(super) fn reconcile(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
+        if self.live.borrow().devices[did].group.is_some() {
+            return self.reconcile_group(did);
+        }
         let (candidate, admitted) = {
             let live = self.live.borrow();
             let slot = &live.devices[did];
@@ -278,6 +281,15 @@ impl Context {
         self.problem(did, Some(reason));
     }
     pub(super) fn remove(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
+        if self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .is_some_and(|slot| slot.group.is_some())
+        {
+            return self.remove_group(did);
+        }
         let key = DeviceKey::new("xiaomi", did);
         self.store.devices().remove(&key)?;
         self.registry.remove(&key);

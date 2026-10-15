@@ -93,20 +93,27 @@ fn standard_parser_uses_capabilities_instead_of_a_model_allowlist() {
 }
 
 #[test]
-fn light_groups_are_excluded_even_with_complete_standard_light_capabilities() {
+fn light_groups_parse_with_their_real_standard_light_capabilities() {
     let instance = description("xiaomi.light.ceil04");
     for (did, model) in [
         ("group.42", "mijia.light.group3"),
         ("group.42", "unknown.light.v7"),
         ("42", "mijia.light.group3"),
     ] {
-        assert_eq!(
-            parse_device_for_model(
-                crate::device::DeviceKey::new("xiaomi", did),
-                model,
-                &instance
-            ),
-            Err(crate::xiaomi::capability::CapabilityError::UnsupportedLightGroup)
+        let parsed = parse_device_for_model(
+            crate::device::DeviceKey::new("xiaomi", did),
+            model,
+            &instance,
+        )
+        .unwrap_or_else(|error| panic!("{did} {model}: {error}"));
+        assert_eq!(parsed.functions.len(), 1);
+        assert!(
+            parsed.functions[0]
+                .lighting
+                .as_ref()
+                .unwrap()
+                .brightness
+                .is_some()
         );
     }
     assert!(parse_device_for_model(key(), "unknown.light.group3", &instance).is_ok());

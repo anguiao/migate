@@ -34,6 +34,9 @@ pub(super) struct DeviceWork {
     pub(super) subscribe_running: Cell<bool>,
     pub(super) refresh_pending: RefCell<VecDeque<Refresh>>,
     pub(super) refresh_inflight: RefCell<BTreeMap<super::lighting::PropertyKey, Rc<ReadFlight>>>,
+    /// Reads that must be repeated after the current in-flight read completes.
+    /// A dirty member event sets this instead of invalidating the current read.
+    pub(super) dirty_again: RefCell<BTreeSet<super::lighting::PropertyKey>>,
     pub(super) refresh_changed: Rc<Event>,
     changed: Event,
     subscribe_problem: RefCell<Option<String>>,
@@ -64,6 +67,7 @@ impl DeviceWork {
             subscribe_running: Cell::new(false),
             refresh_pending: RefCell::new(VecDeque::new()),
             refresh_inflight: RefCell::new(BTreeMap::new()),
+            dirty_again: RefCell::new(BTreeSet::new()),
             refresh_changed,
             changed: Event::new(),
             subscribe_problem: RefCell::new(None),
@@ -186,6 +190,75 @@ impl DeviceWork {
         }
         self.refresh_changed.notify(usize::MAX);
     }
+    /// Queue one read without invalidating an in-flight read of the same
+    /// property. The refresh counter is advanced only for the queued read, so
+    /// the read that is already in flight still applies its result.
+    pub(super) fn queue_member_read(&self, id: &str, binding: PropertyBinding) {
+        self.observations.refresh(id, binding);
+        let mut pending = self.refresh_pending.borrow_mut();
+        if !pending
+            .iter()
+            .any(|read| read.id == id && read.binding == binding)
+        {
+            pending.push_back(Refresh {
+                id: id.into(),
+                binding,
+                attempts: 0,
+                ready_at: Duration::ZERO,
+            });
+        }
+        self.refresh_changed.notify(usize::MAX);
+    }
+    /// A member event marks the group dirty. Changes arriving while a read is
+    /// in flight are coalesced into exactly one follow-up read; the current
+    /// read is never repeatedly invalidated by an event stream.
+    pub(super) fn request_member_read(&self) {
+        if self.life.is_closed() {
+            return;
+        }
+        let pairs = self
+            .record
+            .cached
+            .borrow()
+            .device
+            .functions
+            .iter()
+            .flat_map(|function| {
+                super::lighting::bindings(function)
+                    .into_iter()
+                    .map(|binding| (function.description.id.clone(), binding))
+            })
+            .collect::<Vec<_>>();
+        for (id, binding) in pairs {
+            self.request_dirty_read(&id, binding);
+        }
+    }
+    /// Queue one real read for a binding without dropping an in-flight read:
+    /// a demand arriving during a read coalesces into exactly one follow-up.
+    pub(super) fn request_dirty_read(&self, id: &str, binding: PropertyBinding) {
+        if self.life.is_closed() {
+            return;
+        }
+        let key = super::lighting::key(id, binding);
+        if self.refresh_inflight.borrow().contains_key(&key) {
+            self.dirty_again.borrow_mut().insert(key);
+        } else if !self
+            .refresh_pending
+            .borrow()
+            .iter()
+            .any(|read| read.id == id && read.binding == binding)
+        {
+            self.queue_member_read(id, binding);
+        }
+    }
+    /// Called after a read finishes. A dirty-again marker produces the single
+    /// follow-up read that covers every change seen during the finished read.
+    pub(super) fn finish_dirty_read(&self, id: &str, binding: PropertyBinding) {
+        let key = super::lighting::key(id, binding);
+        if self.dirty_again.borrow_mut().remove(&key) {
+            self.queue_member_read(id, binding);
+        }
+    }
     pub(super) fn ensure_property_read(&self, id: &str, binding: PropertyBinding) {
         if self
             .refresh_pending
@@ -257,6 +330,7 @@ impl DeviceWork {
         self.cloud_disconnected();
         self.subscribe_requested.set(true);
         self.refresh_pending.borrow_mut().clear();
+        self.dirty_again.borrow_mut().clear();
         self.read_problems.borrow_mut().clear();
         self.source_changed();
         self.changed.notify(usize::MAX);
@@ -298,7 +372,18 @@ impl DeviceWork {
             return;
         }
         let blocked = context.live.borrow().devices[did].blocked.clone();
-        context.problem(did, blocked.or_else(|| self.diagnostic()));
+        // Group diagnostics derive from the actual per-DID watch state map, so
+        // one member's success cannot hide another member's failure.
+        let watch = context
+            .is_group(did)
+            .then(|| context.watch_problem(did))
+            .flatten();
+        let values = watch
+            .into_iter()
+            .chain(self.diagnostic())
+            .collect::<Vec<_>>();
+        let problem = blocked.or_else(|| (!values.is_empty()).then(|| values.join("; ")));
+        context.problem(did, problem);
     }
     pub(super) fn problem(
         &self,

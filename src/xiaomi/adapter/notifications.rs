@@ -63,22 +63,28 @@ impl NotificationSource {
 pub(super) struct CloudSession {
     pub(super) handle: NotificationHandle,
     key: ConnectionKey,
-    tasks: TaskSet,
+    pub(super) tasks: TaskSet,
     online: RefCell<BTreeMap<String, Rc<OnlinePreparation>>>,
-    subscriptions: Rc<SubscriptionBudget>,
+    pub(super) subscriptions: Rc<SubscriptionBudget>,
+}
+
+impl CloudSession {
+    pub(super) fn token(&self) -> &str {
+        &self.key.token
+    }
 }
 
 // Online and property handshakes share capacity, leaving transport slots for cleanup.
 const SUBSCRIPTION_LIMIT: usize = 16;
 
 #[derive(Default)]
-struct SubscriptionBudget {
+pub(super) struct SubscriptionBudget {
     in_flight: Cell<usize>,
     released: Event,
 }
-struct SubscriptionPermit<'a>(&'a SubscriptionBudget);
+pub(super) struct SubscriptionPermit<'a>(&'a SubscriptionBudget);
 impl SubscriptionBudget {
-    async fn acquire(
+    pub(super) async fn acquire(
         &self,
         changed: &Event,
         life: &Lifetime,
@@ -138,6 +144,31 @@ fn connection_credentials(context: &Context) -> Option<(ConnectionKey, XiaomiRec
 
 impl Context {
     pub(super) fn active_notification(&self, did: &str) -> Option<super::model::PathKind> {
+        {
+            let live = self.live.borrow();
+            if let Some(group) = live
+                .devices
+                .get(did)
+                .and_then(|slot| slot.group.as_ref())
+                .filter(|group| !group.is_physical)
+            {
+                let connected = self
+                    .notifications
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|session| self.current_notifications(&session.handle));
+                let watches = self.watches.borrow();
+                let key = crate::device::DeviceKey::new("xiaomi", did);
+                let ready = group.members.iter().all(|member| {
+                    watches.members.get(member).is_some_and(|watch| {
+                        watch.groups.contains(&key)
+                            && watch.state == super::watch::WatchState::Ready
+                    })
+                });
+                return (connected && ready && self.cloud_candidate(did, true))
+                    .then_some(super::model::PathKind::Cloud);
+            }
+        }
         let work = self
             .live
             .borrow()
@@ -160,6 +191,19 @@ impl Context {
         })
     }
     pub(super) fn notification_source(&self, did: &str) -> Option<NotificationSource> {
+        // Virtual groups have no own property subscription: their own state is
+        // read over HTTP and member raw events only mark them dirty. Physical
+        // groups keep their own native property subscription.
+        if self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.group.as_ref())
+            .is_some_and(|group| !group.is_physical)
+        {
+            return None;
+        }
         let local = self
             .local_candidate(did, true)
             .map(NotificationSource::Local);
@@ -217,6 +261,9 @@ impl Context {
         if !self.source_valid(did, source) {
             return;
         }
+        // Exact member subscriptions still mark every observing virtual group
+        // dirty; member state itself continues through the ordinary path.
+        self.notify_member_watch(did);
         let work = self
             .live
             .borrow()
@@ -258,6 +305,45 @@ impl Context {
         self.changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
     }
+
+    /// Retire every notification subscription owned by a device whose slot is
+    /// leaving the confirmed set about to be dropped. Mirrors the desired `None`
+    /// branches of `reconcile_source` without a new mechanism.
+    pub(super) fn retire_device_notifications(&self, did: &str) {
+        let Some(work) = self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.work.clone())
+        else {
+            return;
+        };
+        let active = work.active.borrow_mut().take();
+        let local_done = matches!(active, Some(NotificationSource::Local(_)));
+        let cloud_done = matches!(active, Some(NotificationSource::Cloud(_)));
+        if let Some(active) = &active {
+            // `NotificationSource::retire` already unsubscribes properties and
+            // advances that source's generation with a receipt gate.
+            active.retire(&work, did);
+        }
+        if !local_done && let Some(session) = self.live.borrow().session.as_ref() {
+            // Retire local properties including Preparing registrations, then
+            // advance the generation so a late SUBACK cannot reinstate them.
+            drop(session.handle.unsubscribe_properties(did));
+            work.local_generation.set(work.local_generation.get() + 1);
+            work.subscribed.borrow_mut().clear();
+        }
+        if let Some(session) = self.notifications.borrow().as_ref() {
+            // The cloud session also owns online notifications for this DID;
+            // both are retired through the existing device-level unsubscribe.
+            drop(session.handle.unsubscribe_device(did));
+            if !cloud_done {
+                work.cloud_generation.set(work.cloud_generation.get() + 1);
+                work.cloud_subscribed.borrow_mut().clear();
+            }
+        }
+    }
 }
 fn ready(work: &DeviceWork, source: &NotificationSource) -> bool {
     let subscribed = match source {
@@ -278,6 +364,9 @@ fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
     *work.active.borrow_mut() = Some(source);
     work.source_changed();
     context.note_notification_switch(did, "notification subscriptions ready; source activated");
+    // Once the new source is ready, its watched groups refresh actively; a
+    // discarded switching hint must not wait for a future member event.
+    context.notify_member_watch(did);
 }
 async fn selections(context: Rc<Context>) -> Result<(), AdapterError> {
     loop {
@@ -311,6 +400,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         work.active.borrow_mut().take();
         work.source_changed();
         context.update_routing("notification source access conditions invalidated");
+        context.notify_member_watch(&did);
     }
     let desired = context.notification_source(&did);
     // Keep the desired preparation and the active source while handing over to it.
@@ -325,6 +415,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         && let Some(session) = context.live.borrow().session.as_ref()
     {
         NotificationSource::Local(session.handle.clone()).retire(&work, &did);
+        context.notify_member_watch(&did);
     }
     if !keep_cloud
         && (!work.cloud_subscribed.borrow().is_empty() || work.cloud_running.get())
@@ -332,6 +423,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     {
         NotificationSource::Cloud(session.handle.clone()).retire(&work, &did);
         work.cloud_running.set(false);
+        context.notify_member_watch(&did);
     }
     let Some(desired) = desired else { return };
 
@@ -369,6 +461,9 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
 fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
     let live = context.live.borrow();
     let slot = live.devices.get(did)?;
+    if slot.group.as_ref().is_some_and(|group| !group.is_physical) {
+        return None;
+    }
     let record = slot.admitted.as_ref()?;
     if record.life.is_closed()
         || slot.blocked.is_some()
@@ -394,7 +489,9 @@ fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
         if works.contains_key(did) {
             true
         } else {
-            drop(session.handle.unsubscribe_device(did));
+            // Only online ownership is reconciled here; exact property and raw
+            // member subscriptions have their own retirement lifecycles.
+            drop(session.handle.unsubscribe_online(did));
             false
         }
     });
@@ -642,6 +739,7 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     subscriptions: Rc::new(SubscriptionBudget::default()),
                 });
                 *context.notifications.borrow_mut() = Some(session.clone());
+                context.sync_member_watches(true);
                 for work in context
                     .live
                     .borrow()
@@ -693,6 +791,20 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                                 binding,
                                 &value,
                                 true,
+                            ),
+                            NotificationEvent::MemberProperty {
+                                did,
+                                siid,
+                                piid,
+                                value,
+                                retained,
+                            } => events.member_property_event(
+                                &event_handle,
+                                &did,
+                                siid,
+                                piid,
+                                &value,
+                                retained,
                             ),
                         })
                         .await

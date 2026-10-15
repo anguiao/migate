@@ -48,12 +48,8 @@ impl Store {
             initialize(&mut connection)
                 .map_err(|e| StorageError::database(&path, "initialize database", e))?;
         } else {
-            migration::migrate(&mut connection).map_err(|error| match error {
-                migration::MigrationError::Database(error) => {
-                    StorageError::database(&path, "migrate database", error)
-                }
-                error => StorageError::new(&path, "validate database schema", error),
-            })?;
+            migration::validate(&connection)
+                .map_err(|error| StorageError::new(&path, "validate database schema", error))?;
         }
         Ok(Self {
             inner: Rc::new(Inner { path, connection }),

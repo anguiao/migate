@@ -28,9 +28,17 @@ struct Pending {
     unsubscribe: bool,
     count: usize,
 }
+/// One ready registration captured when a QoS2 receipt arrives.
+#[derive(Clone)]
+struct Delivery {
+    filter: String,
+    generation: u64,
+    delivery_generation: u64,
+    target: Target,
+}
 struct Received {
     publish: Publish,
-    registration: Option<(String, u64, u64)>,
+    delivery: Option<Delivery>,
 }
 
 /// Owns MQTT I/O. Subscription completions and notifications run on this driver
@@ -514,16 +522,12 @@ impl NotificationDriver {
                             if self.incoming.len() >= LIMIT {
                                 return Err(NotificationError::Protocol);
                             }
-                            let registration = self.registration(&publish.topic).map(
-                                |(topic, generation, delivery_generation, _)| {
-                                    (topic, generation, delivery_generation)
-                                },
-                            );
+                            let delivery = self.delivery(&publish.topic);
                             self.incoming.insert(
                                 publish.pkid,
                                 Received {
                                     publish: publish.clone(),
-                                    registration,
+                                    delivery,
                                 },
                             );
                         }
@@ -539,15 +543,19 @@ impl NotificationDriver {
                 if ack.pkid == 0 || ack.reason != PubRelReason::Success {
                     return Err(NotificationError::Protocol);
                 }
-                if let Some(received) = self.incoming.remove(&ack.pkid)
-                    && received.registration.is_some_and(
-                        |(topic, generation, delivery_generation)| {
-                            self.shared
-                                .current_delivery(&topic, generation, delivery_generation)
-                        },
-                    )
-                {
-                    self.message(received.publish, on_event);
+                if let Some(received) = self.incoming.remove(&ack.pkid) {
+                    // Dispatch only the registration captured at PUBLISH, and
+                    // only while it is still current; otherwise drop. Never
+                    // resolve a later registration for this receipt.
+                    if let Some(delivery) = received.delivery.filter(|delivery| {
+                        self.shared.current_delivery(
+                            &delivery.filter,
+                            delivery.generation,
+                            delivery.delivery_generation,
+                        )
+                    }) {
+                        self.message_target(received.publish, delivery.target, on_event);
+                    }
                 }
                 self.enqueue(
                     Packet::PubComp(PubComp::new(ack.pkid)),
@@ -570,39 +578,69 @@ impl NotificationDriver {
         Ok(())
     }
 
-    fn registration(&self, topic: &str) -> Option<(String, u64, u64, Target)> {
+    /// The one ready registration selected for a topic: exact first, then the
+    /// raw wildcard. At most one callback per receipt.
+    fn delivery(&self, topic: &str) -> Option<Delivery> {
         let registrations = self.shared.registrations.borrow();
-        let (filter, registration) = registrations.get_key_value(topic).or_else(|| {
-            let (did, suffix) = topic.strip_prefix("device/")?.split_once('/')?;
-            if suffix != "state" && !suffix.starts_with("state/") {
-                return None;
+        let ready = |filter: &str| {
+            registrations
+                .get(filter)
+                .filter(|registration| registration.ready)
+                .map(|registration| Delivery {
+                    filter: filter.to_string(),
+                    generation: registration.generation,
+                    delivery_generation: registration.delivery_generation,
+                    target: registration.target.clone(),
+                })
+        };
+        if let Some(exact) = ready(topic) {
+            return Some(exact);
+        }
+        if let Some((did, suffix)) = topic
+            .strip_prefix("device/")
+            .and_then(|rest| rest.split_once('/'))
+        {
+            let wildcard = if suffix == "state" || suffix.starts_with("state/") {
+                format!("device/{did}/state/#")
+            } else if suffix == "up/properties_changed"
+                || suffix.starts_with("up/properties_changed/")
+            {
+                format!("device/{did}/up/properties_changed/#")
+            } else {
+                String::new()
+            };
+            if !wildcard.is_empty() {
+                return ready(&wildcard);
             }
-            registrations.get_key_value(&format!("device/{did}/state/#"))
-        })?;
-        registration.ready.then(|| {
-            (
-                filter.clone(),
-                registration.generation,
-                registration.delivery_generation,
-                registration.target.clone(),
-            )
-        })
+        }
+        None
     }
 
     fn message(&self, publish: Publish, on_event: &mut impl FnMut(NotificationEvent)) {
-        if let Err(error) = self.dispatch_message(publish, on_event) {
+        // QoS0/1: one callback for the first ready registration, exact or raw.
+        let Some(delivery) = self.delivery(&publish.topic) else {
+            return;
+        };
+        self.message_target(publish, delivery.target, on_event);
+    }
+
+    fn message_target(
+        &self,
+        publish: Publish,
+        target: Target,
+        on_event: &mut impl FnMut(NotificationEvent),
+    ) {
+        if let Err(error) = self.dispatch_target(publish, target, on_event) {
             log::warn!("Ignoring invalid cloud notification: {error}");
         }
     }
 
-    fn dispatch_message(
+    fn dispatch_target(
         &self,
         publish: Publish,
+        target: Target,
         on_event: &mut impl FnMut(NotificationEvent),
     ) -> Result<(), NotificationError> {
-        let Some((_, _, _, target)) = self.registration(&publish.topic) else {
-            return Ok(());
-        };
         let payload: Value =
             serde_json::from_slice(&publish.payload).map_err(|_| NotificationError::Protocol)?;
         self.validate_uid(&payload)?;
@@ -648,6 +686,58 @@ impl NotificationDriver {
                     }
                 };
                 on_event(event);
+            }
+            Target::RawProperties { did } => {
+                let prefix = format!("device/{did}/up/properties_changed/");
+                let suffix = publish
+                    .topic
+                    .strip_prefix(&prefix)
+                    .ok_or(NotificationError::Protocol)?;
+                let mut levels = suffix.split('/');
+                let component = |value: Option<&str>| {
+                    value
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .filter(|value| *value != 0)
+                };
+                let topic_siid = component(levels.next()).ok_or(NotificationError::Protocol)?;
+                let topic_piid = component(levels.next()).ok_or(NotificationError::Protocol)?;
+                if levels.next().is_some() {
+                    return Err(NotificationError::Protocol);
+                }
+                let params = payload
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .ok_or(NotificationError::Protocol)?;
+                for candidate in [payload.get("did"), params.get("did")] {
+                    if let Some(candidate) = candidate
+                        && candidate.as_str() != Some(&did)
+                    {
+                        return Err(NotificationError::Protocol);
+                    }
+                }
+                let payload_component = |name: &str| {
+                    params
+                        .get(name)
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .filter(|value| *value != 0)
+                };
+                let siid = payload_component("siid").ok_or(NotificationError::Protocol)?;
+                let piid = payload_component("piid").ok_or(NotificationError::Protocol)?;
+                if siid != topic_siid || piid != topic_piid {
+                    return Err(NotificationError::Protocol);
+                }
+                let value = params
+                    .get("value")
+                    .filter(|value| crate::xiaomi::property::valid_value(value))
+                    .ok_or(NotificationError::Protocol)?;
+                on_event(NotificationEvent::MemberProperty {
+                    did,
+                    siid,
+                    piid,
+                    value: value.clone(),
+                    retained: publish.retain,
+                });
             }
             Target::Online { did } => {
                 if payload.get("device_id").and_then(Value::as_str) != Some(&did) {

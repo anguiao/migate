@@ -80,6 +80,19 @@ pub(super) struct DeviceSlot {
     pub(super) access: Option<Result<DeviceAccess, CentralError>>,
     pub(super) blocked: Option<String>,
     pub(super) last_switch_reason: Option<String>,
+    /// Native group identity confirmed by the account catalog. Group slots
+    /// reuse the ordinary record/work machinery but never persist identity.
+    /// Virtual groups are cloud-only; physical groups keep their own route.
+    pub(super) group: Option<GroupSource>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct GroupSource {
+    pub(super) record_did: String,
+    pub(super) model: String,
+    pub(super) instance_type: Option<String>,
+    pub(super) members: Vec<String>,
+    pub(super) is_physical: bool,
+    pub(super) online: bool,
 }
 impl DeviceSlot {
     pub(super) fn restored(cached: CachedPhysicalDevice, physical: PhysicalDevice) -> Self {
@@ -250,6 +263,8 @@ pub(super) struct Live {
 pub(super) struct Context {
     pub(super) commands: Rc<super::commands::Commands>,
     pub(super) light_writes: super::commands::LightWriteGates,
+    pub(super) watches: RefCell<super::watch::Watches>,
+    pub(super) relations: RefCell<super::relations::Relations>,
     pub(super) notifications: RefCell<Option<Rc<super::notifications::CloudSession>>>,
     pub(super) credentials_changed: Event,
     #[cfg(test)]

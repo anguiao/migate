@@ -46,6 +46,13 @@ pub(in super::super) struct CloudState {
     pub(in super::super) read_values: BTreeMap<(String, u32, u32), bool>,
     pub(in super::super) read_gates: BTreeMap<(String, u32, u32), flume::Receiver<()>>,
     pub(in super::super) read_status: u16,
+    /// Full unfiltered account-catalog records appended after the ordinary
+    /// home members. Tests inject real `extra.member_list` shapes here.
+    pub(in super::super) catalog_groups: Vec<Value>,
+    pub(in super::super) catalog_status: u16,
+    pub(in super::super) catalog_instances: BTreeMap<String, Value>,
+    pub(in super::super) catalogs: usize,
+    pub(in super::super) catalog_partial: bool,
 }
 pub(in super::super) struct Rig {
     pub(in super::super) _directory: tempfile::TempDir,
@@ -149,6 +156,7 @@ impl Rig {
             property_status: 200,
             read_status: 200,
             info_status: 200,
+            catalog_status: 200,
             ..Default::default()
         }));
         let info_dids = if restore {
@@ -190,10 +198,14 @@ impl Rig {
             } else if request.target.ends_with("/miotspec/prop/set") {
                 let body: Value = serde_json::from_str(&request.body).unwrap();
                 let items = body["params"].as_array().unwrap();
-                let light = records.iter().any(|record| {
-                    record.device.key.id == items[0]["did"].as_str().unwrap()
-                        && record.device.functions[0].lighting.is_some()
+                let did = items[0]["did"].as_str().unwrap();
+                let native_group = state.catalog_groups.iter().any(|record| {
+                    record["extra"]["member_list"]["group_did"].as_str() == Some(did)
                 });
+                let light = native_group
+                    || records.iter().any(|record| {
+                        record.device.key.id == did && record.device.functions[0].lighting.is_some()
+                    });
                 if light {
                     state
                         .numeric_writes
@@ -252,8 +264,26 @@ impl Rig {
                 }
             } else if request.target.ends_with("/device_list_page") {
                 let body: Value = serde_json::from_str(&request.body).unwrap();
-                if body["dids"]
-                    .as_array()
+                let requested = body.get("dids").and_then(Value::as_array);
+                if requested.is_none() {
+                    // Full unfiltered account catalog. Ordinary home members are
+                    // returned together with injectable real group records.
+                    state.catalogs += 1;
+                    if state.catalog_status != 200 {
+                        return MockResponse::json(state.catalog_status, "{}");
+                    }
+                    let mut list = records
+                        .iter()
+                        .filter(|record| state.members.contains(&record.device.key.id))
+                        .map(|record| {
+                            json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})
+                        })
+                        .collect::<Vec<_>>();
+                    list.extend(state.catalog_groups.iter().cloned());
+                    let value = json!({"code":0,"result":{"list":list,"has_more":state.catalog_partial,"next_start_did":Value::Null}});
+                    return MockResponse::json(200, &value.to_string());
+                }
+                if requested
                     .unwrap()
                     .iter()
                     .all(|did| info_dids.contains(did.as_str().unwrap()))
@@ -278,6 +308,19 @@ impl Rig {
                 }
                 json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
+                let query = request
+                    .target
+                    .split_once('?')
+                    .map(|(_, query)| query)
+                    .unwrap_or("");
+                let requested_type = url::form_urlencoded::parse(query.as_bytes())
+                    .find_map(|(key, value)| (key == "type").then(|| value.into_owned()));
+                if let Some(instance) = requested_type
+                    .as_ref()
+                    .and_then(|urn| state.catalog_instances.get(urn))
+                {
+                    return MockResponse::json(200, &instance.to_string());
+                }
                 let multi = request.target.contains("cuco-cp7pd");
                 let mut value: Value = serde_json::from_str(
                     if let Some(instance) = &custom_text

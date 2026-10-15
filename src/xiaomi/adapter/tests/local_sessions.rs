@@ -488,3 +488,243 @@ fn reconnect_keeps_command_consumers_cancels_old_writes_and_rebuilds_only_regist
         .await;
     }));
 }
+
+#[test]
+fn new_physical_group_discovers_own_local_access_after_member_session() {
+    let mut rig = Rig::new(true, &["one"]);
+    let uid = rig.data[0].uid.clone();
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/group3-instance.json"
+    ))
+    .unwrap();
+    let urn = instance["type"].as_str().unwrap().to_string();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.online.insert("one".into());
+        cloud.catalog_groups = vec![json!({
+            "did": "group-record",
+            "name": "Native group",
+            "model": "mijia.light.group3",
+            "spec_type": urn,
+            "isOnline": false,
+            "extra": {
+                "member_list": {
+                    "group_did": "group-1",
+                    "status": "1",
+                    "display_member_switch": 0,
+                    "member_ship": {"one": "1"},
+                    "is_physical": true
+                }
+            }
+        })];
+        cloud
+            .catalog_instances
+            .insert(urn.clone(), instance.clone());
+        for (siid, value) in [(1, json!(false)), (2, json!(50)), (3, json!(2700))] {
+            cloud.raw_values.insert(("group-1".into(), 2, siid), value);
+        }
+    }
+    let mut record = cached(&uid, "group-1", false);
+    record.model = "mijia.light.group3".into();
+    record.instance_type = urn.clone();
+    record.device = crate::xiaomi::capability::parse_device_for_model(
+        DeviceKey::new("xiaomi", "group-1"),
+        "mijia.light.group3",
+        &instance,
+    )
+    .unwrap();
+    rig.data.push(record);
+    let group = rig.cloud.lock().unwrap().catalog_groups.pop().unwrap();
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            assert!(
+                !control
+                    .context
+                    .live
+                    .borrow()
+                    .devices
+                    .contains_key("group-1")
+            );
+            let lists = peer.lists();
+            control.cloud.lock().unwrap().catalog_groups = vec![group];
+            control.context.request_sync();
+            until(|| {
+                control
+                    .context
+                    .live
+                    .borrow()
+                    .devices
+                    .get("group-1")
+                    .is_some_and(|slot| slot.admitted.is_some())
+            })
+            .await;
+            until(|| {
+                matches!(
+                    control.context.control_path("group-1"),
+                    Some(super::super::routing::ControlPath::Local(_))
+                )
+            })
+            .await;
+            assert!(peer.lists() > lists);
+            let id = {
+                let live = control.context.live.borrow();
+                let record = live.devices["group-1"].admitted.as_ref().unwrap();
+                let cached = record.cached.borrow();
+                cached
+                    .device
+                    .functions
+                    .iter()
+                    .find(|function| function.lighting.is_some())
+                    .unwrap()
+                    .description
+                    .id
+                    .clone()
+            };
+            until(|| {
+                function(&control.context.registry, "group-1", &id)
+                    .snapshot()
+                    .availability
+                    == Availability::Available
+            })
+            .await;
+            function(&control.context.registry, "group-1", &id)
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert!(peer.count("rpcReq", "group-1", 2) > 0);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn native_groups_use_own_routes_and_respect_virtual_type() {
+    let mut rig = Rig::light("xiaomi.light.ceil04");
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/group3-instance.json"
+    ))
+    .unwrap();
+    let urn = instance["type"].as_str().unwrap().to_owned();
+    for (did, physical) in [("group-p", true), ("group-v", false)] {
+        let mut record = cached(&rig.data[0].uid, did, false);
+        record.model = "mijia.light.group3".into();
+        record.instance_type = urn.clone();
+        record.device = crate::xiaomi::capability::parse_group(
+            DeviceKey::new("xiaomi", did),
+            &record.model,
+            &instance,
+        )
+        .unwrap();
+        rig.data.push(record);
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.catalog_groups.push(json!({
+            "did": format!("record-{did}"), "name": did,
+            "model": "mijia.light.group3", "spec_type": urn, "isOnline": false,
+            "extra": {"member_list": {
+                "group_did": did, "status": "1", "member_ship": {"one": "1"},
+                "is_physical": physical
+            }}
+        }));
+        for (piid, value) in [(1, json!(false)), (2, json!(50)), (3, json!(3000))] {
+            cloud.raw_values.insert((did.into(), 2, piid), value);
+        }
+    }
+    rig.cloud
+        .lock()
+        .unwrap()
+        .catalog_instances
+        .insert(urn, instance);
+    block_on(rig.run(|c| async move {
+        let peer = Rc::new(Peer::default());
+        peer.state.borrow_mut().omit.insert("group-p".into());
+        for did in ["one", "group-p", "group-v"] {
+            for (piid, value) in [(1, json!(false)), (2, json!(50)), (3, json!(3000))] {
+                peer.value(
+                    did,
+                    crate::xiaomi::capability::PropertyBinding { siid: 2, piid },
+                    value,
+                );
+            }
+        }
+        c.announce();
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                ["group-p", "group-v"].iter().all(|did| {
+                    control
+                        .context
+                        .live
+                        .borrow()
+                        .devices
+                        .get(*did)
+                        .is_some_and(|slot| slot.admitted.is_some())
+                })
+            })
+            .await;
+            until(|| {
+                control.context.active_notification("one")
+                    == Some(super::super::model::PathKind::Local)
+            })
+            .await;
+            let member = function(&control.context.registry, "one", "main");
+            until(|| member.snapshot().power == Power::Off).await;
+            let physical = function(&control.context.registry, "group-p", "main");
+            let virtual_group = function(&control.context.registry, "group-v", "main");
+            assert_eq!(member.snapshot().availability, Availability::Available);
+            assert!(control.context.control_path("group-p").is_none());
+            assert!(matches!(
+                physical.snapshot().availability,
+                Availability::Unavailable(_)
+            ));
+            // Obtain the virtual group's own advertised local row as well.
+            peer.list_changed(&["group-v"]);
+            until(|| {
+                control.context.live.borrow().devices["group-v"]
+                    .access
+                    .is_some()
+            })
+            .await;
+            assert!(control.context.control_path("group-v").is_none());
+            assert!(matches!(
+                virtual_group.snapshot().availability,
+                Availability::Unavailable(_)
+            ));
+            assert_eq!(peer.count("subscribe", "group-v", 2), 0);
+            peer.state.borrow_mut().omit.remove("group-p");
+            peer.list_changed(&["group-p"]);
+            until(|| {
+                control.context.active_notification("group-p")
+                    == Some(super::super::model::PathKind::Local)
+            })
+            .await;
+            assert!(matches!(
+                control.context.control_path("group-p"),
+                Some(super::super::routing::ControlPath::Local(_))
+            ));
+            assert!(peer.count("subscribe", "group-p", 2) > 0);
+            peer.notify_value(
+                "group-p",
+                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                json!(true),
+                false,
+            );
+            until(|| physical.snapshot().power == Power::On).await;
+            assert_eq!(member.snapshot().power, Power::Off);
+            control.cloud.lock().unwrap().catalog_groups[1]["isOnline"] = json!(true);
+            control.context.request_sync();
+            until(|| {
+                matches!(
+                    control.context.control_path("group-v"),
+                    Some(super::super::routing::ControlPath::Cloud(_))
+                )
+            })
+            .await;
+            assert_eq!(peer.count("subscribe", "group-v", 2), 0);
+        })
+        .await;
+    }));
+}

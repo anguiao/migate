@@ -204,6 +204,9 @@ impl Context {
         }
     }
     fn notification_reason(&self, did: &str) -> String {
+        if let Some(reason) = self.watch_problem(did) {
+            return reason;
+        }
         let work = self.live.borrow().devices[did].work.clone();
         if let Some(work) = work {
             if work.subscribe_running.get() || work.cloud_running.get() {

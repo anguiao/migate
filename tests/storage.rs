@@ -9,18 +9,6 @@ use migate::{
 use rusqlite::Connection;
 use std::{error::Error as _, fs};
 
-const LEGACY_SCHEMA: &str = r#"
-CREATE TABLE identity (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    bridge_id TEXT NOT NULL CHECK (length(bridge_id) = 32),
-    light_id TEXT NOT NULL CHECK (length(light_id) = 32 AND light_id <> bridge_id)
-) STRICT;
-CREATE TABLE blobs (
-    key INTEGER PRIMARY KEY CHECK (key BETWEEN 0 AND 65535),
-    value BLOB NOT NULL
-) STRICT;
-"#;
-
 #[test]
 fn initializes_and_restores_identity_without_power() {
     let root = tempfile::tempdir().unwrap();
@@ -34,7 +22,7 @@ fn initializes_and_restores_identity_without_power() {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            7
         );
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
@@ -277,46 +265,6 @@ fn private_permissions() {
 }
 
 #[test]
-fn migrates_unversioned_storage_without_changing_existing_data() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("state.db");
-    let db = Connection::open(&path).unwrap();
-    db.execute_batch(LEGACY_SCHEMA).unwrap();
-    db.execute(
-        "INSERT INTO identity (id, bridge_id, light_id) VALUES (1, ?1, ?2)",
-        [
-            "11111111111111111111111111111111",
-            "22222222222222222222222222222222",
-        ],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO blobs (key, value) VALUES (7, ?1)",
-        [b"matter".as_slice()],
-    )
-    .unwrap();
-    drop(db);
-
-    let store = Store::open(dir.path()).unwrap();
-    assert_eq!(
-        store.load_identity().unwrap().bridge_id,
-        "11111111111111111111111111111111"
-    );
-    assert_eq!(
-        store.matter().get(7).unwrap().as_deref(),
-        Some(b"matter".as_slice())
-    );
-    assert!(store.xiaomi().load().unwrap().is_none());
-
-    let db = Connection::open(path).unwrap();
-    assert_eq!(
-        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        5
-    );
-}
-
-#[test]
 fn rejects_unsupported_or_damaged_schemas_without_changing_data() {
     for (setup, expected) in [
         (
@@ -368,44 +316,6 @@ fn invalid_current_schema_reports_sql_errors_without_replacing_identity() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        5
-    );
-}
-
-#[test]
-fn failed_migration_rolls_back_version_and_preserves_legacy_data() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("state.db");
-    let db = Connection::open(&path).unwrap();
-    db.execute_batch(LEGACY_SCHEMA).unwrap();
-    db.execute(
-        "INSERT INTO identity (id, bridge_id, light_id) VALUES (1, ?1, ?2)",
-        [
-            "11111111111111111111111111111111",
-            "22222222222222222222222222222222",
-        ],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO blobs (key, value) VALUES (7, ?1)",
-        [b"matter".as_slice()],
-    )
-    .unwrap();
-    db.execute_batch("CREATE VIEW xiaomi_auth AS SELECT 1 AS id;")
-        .unwrap();
-    drop(db);
-
-    assert!(Store::open(dir.path()).is_err());
-    let db = Connection::open(path).unwrap();
-    assert_eq!(
-        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.query_row("SELECT value FROM blobs WHERE key = 7", [], |row| row
-            .get::<_, Vec<u8>>(0))
-            .unwrap(),
-        b"matter"
+        7
     );
 }

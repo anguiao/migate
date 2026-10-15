@@ -46,6 +46,9 @@ pub(super) enum Target {
         did: String,
         binding: PropertyBinding,
     },
+    RawProperties {
+        did: String,
+    },
     Online {
         did: String,
     },
@@ -54,12 +57,30 @@ pub(super) enum Target {
 impl Target {
     pub(super) fn did(&self) -> &str {
         match self {
-            Self::Property { did, .. } | Self::Online { did } => did,
+            Self::Property { did, .. } | Self::RawProperties { did } | Self::Online { did } => did,
         }
     }
-    fn retired_by(&self, did: &str, properties_only: bool) -> bool {
-        self.did() == did && (!properties_only || matches!(self, Self::Property { .. }))
+    fn retired_by(&self, did: &str, scope: Retire) -> bool {
+        if self.did() != did {
+            return false;
+        }
+        match scope {
+            Retire::Device => true,
+            Retire::Properties => matches!(self, Self::Property { .. }),
+            Retire::RawProperties => matches!(self, Self::RawProperties { .. }),
+            Retire::Online => matches!(self, Self::Online { .. }),
+        }
     }
+}
+
+/// Subscription ownership: ordinary exact properties and raw member watchers
+/// are retired independently so one cleanup cannot silently remove the other.
+#[derive(Clone, Copy)]
+pub(super) enum Retire {
+    Device,
+    Properties,
+    RawProperties,
+    Online,
 }
 
 pub(super) struct Registration {
@@ -180,6 +201,19 @@ impl NotificationHandle {
         async move { completion?.wait().await }
     }
 
+    /// Subscribe to every valid property event of a device without a parsed
+    /// description. Payloads are validated by the driver before delivery.
+    pub fn subscribe_raw_properties(
+        &self,
+        did: &str,
+    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
+        let completion = self.subscribe(
+            format!("device/{did}/up/properties_changed/#"),
+            Target::RawProperties { did: did.into() },
+        );
+        async move { completion?.wait().await }
+    }
+
     pub fn subscribe_online(
         &self,
         did: &str,
@@ -254,7 +288,27 @@ impl NotificationHandle {
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
-        let completion = self.unsubscribe(did, true);
+        let completion = self.unsubscribe(did, Retire::Properties);
+        async move { completion?.wait().await }
+    }
+
+    /// Retire only raw member watchers. Ordinary exact subscriptions and
+    /// online notifications stay active.
+    pub fn unsubscribe_raw_properties(
+        &self,
+        did: &str,
+    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
+        let completion = self.unsubscribe(did, Retire::RawProperties);
+        async move { completion?.wait().await }
+    }
+
+    /// Retire only online notifications. Exact and raw member subscriptions
+    /// are owned by other lifecycles and must survive an online reconcile.
+    pub fn unsubscribe_online(
+        &self,
+        did: &str,
+    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
+        let completion = self.unsubscribe(did, Retire::Online);
         async move { completion?.wait().await }
     }
 
@@ -262,15 +316,11 @@ impl NotificationHandle {
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
-        let completion = self.unsubscribe(did, false);
+        let completion = self.unsubscribe(did, Retire::Device);
         async move { completion?.wait().await }
     }
 
-    fn unsubscribe(
-        &self,
-        did: &str,
-        properties_only: bool,
-    ) -> Result<Rc<Completion>, NotificationError> {
+    fn unsubscribe(&self, did: &str, scope: Retire) -> Result<Rc<Completion>, NotificationError> {
         if !valid_identifier(did) {
             return Err(NotificationError::InvalidInput);
         }
@@ -281,7 +331,7 @@ impl NotificationHandle {
             .shared
             .registrations
             .borrow_mut()
-            .extract_if(|_, registration| registration.target.retired_by(did, properties_only))
+            .extract_if(|_, registration| registration.target.retired_by(did, scope))
             .collect();
         for (_, registration) in removed {
             if registration
@@ -305,11 +355,7 @@ impl NotificationHandle {
             .known_topics
             .borrow()
             .iter()
-            .filter_map(|(topic, target)| {
-                target
-                    .retired_by(did, properties_only)
-                    .then_some(topic.clone())
-            })
+            .filter_map(|(topic, target)| target.retired_by(did, scope).then_some(topic.clone()))
             .collect();
         if filters.is_empty() {
             return self.immediate(Ok(()));
@@ -320,7 +366,7 @@ impl NotificationHandle {
         self.shared
             .known_topics
             .borrow_mut()
-            .retain(|_, target| !target.retired_by(did, properties_only));
+            .retain(|_, target| !target.retired_by(did, scope));
         let completion = Completion::new();
         self.enqueue(RequestKind::Unsubscribe { filters }, completion.clone());
         Ok(completion)

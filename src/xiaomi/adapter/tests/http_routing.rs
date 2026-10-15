@@ -330,6 +330,15 @@ fn temporary_directory_failures_pause_existing_http_candidates_until_sync_recove
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
         cloud_ready(&c, &["one"]).await;
+        // Settle the ordinary startup read before freezing the clock, so the
+        // directory failure below is the only HTTP pause under test.
+        until(|| {
+            function(&c.context.registry, "one", "main")
+                .snapshot()
+                .power
+                == Power::Off
+        })
+        .await;
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);

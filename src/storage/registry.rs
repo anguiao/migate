@@ -341,7 +341,7 @@ fn create_record(
         endpoint,
     )?;
     connection.execute(
-        "INSERT INTO device_identity VALUES (?1,?2,?3,?4,?5,1)",
+        "INSERT INTO device_identity(source,device_id,unique_id,endpoint,label,published) VALUES (?1,?2,?3,?4,?5,1)",
         params![
             description.key.source,
             description.key.id,

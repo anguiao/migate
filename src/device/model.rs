@@ -9,7 +9,7 @@ pub enum Command {
     Toggle,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DeviceKey {
     pub source: String,
     pub id: String,

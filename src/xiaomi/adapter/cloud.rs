@@ -185,13 +185,20 @@ pub(super) async fn run(
         };
         context.store.devices().save_scope(&scope)?;
         let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
-        let membership_changed = context.live.borrow().devices.keys().ne(members.iter());
+        let membership_changed = context
+            .live
+            .borrow()
+            .devices
+            .iter()
+            .filter(|(_, slot)| slot.group.is_none())
+            .map(|(did, _)| did)
+            .ne(members.iter());
         let removed = {
             let live = context.live.borrow();
             live.devices
-                .keys()
-                .filter(|did| !members.contains(*did))
-                .cloned()
+                .iter()
+                .filter(|(did, slot)| slot.group.is_none() && !members.contains(*did))
+                .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
         };
         context.live.borrow_mut().scope = Some(scope.clone());
@@ -209,6 +216,11 @@ pub(super) async fn run(
         {
             let mut live = context.live.borrow_mut();
             for (did, slot) in &mut live.devices {
+                // Native groups keep their own catalog access metadata; an
+                // ordinary home detail absence must never clear it.
+                if slot.group.is_some() {
+                    continue;
+                }
                 slot.cloud_access = infos.get(did).cloned();
                 slot.cloud_forbidden = false;
             }
@@ -225,7 +237,25 @@ pub(super) async fn run(
         if membership_changed {
             super::local::refresh_access(&context);
         }
+        let catalog_members = members.clone();
         for did in members {
+            // Group-like records are admitted only by a confirmed catalog
+            // relation, never through the ordinary home description path.
+            let group_like = {
+                let live = context.live.borrow();
+                live.devices[&did].group.is_some()
+                    || crate::xiaomi::capability::is_light_group(
+                        &crate::device::DeviceKey::new("xiaomi", &did),
+                        live.devices[&did]
+                            .cloud_access
+                            .as_ref()
+                            .map(|access| access.model.as_str())
+                            .unwrap_or_default(),
+                    )
+            };
+            if group_like {
+                continue;
+            }
             let prepare = context.live.borrow().devices[&did].needs_description();
             if !prepare {
                 context.reconcile(&did)?;
@@ -293,6 +323,60 @@ pub(super) async fn run(
             };
             context.tasks.spawn(task);
             context.changed.notify(usize::MAX);
+        }
+        // Native group relations come from the same authoritative account
+        // catalog; a failed read keeps the previous confirmed relations.
+        // The selected scope is captured at request start so the first home
+        // binding (previously `None`) cannot discard the first catalog.
+        let catalog_scope = context.live.borrow().scope.clone();
+        let catalog = future::or(
+            async { Some(cloud.get_device_catalog(token).await) },
+            async {
+                context.token_retired(token).await;
+                None
+            },
+        )
+        .await;
+        if context.current_token(token) && context.live.borrow().scope == catalog_scope {
+            match catalog {
+                Some(Ok(catalog)) => {
+                    let update =
+                        context
+                            .relations
+                            .borrow_mut()
+                            .apply(&catalog, &scope, &catalog_members);
+                    for did in &update.withdrawn {
+                        if !catalog_members.contains(did)
+                            && context.live.borrow().devices.contains_key(did)
+                        {
+                            context.remove(did)?;
+                        }
+                    }
+                    for (did, reason) in &update.errors {
+                        log::warn!("Native group {did} relation not confirmed: {reason}");
+                    }
+                    for group in &update.active {
+                        log::debug!(
+                            "Native group {} model {} instance {} confirmed with {} members",
+                            group.membership.group_did,
+                            group.model,
+                            group.instance_type.as_deref().unwrap_or("missing"),
+                            group.membership.members.len()
+                        );
+                    }
+                    context.sync_member_watches(false);
+                    context.sync_groups(cloud, token, &update.active);
+                }
+                Some(Err(error)) => {
+                    log::warn!(
+                        "Native group catalog read failed; keeping confirmed relations: {error}"
+                    );
+                    if error.is_unauthorized() {
+                        context.cloud_error(token, None, &error)?;
+                    }
+                }
+                None => {}
+            }
         }
         due = context.clock.now() + MEMBER_INTERVAL;
     }
