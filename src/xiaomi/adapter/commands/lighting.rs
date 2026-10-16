@@ -151,6 +151,363 @@ fn feedback_bindings(record: &DeviceRecord, id: &str, group: bool) -> Vec<Proper
     bindings
 }
 
+pub(super) type EchoTickets = Vec<(
+    PropertyBinding,
+    Rc<super::LightWriteGate>,
+    super::ExpectedTicket,
+)>;
+
+/// One settled property batch: logical result plus a fallible cloud report.
+struct BatchReceipt {
+    result: Result<(), CommandError>,
+    /// A fallible cloud maintenance report after the receipt already settled.
+    maintenance: Option<AdapterError>,
+}
+
+enum BatchAttempt {
+    /// No byte was written; the caller re-encodes and retries.
+    Withdrawn,
+    Settled(BatchReceipt),
+}
+
+fn settled(result: Result<(), CommandError>) -> BatchAttempt {
+    BatchAttempt::Settled(BatchReceipt {
+        result,
+        maintenance: None,
+    })
+}
+
+/// Concrete inputs for one attempt of one property batch.
+struct Batch<'a> {
+    function_id: &'a str,
+    properties: Vec<(PropertyBinding, Value)>,
+    history_bindings: &'a [PropertyBinding],
+    /// Exact native-to-member expectations owned by this attempt.
+    echoes: EchoTickets,
+    gate: &'a Rc<super::LightWriteGate>,
+    operation: &'a Rc<super::CommandOperation>,
+    mark: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
+    /// Ownership and the exact error once the request is superseded.
+    current: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
+    /// Single-light frames withdraw when their re-encode no longer matches.
+    frame_current: Option<&'a Rc<dyn Fn() -> bool>>,
+    optimistic: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_receipt<E>(
+    work: &DeviceWork,
+    id: &str,
+    properties: &[(PropertyBinding, Value)],
+    stamps: &[super::super::observations::WriteStamp],
+    results: &PropertyResults<(), E>,
+    gate: &Rc<super::LightWriteGate>,
+    authority: u64,
+    history_bindings: &[PropertyBinding],
+    optimistic: bool,
+) -> Vec<(PropertyBinding, Option<bool>)> {
+    let settlements = properties
+        .iter()
+        .enumerate()
+        .map(|(index, (binding, _))| {
+            (
+                *binding,
+                if results.protocol_error {
+                    None
+                } else {
+                    results.items.get(index).map(|result| result.is_ok())
+                },
+            )
+        })
+        .collect();
+    gate.finish_feedback_for(authority, properties, results, history_bindings);
+    if optimistic {
+        apply(work, id, properties, stamps, results);
+    } else {
+        for (binding, _) in properties {
+            work.request_dirty_read(id, *binding);
+        }
+    }
+    settlements
+}
+
+/// Submit one exact property batch over the device's current path. The sender
+/// owns route selection, the final transmission guard, send marking, feedback
+/// registration and receipt settlement, including this attempt's echoes.
+/// Callers own encoding, ownership closures and the logical request result.
+async fn submit_properties(
+    context: &Rc<Context>,
+    work: &Rc<DeviceWork>,
+    batch: Batch<'_>,
+) -> BatchAttempt {
+    let Batch {
+        function_id,
+        properties,
+        history_bindings,
+        echoes,
+        gate,
+        operation,
+        mark,
+        current,
+        frame_current,
+        optimistic,
+    } = batch;
+    let did = work.record.physical.key().id.clone();
+    let generation = work.record.binding_generation.get();
+    let authority = gate.authority();
+    if let Err(error) = current() {
+        settle_group_echoes(&echoes, &[]);
+        return settled(Err(error));
+    }
+    if !alive(work, generation) {
+        settle_group_echoes(&echoes, &[]);
+        return settled(Err(CommandError::Cancelled));
+    }
+    let Some(path) = context.control_path(&did) else {
+        settle_group_echoes(&echoes, &[]);
+        return settled(Err(CommandError::Unavailable(
+            "no usable control path".into(),
+        )));
+    };
+    match path {
+        ControlPath::Local(handle) => {
+            let slot = Rc::new(RefCell::new(None::<BatchReceipt>));
+            let stamps = Rc::new(RefCell::new(Vec::new()));
+            let guard_work = work.clone();
+            let guard_context = context.clone();
+            let guard_handle = handle.clone();
+            let guard_did = did.clone();
+            let guard_properties = properties.clone();
+            let guard_stamps = stamps.clone();
+            let guard_gate = gate.clone();
+            let guard_operation = operation.clone();
+            let guard_mark = mark.clone();
+            let guard_current = current.clone();
+            let guard_frame = frame_current.cloned();
+            let capture_work = work.clone();
+            let capture_id = function_id.to_owned();
+            let result_slot = slot.clone();
+            let result_context = context.clone();
+            let result_handle = handle.clone();
+            let result_work = work.clone();
+            let result_gate = gate.clone();
+            let result_properties = properties.clone();
+            let result_id = function_id.to_owned();
+            let result_history = history_bindings.to_vec();
+            let result_echoes = echoes;
+            let result_current = current.clone();
+            let hooks = SendHooks::new(
+                move || {
+                    if guard_work.life.is_closed()
+                        || guard_work.record.life.is_closed()
+                        || guard_work.record.binding_generation.get() != generation
+                        || !guard_context.current_local(&guard_handle)
+                        || guard_current().is_err()
+                    {
+                        SendDecision::Cancel
+                    } else if guard_frame.as_ref().is_some_and(|frame| !frame()) {
+                        SendDecision::Withdraw
+                    } else if matches!(
+                        guard_context.control_path(&guard_did),
+                        Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle)
+                    ) {
+                        SendDecision::Send
+                    } else {
+                        SendDecision::Withdraw
+                    }
+                },
+                move || {
+                    // The synchronous guard proved the request current; a
+                    // failed mark can only mean the frame was retired.
+                    let _ = guard_mark();
+                    guard_operation.submitted(PathKind::Local);
+                    *guard_stamps.borrow_mut() = guard_properties
+                        .iter()
+                        .map(|(binding, _)| {
+                            capture_work.observations.write_stamp(
+                                &capture_work.record,
+                                &capture_id,
+                                *binding,
+                            )
+                        })
+                        .collect();
+                    guard_gate.register_feedback_for(authority, &guard_properties);
+                },
+            );
+            handle
+                .set_properties_guarded(&did, &properties, hooks, move |outcome| {
+                    if outcome.result == Err(CentralError::Withdrawn)
+                        && outcome.stage == RequestStage::NotSent
+                    {
+                        // A not-sent attempt retires its pending tickets so the
+                        // retry cannot leave indefinite expectations.
+                        settle_group_echoes(&result_echoes, &[]);
+                        return;
+                    }
+                    result_context.local_device_outcome(
+                        &result_handle,
+                        &result_work,
+                        generation,
+                        &outcome,
+                    );
+                    let receipt = match outcome.result {
+                        Ok(results) => {
+                            let settlements = settle_receipt(
+                                &result_work,
+                                &result_id,
+                                &result_properties,
+                                &stamps.borrow(),
+                                &results,
+                                &result_gate,
+                                authority,
+                                &result_history,
+                                optimistic,
+                            );
+                            settle_group_echoes(&result_echoes, &settlements);
+                            for error in results.items.iter().filter_map(|item| item.as_ref().err())
+                            {
+                                result_context.local_device_outcome(
+                                    &result_handle,
+                                    &result_work,
+                                    generation,
+                                    &crate::xiaomi::central::RequestOutcome::<()> {
+                                        result: Err(error.clone()),
+                                        stage: outcome.stage,
+                                        timeout: outcome.timeout,
+                                    },
+                                );
+                            }
+                            BatchReceipt {
+                                result: if results.protocol_error {
+                                    Err(command_error(CentralError::Protocol))
+                                } else if let Some(error) =
+                                    results.items.iter().find_map(|item| item.as_ref().err())
+                                {
+                                    Err(command_error(error.clone()))
+                                } else {
+                                    Ok(())
+                                },
+                                maintenance: None,
+                            }
+                        }
+                        Err(error) => {
+                            let settlements = if outcome.stage == RequestStage::NotSent {
+                                Vec::new()
+                            } else {
+                                result_properties
+                                    .iter()
+                                    .map(|(binding, _)| (*binding, None))
+                                    .collect()
+                            };
+                            result_gate.cancel_feedback();
+                            settle_group_echoes(&result_echoes, &settlements);
+                            let result = if outcome.stage == RequestStage::NotSent {
+                                // A cancelled not-sent request may already be
+                                // superseded; keep its actual error.
+                                result_current()
+                                    .err()
+                                    .unwrap_or_else(|| command_error(error))
+                            } else {
+                                command_error(error)
+                            };
+                            BatchReceipt {
+                                result: Err(result),
+                                maintenance: None,
+                            }
+                        }
+                    };
+                    *result_slot.borrow_mut() = Some(receipt);
+                })
+                .await;
+            match slot.borrow_mut().take() {
+                Some(receipt) => BatchAttempt::Settled(receipt),
+                None => BatchAttempt::Withdrawn,
+            }
+        }
+        ControlPath::Cloud(credentials) => {
+            if let Err(error) = mark() {
+                settle_group_echoes(&echoes, &[]);
+                return settled(Err(error));
+            }
+            let stamps: Vec<_> = properties
+                .iter()
+                .map(|(binding, _)| {
+                    work.observations
+                        .write_stamp(&work.record, function_id, *binding)
+                })
+                .collect();
+            gate.register_feedback_for(authority, &properties);
+            operation.submitted(PathKind::Cloud);
+            let result = context
+                .cloud
+                .set_properties(&credentials.access_token, &did, &properties)
+                .await;
+            let receipt = match &result {
+                Ok(results) => {
+                    let settlements = settle_receipt(
+                        work,
+                        function_id,
+                        &properties,
+                        &stamps,
+                        results,
+                        gate,
+                        authority,
+                        history_bindings,
+                        optimistic,
+                    );
+                    settle_group_echoes(&echoes, &settlements);
+                    let current = alive(work, generation);
+                    let mut maintenance = None;
+                    for error in results.items.iter().filter_map(|item| item.as_ref().err()) {
+                        if maintenance.is_none() {
+                            maintenance = context
+                                .cloud_error(
+                                    &credentials.access_token,
+                                    current.then_some(did.as_str()),
+                                    error,
+                                )
+                                .err();
+                        }
+                    }
+                    let result = if results.protocol_error {
+                        Err(CommandError::SendFailed("invalid cloud response".into()))
+                    } else if let Some(error) =
+                        results.items.iter().find_map(|item| item.as_ref().err())
+                    {
+                        Err(cloud_command_error(error))
+                    } else {
+                        Ok(())
+                    };
+                    BatchReceipt {
+                        result,
+                        maintenance,
+                    }
+                }
+                Err(error) => {
+                    gate.cancel_feedback();
+                    let settlements: Vec<_> = properties
+                        .iter()
+                        .map(|(binding, _)| (*binding, None))
+                        .collect();
+                    settle_group_echoes(&echoes, &settlements);
+                    let maintenance = context
+                        .cloud_error(
+                            &credentials.access_token,
+                            alive(work, generation).then_some(did.as_str()),
+                            error,
+                        )
+                        .err();
+                    BatchReceipt {
+                        result: Err(cloud_command_error(error)),
+                        maintenance,
+                    }
+                }
+            };
+            BatchAttempt::Settled(receipt)
+        }
+    }
+}
+
 /// Receipt ownership outlives the consumer and the immutable function instance.
 pub(super) async fn send_owned(
     request: DeviceRequest,
@@ -261,304 +618,70 @@ pub(super) async fn send(
             operation.0.finish(skip(request));
             return Ok(());
         }
-        let Some(path) = context.control_path(&did) else {
-            let error = CommandError::Unavailable("no usable control path".into());
-            operation.0.finish(Err(error.clone()));
-            reject(request, error);
-            return Ok(());
-        };
         let history_bindings = feedback_bindings(&record, id, group);
-        let authority = gate.authority();
         // An ordinary native group also emits converted member echoes; the
         // same exact matcher keeps its own fade from being read as external.
-        let echoes: Rc<
-            Vec<(
-                PropertyBinding,
-                Rc<super::LightWriteGate>,
-                super::ExpectedTicket,
-            )>,
-        > = Rc::new(if group && context.group_repair(&did).is_none() {
+        let echoes = if group && context.group_repair(&did).is_none() {
             repair::register_group_echoes(&context, &record, id, &properties)
         } else {
             Vec::new()
-        });
-        let settlements: repair::Settlements = Rc::new(RefCell::new(Vec::new()));
-        match path {
-            ControlPath::Local(handle) => {
-                let pending = Rc::new(RefCell::new(Some(request)));
-                let guard_pending = pending.clone();
-                let guard_work = work.clone();
-                let guard_context = context.clone();
-                let guard_handle = handle.clone();
-                let guard_did = did.clone();
-                let guard_id = id.to_owned();
-                let guard_properties = properties.clone();
-                let capture_pending = pending.clone();
-                let capture_work = work.clone();
-                let capture_id = id.to_owned();
-                let capture_properties = properties.clone();
-                let capture_gate = gate.clone();
-                let result_settlements = settlements.clone();
-                let submitted = operation.0.clone();
-                let stamps = Rc::new(RefCell::new(Vec::new()));
-                let capture_stamps = stamps.clone();
-                let result_pending = pending.clone();
-                let result_work = work.clone();
-                let result_context = context.clone();
-                let result_handle = handle.clone();
-                let result_properties = properties.clone();
-                let result_id = id.to_owned();
-                let result_operation = operation.0.clone();
-                let result_gate = gate.clone();
-                let hooks = SendHooks::new(
-                    move || {
-                        if !alive(&guard_work, generation)
-                            || !guard_context.current_local(&guard_handle)
-                            || !current(guard_pending.borrow().as_ref().unwrap())
-                        {
-                            SendDecision::Cancel
-                        } else if super::super::lighting::encode(
-                            &guard_work.record,
-                            &guard_id,
-                            target,
-                        )
-                        .ok()
-                        .as_ref()
-                            != Some(&guard_properties)
-                        {
-                            SendDecision::Withdraw
-                        } else if matches!(guard_context.control_path(&guard_did), Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle))
-                        {
-                            SendDecision::Send
-                        } else {
-                            SendDecision::Withdraw
-                        }
-                    },
-                    move || {
-                        // Rc tasks cannot interleave guard, socket poll and this callback.
-                        mark_sent(capture_pending.borrow().as_ref().unwrap())
-                            .expect("synchronous send guard");
-                        submitted.submitted(PathKind::Local);
-                        *capture_stamps.borrow_mut() = capture_properties
-                            .iter()
-                            .map(|(binding, _)| {
-                                capture_work.observations.write_stamp(
-                                    &capture_work.record,
-                                    &capture_id,
-                                    *binding,
-                                )
-                            })
-                            .collect();
-                        capture_gate.register_feedback_for(authority, &capture_properties);
-                    },
-                );
-                handle
-                    .set_properties_guarded(&did, &properties, hooks, move |outcome| {
-                        result_context.local_device_outcome(
-                            &result_handle,
-                            &result_work,
-                            generation,
-                            &outcome,
-                        );
-                        if outcome.result == Err(CentralError::Withdrawn)
-                            && outcome.stage == RequestStage::NotSent
-                        {
-                            // A not-sent attempt retires its pending tickets so
-                            // the retry cannot leave indefinite expectations.
-                            for (_, gate, ticket) in echoes.iter() {
-                                gate.clear_expected(*ticket);
-                            }
-                            return;
-                        }
-                        let request = result_pending.borrow_mut().take().unwrap();
-                        let result = match outcome.result {
-                            Ok(results) => {
-                                {
-                                    let mut settled = result_settlements.borrow_mut();
-                                    for (index, (binding, _)) in
-                                        result_properties.iter().enumerate()
-                                    {
-                                        let accepted = if results.protocol_error {
-                                            None
-                                        } else {
-                                            results.items.get(index).map(|item| item.is_ok())
-                                        };
-                                        settled.push((*binding, accepted));
-                                    }
-                                }
-                                result_gate.finish_feedback_for(
-                                    authority,
-                                    &result_properties,
-                                    &results,
-                                    &history_bindings,
-                                );
-                                if group {
-                                    for (binding, _) in &result_properties {
-                                        result_work.request_dirty_read(&result_id, *binding);
-                                    }
-                                } else {
-                                    apply(
-                                        &result_work,
-                                        &result_id,
-                                        &result_properties,
-                                        &stamps.borrow(),
-                                        &results,
-                                    );
-                                }
-                                for error in results
-                                    .items
-                                    .iter()
-                                    .filter_map(|result| result.as_ref().err())
-                                {
-                                    result_context.local_device_outcome(
-                                        &result_handle,
-                                        &result_work,
-                                        generation,
-                                        &crate::xiaomi::central::RequestOutcome::<()> {
-                                            result: Err(error.clone()),
-                                            stage: outcome.stage,
-                                            timeout: outcome.timeout,
-                                        },
-                                    );
-                                }
-                                if results.protocol_error {
-                                    Err(command_error(CentralError::Protocol))
-                                } else if let Some(error) =
-                                    results.items.into_iter().find_map(Result::err)
-                                {
-                                    Err(command_error(error))
-                                } else {
-                                    Ok(())
-                                }
-                            }
-                            Err(error) => {
-                                if outcome.stage != RequestStage::NotSent {
-                                    let mut settled = result_settlements.borrow_mut();
-                                    for (binding, _) in &result_properties {
-                                        settled.push((*binding, None));
-                                    }
-                                }
-                                result_gate.cancel_feedback();
-                                if outcome.stage == RequestStage::NotSent && !current(&request) {
-                                    current_result(&request)
-                                } else {
-                                    Err(command_error(error))
-                                }
-                            }
-                        };
-                        settle_group_echoes(&echoes, &settlements.borrow());
-                        match result {
-                            Ok(()) => result_operation.finish(accept(request)),
-                            Err(error) => {
-                                result_operation.finish(Err(error.clone()));
-                                reject(request, error);
-                            }
-                        }
-                    })
-                    .await;
-                let withdrawn = pending.borrow_mut().take();
-                if let Some(withdrawn) = withdrawn {
-                    request = withdrawn;
-                } else {
-                    return Ok(());
-                }
+        };
+        let pending = Rc::new(RefCell::new(Some(request)));
+        let mark: Rc<dyn Fn() -> Result<(), CommandError>> = {
+            let pending = pending.clone();
+            Rc::new(move || mark_sent(pending.borrow().as_ref().unwrap()))
+        };
+        let current: Rc<dyn Fn() -> Result<(), CommandError>> = {
+            let pending = pending.clone();
+            Rc::new(move || match pending.borrow().as_ref() {
+                Some(request) => current_result(request),
+                None => Err(CommandError::Cancelled),
+            })
+        };
+        let frame_current: Rc<dyn Fn() -> bool> = {
+            let record = record.clone();
+            let id = id.to_owned();
+            let properties = properties.clone();
+            Rc::new(move || {
+                super::super::lighting::encode(&record, &id, target)
+                    .ok()
+                    .as_ref()
+                    == Some(&properties)
+            })
+        };
+        match submit_properties(
+            &context,
+            &work,
+            Batch {
+                function_id: id,
+                properties,
+                history_bindings: &history_bindings,
+                echoes,
+                gate: &gate,
+                operation: &operation.0,
+                mark: &mark,
+                current: &current,
+                frame_current: Some(&frame_current),
+                optimistic: !group,
+            },
+        )
+        .await
+        {
+            BatchAttempt::Withdrawn => {
+                request = pending.borrow_mut().take().unwrap();
             }
-            ControlPath::Cloud(credentials) => {
-                // No await separates the final ownership/path check from HTTP submission.
-                if !alive(&work, generation) || !current(&request) {
-                    let error = current_result(&request)
-                        .err()
-                        .unwrap_or(CommandError::Cancelled);
-                    operation.0.finish(Err(error.clone()));
-                    reject(request, error);
-                    return Ok(());
-                }
-                if let Err(error) = mark_sent(&request) {
-                    operation.0.finish(Err(error.clone()));
-                    reject(request, error);
-                    return Ok(());
-                }
-                let stamps: Vec<_> = properties
-                    .iter()
-                    .map(|(binding, _)| work.observations.write_stamp(&record, id, *binding))
-                    .collect();
-                gate.register_feedback_for(authority, &properties);
-                operation.0.submitted(PathKind::Cloud);
-                let result = context
-                    .cloud
-                    .set_properties(&credentials.access_token, &did, &properties)
-                    .await;
-                let outcome = match &result {
-                    Ok(results) => {
-                        {
-                            let mut settled = settlements.borrow_mut();
-                            for (index, (binding, _)) in properties.iter().enumerate() {
-                                let accepted = if results.protocol_error {
-                                    None
-                                } else {
-                                    results.items.get(index).map(|item| item.is_ok())
-                                };
-                                settled.push((*binding, accepted));
-                            }
-                        }
-                        gate.finish_feedback_for(
-                            authority,
-                            &properties,
-                            results,
-                            &history_bindings,
-                        );
-                        if context.is_group(&did) {
-                            for (binding, _) in &properties {
-                                work.request_dirty_read(id, *binding);
-                            }
-                        } else {
-                            apply(&work, id, &properties, &stamps, results);
-                        }
-                        if results.protocol_error {
-                            Err(CommandError::SendFailed("invalid cloud response".into()))
-                        } else if let Some(error) =
-                            results.items.iter().find_map(|item| item.as_ref().err())
-                        {
-                            Err(cloud_command_error(error))
-                        } else {
-                            Ok(())
-                        }
-                    }
+            BatchAttempt::Settled(receipt) => {
+                let request = pending.borrow_mut().take().unwrap();
+                let result = match receipt.result {
+                    Ok(()) => accept(request),
                     Err(error) => {
-                        {
-                            let mut settled = settlements.borrow_mut();
-                            for (binding, _) in &properties {
-                                settled.push((*binding, None));
-                            }
-                        }
-                        gate.cancel_feedback();
-                        Err(cloud_command_error(error))
+                        reject(request, error.clone());
+                        Err(error)
                     }
                 };
-                settle_group_echoes(&echoes, &settlements.borrow());
-                match outcome {
-                    Ok(()) => operation.0.finish(accept(request)),
-                    Err(error) => {
-                        operation.0.finish(Err(error.clone()));
-                        reject(request, error);
-                    }
-                }
-                // Settle the original receipt even if persisting refreshed access fails.
-                match result {
-                    Ok(results) => {
-                        for error in results.items.iter().filter_map(|item| item.as_ref().err()) {
-                            context.cloud_error(
-                                &credentials.access_token,
-                                alive(&work, generation).then_some(did.as_str()),
-                                error,
-                            )?;
-                        }
-                    }
-                    Err(error) => context.cloud_error(
-                        &credentials.access_token,
-                        alive(&work, generation).then_some(did.as_str()),
-                        &error,
-                    )?,
+                operation.0.finish(result);
+                if let Some(error) = receipt.maintenance {
+                    return Err(error);
                 }
                 return Ok(());
             }

@@ -7,19 +7,18 @@
 //! batch are accepted; remaining owned member sends continue independently.
 
 use super::super::super::{
-    model::{AdapterError, CommandTarget, PathKind},
-    routing::ControlPath,
+    model::{AdapterError, CommandTarget},
     state::{Context, DeviceRecord},
     work::{ConfirmedLight, DeviceWork, RepairMemberRef},
 };
-use super::super::{CommandLease, CommandOperation, ExpectedTicket, LightWriteGate, command_error};
-use super::{accept, alive, feedback_bindings, reject, skip};
+use super::super::LightWriteGate;
+use super::{
+    Batch, BatchAttempt, BatchReceipt, accept, alive, feedback_bindings, reject, skip,
+    submit_properties,
+};
 use crate::{
     device::{ActionToken, CommandError, DeviceRequest, LightColorTarget, LightMode, LightTarget},
-    xiaomi::{
-        capability::{PropertyBinding, RepairPlan},
-        central::{CentralError, RequestStage, SendDecision, SendHooks},
-    },
+    xiaomi::capability::{PropertyBinding, RepairPlan},
 };
 use event_listener::Event;
 use serde_json::{Value, json};
@@ -27,10 +26,6 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
-
-/// Per-native-property settlement: `Some(true)` accepted, `Some(false)`
-/// definitely rejected, `None` unknown after a submitted receipt.
-pub(super) type Settlements = Rc<RefCell<Vec<(PropertyBinding, Option<bool>)>>>;
 
 #[derive(Default)]
 struct MemberResults {
@@ -73,9 +68,14 @@ pub(super) async fn send(
     };
     let generation = record.binding_generation.get();
     let request = Rc::new(RefCell::new(Some(request)));
-    let request_current: Rc<dyn Fn() -> bool> = {
+    let request_current: Rc<dyn Fn() -> Result<(), CommandError>> = {
         let request = request.clone();
-        Rc::new(move || request.borrow().as_ref().is_some_and(super::current))
+        Rc::new(move || {
+            request
+                .borrow()
+                .as_ref()
+                .map_or(Err(CommandError::Cancelled), super::current_result)
+        })
     };
     let take_request = {
         let request = request.clone();
@@ -97,7 +97,7 @@ pub(super) async fn send(
             result
         })
     };
-    if !alive(&work, generation) || !request_current() {
+    if !alive(&work, generation) || request_current().is_err() {
         resolve(&take_request, Resolution::Reject(CommandError::Cancelled));
         return Ok(());
     }
@@ -138,9 +138,8 @@ pub(super) async fn send(
             .function(id)
             .and_then(|function| function.snapshot().power.value())
     });
+    let results = Rc::new(MemberResults::default());
     if !native.is_empty() {
-        let expectations = register_member_echoes(&record, id, &members, &native);
-        let settlements = Rc::new(RefCell::new(Vec::new()));
         let history = feedback_bindings(&record, id, true);
         let operation = context.commands.begin_operation(
             &did,
@@ -150,45 +149,40 @@ pub(super) async fn send(
             native.clone(),
             queued_at,
         );
-        let result = submit_batch(
-            &context,
-            &work,
-            &did,
-            id,
-            native,
-            &history,
-            &gate,
-            &mark,
-            &request_current,
-            Some(operation.0.clone()),
-            settlements.clone(),
-        )
-        .await;
-        if let Err(error) = result {
-            // A submitted transport/protocol-unknown receipt cannot prove no
-            // change happened: retain its exact bounded expectation for the
-            // same 3s window. Only definitely rejected or not-sent native
-            // properties retire their expectations.
-            for (native_binding, gate, ticket) in &expectations {
-                match settlements
-                    .borrow()
-                    .iter()
-                    .find(|(binding, _)| binding == native_binding)
-                {
-                    Some((_, Some(false))) => gate.clear_expected(*ticket),
-                    Some((_, _)) => gate.expect_ack(*ticket),
-                    None => gate.clear_expected(*ticket),
-                }
+        let receipt = loop {
+            let echoes = register_member_echoes(&record, id, &members, &native);
+            match submit_properties(
+                &context,
+                &work,
+                Batch {
+                    function_id: id,
+                    properties: native.clone(),
+                    history_bindings: &history,
+                    echoes,
+                    gate: &gate,
+                    operation: &operation.0,
+                    mark: &mark,
+                    current: &request_current,
+                    frame_current: None,
+                    optimistic: false,
+                },
+            )
+            .await
+            {
+                BatchAttempt::Withdrawn => continue,
+                BatchAttempt::Settled(receipt) => break receipt,
             }
+        };
+        let result = receipt.result.clone();
+        operation.0.finish(result.clone());
+        if let Err(error) = result {
             cancel_frame(&work, token, epoch);
             resolve(&take_request, Resolution::Reject(error));
-            return Ok(());
-        }
-        for (_, gate, ticket) in &expectations {
-            gate.expect_ack(*ticket);
+            // A maintenance report only accompanies a failed cloud report,
+            // whose actual receipt was just settled.
+            return receipt.maintenance.map_or(Ok(()), Err);
         }
     }
-    let results = Rc::new(MemberResults::default());
     let total = members.len() + missing;
     for member in members.iter() {
         let task_context = context.clone();
@@ -200,7 +194,7 @@ pub(super) async fn send(
         let group_work = work.clone();
         let mark = mark.clone();
         context.tasks.spawn(async move {
-            let full = member_task(
+            let (result, maintenance) = member_task(
                 &task_context,
                 &member,
                 &member_gate,
@@ -212,18 +206,17 @@ pub(super) async fn send(
                 epoch,
                 &mark,
             )
-            .await
-            .is_ok();
-            if full {
+            .await;
+            if result.is_ok() {
                 results.full.set(true);
             }
             results.done.set(results.done.get() + 1);
             results.changed.notify(usize::MAX);
-            Ok(())
+            maintenance.map_or(Ok(()), Err)
         });
     }
     loop {
-        if !request_current() {
+        if request_current().is_err() {
             cancel_frame(&work, token, epoch);
             resolve(&take_request, Resolution::Reject(CommandError::Cancelled));
             return Ok(());
@@ -255,7 +248,8 @@ pub(super) async fn send(
             return Ok(());
         }
         let listener = results.changed.listen();
-        if results.full.get() || results.done.get() + missing >= total || !request_current() {
+        if results.full.get() || results.done.get() + missing >= total || request_current().is_err()
+        {
             continue;
         }
         listener.await;
@@ -281,18 +275,6 @@ fn resolve(take: &impl Fn() -> Option<DeviceRequest>, resolution: Resolution) {
         }
         Resolution::Reject(error) => reject(request, error),
     }
-}
-
-/// Mirror ordinary cloud routing/auth coordination for repaired writes.
-fn report_cloud(
-    context: &Context,
-    token: &str,
-    did: Option<&str>,
-    error: &crate::xiaomi::cloud::CloudError,
-) -> Result<(), CommandError> {
-    context
-        .cloud_error(token, did, error)
-        .map_err(|error| CommandError::SendFailed(error.to_string()))
 }
 
 fn cancel_frame(work: &Rc<DeviceWork>, token: Option<ActionToken>, epoch: u64) {
@@ -332,13 +314,13 @@ async fn member_task(
     token: Option<ActionToken>,
     epoch: u64,
     mark: &Rc<dyn Fn() -> Result<(), CommandError>>,
-) -> Result<(), CommandError> {
+) -> (Result<(), CommandError>, Option<AdapterError>) {
     if member.record.life.is_closed() {
-        return Err(CommandError::Cancelled);
+        return (Err(CommandError::Cancelled), None);
     }
     let _permit = gate.acquire().await;
     if member.record.life.is_closed() || member.work.life.is_closed() {
-        return Err(CommandError::Cancelled);
+        return (Err(CommandError::Cancelled), None);
     }
     // An unsent frame superseded by a newer frame, Stop or takeover retires
     // here. A successful final acceptance keeps its owned member sends.
@@ -353,7 +335,7 @@ async fn member_task(
         None => (group_work.light_frames.borrow().current_power(epoch), false),
     };
     if !owned {
-        return Err(CommandError::Superseded);
+        return (Err(CommandError::Superseded), None);
     }
     if let Some(token) = token
         && !accepted_final
@@ -364,80 +346,112 @@ async fn member_task(
             .function("main")
             .is_some_and(|function| function.light_action_current(token));
         if !current {
-            return Err(CommandError::Superseded);
+            return (Err(CommandError::Superseded), None);
         }
     }
-    // Ownership was proven at the gate; the accepted task now owns its batches
-    // so an ordinary settle cannot cancel half of the required auxiliary work.
-    let owned_continue: Rc<dyn Fn() -> bool> = Rc::new(|| true);
     let confirmed = member.work.confirmed_light().unwrap_or_default();
-    let writes = encode_member(
+    let writes = match encode_member(
         &member.record,
         target,
         logical_power,
         &confirmed,
         native_wrote,
-    )?;
-    let member_did = member.record.physical.key().id.clone();
+    ) {
+        Ok(writes) => writes,
+        Err(error) => return (Err(error), None),
+    };
+    let mut maintenance = None;
     if !writes.primary.is_empty() {
         let history = writes
             .primary
             .iter()
             .map(|(binding, _)| *binding)
             .collect::<Vec<_>>();
-        let operation = member_operation(context, &member_did, target, &writes.primary);
-        submit_batch(
+        let receipt = send_member_batch(
             context,
             &member.work,
-            &member_did,
-            "main",
-            writes.primary,
+            &writes.primary,
             &history,
+            target,
             gate,
             mark,
-            &owned_continue,
-            operation.as_ref().map(|lease| lease.0.clone()),
-            Rc::new(RefCell::new(Vec::new())),
         )
-        .await?;
+        .await;
+        maintenance = receipt.maintenance;
+        if let Err(error) = receipt.result {
+            return (Err(error), maintenance);
+        }
     }
     if let Some((binding, value)) = writes.final_off {
-        let properties = vec![(binding, value)];
-        let operation = member_operation(context, &member_did, target, &properties);
-        submit_batch(
+        let receipt = send_member_batch(
             context,
             &member.work,
-            &member_did,
-            "main",
-            properties,
+            &[(binding, value)],
             &[binding],
+            target,
             gate,
             mark,
-            &owned_continue,
-            operation.as_ref().map(|lease| lease.0.clone()),
-            Rc::new(RefCell::new(Vec::new())),
         )
-        .await?;
+        .await;
+        if maintenance.is_none() {
+            maintenance = receipt.maintenance;
+        }
+        if let Err(error) = receipt.result {
+            return (Err(error), maintenance);
+        }
     }
-    Ok(())
+    (Ok(()), maintenance)
 }
 
-/// One existing per-DID command record for a real member batch.
-fn member_operation(
+/// Submit one member batch through a fresh per-DID command record.
+async fn send_member_batch(
     context: &Rc<Context>,
-    did: &str,
-    target: LightTarget,
+    work: &Rc<DeviceWork>,
     properties: &[(PropertyBinding, Value)],
-) -> Option<CommandLease> {
-    let (binding, _) = properties.first()?;
-    Some(context.commands.begin_operation(
-        did,
+    history: &[PropertyBinding],
+    target: LightTarget,
+    gate: &Rc<LightWriteGate>,
+    mark: &Rc<dyn Fn() -> Result<(), CommandError>>,
+) -> BatchReceipt {
+    // Ownership was proven at the gate; the accepted task now owns its batches
+    // so an ordinary settle cannot cancel half of the required auxiliary work.
+    let current: Rc<dyn Fn() -> Result<(), CommandError>> = Rc::new(|| Ok(()));
+    let did = work.record.physical.key().id.clone();
+    let operation = context.commands.begin_operation(
+        &did,
         "main",
-        *binding,
+        properties
+            .first()
+            .map_or(work.record.binding("main"), |(binding, _)| *binding),
         CommandTarget::Light(target),
         properties.to_vec(),
         std::time::Instant::now(),
-    ))
+    );
+    let receipt = loop {
+        match submit_properties(
+            context,
+            work,
+            Batch {
+                function_id: "main",
+                properties: properties.to_vec(),
+                history_bindings: history,
+                echoes: Vec::new(),
+                gate,
+                operation: &operation.0,
+                mark,
+                current: &current,
+                frame_current: None,
+                optimistic: false,
+            },
+        )
+        .await
+        {
+            BatchAttempt::Withdrawn => continue,
+            BatchAttempt::Settled(receipt) => break receipt,
+        }
+    };
+    operation.0.finish(receipt.result.clone());
+    receipt
 }
 
 struct MemberWrites {
@@ -449,56 +463,18 @@ struct MemberWrites {
 fn encode_native(
     record: &DeviceRecord,
     id: &str,
-    target: LightTarget,
+    mut target: LightTarget,
     logical_range: crate::device::NumericRange,
 ) -> Result<Vec<(PropertyBinding, Value)>, CommandError> {
-    let cached = record.cached.borrow();
-    let function = cached
-        .device
-        .functions
-        .iter()
-        .find(|function| function.description.id == id)
-        .ok_or(CommandError::Unsupported)?;
-    let light = function
-        .lighting
-        .as_ref()
-        .ok_or(CommandError::Unsupported)?;
-    let snapshot = record.physical.function(id).unwrap().snapshot();
-    let state = snapshot.lighting.unwrap();
-    let convert = |error: crate::xiaomi::capability::CapabilityError| {
-        CommandError::Rejected(error.to_string())
+    target.color = match target.color {
+        Some(LightColorTarget::Temperature(kelvin)) => Some(LightColorTarget::Temperature(
+            kelvin.clamp(logical_range.min, logical_range.max),
+        )),
+        Some(LightColorTarget::Rgb(_)) | None => None,
     };
-    let mut values = Vec::new();
-    if let Some(power) = target.power
-        && snapshot.power.value() != Some(power)
-    {
-        values.push((function.power, json!(power)));
-    }
-    if let Some(percent) = target.brightness_percent {
-        let brightness = light.brightness.as_ref().ok_or(CommandError::Unsupported)?;
-        let raw = brightness.brightness_to_raw(percent).map_err(convert)?;
-        let current = state
-            .brightness_percent
-            .and_then(|value| brightness.brightness_to_raw(value).ok());
-        if current != Some(raw) {
-            values.push((brightness.property, json!(raw)));
-        }
-    }
-    if let Some(LightColorTarget::Temperature(kelvin)) = target.color {
-        let temperature = light
-            .temperature
-            .as_ref()
-            .ok_or(CommandError::Unsupported)?;
-        let clamped = kelvin.clamp(logical_range.min, logical_range.max);
-        let raw = temperature.temperature_to_raw(clamped).map_err(convert)?;
-        let current = state
-            .temperature_kelvin
-            .and_then(|value| temperature.temperature_to_raw(value).ok());
-        if current != Some(raw) {
-            values.push((temperature.property, json!(raw)));
-        }
-    }
-    Ok(values)
+    // A repair plan has no native RGB or mode binding. Its native fields use
+    // the same encoding and unchanged-value suppression as ordinary lights.
+    super::super::super::lighting::encode(record, id, target)
 }
 
 fn encode_member(
@@ -577,7 +553,7 @@ fn register_member_echoes(
     id: &str,
     members: &[RepairMemberRef],
     native: &[(PropertyBinding, Value)],
-) -> Vec<(PropertyBinding, Rc<LightWriteGate>, ExpectedTicket)> {
+) -> super::EchoTickets {
     let mut tickets = Vec::new();
     let cached = record.cached.borrow();
     let Some(group) = cached
@@ -664,7 +640,7 @@ pub(super) fn register_group_echoes(
     record: &DeviceRecord,
     id: &str,
     native: &[(PropertyBinding, Value)],
-) -> Vec<(PropertyBinding, Rc<LightWriteGate>, ExpectedTicket)> {
+) -> super::EchoTickets {
     let did = record.physical.key().id.clone();
     let members = {
         let live = context.live.borrow();
@@ -690,250 +666,4 @@ pub(super) fn register_group_echoes(
         }
     }
     register_member_echoes(record, id, &refs, native)
-}
-
-/// Submit one exact property batch through the device's current path, with the
-/// shared gate handling receipts and a real readback for actual state. `mark`
-/// records the logical request as actually submitted at the transport boundary.
-#[allow(clippy::too_many_arguments)]
-async fn submit_batch(
-    context: &Rc<Context>,
-    work: &Rc<DeviceWork>,
-    did: &str,
-    id: &str,
-    properties: Vec<(PropertyBinding, Value)>,
-    history_bindings: &[PropertyBinding],
-    gate: &Rc<LightWriteGate>,
-    mark: &Rc<dyn Fn() -> Result<(), CommandError>>,
-    still_current: &Rc<dyn Fn() -> bool>,
-    operation: Option<Rc<CommandOperation>>,
-    settlements: Settlements,
-) -> Result<(), CommandError> {
-    if properties.is_empty() {
-        return Ok(());
-    }
-    let generation = work.record.binding_generation.get();
-    loop {
-        if work.life.is_closed()
-            || work.record.life.is_closed()
-            || work.record.binding_generation.get() != generation
-        {
-            return Err(CommandError::Cancelled);
-        }
-        let Some(path) = context.control_path(did) else {
-            return Err(CommandError::Unavailable("no usable control path".into()));
-        };
-        let authority = gate.authority();
-        match path {
-            ControlPath::Local(handle) => {
-                let result_outer = Rc::new(RefCell::new(None::<Result<(), CommandError>>));
-                let result_slot = result_outer.clone();
-                let pending = Rc::new(Cell::new(true));
-                let pending_result = pending.clone();
-                let capture_gate = gate.clone();
-                let capture_properties = properties.clone();
-                let capture_operation = operation.clone();
-                let result_settlements = settlements.clone();
-                let guard_work = work.clone();
-                let guard_context = context.clone();
-                let guard_handle = handle.clone();
-                let guard_did = did.to_string();
-                let guard_mark = mark.clone();
-                let guard_request = still_current.clone();
-                let result_context = context.clone();
-                let result_handle = handle.clone();
-                let result_work = work.clone();
-                let result_gate = gate.clone();
-                let result_properties = properties.clone();
-                let result_history = history_bindings.to_vec();
-                let result_id = id.to_string();
-                let result_operation = operation.clone();
-                let hooks = SendHooks::new(
-                    move || {
-                        if guard_work.life.is_closed()
-                            || guard_work.record.life.is_closed()
-                            || guard_work.record.binding_generation.get() != generation
-                            || !guard_context.current_local(&guard_handle)
-                            || !guard_request()
-                        {
-                            SendDecision::Cancel
-                        } else if matches!(
-                            guard_context.control_path(&guard_did),
-                            Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle)
-                        ) {
-                            SendDecision::Send
-                        } else {
-                            SendDecision::Withdraw
-                        }
-                    },
-                    move || {
-                        // Ownership is recorded at the actual transmission boundary.
-                        let _ = guard_mark();
-                        if let Some(operation) = &capture_operation {
-                            operation.submitted(PathKind::Local);
-                        }
-                        capture_gate.register_feedback_for(authority, &capture_properties);
-                    },
-                );
-                handle
-                    .set_properties_guarded(did, &properties, hooks, move |outcome| {
-                        if outcome.result == Err(CentralError::Withdrawn)
-                            && outcome.stage == RequestStage::NotSent
-                        {
-                            return;
-                        }
-                        pending_result.set(false);
-                        result_context.local_device_outcome(
-                            &result_handle,
-                            &result_work,
-                            generation,
-                            &outcome,
-                        );
-                        let result = match outcome.result {
-                            Ok(results) => {
-                                {
-                                    let mut settled = result_settlements.borrow_mut();
-                                    for (index, (binding, _)) in
-                                        result_properties.iter().enumerate()
-                                    {
-                                        let accepted = if results.protocol_error {
-                                            None
-                                        } else {
-                                            results.items.get(index).map(|item| item.is_ok())
-                                        };
-                                        settled.push((*binding, accepted));
-                                    }
-                                }
-                                result_gate.finish_feedback_for(
-                                    authority,
-                                    &result_properties,
-                                    &results,
-                                    &result_history,
-                                );
-                                for (binding, _) in &result_properties {
-                                    result_work.request_dirty_read(&result_id, *binding);
-                                }
-                                if results.protocol_error {
-                                    Err(CommandError::SendFailed("invalid gateway response".into()))
-                                } else if let Some(error) =
-                                    results.items.into_iter().find_map(Result::err)
-                                {
-                                    Err(command_error(error))
-                                } else {
-                                    Ok(())
-                                }
-                            }
-                            Err(error) => {
-                                if outcome.stage != RequestStage::NotSent {
-                                    let mut settled = result_settlements.borrow_mut();
-                                    for (binding, _) in &result_properties {
-                                        settled.push((*binding, None));
-                                    }
-                                }
-                                result_gate.cancel_feedback();
-                                Err(command_error(error))
-                            }
-                        };
-                        if let Some(operation) = &result_operation {
-                            operation.finish(result.clone());
-                        }
-                        *result_slot.borrow_mut() = Some(result);
-                    })
-                    .await;
-                if let Some(result) = result_outer.borrow_mut().take() {
-                    return result;
-                }
-                // Withdrawn before transmission: retry with a fresh path.
-                continue;
-            }
-            ControlPath::Cloud(credentials) => {
-                if work.life.is_closed() || work.record.life.is_closed() {
-                    return Err(CommandError::Cancelled);
-                }
-                if !still_current() || !context.current_token(&credentials.access_token) {
-                    return Err(CommandError::Cancelled);
-                }
-                // Re-resolve immediately before the await so a route change is
-                // never replayed across paths after an unknown send.
-                if !matches!(
-                    context.control_path(did),
-                    Some(ControlPath::Cloud(selected))
-                        if selected.uid == credentials.uid
-                            && selected.access_token == credentials.access_token
-                ) {
-                    continue;
-                }
-                if !still_current() {
-                    return Err(CommandError::Cancelled);
-                }
-                mark()?;
-                if let Some(operation) = &operation {
-                    operation.submitted(PathKind::Cloud);
-                }
-                gate.register_feedback_for(authority, &properties);
-                let result = context
-                    .cloud
-                    .set_properties(&credentials.access_token, did, &properties)
-                    .await;
-                let outcome = match &result {
-                    Ok(results) => {
-                        {
-                            let mut settled = settlements.borrow_mut();
-                            for (index, (binding, _)) in properties.iter().enumerate() {
-                                let accepted = if results.protocol_error {
-                                    None
-                                } else {
-                                    results.items.get(index).map(|item| item.is_ok())
-                                };
-                                settled.push((*binding, accepted));
-                            }
-                        }
-                        gate.finish_feedback_for(authority, &properties, results, history_bindings);
-                        for (binding, _) in &properties {
-                            work.request_dirty_read(id, *binding);
-                        }
-                        let current = !work.life.is_closed() && !work.record.life.is_closed();
-                        for error in results.items.iter().filter_map(|item| item.as_ref().err()) {
-                            report_cloud(
-                                context,
-                                &credentials.access_token,
-                                current.then_some(did),
-                                error,
-                            )?;
-                        }
-                        if results.protocol_error {
-                            Err(CommandError::SendFailed("invalid cloud response".into()))
-                        } else if let Some(error) =
-                            results.items.iter().find_map(|item| item.as_ref().err())
-                        {
-                            Err(super::cloud_command_error(error))
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    Err(error) => {
-                        {
-                            let mut settled = settlements.borrow_mut();
-                            for (binding, _) in &properties {
-                                settled.push((*binding, None));
-                            }
-                        }
-                        gate.cancel_feedback();
-                        let current = !work.life.is_closed() && !work.record.life.is_closed();
-                        report_cloud(
-                            context,
-                            &credentials.access_token,
-                            current.then_some(did),
-                            error,
-                        )?;
-                        Err(super::cloud_command_error(error))
-                    }
-                };
-                if let Some(operation) = &operation {
-                    operation.finish(outcome.clone());
-                }
-                return outcome;
-            }
-        }
-    }
 }

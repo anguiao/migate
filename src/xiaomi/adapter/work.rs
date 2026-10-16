@@ -379,25 +379,6 @@ impl DeviceWork {
         }
         self.refresh_changed.notify(usize::MAX);
     }
-    /// Queue one read without invalidating an in-flight read of the same
-    /// property. The refresh counter is advanced only for the queued read, so
-    /// the read that is already in flight still applies its result.
-    pub(super) fn queue_member_read(&self, id: &str, binding: PropertyBinding) {
-        self.observations.refresh(id, binding);
-        let mut pending = self.refresh_pending.borrow_mut();
-        if !pending
-            .iter()
-            .any(|read| read.id == id && read.binding == binding)
-        {
-            pending.push_back(Refresh {
-                id: id.into(),
-                binding,
-                attempts: 0,
-                ready_at: Duration::ZERO,
-            });
-        }
-        self.refresh_changed.notify(usize::MAX);
-    }
     /// A member event marks the group dirty. Changes arriving while a read is
     /// in flight are coalesced into exactly one follow-up read; the current
     /// read is never repeatedly invalidated by an event stream.
@@ -437,7 +418,7 @@ impl DeviceWork {
             .iter()
             .any(|read| read.id == id && read.binding == binding)
         {
-            self.queue_member_read(id, binding);
+            self.refresh_property(id, binding);
         }
     }
     /// Called after a read finishes. A dirty-again marker produces the single
@@ -445,7 +426,7 @@ impl DeviceWork {
     pub(super) fn finish_dirty_read(&self, id: &str, binding: PropertyBinding) {
         let key = super::lighting::key(id, binding);
         if self.dirty_again.borrow_mut().remove(&key) {
-            self.queue_member_read(id, binding);
+            self.refresh_property(id, binding);
         }
     }
     pub(super) fn ensure_property_read(&self, id: &str, binding: PropertyBinding) {
