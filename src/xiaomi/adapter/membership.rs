@@ -1,10 +1,9 @@
 use super::{
-    model::AdapterError,
+    model::{AdapterError, INCOMPATIBLE_FUNCTIONS},
     state::{Context, DeviceRecord},
 };
 use crate::{
     device::{Availability, CommandReceiver, DeviceKey},
-    storage::AdmissionError,
     xiaomi::central::DeviceEntry,
 };
 use std::{collections::BTreeMap, rc::Rc};
@@ -111,9 +110,8 @@ impl Context {
                 let mut live = self.live.borrow_mut();
                 let slot = live.devices.get_mut(did).unwrap();
                 slot.candidate = None;
-                slot.prepared = None;
             }
-            self.block_device(did, AdmissionError::IncompatibleFunctions.to_string());
+            self.block_device(did, INCOMPATIBLE_FUNCTIONS.to_owned());
             return Ok(());
         }
         if self.live.borrow().devices[did].candidate.is_some() {

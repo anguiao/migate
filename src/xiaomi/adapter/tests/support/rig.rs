@@ -176,18 +176,36 @@ impl Rig {
             ));
         }
         if restore {
+            let cached = data
+                .iter()
+                .filter(|record| members.contains(&record.device.key.id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut endpoint = 2;
+            let records = cached
+                .iter()
+                .map(|cached| {
+                    let description =
+                        cached.physical_description(format!("name {}", cached.device.key.id));
+                    let record = crate::storage::tests::fixtures::record(&description, endpoint);
+                    endpoint = record
+                        .functions
+                        .iter()
+                        .map(|function| function.endpoint)
+                        .max()
+                        .unwrap()
+                        + 1;
+                    record
+                })
+                .collect();
             store
                 .devices()
-                .save_scope(&scope(&tls.credentials.uid))
+                .apply_publication(&crate::storage::tests::fixtures::commit(
+                    scope(&tls.credentials.uid),
+                    cached,
+                    records,
+                ))
                 .unwrap();
-            for record in &data {
-                if members.contains(&record.device.key.id.as_str()) {
-                    store
-                        .devices()
-                        .publish_cached(record, &format!("name {}", record.device.key.id))
-                        .unwrap();
-                }
-            }
         }
         let cloud = Arc::new(Mutex::new(CloudState {
             members: members.iter().map(|v| v.to_string()).collect(),

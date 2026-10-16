@@ -1,7 +1,7 @@
 use super::{CatalogError, current_home, load_device, select_local_home};
 use crate::{
     device::DeviceKey,
-    storage::{CachedScope, Store, XiaomiRecord},
+    storage::{CachedScope, XiaomiRecord},
     xiaomi::{
         cloud::{CloudClient, OwnedHome},
         discovery::DiscoverySnapshot,
@@ -188,31 +188,6 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
             json!([did])
         );
     }
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    store.devices().save_scope(&scope()).unwrap();
-    for record in &records {
-        store.devices().publish_cached(record, "name").unwrap();
-    }
-    let mut moved = records[0].clone();
-    moved.home_id = "remote".into();
-    moved.group_id = group_id("account", "remote");
-    store
-        .devices()
-        .publish_cached(&moved, "changed name")
-        .unwrap();
-    assert_eq!(
-        store.devices().load_scope("account").unwrap(),
-        Some(scope())
-    );
-    assert_eq!(
-        store
-            .devices()
-            .restore_cached("account", "local")
-            .unwrap()
-            .len(),
-        3
-    );
     assert!(
         current_home(&[home("local", &[]), home("remote", &["first"])], &scope())
             .unwrap()

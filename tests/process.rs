@@ -1,3 +1,7 @@
+use migate::{device, storage, xiaomi};
+#[path = "../src/storage/tests/fixtures.rs"]
+mod publication_support;
+
 use migate::storage::{TokenSet, XiaomiRecord};
 use rusqlite::Connection;
 use std::{
@@ -644,7 +648,22 @@ fn bridge_helper_child() {
                     capabilities: vec![Capability::OnOff],
                 }],
             });
-            store.devices().publish(&physical.description()).unwrap();
+            if store
+                .devices()
+                .load_publication(None)
+                .unwrap()
+                .records
+                .is_empty()
+            {
+                store
+                    .devices()
+                    .apply_publication(&publication_support::commit(
+                        publication_support::scope(),
+                        Vec::new(),
+                        vec![publication_support::record(&physical.description(), 2)],
+                    ))
+                    .unwrap();
+            }
             let mut receiver = receivers.remove(0);
             let registry = DeviceRegistry::new();
             registry.insert(physical.clone());

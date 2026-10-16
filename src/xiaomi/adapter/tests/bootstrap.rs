@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::tests::fixtures::{commit, record};
 
 #[test]
 fn restored_topology_is_the_selected_scope_and_published_intersection() {
@@ -6,22 +7,38 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     let store = Store::open(directory.path()).unwrap();
     let tls = TlsFixture::new(false);
     store.xiaomi().replace(&tls.credentials).unwrap();
-    store
-        .devices()
-        .save_scope(&scope(&tls.credentials.uid))
-        .unwrap();
     let kept = cached(&tls.credentials.uid, "kept", true);
-    store.devices().publish_cached(&kept, "saved name").unwrap();
     let deleted = cached(&tls.credentials.uid, "deleted", false);
-    store.devices().publish_cached(&deleted, "deleted").unwrap();
-    store.devices().remove(&deleted.device.key).unwrap();
     let mut other = cached(&tls.credentials.uid, "other-home", false);
     other.home_id = "other".into();
     other.group_id = group_id(&other.uid, &other.home_id);
-    store.devices().publish_cached(&other, "other").unwrap();
+    let foreign = cached("foreign", "foreign", false);
+    let mut deleted_record = record(&deleted.physical_description("deleted"), 6);
+    deleted_record.published = false;
+    let records = vec![
+        record(&kept.physical_description("saved name"), 2),
+        deleted_record,
+        record(&other.physical_description("other"), 7),
+        record(&foreign.physical_description("foreign"), 8),
+    ];
+    for cached in [other, foreign] {
+        let scope = CachedScope {
+            uid: cached.uid.clone(),
+            home_id: cached.home_id.clone(),
+            group_id: cached.group_id.clone(),
+        };
+        store
+            .devices()
+            .apply_publication(&commit(scope, vec![cached], records.clone()))
+            .unwrap();
+    }
     store
         .devices()
-        .publish_cached(&cached("foreign", "foreign", false), "foreign")
+        .apply_publication(&commit(
+            scope(&tls.credentials.uid),
+            vec![kept, deleted],
+            records,
+        ))
         .unwrap();
     let (base, requests) = dynamic_mock_server(1, |_| MockResponse::json(503, "{}"));
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
@@ -57,22 +74,27 @@ fn prepared_accounts_can_deliver_an_empty_registry() {
 #[test]
 fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
     let rig = Rig::light("xiaomi.light.ceil04");
+    let scope = scope(&rig.data[0].uid);
+    let mut state = rig.store.devices().load_publication(Some(&scope)).unwrap();
+    let single = state.records[0].clone();
     let mut groups = Vec::new();
-    for (did, model) in [
-        ("group.42", "xiaomi.light.ceil04"),
-        ("43", "mijia.light.group3"),
+    for (endpoint, did, model) in [
+        (3, "group.42", "xiaomi.light.ceil04"),
+        (4, "43", "mijia.light.group3"),
     ] {
         let mut group = rig.data[0].clone();
         group.device.key.id = did.into();
         group.model = model.into();
-        let stored = rig
-            .store
-            .devices()
-            .publish_cached(&group, "Saved group")
-            .unwrap();
-        groups.push((group, stored));
+        state
+            .records
+            .push(record(&group.physical_description("Saved group"), endpoint));
+        state.cached.push(group.clone());
+        groups.push(group);
     }
-    let single = rig.store.devices().list_published().unwrap()[0].clone();
+    rig.store
+        .devices()
+        .apply_publication(&commit(scope, state.cached, state.records))
+        .unwrap();
     for _ in 0..2 {
         let (source, ready) = XiaomiAdapter::build(
             rig.store.clone(),
@@ -84,8 +106,18 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         let registry = block_on(poll_once(ready.wait())).unwrap().unwrap();
         assert_eq!(registry.list().len(), 3);
         assert!(registry.get(&single.key).is_some());
-        assert_eq!(rig.store.devices().list_published().unwrap().len(), 3);
-        for (group, _) in &groups {
+        assert_eq!(
+            rig.store
+                .devices()
+                .load_publication(None)
+                .unwrap()
+                .records
+                .iter()
+                .filter(|record| record.published)
+                .count(),
+            3
+        );
+        for group in &groups {
             assert!(registry.get(&group.device.key).is_some());
             assert!(
                 source.context.live.borrow().devices[&group.device.key.id]
@@ -101,16 +133,6 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
             );
         }
         drop(source);
-    }
-    // A future admission can reuse the withdrawn identity and endpoint allocation.
-    for (group, stored) in groups {
-        assert_eq!(
-            rig.store
-                .devices()
-                .publish_cached(&group, "New name")
-                .unwrap(),
-            stored
-        );
     }
     assert_eq!(rig.cloud.lock().unwrap().homes, 0);
 }

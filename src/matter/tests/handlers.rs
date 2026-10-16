@@ -484,10 +484,10 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         // Commit one single-function and one multi-function outlet, then build
         // the next frozen instance from the committed set.
         let (single, mut single_receivers) = super::physical("single", false);
-        let single_stored = store.devices().publish(&single.description()).unwrap();
+        let single_stored = super::support::add_device(&store, &single.description());
         assert_eq!(single_stored.endpoint, 2);
         let (multi, mut receivers) = super::physical("multi", true);
-        let stored = store.devices().publish(&multi.description()).unwrap();
+        let stored = super::support::add_device(&store, &multi.description());
         registry.insert(single.clone());
         registry.insert(multi.clone());
         {
@@ -609,9 +609,9 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                 .devices()
                 .set_device_label(&single_stored.key, "Retained name")
                 .unwrap();
-            store.devices().remove(&single_stored.key).unwrap();
+            super::support::set_published(&store, &single_stored.key, false);
             registry.remove(&single_stored.key);
-            let restored = store.devices().publish(&single.description()).unwrap();
+            let restored = super::support::set_published(&store, &single_stored.key, true);
             assert_eq!(restored.unique_id, single_stored.unique_id);
             assert_eq!(restored.endpoint, 2);
             assert_eq!(restored.label, "Retained name");
@@ -675,7 +675,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         }
 
         // Removing the multi is only visible in the next frozen instance.
-        store.devices().remove(&stored.key).unwrap();
+        super::support::set_published(&store, &stored.key, false);
         registry.remove(&stored.key);
         {
             let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
@@ -703,7 +703,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         // Many committed devices build one larger but still frozen instance.
         for index in 0..20 {
             let (device, _receivers) = super::physical(&format!("extra-{index}"), false);
-            store.devices().publish(&device.description()).unwrap();
+            super::support::add_device(&store, &device.description());
             registry.insert(device);
         }
         {
@@ -748,8 +748,8 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         let registry = crate::device::DeviceRegistry::new();
         let (first, _first) = super::physical("first-name", false);
         let (second, _second) = super::physical("second-name", true);
-        let first_stored = store.devices().publish(&first.description()).unwrap();
-        let second_stored = store.devices().publish(&second.description()).unwrap();
+        let first_stored = super::support::add_device(&store, &first.description());
+        let second_stored = super::support::add_device(&store, &second.description());
         registry.insert(first.clone());
         registry.insert(second.clone());
         let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();

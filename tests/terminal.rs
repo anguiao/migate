@@ -1,3 +1,29 @@
+use migate::{device, storage, xiaomi};
+#[path = "../src/storage/tests/fixtures.rs"]
+mod publication_support;
+
+fn add_device(store: &Store, description: &PhysicalDeviceDescription) {
+    let mut state = store.devices().load_publication(None).unwrap();
+    assert!(
+        state
+            .records
+            .iter()
+            .all(|record| record.key != description.key)
+    );
+    state.records.push(publication_support::record(
+        description,
+        store.devices().next_endpoint().unwrap(),
+    ));
+    store
+        .devices()
+        .apply_publication(&publication_support::commit(
+            publication_support::scope(),
+            Vec::new(),
+            state.records,
+        ))
+        .unwrap();
+}
+
 use futures_lite::{
     future::{self, block_on, poll_once},
     io::Cursor,
@@ -48,7 +74,7 @@ fn fixture() -> (
                 .collect(),
         });
         physical.set_availability(Availability::Available);
-        store.devices().publish(&physical.description()).unwrap();
+        add_device(&store, &physical.description());
         registry.insert(physical);
         receivers.append(&mut consumers);
     }
@@ -179,9 +205,9 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
             let parsed =
                 parse_device_for_model(key.clone(), model, &serde_json::from_str(source).unwrap())
                     .unwrap();
-            store
-                .devices()
-                .publish(&PhysicalDeviceDescription {
+            add_device(
+                &store,
+                &PhysicalDeviceDescription {
                     key: key.clone(),
                     label: "Imported 米家 name".into(),
                     functions: parsed
@@ -189,8 +215,8 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                         .into_iter()
                         .map(|function| function.description)
                         .collect(),
-                })
-                .unwrap();
+                },
+            );
             store
                 .devices()
                 .set_device_label(&key, &format!("Saved {did} 名称"))
@@ -321,7 +347,7 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
                 ..Default::default()
             })
             .unwrap();
-        store.devices().publish(&physical.description()).unwrap();
+        add_device(&store, &physical.description());
         registry.insert(physical.clone());
         for (line, target) in [("on light", true), ("off light main", false)] {
             let (result, ()) = future::zip(

@@ -221,6 +221,8 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 assert!(poll_once(queued.as_mut()).await.is_none());
                 let stop = event_listener::Event::new();
                 let listening = stop.listen();
+                let ready = event_listener::Event::new();
+                let ready_listening = ready.listen();
                 let ready_seen = Cell::new(false);
                 let ready_ref = &ready_seen;
                 let stop_ref = &stop;
@@ -228,6 +230,7 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 let guard = Dropped(dropped.clone());
                 let source = async move {
                     let _guard = guard;
+                    ready_listening.await;
                     assert!(ready_ref.get());
                     let _active = receiver.next().await.unwrap();
                     stop_ref.notify(usize::MAX);
@@ -243,6 +246,7 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                     },
                     async {
                         ready_seen.set(true);
+                        ready.notify(usize::MAX);
                         Ok(crate::matter::tests::support::test_registry(
                             &store, &device,
                         ))

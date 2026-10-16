@@ -1,4 +1,45 @@
 use super::*;
+use crate::storage::tests::fixtures::{commit, record, scope};
+
+pub(super) fn add_device(
+    store: &Store,
+    description: &crate::device::PhysicalDeviceDescription,
+) -> crate::storage::StoredDevice {
+    let mut state = store.devices().load_publication(None).unwrap();
+    assert!(
+        state
+            .records
+            .iter()
+            .all(|stored| stored.key != description.key)
+    );
+    let stored = record(description, store.devices().next_endpoint().unwrap());
+    state.records.push(stored.clone());
+    store
+        .devices()
+        .apply_publication(&commit(scope(), Vec::new(), state.records))
+        .unwrap();
+    stored
+}
+
+pub(super) fn set_published(
+    store: &Store,
+    key: &DeviceKey,
+    published: bool,
+) -> crate::storage::StoredDevice {
+    let mut state = store.devices().load_publication(None).unwrap();
+    let stored = state
+        .records
+        .iter_mut()
+        .find(|record| &record.key == key)
+        .unwrap();
+    stored.published = published;
+    let stored = stored.clone();
+    store
+        .devices()
+        .apply_publication(&commit(scope(), Vec::new(), state.records))
+        .unwrap();
+    stored
+}
 
 pub(super) fn physical(
     id: &str,
@@ -31,7 +72,11 @@ pub(crate) fn test_registry(
     store: &Store,
     device: &PhysicalDevice,
 ) -> crate::device::DeviceRegistry {
-    let stored = store.devices().publish(&device.description()).unwrap();
+    let stored = store
+        .devices()
+        .load_published(device.key())
+        .unwrap()
+        .unwrap_or_else(|| add_device(store, &device.description()));
     device.set_label(stored.label);
     let registry = crate::device::DeviceRegistry::new();
     registry.insert(device.clone());

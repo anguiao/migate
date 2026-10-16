@@ -740,6 +740,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             let group = DeviceKey::new("xiaomi", "group-1");
             let two = DeviceKey::new("xiaomi", "two");
             until(|| store.devices().load_published(&group).unwrap().is_some()).await;
+            until(|| store.devices().load_published(&two).unwrap().is_some()).await;
             until(|| runtime_socket_live(port)).await;
             let publication = status.publication().expect("runtime publication");
             let root_before = publication.current().root_version;
@@ -800,7 +801,6 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                                     step: 1,
                                 };
                             }
-                            slot.prepared = None;
                             slot.candidate = Some((cached, None));
                             slot.confirmed = true;
                         }
@@ -972,6 +972,72 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             Ok::<(), crate::RuntimeError>(())
         };
         future::or(runtime, assertions).await.unwrap();
+    }))
+    .unwrap();
+}
+
+#[test]
+fn failed_source_wins_before_configured_startup_commits() {
+    let rig = Rig::new(false, &["one"]);
+    block_on(rig.run_result_without_publication(|c| async move {
+        c.announce();
+        until(|| {
+            let live = c.context.live.borrow();
+            live.scope.is_some()
+                && live
+                    .devices
+                    .get("one")
+                    .is_some_and(|slot| slot.candidate.is_some())
+        })
+        .await;
+        let port = free_udp_port();
+        let store = c.store.clone();
+        let identity = store.load_identity().unwrap();
+        let report = crate::xiaomi::auth::AuthReport::for_test(
+            crate::xiaomi::auth::AuthenticationState::NotSignedIn,
+            None,
+            crate::xiaomi::auth::CertificateUpdate::NotNeeded,
+            0,
+        );
+        let status = crate::terminal::AuthStatus::new(report, "/bin/migate".into(), "/data".into());
+        let handle = crate::xiaomi::adapter::SourceHandle(c.context.clone());
+        let registry = handle.registry();
+        let before = store.devices().load_publication(None).unwrap();
+        let paired = Rc::new(Cell::new(false));
+        let paired_flag = paired.clone();
+        let error = crate::runtime::run_xiaomi_bridge(
+            crate::runtime::BridgeOptions {
+                store: &store,
+                identity: &identity,
+                status: &status,
+                port,
+            },
+            async move { Ok((handle, registry)) },
+            async { Err("source failed before startup".into()) },
+            &b""[..],
+            Vec::new(),
+            future::pending::<Result<(), crate::RuntimeError>>(),
+            move |_| {
+                paired_flag.set(true);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "source failed before startup");
+        assert!(!paired.get(), "a failed source must not start pairing");
+        let after = store.devices().load_publication(None).unwrap();
+        assert_eq!(after.root_version, before.root_version);
+        assert_eq!(after.records, before.records);
+        assert_eq!(after.revocations, before.revocations);
+        assert!(
+            store
+                .devices()
+                .load_published(&DeviceKey::new("xiaomi", "one"))
+                .unwrap()
+                .is_none(),
+            "a failed source must not publish any device"
+        );
     }))
     .unwrap();
 }

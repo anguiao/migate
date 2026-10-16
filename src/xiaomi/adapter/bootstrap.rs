@@ -1,12 +1,14 @@
 use super::{
-    model::{AdapterError, AdapterStatus, GatewayStatus, Ready, TopologyReady},
+    model::{
+        AdapterError, AdapterStatus, GatewayStatus, INCOMPATIBLE_FUNCTIONS, Ready, TopologyReady,
+    },
     runner::XiaomiAdapter,
     state::{Backoff, Context, DeviceSlot, GroupSource, Live},
     tasks::TaskSet,
 };
 use crate::{
     device::{Availability, DeviceRegistry, PhysicalDevice},
-    storage::{AdmissionError, Store},
+    storage::Store,
     xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
 };
 use event_listener::Event;
@@ -129,7 +131,7 @@ impl XiaomiAdapter {
                     slot.group = Some(group.clone());
                     slot.effective_group = Some(group);
                 } else if incompatible_native {
-                    let reason = AdmissionError::IncompatibleFunctions.to_string();
+                    let reason = INCOMPATIBLE_FUNCTIONS.to_owned();
                     slot.blocked = Some(reason.clone());
                     slot.admitted
                         .as_ref()

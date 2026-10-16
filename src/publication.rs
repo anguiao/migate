@@ -202,10 +202,8 @@ impl Publication {
                         description.functions.len() + 1
                     };
                     if usize::from(next_endpoint) + needed - 1 > 65534 {
-                        self.source.pending(
-                            key,
-                            crate::storage::AdmissionError::EndpointExhausted.to_string(),
-                        );
+                        self.source
+                            .pending(key, "Device endpoint numbers are exhausted".into());
                         self.pending.set(true);
                         return Ok(None);
                     }

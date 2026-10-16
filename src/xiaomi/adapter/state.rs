@@ -70,7 +70,6 @@ impl DeviceRecord {
 /// One entry owns all preparation and admission state for a current home member.
 #[derive(Default)]
 pub(super) struct DeviceSlot {
-    pub(super) prepared: Option<Rc<super::publication::SourceEntry>>,
     pub(super) effective_group: Option<GroupSource>,
     /// Repair plan installed only by a successful configuration commit.
     pub(super) effective_repair: Option<Rc<RepairPlan>>,

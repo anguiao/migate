@@ -12,6 +12,10 @@ use crate::{
 };
 use event_listener::Event;
 use std::{cell::RefCell, error::Error, fmt, rc::Rc};
+
+pub(super) const INCOMPATIBLE_FUNCTIONS: &str =
+    "Device function set is incompatible with its stored identity";
+
 #[derive(Clone, Debug)]
 pub enum AdapterError {
     Storage(StorageError),

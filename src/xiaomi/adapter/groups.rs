@@ -249,7 +249,6 @@ impl Context {
                                     let mut live = context.live.borrow_mut();
                                     let slot = live.devices.get_mut(&group_did).unwrap();
                                     slot.candidate = None;
-                                    slot.prepared = None;
                                 }
                                 context.block_device(&group_did, error.to_string());
                                 context.stage();

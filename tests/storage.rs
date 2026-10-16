@@ -1,17 +1,23 @@
 use migate::{
     config::Config,
+    device,
     device::{
-        Capability, Category, DeviceKey, FunctionDescription, FunctionKey, PhysicalDevice,
+        Capability, Category, DeviceKey, FunctionDescription, PhysicalDevice,
         PhysicalDeviceDescription, Power,
     },
+    storage,
     storage::{
-        CachedPhysicalDevice, CachedScope, PublicationCommit, Store, StoredDevice, StoredFunction,
-        StoredRelation, StoredRevocation,
+        CachedPhysicalDevice, CachedScope, PublicationCommit, Store, StoredRelation,
+        StoredRevocation,
     },
+    xiaomi,
     xiaomi::{capability::parse_device_for_model, cloud::group_id},
 };
 use rusqlite::Connection;
 use std::{error::Error as _, fs};
+#[path = "../src/storage/tests/fixtures.rs"]
+mod publication_support;
+use publication_support::{commit, record, scope};
 
 #[test]
 fn initializes_and_restores_identity_without_power() {
@@ -385,32 +391,13 @@ fn light_cached(id: &str, scope: &CachedScope) -> CachedPhysicalDevice {
     }
 }
 
-fn light_record(cached: &CachedPhysicalDevice) -> StoredDevice {
-    let key = cached.device.key.clone();
-    StoredDevice {
-        key: key.clone(),
-        unique_id: "0f0e0d0c0b0a09080706050403020100".into(),
-        endpoint: 2,
-        label: "New Light".into(),
-        functions: vec![StoredFunction {
-            key: FunctionKey::new(key, "main"),
-            endpoint: 2,
-            label: "主灯".into(),
-            category: Category::Light,
-            capabilities: cached.device.functions[0].description.capabilities.clone(),
-        }],
-        published: true,
-        configuration_version: 1,
-    }
-}
-
 #[test]
 fn first_full_publication_inserts_real_cache_identity_and_allocation() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let scope = publication_scope();
     let cached = light_cached("new-light", &scope);
-    let record = light_record(&cached);
+    let record = record(&cached.physical_description("New Light"), 2);
     let relation = StoredRelation {
         group_did: "group-new".into(),
         record_did: "record-new".into(),
@@ -476,7 +463,7 @@ fn late_transaction_failure_rolls_back_the_whole_first_publication() {
     let devices = store.devices();
     let scope = publication_scope();
     let cached = light_cached("rollback-light", &scope);
-    let record = light_record(&cached);
+    let record = record(&cached.physical_description("New Light"), 2);
     let relation = StoredRelation {
         group_did: "group-rollback".into(),
         record_did: "record-rollback".into(),
@@ -540,11 +527,14 @@ fn publication_commit_is_atomic_and_retains_identity() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let devices = store.devices();
-    let first = devices
-        .publish(&outlet_description("first", "First"))
-        .unwrap();
-    let second = devices
-        .publish(&outlet_description("second", "Second"))
+    let first = record(&outlet_description("first", "First"), 2);
+    let second = record(&outlet_description("second", "Second"), 3);
+    devices
+        .apply_publication(&commit(
+            scope(),
+            Vec::new(),
+            vec![first.clone(), second.clone()],
+        ))
         .unwrap();
     let scope = publication_scope();
     assert_eq!(devices.next_endpoint().unwrap(), 4);

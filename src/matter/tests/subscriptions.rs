@@ -1020,7 +1020,7 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
             for function in device.functions() {
                 function.observe(false);
             }
-            store.devices().publish(&device.description()).unwrap();
+            super::support::add_device(&store, &device.description());
         }
     }
     // Each boot serves exactly the committed published set, frozen.
@@ -1136,10 +1136,14 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
                     assert_eq!(restored.parts[&1], [2]);
                     assert_eq!(restored.powers.keys().copied().collect::<Vec<_>>(), [2]);
                     wait_committed(&state).await;
-                    let readded = store.devices().publish(&multi.description()).unwrap();
+                    commit_visibility(&store, &scope, "dynamic-multi", true, 3, 3);
+                    let readded = store
+                        .devices()
+                        .load_published(multi.key())
+                        .unwrap()
+                        .unwrap();
                     assert_eq!(readded.unique_id, unique_id);
                     assert_eq!(readded.label, "Named multi");
-                    commit_visibility(&store, &scope, "dynamic-multi", true, 3, 3);
                     (id, readded.unique_id)
                 }
                 _ => {
@@ -1583,7 +1587,7 @@ fn frozen_light_boot(directory: &Path, boot: u16, previous: Option<u32>) -> (u32
     let (device, _receiver) = super::support::light(false);
     if boot == 1 {
         device.set_availability(Availability::Available);
-        store.devices().publish(&device.description()).unwrap();
+        super::support::add_device(&store, &device.description());
     }
     let stored = store
         .devices()

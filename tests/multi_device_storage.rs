@@ -1,12 +1,18 @@
 use migate::{
-    device::{Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription},
-    storage::{CachedPhysicalDevice, CachedScope, Store},
+    device::{
+        self, Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription,
+    },
+    storage::{self, CachedPhysicalDevice, CachedScope, Store},
     xiaomi::{
+        self,
         capability::{ParsedDevice, ParsedFunction, PropertyBinding},
         cloud::group_id,
     },
 };
 use rusqlite::Connection;
+#[path = "../src/storage/tests/fixtures.rs"]
+mod publication_support;
+use publication_support::{commit, record, scope};
 fn description(id: &str) -> PhysicalDeviceDescription {
     PhysicalDeviceDescription {
         key: DeviceKey::new("xiaomi", id),
@@ -51,42 +57,78 @@ fn cached(uid: &str, home: &str) -> CachedPhysicalDevice {
 }
 
 #[test]
-fn physical_and_function_identities_names_and_historical_endpoints_survive_remove_and_rejoin() {
+fn stored_identity_names_and_endpoints_survive_withdrawal_and_republication() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let desc = description("multi");
-    let first = store.devices().publish(&desc).unwrap();
-    assert_eq!(first.endpoint, 2);
+    let first = record(&description("multi"), 2);
+    store
+        .devices()
+        .apply_publication(&commit(scope(), Vec::new(), vec![first.clone()]))
+        .unwrap();
+    store
+        .devices()
+        .set_device_label(&first.key, "Home name")
+        .unwrap();
+    let mut withdrawn = store
+        .devices()
+        .load_publication(None)
+        .unwrap()
+        .records
+        .remove(0);
+    withdrawn.published = false;
+    let other = record(&description("other"), 6);
+    store
+        .devices()
+        .apply_publication(&commit(
+            scope(),
+            Vec::new(),
+            vec![withdrawn.clone(), other.clone()],
+        ))
+        .unwrap();
+    assert!(
+        store
+            .devices()
+            .load_published(&first.key)
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    let mut restored = store
+        .devices()
+        .load_publication(None)
+        .unwrap()
+        .records
+        .remove(0);
+    assert_eq!(restored, withdrawn);
+    restored.published = true;
+    store
+        .devices()
+        .apply_publication(&commit(scope(), Vec::new(), vec![restored.clone(), other]))
+        .unwrap();
+    let saved = store.devices().load_published(&first.key).unwrap().unwrap();
+    assert_eq!(saved.unique_id, first.unique_id);
+    assert_eq!(saved.endpoint, 2);
     assert_eq!(
-        first
+        saved
             .functions
             .iter()
             .map(|f| f.endpoint)
             .collect::<Vec<_>>(),
         [3, 4, 5]
     );
-    store
-        .devices()
-        .set_device_label(&desc.key, "Home name")
-        .unwrap();
-    store.devices().remove(&desc.key).unwrap();
-    assert!(store.devices().list_published().unwrap().is_empty());
-    let other = store.devices().publish(&description("other")).unwrap();
-    assert_eq!(other.endpoint, 6);
-    drop(store);
-    let store = Store::open(dir.path()).unwrap();
-    let mut renamed = desc;
-    renamed.label = "新米家名".into();
-    let restored = store.devices().publish(&renamed).unwrap();
-    assert_eq!(restored.unique_id, first.unique_id);
-    assert_eq!(restored.endpoint, first.endpoint);
-    assert_eq!(restored.label, "Home name");
-    assert_eq!(restored.functions[2].label, "usb");
-    let mut incompatible = renamed;
+    assert_eq!(saved.label, "Home name");
+    assert_eq!(store.devices().next_endpoint().unwrap(), 10);
+    let mut incompatible = restored.clone();
     incompatible.functions.pop();
-    assert!(store.devices().publish(&incompatible).is_err());
+    assert!(
+        store
+            .devices()
+            .apply_publication(&commit(scope(), Vec::new(), vec![incompatible]))
+            .is_err()
+    );
     assert_eq!(
-        store.devices().load_published(&incompatible.key).unwrap(),
+        store.devices().load_published(&first.key).unwrap(),
         Some(restored)
     );
 }
@@ -98,7 +140,11 @@ fn names_are_utf8_truncated_on_import_and_validated_on_write() {
     let mut desc = description("multi");
     desc.label = "插".repeat(20);
     desc.functions[0].label = "路".repeat(20);
-    let saved = store.devices().publish(&desc).unwrap();
+    let saved = record(&desc, 2);
+    store
+        .devices()
+        .apply_publication(&commit(scope(), Vec::new(), vec![saved.clone()]))
+        .unwrap();
     assert_eq!(saved.label, "插".repeat(10));
     assert_eq!(saved.functions[0].label, "路".repeat(10));
     assert!(
@@ -108,13 +154,13 @@ fn names_are_utf8_truncated_on_import_and_validated_on_write() {
             .is_err()
     );
     assert_eq!(
-        store.devices().load_published(&desc.key).unwrap().unwrap(),
-        saved
+        store.devices().load_published(&desc.key).unwrap(),
+        Some(saved)
     );
 }
 
 #[test]
-fn malformed_stored_functions_are_rejected_when_reading_published_devices() {
+fn malformed_stored_functions_are_rejected_when_loading_a_publication() {
     for update in [
         "function_id=''",
         "label='abcdefghijklmnopqrstuvwxyz1234567'",
@@ -125,8 +171,11 @@ fn malformed_stored_functions_are_rejected_when_reading_published_devices() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let desc = description("multi");
-        store.devices().publish(&desc).unwrap();
+        let record = record(&description("multi"), 2);
+        store
+            .devices()
+            .apply_publication(&commit(scope(), Vec::new(), vec![record.clone()]))
+            .unwrap();
         Connection::open(store.path())
             .unwrap()
             .execute(
@@ -134,249 +183,127 @@ fn malformed_stored_functions_are_rejected_when_reading_published_devices() {
                 [],
             )
             .unwrap();
-
+        assert!(store.devices().load_publication(None).is_err(), "{update}");
         assert!(
-            store.devices().load_published(&desc.key).is_err(),
+            store.devices().load_published(&record.key).is_err(),
             "{update}"
         );
-        assert!(store.devices().list_published().is_err(), "{update}");
     }
 }
 
 #[test]
-fn allocation_is_atomic_on_failure_and_exhaustion_and_never_uses_wildcard_endpoint() {
+fn invalid_records_and_function_write_failures_do_not_allocate_endpoints() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
+    let original = record(&description("multi"), 2);
+    let mut empty = original.clone();
+    empty.functions.clear();
+    let mut duplicate = original.clone();
+    duplicate.functions[1].key = duplicate.functions[0].key.clone();
+    let mut missing_id = original.clone();
+    missing_id.functions[0].key.id.clear();
+    let mut wildcard = original.clone();
+    wildcard.functions[2].endpoint = u16::MAX;
+    for invalid in [empty, duplicate, missing_id, wildcard] {
+        assert!(
+            store
+                .devices()
+                .apply_publication(&commit(scope(), Vec::new(), vec![invalid]))
+                .is_err()
+        );
+    }
     let db = Connection::open(store.path()).unwrap();
     db.execute_batch("CREATE TRIGGER fail_function AFTER INSERT ON device_function WHEN NEW.function_id='usb' BEGIN SELECT RAISE(ABORT,'secret'); END;").unwrap();
-    assert!(store.devices().publish(&description("failed")).is_err());
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM endpoint_allocation", [], |r| r
-            .get::<_, u32>(0))
-            .unwrap(),
-        0
+    assert!(
+        store
+            .devices()
+            .apply_publication(&commit(scope(), Vec::new(), vec![original]))
+            .is_err()
     );
-    db.execute_batch("DROP TRIGGER fail_function; INSERT INTO endpoint_allocation VALUES (65533,'test','history','main');").unwrap();
-    let exhausted = store
-        .devices()
-        .publish(&description("exhausted"))
-        .unwrap_err();
-    assert!(matches!(
-        exhausted,
-        migate::storage::AdmissionError::EndpointExhausted
-    ));
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM device_identity", [], |r| r
-            .get::<_, u32>(0))
-            .unwrap(),
-        0
+    assert!(
+        store
+            .devices()
+            .load_publication(None)
+            .unwrap()
+            .records
+            .is_empty()
     );
+    assert_eq!(store.devices().next_endpoint().unwrap(), 2);
+    db.execute_batch("DROP TRIGGER fail_function;").unwrap();
     let mut single = description("last");
     single.functions.truncate(1);
-    single.functions[0].id = "main".into();
-    let saved = store.devices().publish(&single).unwrap();
-    assert_eq!(saved.endpoint, 65534);
-    assert_eq!(saved.functions[0].endpoint, 65534);
-    assert!(store.devices().publish(&description("overflow")).is_err());
+    let last = record(&single, 65534);
+    store
+        .devices()
+        .apply_publication(&commit(scope(), Vec::new(), vec![last.clone()]))
+        .unwrap();
     assert_eq!(
-        store.devices().load_published(&single.key).unwrap(),
-        Some(saved)
+        store.devices().load_published(&last.key).unwrap(),
+        Some(last)
     );
+    assert_eq!(store.devices().next_endpoint().unwrap(), 65535);
 }
 
 #[test]
-fn canonical_cache_and_selected_scope_are_account_and_home_scoped() {
+fn cache_and_selected_scope_are_account_and_home_scoped() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let first = cached("account", "home-one");
     let mut second = cached("account", "home-two");
     second.device.functions[0].power.siid = 30;
-    store.devices().publish_cached(&first, "Outlet").unwrap();
-    store.devices().publish_cached(&second, "Outlet").unwrap();
-    store
-        .devices()
-        .publish_cached(&cached("other", "home-one"), "Outlet")
-        .unwrap();
-    let scope = CachedScope {
-        uid: "account".into(),
-        home_id: "home-one".into(),
-        group_id: group_id("account", "home-one"),
-    };
-    store.devices().save_scope(&scope).unwrap();
+    let other = cached("other", "home-one");
+    let identity = record(&first.physical_description("Outlet"), 2);
+    for cached in [&first, &second, &other] {
+        let scope = CachedScope {
+            uid: cached.uid.clone(),
+            home_id: cached.home_id.clone(),
+            group_id: cached.group_id.clone(),
+        };
+        store
+            .devices()
+            .apply_publication(&commit(scope, vec![cached.clone()], vec![identity.clone()]))
+            .unwrap();
+    }
     drop(store);
     let store = Store::open(dir.path()).unwrap();
-    assert_eq!(store.devices().load_scope("account").unwrap(), Some(scope));
-    assert_eq!(store.devices().load_scope("other").unwrap(), None);
     assert_eq!(
         store
             .devices()
-            .load_parsed("account", "home-one", &first.device.key)
-            .unwrap(),
-        Some(first.clone())
+            .load_scope("account")
+            .unwrap()
+            .unwrap()
+            .home_id,
+        "home-two"
     );
     assert_eq!(
         store
             .devices()
-            .load_parsed("account", "home-two", &second.device.key)
-            .unwrap(),
-        Some(second)
+            .load_scope("other")
+            .unwrap()
+            .unwrap()
+            .home_id,
+        "home-one"
     );
+    for cached in [&first, &second, &other] {
+        let scope = CachedScope {
+            uid: cached.uid.clone(),
+            home_id: cached.home_id.clone(),
+            group_id: cached.group_id.clone(),
+        };
+        assert_eq!(
+            store
+                .devices()
+                .load_publication(Some(&scope))
+                .unwrap()
+                .cached,
+            std::slice::from_ref(cached)
+        );
+    }
     assert!(
         store
             .devices()
             .load_parsed("account", "missing", &first.device.key)
             .unwrap()
             .is_none()
-    );
-    let mut invalid = first;
-    invalid.group_id = "wrong".into();
-    assert!(store.devices().publish_cached(&invalid, "Outlet").is_err());
-}
-
-#[test]
-fn publishing_cached_device_is_one_transaction_and_incompatible_changes_keep_the_old_cache() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let original = cached("account", "home");
-    let published = store
-        .devices()
-        .publish_cached(&original, "初始名称")
-        .unwrap();
-    let mut incompatible = original.clone();
-    incompatible.device.functions.pop();
-    assert!(
-        store
-            .devices()
-            .publish_cached(&incompatible, "不同名称")
-            .is_err()
-    );
-    assert_eq!(
-        store
-            .devices()
-            .load_parsed("account", "home", &original.device.key)
-            .unwrap(),
-        Some(original.clone())
-    );
-    assert_eq!(
-        store
-            .devices()
-            .load_published(&original.device.key)
-            .unwrap(),
-        Some(published)
-    );
-    Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER reject_new_cache AFTER INSERT ON device_cache BEGIN SELECT RAISE(ABORT,'private'); END;").unwrap();
-    let mut another = original;
-    another.device.key.id = "new".into();
-    assert!(store.devices().publish_cached(&another, "new").is_err());
-    assert!(
-        store
-            .devices()
-            .load_published(&another.device.key)
-            .unwrap()
-            .is_none()
-    );
-    let db = Connection::open(store.path()).unwrap();
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM endpoint_allocation", [], |row| row
-            .get::<_, u32>(0))
-            .unwrap(),
-        4
-    );
-}
-
-#[test]
-fn invalid_function_sets_are_rejected_atomically_and_device_count_has_no_sample_limit() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    for ids in [vec![], vec!["main", "main"], vec![""]] {
-        let mut desc = description("invalid");
-        desc.functions = ids
-            .into_iter()
-            .map(|id| FunctionDescription {
-                id: id.into(),
-                label: id.into(),
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
-            })
-            .collect();
-        assert!(store.devices().publish(&desc).is_err());
-        assert!(store.devices().list_published().unwrap().is_empty());
-    }
-    let db = Connection::open(store.path()).unwrap();
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM endpoint_allocation", [], |row| row
-            .get::<_, u32>(0))
-            .unwrap(),
-        0
-    );
-    for id in 0..20 {
-        store
-            .devices()
-            .publish(&description(&format!("same-model-{id}")))
-            .unwrap();
-    }
-    assert_eq!(store.devices().list_published().unwrap().len(), 20);
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM endpoint_allocation", [], |row| row
-            .get::<_, u32>(0))
-            .unwrap(),
-        80
-    );
-}
-
-#[test]
-fn restoration_uses_committed_names_and_checks_only_published_topology() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let original = cached("account", "home");
-    store
-        .devices()
-        .publish_cached(&original, "Initial name")
-        .unwrap();
-    store
-        .devices()
-        .set_device_label(&original.device.key, "Home name")
-        .unwrap();
-    let mut deleted = original.clone();
-    deleted.device.key.id = "deleted".into();
-    store.devices().publish_cached(&deleted, "Deleted").unwrap();
-    store.devices().remove(&deleted.device.key).unwrap();
-    // A valid cached candidate cannot silently change a published function identity.
-    let mut candidate = original.clone();
-    candidate.device.functions.reverse();
-    store
-        .devices()
-        .publish_cached(&candidate, "Outlet")
-        .unwrap();
-    drop(store);
-
-    let store = Store::open(dir.path()).unwrap();
-    let restored = store.devices().restore_cached("account", "home").unwrap();
-    assert_eq!(restored.len(), 1);
-    let (bindings, identity) = &restored[0];
-    assert_eq!(bindings, &candidate);
-    let (physical, _receivers) = migate::device::PhysicalDevice::new(identity.description());
-    assert_eq!(physical.label(), "Home name");
-    assert_eq!(physical.function("usb").unwrap().description().label, "usb");
-    assert!(
-        store
-            .devices()
-            .restore_cached("other", "home")
-            .unwrap()
-            .is_empty()
-    );
-
-    Connection::open(store.path()).unwrap().execute(
-        "UPDATE device_cache SET functions = json_remove(functions, '$[0]') WHERE device_id = 'multi'",
-        [],
-    ).unwrap();
-    assert!(store.devices().restore_cached("account", "home").is_err());
-    store.devices().remove(&original.device.key).unwrap();
-    assert!(
-        store
-            .devices()
-            .restore_cached("account", "home")
-            .unwrap()
-            .is_empty()
     );
 }

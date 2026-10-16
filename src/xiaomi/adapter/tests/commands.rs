@@ -143,9 +143,20 @@ fn restored_and_updated_description_order_cannot_cross_wire_channel_commands() {
     let mut rig = Rig::new(true, &["multi"]);
     let mut reordered = rig.data[1].clone();
     reordered.device.functions.reverse();
+    let scope = scope(&reordered.uid);
+    let mut state = rig.store.devices().load_publication(Some(&scope)).unwrap();
+    *state
+        .cached
+        .iter_mut()
+        .find(|cached| cached.device.key == reordered.device.key)
+        .unwrap() = reordered.clone();
     rig.store
         .devices()
-        .publish_cached(&reordered, "ignored later name")
+        .apply_publication(&crate::storage::tests::fixtures::commit(
+            scope,
+            state.cached,
+            state.records,
+        ))
         .unwrap();
     let (mut source, ready) = XiaomiAdapter::build(
         rig.store.clone(),

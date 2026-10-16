@@ -16,6 +16,9 @@ pub use identity::Identity;
 pub use lock::InstanceLock;
 pub use matter::MatterStore;
 pub use publication::{PublicationCommit, PublicationState, StoredRelation, StoredRevocation};
-pub use registry::{AdmissionError, StoredDevice, StoredFunction, import_label};
+pub use registry::{StoredDevice, StoredFunction, import_label};
 pub use store::Store;
 pub use xiaomi::{TokenSet, XiaomiRecord, XiaomiStore};
+
+#[cfg(test)]
+pub(crate) mod tests;

@@ -121,7 +121,7 @@ impl SourceHandle {
         if let Some(observer) = self.0.snapshot_observer.borrow_mut().as_mut() {
             observer();
         }
-        let mut live = self.0.live.borrow_mut();
+        let live = self.0.live.borrow();
         let descriptions = live
             .devices
             .iter()
@@ -139,7 +139,7 @@ impl SourceHandle {
             })
             .collect::<BTreeMap<_, _>>();
         let mut entries = Vec::new();
-        for slot in live.devices.values_mut() {
+        for slot in live.devices.values() {
             // The latest genuine confirmed source input is authoritative for
             // planning and persistence, even when the static independent-lamp
             // contract keeps an older served logical description. A pending
@@ -249,16 +249,6 @@ impl SourceHandle {
                     }
                 }
             };
-            if let Some(prepared) = &slot.prepared
-                && prepared.cached == cached
-                && prepared.group == slot.group
-                && prepared.repair == repair
-                && prepared.repair_reason == repair_reason
-                && same_shape(&prepared.physical.description(), &description)
-            {
-                entries.push(prepared.clone());
-                continue;
-            }
             let existing = slot.admitted.as_ref().filter(|record| {
                 !record.life.is_closed() && same_shape(&record.physical.description(), &description)
             });
@@ -287,7 +277,7 @@ impl SourceHandle {
                     )
                 }
             };
-            let prepared = Rc::new(SourceEntry {
+            entries.push(Rc::new(SourceEntry {
                 cached,
                 physical: record.physical.clone(),
                 fresh: slot.confirmed,
@@ -297,9 +287,7 @@ impl SourceHandle {
                 record,
                 receivers: RefCell::new(receivers),
                 group: slot.group.clone(),
-            });
-            slot.prepared = Some(prepared.clone());
-            entries.push(prepared);
+            }));
         }
         entries.sort_by(|a, b| a.physical.key().cmp(b.physical.key()));
         let problems = live
@@ -392,7 +380,6 @@ impl SourceHandle {
                 }
                 slot.effective_repair = entry.repair.clone();
                 slot.candidate = None;
-                slot.prepared = None;
             }
             self.0.registry.insert(entry.physical.clone());
             if let Some(receivers) = entry.receivers.borrow_mut().take() {
@@ -494,24 +481,19 @@ impl Context {
     /// Confirmed removal closes every retained authority before persistence.
     pub(super) fn revoke(&self, did: &str, reason: &str) -> Result<(), AdapterError> {
         let key = DeviceKey::new("xiaomi", did);
-        let had_authority = self
+        let admitted = self
             .live
             .borrow()
             .devices
             .get(did)
-            .is_some_and(|slot| slot.admitted.is_some());
-        if let Some(slot) = self.live.borrow().devices.get(did) {
-            for physical in slot
-                .admitted
-                .iter()
-                .map(|record| &record.physical)
-                .chain(slot.prepared.iter().map(|entry| &entry.physical))
-            {
-                physical.set_availability(Availability::Unavailable(reason.into()));
-                physical.close();
-            }
+            .and_then(|slot| slot.admitted.clone());
+        if let Some(record) = &admitted {
+            record
+                .physical
+                .set_availability(Availability::Unavailable(reason.into()));
+            record.physical.close();
         }
-        if had_authority {
+        if admitted.is_some() {
             self.store
                 .devices()
                 .record_revocations(&[crate::storage::StoredRevocation {

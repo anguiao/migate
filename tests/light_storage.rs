@@ -1,9 +1,12 @@
 use migate::{
-    device::{Capability, DeviceKey, LightMode, LightPatch, PhysicalDevice},
-    storage::{AdmissionError, CachedPhysicalDevice, Store},
-    xiaomi::{capability::parse_device_for_model, cloud::group_id},
+    device::{self, Capability, DeviceKey},
+    storage::{self, CachedPhysicalDevice, Store},
+    xiaomi::{self, capability::parse_device_for_model, cloud::group_id},
 };
 use serde_json::Value;
+#[path = "../src/storage/tests/fixtures.rs"]
+mod publication_support;
+use publication_support::{commit, record, scope};
 
 fn light(model: &str, fixture: &str) -> CachedPhysicalDevice {
     let instance: Value = serde_json::from_str(fixture).unwrap();
@@ -45,33 +48,42 @@ fn profile_light(id: &str, brightness: bool, temperature: bool) -> CachedPhysica
 }
 
 #[test]
-fn on_off_and_dimmable_profiles_persist_and_restore_static_capabilities() {
+fn on_off_and_dimmable_profiles_persist_static_capabilities() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
-    for (id, brightness, expected) in [
-        ("profile-switch", false, vec![Capability::OnOff]),
-        (
-            "profile-dimmer",
-            true,
-            vec![Capability::OnOff, Capability::Brightness],
-        ),
-    ] {
-        let cached = profile_light(id, brightness, false);
-        let identity = store.devices().publish_cached(&cached, id).unwrap();
-        assert_eq!(identity.functions[0].capabilities, expected);
-    }
-    let restored = store.devices().restore_cached("account", "home").unwrap();
-    assert_eq!(restored.len(), 2);
-    for (cached, stored) in &restored {
-        assert_eq!(
-            cached.device.functions[0].description.capabilities,
-            stored.functions[0].capabilities
-        );
-    }
+    let cached = vec![
+        profile_light("profile-switch", false, false),
+        profile_light("profile-dimmer", true, false),
+    ];
+    let records = cached
+        .iter()
+        .enumerate()
+        .map(|(index, cached)| {
+            record(
+                &cached.physical_description(&cached.device.key.id),
+                2 + index as u16,
+            )
+        })
+        .collect::<Vec<_>>();
+    store
+        .devices()
+        .apply_publication(&commit(scope(), cached.clone(), records.clone()))
+        .unwrap();
+    let state = store.devices().load_publication(Some(&scope())).unwrap();
+    assert_eq!(state.records, records);
+    assert_eq!(state.cached.len(), 2);
+    assert_eq!(
+        state.records[0].functions[0].capabilities,
+        [Capability::OnOff]
+    );
+    assert_eq!(
+        state.records[1].functions[0].capabilities,
+        [Capability::OnOff, Capability::Brightness]
+    );
 }
 
 #[test]
-fn all_seven_lights_restore_complete_static_bindings_one_endpoint_and_unknown_runtime() {
+fn all_seven_lights_restore_complete_static_bindings_and_identities() {
     let directory = tempfile::tempdir().unwrap();
     let models = [
         (
@@ -106,137 +118,35 @@ fn all_seven_lights_restore_complete_static_bindings_one_endpoint_and_unknown_ru
     let mut saved = Vec::new();
     {
         let store = Store::open(directory.path()).unwrap();
-        for (model, fixture) in models {
+        for (index, (model, fixture)) in models.into_iter().enumerate() {
             let cached = light(model, fixture);
-            let identity = store.devices().publish_cached(&cached, model).unwrap();
+            let identity = record(&cached.physical_description(model), 2 + index as u16);
             assert_eq!(identity.functions.len(), 1);
             assert_eq!(identity.functions[0].key.id, "main");
             assert_eq!(identity.endpoint, identity.functions[0].endpoint);
-            let (device, _) = PhysicalDevice::new(identity.description());
-            device.functions()[0]
-                .observe_light(LightPatch {
-                    power: Some(true),
-                    brightness_percent: Some(72.5),
-                    temperature_kelvin: Some(4000),
-                    ..LightPatch::default()
-                })
-                .unwrap();
             saved.push((cached, identity));
         }
-    }
-    let store = Store::open(directory.path()).unwrap();
-    let restored = store.devices().restore_cached("account", "home").unwrap();
-    assert_eq!(restored, saved);
-    for (cached, identity) in restored {
-        let (device, _) = PhysicalDevice::new(identity.description());
-        assert_eq!(
-            device.functions()[0].snapshot().power,
-            migate::device::Power::Unknown
-        );
-        let snapshot = device.functions()[0].snapshot().lighting.unwrap();
-        assert_eq!(snapshot.brightness_percent, None);
-        assert_eq!(snapshot.temperature_kelvin, None);
-        assert_eq!(snapshot.color, None);
-        assert_eq!(
-            snapshot.mode,
-            if cached.model == "devcea.light.ls2307" {
-                None
-            } else {
-                Some(LightMode::Temperature)
-            }
-        );
-    }
-}
-
-#[test]
-fn binding_updates_keep_identity_but_range_or_capability_changes_are_rejected() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    let mut cached = light(
-        "xiaomi.light.ceil04",
-        include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
-    );
-    let original_cached = cached.clone();
-    let original = store.devices().publish_cached(&cached, "Original").unwrap();
-    cached.device.functions[0]
-        .lighting
-        .as_mut()
-        .unwrap()
-        .brightness
-        .as_mut()
-        .unwrap()
-        .property
-        .piid = 8;
-    let changed = store
-        .devices()
-        .publish_cached(&cached, "Changed cloud name")
-        .unwrap();
-    assert_eq!(changed.unique_id, original.unique_id);
-    assert_eq!(changed.endpoint, original.endpoint);
-    assert_eq!(changed.label, original.label);
-    assert_eq!(
-        changed.description().functions[0]
-            .temperature_range()
-            .unwrap()
-            .max,
-        5700
-    );
-    assert_eq!(
         store
             .devices()
-            .load_parsed("account", "home", &cached.device.key)
-            .unwrap()
-            .unwrap()
-            .device
-            .functions[0]
-            .lighting
-            .as_ref()
-            .unwrap()
-            .brightness
-            .as_ref()
-            .unwrap()
-            .property
-            .piid,
-        8
+            .apply_publication(&commit(
+                scope(),
+                saved.iter().map(|(cached, _)| cached.clone()).collect(),
+                saved.iter().map(|(_, identity)| identity.clone()).collect(),
+            ))
+            .unwrap();
+    }
+    let store = Store::open(directory.path()).unwrap();
+    let state = store.devices().load_publication(Some(&scope())).unwrap();
+    assert_eq!(
+        state.records,
+        saved
+            .iter()
+            .map(|(_, identity)| identity.clone())
+            .collect::<Vec<_>>()
     );
-    let mut range_changed = cached.clone();
-    let range = &mut range_changed.device.functions[0]
-        .lighting
-        .as_mut()
-        .unwrap()
-        .temperature
-        .as_mut()
-        .unwrap()
-        .range;
-    range.max = 5600;
-    range_changed.device.functions[0].description.capabilities[2] =
-        Capability::ColorTemperature(*range);
-    assert!(matches!(
-        store.devices().publish_cached(&range_changed, "Range"),
-        Err(AdmissionError::IncompatibleFunctions)
-    ));
-    let mut incompatible = changed.description();
-    incompatible.functions[0]
-        .capabilities
-        .push(Capability::ColorRgb);
-    assert!(matches!(
-        store.devices().publish(&incompatible),
-        Err(AdmissionError::IncompatibleFunctions)
-    ));
-    store.devices().remove(&cached.device.key).unwrap();
-    assert!(
-        store
-            .devices()
-            .restore_cached("account", "home")
-            .unwrap()
-            .is_empty()
-    );
-    let rejoined = store
-        .devices()
-        .publish_cached(&original_cached, "New")
-        .unwrap();
-    assert_eq!(rejoined.unique_id, original.unique_id);
-    assert_eq!(rejoined.endpoint, original.endpoint);
+    for (cached, _) in saved {
+        assert!(state.cached.contains(&cached));
+    }
 }
 
 #[test]
@@ -249,9 +159,10 @@ fn corrupted_ls2307_binding_or_mode_conversion_cannot_be_restored() {
             "devcea.light.ls2307",
             include_str!("fixtures/miot/devcea-light-ls2307.json"),
         );
+        let identity = record(&cached.physical_description("RGB light"), 2);
         store
             .devices()
-            .publish_cached(&cached, "RGB light")
+            .apply_publication(&commit(scope(), vec![cached], vec![identity]))
             .unwrap();
         let db = Connection::open(store.path()).unwrap();
         if mutation == "instance-type" {
@@ -283,82 +194,52 @@ fn corrupted_ls2307_binding_or_mode_conversion_cannot_be_restored() {
             .unwrap();
         }
         assert!(
-            store.devices().restore_cached("account", "home").is_err(),
+            store.devices().load_publication(Some(&scope())).is_err(),
             "{mutation}"
         );
     }
 }
 
 #[test]
-fn cached_and_identity_temperature_ranges_must_match_on_restore() {
-    use rusqlite::Connection;
+fn new_description_and_version_keep_identity_names_and_endpoints() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
-    let cached = light(
-        "xiaomi.light.ceil04",
-        include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
-    );
-    store.devices().publish_cached(&cached, "Light").unwrap();
-    let db = Connection::open(store.path()).unwrap();
-    let mut capabilities: Value = serde_json::from_str(
-        &db.query_row("SELECT capabilities FROM device_function", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    capabilities[2]["color_temperature"]["max"] = serde_json::json!(5600);
-    db.execute(
-        "UPDATE device_function SET capabilities=?1",
-        [capabilities.to_string()],
-    )
-    .unwrap();
-    assert!(store.devices().restore_cached("account", "home").is_err());
-}
-
-#[test]
-fn binding_update_restores_identical_cache_and_identity_without_reallocating() {
-    let directory = tempfile::tempdir().unwrap();
     let mut cached = light(
         "xiaomi.light.ceil04",
         include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
     );
-    let original;
-    {
-        let store = Store::open(directory.path()).unwrap();
-        original = store.devices().publish_cached(&cached, "Light").unwrap();
-        cached.device.functions[0]
-            .lighting
-            .as_mut()
-            .unwrap()
-            .brightness
-            .as_mut()
-            .unwrap()
-            .property
-            .piid = 8;
-        store.devices().publish_cached(&cached, "New name").unwrap();
-    }
+    let original = record(&cached.physical_description("Light"), 2);
+    store
+        .devices()
+        .apply_publication(&commit(
+            scope(),
+            vec![cached.clone()],
+            vec![original.clone()],
+        ))
+        .unwrap();
+    let range = {
+        let binding = cached.device.functions[0].lighting.as_mut().unwrap();
+        binding.brightness.as_mut().unwrap().property.piid = 8;
+        let range = &mut binding.temperature.as_mut().unwrap().range;
+        range.max = 5600;
+        *range
+    };
+    cached.device.functions[0].description.capabilities[2] = Capability::ColorTemperature(range);
+    let mut updated = original.clone();
+    updated.configuration_version = 2;
+    updated.functions[0].capabilities = cached.device.functions[0].description.capabilities.clone();
+    let mut publication = commit(scope(), vec![cached.clone()], vec![updated.clone()]);
+    publication.root_version = 2;
+    store.devices().apply_publication(&publication).unwrap();
+    drop(store);
     let store = Store::open(directory.path()).unwrap();
-    let restored = store.devices().restore_cached("account", "home").unwrap();
-    assert_eq!(restored[0].1.unique_id, original.unique_id);
-    assert_eq!(restored[0].1.endpoint, original.endpoint);
-    assert_eq!(restored[0].1.label, original.label);
-    assert_eq!(
-        restored[0].0.device.functions[0]
-            .lighting
-            .as_ref()
-            .unwrap()
-            .brightness
-            .as_ref()
-            .unwrap()
-            .property
-            .piid,
-        8
-    );
-    assert_eq!(
-        restored[0].0.device.functions[0].description.capabilities,
-        restored[0].1.functions[0].capabilities
-    );
+    let state = store.devices().load_publication(Some(&scope())).unwrap();
+    assert_eq!(state.root_version, 2);
+    assert_eq!(state.cached, [cached]);
+    assert_eq!(state.records, [updated]);
+    assert_eq!(state.records[0].unique_id, original.unique_id);
+    assert_eq!(state.records[0].endpoint, original.endpoint);
+    assert_eq!(state.records[0].label, original.label);
 }
 
 #[test]
@@ -386,7 +267,13 @@ fn ls2307_cannot_publish_an_outlet_description() {
         )
         .unwrap(),
     };
-    assert!(store.devices().publish_cached(&cached, "Wrong").is_err());
+    let identity = record(&cached.physical_description("Wrong"), 2);
+    assert!(
+        store
+            .devices()
+            .apply_publication(&commit(scope(), vec![cached], vec![identity]))
+            .is_err()
+    );
 }
 
 #[test]
@@ -421,18 +308,13 @@ fn unrepresentable_mired_ranges_are_rejected_at_publication_and_cache_restore() 
             .as_mut()
             .unwrap()
             .range = range;
+        let identity = record(&cached.physical_description("Bad range"), 2);
         assert!(
             store
                 .devices()
-                .publish_cached(&cached, "Bad range")
+                .apply_publication(&commit(scope(), vec![cached], vec![identity]))
                 .is_err()
         );
-        let description = migate::device::PhysicalDeviceDescription {
-            key: cached.device.key.clone(),
-            label: "Bad range".into(),
-            functions: vec![cached.device.functions[0].description.clone()],
-        };
-        assert!(store.devices().publish(&description).is_err());
     }
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
@@ -440,7 +322,11 @@ fn unrepresentable_mired_ranges_are_rejected_at_publication_and_cache_restore() 
         "xiaomi.light.ceil04",
         include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
     );
-    store.devices().publish_cached(&cached, "Light").unwrap();
+    let identity = record(&cached.physical_description("Light"), 2);
+    store
+        .devices()
+        .apply_publication(&commit(scope(), vec![cached], vec![identity]))
+        .unwrap();
     let db = rusqlite::Connection::open(store.path()).unwrap();
     let mut functions: Value = serde_json::from_str(
         &db.query_row("SELECT functions FROM device_cache", [], |row| {
@@ -470,5 +356,5 @@ fn unrepresentable_mired_ranges_are_rejected_at_publication_and_cache_restore() 
         [capabilities.to_string()],
     )
     .unwrap();
-    assert!(store.devices().restore_cached("account", "home").is_err());
+    assert!(store.devices().load_publication(Some(&scope())).is_err());
 }

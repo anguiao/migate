@@ -227,7 +227,7 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
         let next_address = next.get_ref().local_addr().unwrap();
         let foreign = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
         let foreign_address = foreign.get_ref().local_addr().unwrap();
-        let before = c.store.devices().list_published().unwrap();
+        let before = c.store.devices().load_publication(None).unwrap().records;
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one", "multi"]).await;
@@ -279,7 +279,15 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
             );
             assert_eq!(control.discovery.snapshot().gateways.len(), 3);
             assert!(poll_once(foreign.accept()).await.is_none());
-            assert_eq!(control.store.devices().list_published().unwrap(), before);
+            assert_eq!(
+                control
+                    .store
+                    .devices()
+                    .load_publication(None)
+                    .unwrap()
+                    .records,
+                before
+            );
             for (did, id, siid) in [
                 ("one", "main", 2),
                 ("multi", "outlet_1", 3),

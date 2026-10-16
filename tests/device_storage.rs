@@ -1,12 +1,16 @@
 use migate::{
-    device::{Capability, Category, DeviceKey, FunctionDescription},
-    storage::{CachedPhysicalDevice, Store},
+    device::{self, Capability, Category, DeviceKey, FunctionDescription},
+    storage::{self, CachedPhysicalDevice, CachedScope, Store},
     xiaomi::{
+        self,
         capability::{ParsedDevice, ParsedFunction, PropertyBinding},
         cloud::group_id,
     },
 };
 use rusqlite::Connection;
+#[path = "../src/storage/tests/fixtures.rs"]
+mod publication_support;
+use publication_support::{commit, record, scope};
 
 fn cached(uid: &str) -> CachedPhysicalDevice {
     CachedPhysicalDevice {
@@ -33,69 +37,63 @@ fn cached(uid: &str) -> CachedPhysicalDevice {
 }
 
 #[test]
-fn caches_are_account_scoped_and_identity_is_stable_across_restart_and_routing_changes() {
+fn caches_are_account_scoped_and_identity_survives_restart_and_routing_changes() {
     let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
     let first = cached("account-one");
     let second = cached("account-two");
-    let key = &first.device.key;
-    let store = Store::open(dir.path()).unwrap();
-    let identity = store.devices().publish_cached(&first, "Outlet").unwrap();
-    assert_eq!(identity.endpoint, 2);
-    assert_eq!(identity.unique_id.len(), 32);
-    assert_ne!(identity.unique_id, store.load_identity().unwrap().bridge_id);
-    assert_eq!(
+    let identity = record(&first.physical_description("Outlet"), 2);
+    for cached in [&first, &second] {
+        let scope = CachedScope {
+            uid: cached.uid.clone(),
+            home_id: cached.home_id.clone(),
+            group_id: cached.group_id.clone(),
+        };
         store
             .devices()
-            .load_parsed("account-one", "home", key)
-            .unwrap(),
-        Some(first.clone())
-    );
-    assert!(
-        store
-            .devices()
-            .load_parsed("account-two", "home", key)
-            .unwrap()
-            .is_none()
-    );
-    store.devices().publish_cached(&second, "Outlet").unwrap();
+            .apply_publication(&commit(scope, vec![cached.clone()], vec![identity.clone()]))
+            .unwrap();
+    }
     drop(store);
-    let reopened = Store::open(dir.path()).unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    for cached in [&first, &second] {
+        assert_eq!(
+            store
+                .devices()
+                .load_parsed(&cached.uid, "home", &identity.key)
+                .unwrap()
+                .as_ref(),
+            Some(cached)
+        );
+    }
     assert_eq!(
-        reopened
-            .devices()
-            .load_parsed("account-one", "home", key)
-            .unwrap(),
-        Some(first.clone())
-    );
-    assert_eq!(
-        reopened
-            .devices()
-            .load_parsed("account-two", "home", key)
-            .unwrap(),
-        Some(second.clone())
-    );
-    assert_eq!(
-        reopened.devices().load_published(key).unwrap(),
+        store.devices().load_published(&identity.key).unwrap(),
         Some(identity.clone())
     );
     let mut moved = second;
     moved.home_id = "different-home".into();
     moved.group_id = group_id(&moved.uid, &moved.home_id);
+    let scope = CachedScope {
+        uid: moved.uid.clone(),
+        home_id: moved.home_id.clone(),
+        group_id: moved.group_id.clone(),
+    };
+    store
+        .devices()
+        .apply_publication(&commit(scope, vec![moved.clone()], vec![identity.clone()]))
+        .unwrap();
     assert_eq!(
-        reopened.devices().publish_cached(&moved, "Moved").unwrap(),
-        identity
+        store.devices().load_published(&identity.key).unwrap(),
+        Some(identity)
     );
-    let mut another = moved.clone();
-    another.device.key.id = "other-did".into();
-    assert_ne!(
-        reopened
+    assert_eq!(
+        store
             .devices()
-            .publish_cached(&another, "Other outlet")
-            .unwrap()
-            .unique_id,
-        identity.unique_id
+            .load_parsed(&moved.uid, &moved.home_id, &moved.device.key)
+            .unwrap(),
+        Some(moved)
     );
-    let db = Connection::open(reopened.path()).unwrap();
+    let db = Connection::open(store.path()).unwrap();
     let columns = db
         .prepare("PRAGMA table_info(device_cache)")
         .unwrap()
@@ -113,95 +111,64 @@ fn damaged_cache_and_identity_fail_without_replacing_stored_data() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let first = cached("account");
-    let key = &first.device.key;
-    store.devices().publish_cached(&first, "Outlet").unwrap();
-    let db = Connection::open(store.path()).unwrap();
-    db.execute("UPDATE device_cache SET category = 'unknown'", [])
+    let identity = record(&first.physical_description("Outlet"), 2);
+    store
+        .devices()
+        .apply_publication(&commit(scope(), vec![first], vec![identity.clone()]))
         .unwrap();
-    assert!(store.devices().load_parsed("account", "home", key).is_err());
+    let db = Connection::open(store.path()).unwrap();
+    db.execute("UPDATE device_cache SET category='unknown'", [])
+        .unwrap();
+    assert!(store.devices().load_publication(Some(&scope())).is_err());
     assert_eq!(
         db.query_row("SELECT category FROM device_cache", [], |row| row
             .get::<_, String>(0))
             .unwrap(),
         "unknown"
     );
-    db.execute("UPDATE device_identity SET unique_id = 'broken'", [])
+    db.execute("UPDATE device_identity SET unique_id='broken'", [])
         .unwrap();
-    assert!(store.devices().load_published(key).is_err());
+    assert!(store.devices().load_published(&identity.key).is_err());
     assert_eq!(
         db.query_row("SELECT unique_id FROM device_identity", [], |row| row
             .get::<_, String>(0))
             .unwrap(),
         "broken"
     );
-    let mut invalid = first.clone();
-    invalid.group_id = "wrong-family".into();
-    assert!(store.devices().publish_cached(&invalid, "Outlet").is_err());
-    assert_eq!(
-        db.query_row("SELECT group_id FROM device_cache", [], |row| row
-            .get::<_, String>(0))
-            .unwrap(),
-        first.group_id
-    );
 }
 
 #[test]
-fn cache_write_failures_preserve_the_previous_description() {
+fn invalid_cache_or_late_write_failure_preserves_the_previous_publication() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let first = cached("account");
-    store.devices().publish_cached(&first, "Outlet").unwrap();
-    Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER reject_cache AFTER UPDATE ON device_cache BEGIN SELECT RAISE(ABORT, 'private details'); END;").unwrap();
-    let mut changed = first.clone();
-    changed.model = "changed.model".into();
-    let error = store
-        .devices()
-        .publish_cached(&changed, "Outlet")
-        .unwrap_err();
+    let identity = record(&first.physical_description("Outlet"), 2);
+    let original = commit(scope(), vec![first.clone()], vec![identity.clone()]);
+    store.devices().apply_publication(&original).unwrap();
+    for invalid in [
+        CachedPhysicalDevice {
+            group_id: "wrong-family".into(),
+            ..first.clone()
+        },
+        CachedPhysicalDevice {
+            instance_type: "urn:miot-spec-v2:device:light:0000A001:vendor-v1:1".into(),
+            ..first.clone()
+        },
+    ] {
+        assert!(
+            store
+                .devices()
+                .apply_publication(&commit(scope(), vec![invalid], vec![identity.clone()]))
+                .is_err()
+        );
+    }
+    Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER reject_cache AFTER INSERT ON device_cache BEGIN SELECT RAISE(ABORT, 'private details'); END;").unwrap();
+    let mut changed = original;
+    changed.cached[0].model = "changed.model".into();
+    changed.records[0].label = "Must roll back".into();
+    let error = store.devices().apply_publication(&changed).unwrap_err();
     assert!(!format!("{error:?} {error}").contains("private details"));
-    assert_eq!(
-        store
-            .devices()
-            .load_parsed("account", "home", &first.device.key)
-            .unwrap(),
-        Some(first)
-    );
-}
-
-#[test]
-fn corrupted_cached_instance_type_cannot_restore_an_outlet_or_overwrite_valid_data() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let first = cached("account");
-    store.devices().publish_cached(&first, "Outlet").unwrap();
-    let mut invalid = first.clone();
-    invalid.instance_type = "urn:miot-spec-v2:device:light:0000A001:vendor-v1:1".into();
-    assert!(store.devices().publish_cached(&invalid, "Outlet").is_err());
-    assert_eq!(
-        store
-            .devices()
-            .load_parsed("account", "home", &first.device.key)
-            .unwrap(),
-        Some(first.clone())
-    );
-    let db = Connection::open(store.path()).unwrap();
-    db.execute(
-        "UPDATE device_cache SET instance_type = ?1",
-        [&invalid.instance_type],
-    )
-    .unwrap();
-    assert!(
-        store
-            .devices()
-            .load_parsed("account", "home", &first.device.key)
-            .is_err()
-    );
-    assert_eq!(
-        db.query_row("SELECT instance_type FROM device_cache", [], |row| row
-            .get::<_, String>(
-            0
-        ))
-        .unwrap(),
-        invalid.instance_type
-    );
+    let state = store.devices().load_publication(Some(&scope())).unwrap();
+    assert_eq!(state.cached, [first]);
+    assert_eq!(state.records, [identity]);
 }

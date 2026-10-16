@@ -566,6 +566,7 @@ fn validate_record(record: &StoredDevice) -> Result<(), &'static str> {
     let single = record.functions.len() == 1;
     let mut ids = BTreeSet::new();
     for function in &record.functions {
+        validate_text(&function.key.id)?;
         if !ids.insert(&function.key.id)
             || function.key.device != record.key
             || !(2..=65534).contains(&function.endpoint)
