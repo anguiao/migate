@@ -265,10 +265,12 @@ fn native_group_write_uses_its_own_did_and_read_owns_state() {
             .read_values
             .insert(key.clone(), false);
         release_read.send(()).unwrap();
-        until(|| light.snapshot().power == Power::On).await;
         until(|| reads() == before + 2).await;
+        // A read started before the write receipt cannot confirm its result.
+        assert_eq!(light.snapshot().power, Power::Off);
         release_read.send(()).unwrap();
-        until(|| light.snapshot().power == Power::Off).await;
+        until(|| work.refresh_inflight.borrow().is_empty()).await;
+        assert_eq!(light.snapshot().power, Power::Off);
         let write = c
             .cloud
             .lock()
@@ -391,6 +393,14 @@ fn native_compound_target_requires_every_property_and_readback_owns_state() {
         }
         // All properties accepted while the readback is held: acceptance is
         // independent of actual fields, which are never optimistic targets.
+        let work = c.context.live.borrow().devices["group-1"]
+            .work
+            .clone()
+            .unwrap();
+        until(|| {
+            work.refresh_pending.borrow().is_empty() && work.refresh_inflight.borrow().is_empty()
+        })
+        .await;
         c.cloud.lock().unwrap().property_codes.clear();
         let (release, gate) = flume::bounded::<()>(2);
         {

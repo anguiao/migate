@@ -514,7 +514,7 @@ fn lighting_actions_distinguish_original_startup_receipt_acceptance_and_failure(
 }
 
 #[test]
-fn quantized_no_write_frame_does_not_claim_action_startup_acceptance() {
+fn unchanged_transition_startup_does_not_claim_acceptance() {
     use crate::device::{DeviceRequest, LightDimension, LightTarget};
     use futures_lite::future::{block_on, poll_once};
 
@@ -533,8 +533,9 @@ fn quantized_no_write_frame_does_not_claim_action_startup_acceptance() {
         let DeviceRequest::Light(frame) = receiver.next_operation().await.unwrap() else {
             panic!("expected repeated frame")
         };
-        frame.skip_unchanged().unwrap();
+        frame.accept_unchanged().unwrap();
         assert!(poll_once(action.accepted()).await.is_none());
+        assert!(poll_once(action.ended()).await.is_none());
         let report = action_report(&function);
         assert!(
             report.contains(

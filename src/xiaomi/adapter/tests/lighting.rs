@@ -642,6 +642,112 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
                 .unwrap();
             b.accepted().await.unwrap();
             assert_eq!(peer.count("rpcReq", "one", 0), 0);
+
+            freeze_light_clock(control);
+            let work = control.context.live.borrow().devices["one"]
+                .work
+                .clone()
+                .unwrap();
+            let old_read = work
+                .observations
+                .read_stamp(&work.record, "main", BRIGHTNESS);
+            light
+                .begin_light_action(LightDimension::Brightness, brightness(80.0), true)
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            // Neither a read started before the receipt nor a cached report
+            // proves that the displayed value still matches the device.
+            work.observe_read("main", BRIGHTNESS, &old_read, &json!(32768))
+                .unwrap();
+            work.notify_value(BRIGHTNESS, &json!(32768), true, false);
+            light
+                .begin_light_action(LightDimension::Brightness, brightness(value), true)
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 0), 2);
+
+            peer.notify_value("one", BRIGHTNESS, json!(32768), false);
+            until(|| !work.observations.has_unconfirmed_write("main", BRIGHTNESS)).await;
+            light
+                .begin_light_action(
+                    LightDimension::Brightness,
+                    brightness(value + 0.00001),
+                    true,
+                )
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 0), 2);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn reversing_targets_before_feedback_still_sends_power_brightness_and_mode() {
+    block_on(Rig::light("devcea.light.ls2307").run(|c| async move {
+        c.announce();
+        let peer = peer_values(&c);
+        peer.value("one", BRIGHTNESS, json!(50));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            let light = ready_light(control).await;
+            freeze_light_clock(control);
+            let before = light.snapshot();
+            for target in [80.0, 50.0] {
+                light
+                    .begin_light_action(LightDimension::Brightness, brightness(target), true)
+                    .unwrap()
+                    .accepted()
+                    .await
+                    .unwrap();
+            }
+            light.execute(Command::Off).await.unwrap();
+            light.execute(Command::On).await.unwrap();
+            for target in [
+                LightColorTarget::Rgb(Rgb::from_packed(0xabcdef).unwrap()),
+                LightColorTarget::Temperature(before.lighting.unwrap().temperature_kelvin.unwrap()),
+            ] {
+                light
+                    .begin_light_action(LightDimension::Color, color_target(target), true)
+                    .unwrap()
+                    .accepted()
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(light.snapshot(), before);
+            let writes = peer
+                .state
+                .borrow()
+                .seen
+                .iter()
+                .filter(|(operation, _)| operation == "rpcReq")
+                .flat_map(|(_, request)| request["rpc"]["params"].as_array().unwrap())
+                .map(|property| {
+                    (
+                        property["siid"].as_u64().unwrap(),
+                        property["piid"].as_u64().unwrap(),
+                        property["value"].clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                writes,
+                vec![
+                    (2, 2, json!(80)),
+                    (2, 2, json!(50)),
+                    (2, 1, json!(false)),
+                    (2, 1, json!(true)),
+                    (4, 1, json!(0xabcdef)),
+                    (4, 2, json!(1)),
+                    (4, 2, json!(0)),
+                ]
+            );
         })
         .await;
     }));
@@ -859,7 +965,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             control.context.reconcile("one").unwrap();
             let new = ready_replacement_light(control).await;
             let next = new
-                .begin_light_action(LightDimension::Brightness, brightness(70.0), false)
+                .begin_light_action(LightDimension::Brightness, brightness(55.0), false)
                 .unwrap();
             async_io::Timer::after(std::time::Duration::from_millis(30)).await;
             assert_eq!(peer.count("rpcReq", "one", 0), 1);
@@ -872,6 +978,8 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             assert_eq!(peer.count("rpcReq", "one", 0), 1);
             peer.notify_value("one", BRIGHTNESS, json!(55), true);
             until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(55.0)).await;
+            // The old write may have changed this same device after the new
+            // instance's cached report, so the queued target must still send.
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
                 .await;
             first.accepted().await.unwrap();
@@ -896,8 +1004,8 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
             until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
             assert!(new.light_action_current(next.token()));
-            peer.notify_value("one", BRIGHTNESS, json!(70), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(70.0)).await;
+            peer.notify_value("one", BRIGHTNESS, json!(55), false);
+            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(55.0)).await;
             assert!(new.light_action_current(next.token()));
             control.clock.advance(Duration::from_millis(1));
             peer.notify_value("one", BRIGHTNESS, json!(60), false);

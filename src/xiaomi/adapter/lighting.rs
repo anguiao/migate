@@ -1,7 +1,4 @@
-use super::{
-    state::{Context, DeviceRecord},
-    work::DeviceWork,
-};
+use super::{state::Context, work::DeviceWork};
 use crate::{
     device::{
         Availability, Capability, CommandError, LightColorTarget, LightDimension, LightMode,
@@ -65,11 +62,12 @@ pub(super) fn decode(
     Ok(patch)
 }
 pub(super) fn encode(
-    record: &DeviceRecord,
+    work: &DeviceWork,
     id: &str,
     target: LightTarget,
     force: bool,
 ) -> Result<Vec<(PropertyBinding, Value)>, CommandError> {
+    let record = &work.record;
     let cached = record.cached.borrow();
     let function = cached
         .device
@@ -112,8 +110,12 @@ pub(super) fn encode(
         None => None,
     };
     if let Some(mode) = mode
-        && state.mode != Some(mode)
         && let Some(binding) = light.mode
+        && (force
+            || work
+                .observations
+                .has_unconfirmed_write(id, binding.property)
+            || state.mode != Some(mode))
     {
         values.push((
             binding.property,
@@ -127,6 +129,9 @@ pub(super) fn encode(
         return Ok(values);
     }
     values.retain(|(binding, value)| {
+        if work.observations.has_unconfirmed_write(id, *binding) {
+            return true;
+        }
         let current = if *binding == function.power {
             snapshot.power.value().map(Value::Bool)
         } else if light
@@ -292,8 +297,7 @@ pub(super) fn observe(
                 .expect("light");
         }
     }
-    work.observations
-        .observed(record, id, binding, matches!(origin, Origin::Notification));
+    work.observations.observed(record, id, binding, origin);
     function
         .observe_light(patch)
         .expect("validated light report");

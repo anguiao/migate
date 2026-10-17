@@ -185,10 +185,14 @@ impl Scheduler {
             target.power = forced_power;
         }
         let dimension = task.dimension();
-        let action = Rc::new(
-            self.function
-                .begin_light_action(dimension, target, final_frame)?,
-        );
+        let allow_unchanged_startup =
+            matches!(task, Task::Color(color::Task::Hs(task)) if task.is_achromatic());
+        let action = Rc::new(self.function.begin_light_action_with_unchanged_startup(
+            dimension,
+            target,
+            final_frame,
+            allow_unchanged_startup,
+        )?);
         self.active.borrow_mut()[index(dimension)] = Some(Active {
             task,
             token: action.token(),
@@ -224,24 +228,10 @@ impl Scheduler {
                 .target(elapsed, self.range)
                 .expect("validated controller task");
             let mut remaining = active.task.duration().saturating_sub(elapsed);
-            let local_startup = !active.action.accepted_while_current()
-                && matches!(active.task, Task::Color(color::Task::Hs(task)) if task.is_achromatic());
-            if final_frame || target != active.last || local_startup {
+            if final_frame || target != active.last {
                 let submitted = self
                     .function
-                    .submit_light_frame(active.token, target, final_frame)
-                    .and_then(|()| {
-                        if local_startup {
-                            // A preceding write may have prevented local acceptance
-                            // at startup. Recheck after its gate has settled, even
-                            // when all subsequent RGB frames are identical.
-                            self.function
-                                .accept_light_state_only_startup(active.token)
-                                .map(|_| ())
-                        } else {
-                            Ok(())
-                        }
-                    });
+                    .submit_light_frame(active.token, target, final_frame);
                 match submitted {
                     Ok(()) => {
                         active.last = target;

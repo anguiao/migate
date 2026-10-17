@@ -1,5 +1,5 @@
 use super::{
-    lighting::{PropertyKey, key},
+    lighting::{Origin, PropertyKey, key},
     state::DeviceRecord,
 };
 use crate::device::{CommandError, CommandRequest};
@@ -14,6 +14,8 @@ struct Counts {
     observed: u64,
     notified: u64,
     refresh: u64,
+    // A completed write can make the displayed feedback too old for deduplication.
+    unconfirmed_write: bool,
 }
 #[derive(Default)]
 pub(super) struct Observations {
@@ -33,6 +35,18 @@ pub(super) struct WriteStamp {
     notified: u64,
 }
 impl Observations {
+    pub(super) fn invalidate_write(&self, id: &str, binding: PropertyBinding) {
+        let mut channels = self.channels.borrow_mut();
+        let counts = channels.entry(key(id, binding)).or_default();
+        counts.observed += 1;
+        counts.unconfirmed_write = true;
+    }
+    pub(super) fn has_unconfirmed_write(&self, id: &str, binding: PropertyBinding) -> bool {
+        self.channels
+            .borrow()
+            .get(&key(id, binding))
+            .is_some_and(|counts| counts.unconfirmed_write)
+    }
     pub(super) fn source_changed(&self) {
         self.source_epoch.set(self.source_epoch.get() + 1);
     }
@@ -142,7 +156,7 @@ impl Observations {
         record: &DeviceRecord,
         id: &str,
         binding: PropertyBinding,
-        notified: bool,
+        origin: Origin,
     ) {
         if record.life.is_closed() {
             return;
@@ -150,6 +164,9 @@ impl Observations {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         counts.observed += 1;
-        counts.notified += u64::from(notified);
+        counts.notified += u64::from(matches!(origin, Origin::Notification));
+        if !matches!(origin, Origin::Cache) {
+            counts.unconfirmed_write = false;
+        }
     }
 }

@@ -11,7 +11,6 @@ use crate::{
         capability::PropertyBinding,
         central::{CentralError, RequestStage, SendDecision, SendHooks},
         cloud::{CloudError, CloudErrorKind},
-        property::PropertyResults,
     },
 };
 use event_listener::Event;
@@ -53,7 +52,7 @@ fn accept(request: DeviceRequest) -> Result<(), CommandError> {
 fn skip(request: DeviceRequest) -> Result<(), CommandError> {
     match request {
         DeviceRequest::Power(request) => request.accept_preserving_state().map(|_| ()),
-        DeviceRequest::Light(request) => request.skip_unchanged().map(|_| ()),
+        DeviceRequest::Light(request) => request.accept_unchanged().map(|_| ()),
     }
 }
 fn cloud_command_error(error: &CloudError) -> CommandError {
@@ -105,18 +104,76 @@ struct Batch<'a> {
     frame_current: Option<&'a Rc<dyn Fn() -> bool>>,
 }
 
-fn settle_receipt<E>(
-    work: &DeviceWork,
+/// The DID gate still owns this receipt. Keep displayed feedback, but do not
+/// use it to omit later writes until fresh feedback arrives.
+fn refresh_after_write(
+    context: &Context,
+    original: &DeviceWork,
     id: &str,
     properties: &[(PropertyBinding, Value)],
-    results: &PropertyResults<(), E>,
-    gate: &Rc<super::LightWriteGate>,
+    gate: &super::LightWriteGate,
     authority: u64,
-    retain_feedback: bool,
 ) {
-    gate.finish_feedback_for(authority, properties, results, retain_feedback);
-    for (binding, _) in properties {
-        work.request_dirty_read(id, *binding);
+    if gate.authority() != authority {
+        return;
+    }
+    let Some(work) = context
+        .live
+        .borrow()
+        .devices
+        .get(&original.record.physical.key().id)
+        .and_then(|slot| slot.work.clone())
+    else {
+        return;
+    };
+    if work.life.is_closed() || work.record.life.is_closed() {
+        return;
+    }
+    let mode = {
+        let original = original.record.cached.borrow();
+        let original = original
+            .device
+            .functions
+            .iter()
+            .find(|function| function.description.id == id)
+            .unwrap();
+        let cached = work.record.cached.borrow();
+        let Some(function) = cached
+            .device
+            .functions
+            .iter()
+            .find(|function| function.description.id == id)
+        else {
+            return;
+        };
+        // Removing and readding the same DID preserves its in-flight write;
+        // a new binding description must not inherit that write's invalidation.
+        if original.power != function.power || original.lighting != function.lighting {
+            return;
+        }
+        let light = function.lighting.as_ref().unwrap();
+        let color_written = [light.color, light.temperature]
+            .into_iter()
+            .flatten()
+            .any(|color| {
+                properties
+                    .iter()
+                    .any(|(binding, _)| *binding == color.property)
+            });
+        light.mode.filter(|mode| {
+            color_written
+                && !properties
+                    .iter()
+                    .any(|(binding, _)| *binding == mode.property)
+        })
+    };
+    for binding in properties
+        .iter()
+        .map(|(binding, _)| *binding)
+        .chain(mode.map(|mode| mode.property))
+    {
+        work.observations.invalidate_write(id, binding);
+        work.request_dirty_read(id, binding);
     }
 }
 
@@ -211,6 +268,16 @@ async fn submit_properties(
                     {
                         return;
                     }
+                    if outcome.stage != RequestStage::NotSent {
+                        refresh_after_write(
+                            &result_context,
+                            &result_work,
+                            &result_id,
+                            &result_properties,
+                            &result_gate,
+                            authority,
+                        );
+                    }
                     result_context.local_device_outcome(
                         &result_handle,
                         &result_work,
@@ -219,13 +286,10 @@ async fn submit_properties(
                     );
                     let receipt = match outcome.result {
                         Ok(results) => {
-                            settle_receipt(
-                                &result_work,
-                                &result_id,
+                            result_gate.finish_feedback_for(
+                                authority,
                                 &result_properties,
                                 &results,
-                                &result_gate,
-                                authority,
                                 retain_feedback,
                             );
                             for error in results.items.iter().filter_map(|item| item.as_ref().err())
@@ -291,17 +355,10 @@ async fn submit_properties(
                 .cloud
                 .set_properties(&credentials.access_token, &did, &properties)
                 .await;
+            refresh_after_write(context, work, function_id, &properties, gate, authority);
             let receipt = match &result {
                 Ok(results) => {
-                    settle_receipt(
-                        work,
-                        function_id,
-                        &properties,
-                        results,
-                        gate,
-                        authority,
-                        retain_feedback,
-                    );
+                    gate.finish_feedback_for(authority, &properties, results, retain_feedback);
                     let current = alive(work, generation);
                     let mut maintenance = None;
                     for error in results.items.iter().filter_map(|item| item.as_ref().err()) {
@@ -406,7 +463,18 @@ pub(super) async fn send(
         };
         return repair::send(request, rgb, context, record, plan).await;
     }
-    let properties = match super::super::lighting::encode(&record, id, target, native_group) {
+    let work = context
+        .live
+        .borrow()
+        .devices
+        .get(&did)
+        .and_then(|slot| slot.work.clone());
+    let Some(work) = work else {
+        let error = CommandError::Unavailable("no usable control path".into());
+        reject(request, error);
+        return Ok(());
+    };
+    let properties = match super::super::lighting::encode(&work, id, target, native_group) {
         Ok(properties) => properties,
         Err(error) => {
             reject(request, error);
@@ -428,18 +496,6 @@ pub(super) async fn send(
         request.queued_at(),
     );
 
-    let work = context
-        .live
-        .borrow()
-        .devices
-        .get(&did)
-        .and_then(|slot| slot.work.clone());
-    let Some(work) = work else {
-        let error = CommandError::Unavailable("no usable control path".into());
-        operation.0.finish(Err(error.clone()));
-        reject(request, error);
-        return Ok(());
-    };
     let generation = record.binding_generation.get();
     let mut request = request;
     loop {
@@ -451,7 +507,7 @@ pub(super) async fn send(
             reject(request, error);
             return Ok(());
         }
-        let properties = match super::super::lighting::encode(&record, id, target, native_group) {
+        let properties = match super::super::lighting::encode(&work, id, target, native_group) {
             Ok(properties) => properties,
             Err(error) => {
                 operation.0.finish(Err(error.clone()));
@@ -478,11 +534,11 @@ pub(super) async fn send(
             })
         };
         let frame_current: Rc<dyn Fn() -> bool> = {
-            let record = record.clone();
+            let work = work.clone();
             let id = id.to_owned();
             let properties = properties.clone();
             Rc::new(move || {
-                super::super::lighting::encode(&record, &id, target, native_group)
+                super::super::lighting::encode(&work, &id, target, native_group)
                     .ok()
                     .as_ref()
                     == Some(&properties)

@@ -1,5 +1,5 @@
 use super::*;
-use crate::device::{CommandReceiver, LightTarget};
+use crate::device::CommandReceiver;
 use crate::lighting::hs;
 use c::ClusterAsyncHandler as _;
 
@@ -192,7 +192,7 @@ fn gray_hue_waits_for_older_red_receipt_and_rejects_failed_white_correction() {
 }
 
 #[test]
-fn failed_older_write_allows_gray_hue_startup_to_be_accepted_on_advance() {
+fn gray_hue_waits_for_its_source_receipt_even_when_an_older_write_failed() {
     setup!(true, function, receiver, light, clock, ctx);
     white_state(&function);
     block_on(async {
@@ -207,60 +207,14 @@ fn failed_older_write_allows_gray_hue_startup_to_be_accepted_on_advance() {
         assert!(old_invoke.await.is_err());
         clock.set(1000);
         light.advance();
-        poll_once(new_invoke.as_mut())
-            .await
-            .expect("advance must retry local startup acceptance")
-            .unwrap();
+        assert!(poll_once(new_invoke.as_mut()).await.is_none());
         let unchanged = frame(&mut receiver).await;
         assert_eq!(
             unchanged.target.color,
             Some(LightColorTarget::Rgb(Rgb::from_packed(0xffffff).unwrap()))
         );
-        // No transport submission is needed: the previous failure left the
-        // known physical state white, and the gray trajectory stays white.
-        unchanged.skip_unchanged().unwrap();
-        assert_eq!(
-            ColorHandler::<true>(&light)
-                .current_hue(&ctx)
-                .await
-                .unwrap(),
-            20
-        );
-        assert!(poll_once(receiver.next_operation()).await.is_none());
-    });
-}
-
-#[test]
-fn skipped_older_frame_allows_gray_hue_startup_to_be_accepted_on_advance() {
-    setup!(true, function, receiver, light, clock, ctx);
-    white_state(&function);
-    block_on(async {
-        // An unchanged brightness frame still owns the shared device gate
-        // until its adapter finishes the no-write operation.
-        let old_action = function
-            .begin_light_action(
-                LightDimension::Brightness,
-                LightTarget {
-                    brightness_percent: Some(50.0),
-                    ..Default::default()
-                },
-                true,
-            )
-            .unwrap();
-        let old = frame(&mut receiver).await;
-        let mut new_invoke = pin!(light.execute_color(gray_hue_move()));
-        assert!(poll_once(new_invoke.as_mut()).await.is_none());
-        old.skip_unchanged().unwrap();
-        old_action.ended().await.unwrap();
-
-        clock.set(1000);
-        light.advance();
-        poll_once(new_invoke.as_mut())
-            .await
-            .expect("advance must retry local startup acceptance")
-            .unwrap();
-        let unchanged = frame(&mut receiver).await;
-        unchanged.skip_unchanged().unwrap();
+        accept(&function, unchanged);
+        new_invoke.await.unwrap();
         assert_eq!(
             ColorHandler::<true>(&light)
                 .current_hue(&ctx)

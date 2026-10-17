@@ -79,7 +79,7 @@ fn hs_transition_from_temperature_ignores_the_inactive_rgb_cache() {
 }
 
 #[test]
-fn gray_hue_motion_accepts_without_a_write_and_stop_preserves_the_hue_for_saturation() {
+fn gray_hue_motion_waits_for_source_acceptance_and_stop_preserves_the_hue_for_saturation() {
     for continuous in [false, true] {
         setup!(true, function, receiver, light, clock, ctx);
         let white = Rgb {
@@ -115,12 +115,13 @@ fn gray_hue_motion_accepts_without_a_write_and_stop_preserves_the_hue_for_satura
                         .await
                 }
             });
-            assert!(poll_once(invoke.as_mut()).await.unwrap().is_ok());
+            assert!(poll_once(invoke.as_mut()).await.is_none());
             let token = function.light_action_diagnostics().unwrap().color.unwrap();
             let request = frame(&mut receiver).await;
             assert_eq!(request.target.color, Some(LightColorTarget::Rgb(white)));
             assert!(!request.final_frame);
-            request.skip_unchanged().unwrap();
+            request.accept_unchanged().unwrap();
+            invoke.await.unwrap();
             assert!(function.light_action_current(token));
 
             for (millis, hue) in [(500, 30), (1000, 60)] {
@@ -161,6 +162,46 @@ fn gray_hue_motion_accepts_without_a_write_and_stop_preserves_the_hue_for_satura
             invoke.await.unwrap();
             assert!(handler.current_hue(&ctx).await.unwrap().abs_diff(60) <= 1);
             assert_eq!(handler.current_saturation(&ctx).await.unwrap(), 254);
+        });
+    }
+}
+
+#[test]
+fn gray_hue_source_rejection_does_not_accept_or_change_representation() {
+    for powered_on in [false, true] {
+        setup!(true, function, receiver, light, clock, ctx);
+        function
+            .observe_light(LightPatch {
+                power: Some(powered_on),
+                color: Some(Rgb::from_packed(0xffffff).unwrap()),
+                mode: Some(LightMode::Rgb),
+                ..Default::default()
+            })
+            .unwrap();
+        block_on(async {
+            let handler = ColorHandler::<true>(&light);
+            let before = function.snapshot();
+            let mode = handler.color_mode(&ctx).await.unwrap();
+            // ExecuteIfOff requires the source result even with a cached white RGB.
+            let data = [0x15, 0x24, 0, 1, 0x24, 1, 60, 0x24, 2, 1, 0x24, 3, 1, 0x18];
+            let mut invoke = pin!(
+                handler.handle_move_hue(&ctx, c::MoveHueRequest::new(TLVElement::new(&data)),)
+            );
+            assert!(poll_once(invoke.as_mut()).await.is_none());
+            let request = frame(&mut receiver).await;
+            let token = request.token;
+            assert!(!request.final_frame);
+            clock.set(1000);
+            light.advance();
+            assert!(poll_once(invoke.as_mut()).await.is_none());
+            request.reject(CommandError::Rejected("no member accepted RGB".into()));
+            assert_eq!(invoke.await.unwrap_err().code(), ErrorCode::Failure);
+            light.advance();
+            assert!(!function.light_action_current(token));
+            assert_eq!(handler.color_mode(&ctx).await.unwrap(), mode);
+            assert_eq!(handler.current_hue(&ctx).await.unwrap(), 0);
+            assert_eq!(function.snapshot(), before);
+            assert!(poll_once(receiver.next_operation()).await.is_none());
         });
     }
 }

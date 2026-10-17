@@ -338,14 +338,6 @@ impl Lighting {
     }
     async fn execute_color(&self, task: color::Task) -> Result<(), Error> {
         let action = self.begin(Task::Color(task), None)?;
-        if let color::Task::Hs(task) = task
-            && task.duration() > 0
-            && task.is_achromatic()
-        {
-            self.function
-                .accept_light_state_only_startup(action.token())
-                .map_err(command_error)?;
-        }
         action.accepted().await.map_err(command_error)?;
         self.refresh();
         Ok(())

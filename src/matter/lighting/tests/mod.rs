@@ -361,7 +361,7 @@ fn startup_waiter_does_not_block_ticks_merge_or_final_and_sent_stop_retains_rece
         let mut accepted = pin!(action.accepted());
         assert!(poll_once(accepted.as_mut()).await.is_none());
         let request = frame(&mut receiver).await;
-        request.skip_unchanged().unwrap();
+        request.accept_unchanged().unwrap();
         assert!(poll_once(accepted.as_mut()).await.is_none());
         let mut run = pin!(light.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());

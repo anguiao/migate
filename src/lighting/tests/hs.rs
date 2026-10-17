@@ -159,7 +159,7 @@ fn resuming_continuous_hue_retains_rate_and_phase() {
 }
 
 #[test]
-fn achromatic_requires_zero_saturation_for_the_entire_remaining_task() {
+fn only_a_wholly_achromatic_trajectory_keeps_its_physical_rgb_constant() {
     let mut task = HsTask {
         hue: HueAxis::move_at(0.0, 10.0),
         saturation: SaturationAxis::Hold(0.0),

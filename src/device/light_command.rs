@@ -8,7 +8,7 @@ use std::{
 
 use super::{
     Capability, Category, CommandError, CommandReceiver, CommandRequest, Function,
-    FunctionSnapshot, LightMode, Rgb, command::Completion, state::RuntimeState,
+    FunctionSnapshot, Rgb, command::Completion, state::RuntimeState,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -59,6 +59,7 @@ struct Action {
     accepted_while_current: AtomicBool,
     startup_sent: AtomicBool,
     final_submitted: AtomicBool,
+    allow_unchanged_startup: bool,
 }
 
 /// Startup acceptance and action termination have independent lifetimes.
@@ -279,6 +280,17 @@ impl Function {
         target: LightTarget,
         final_frame: bool,
     ) -> Result<LightAction, CommandError> {
+        self.begin_light_action_with_unchanged_startup(dimension, target, final_frame, false)
+    }
+
+    /// A physically constant trajectory can accept a source-confirmed no-write startup.
+    pub(crate) fn begin_light_action_with_unchanged_startup(
+        &self,
+        dimension: LightDimension,
+        target: LightTarget,
+        final_frame: bool,
+        allow_unchanged_startup: bool,
+    ) -> Result<LightAction, CommandError> {
         self.validate_light_target(dimension, target)?;
         let mut state = self.0.state.lock().unwrap();
         self.validate_light_available(&state)?;
@@ -300,6 +312,7 @@ impl Function {
             accepted_while_current: AtomicBool::new(false),
             startup_sent: AtomicBool::new(false),
             final_submitted: AtomicBool::new(final_frame),
+            allow_unchanged_startup,
         });
         coordinator.write_serials[dimension.index()] = action.token.serial;
         coordinator.current[dimension.index()] = Some(action.clone());
@@ -346,80 +359,6 @@ impl Function {
         }
         self.0.submitted.notify(usize::MAX);
         Ok(())
-    }
-
-    /// Accept a controller-only startup whose entire physical target is already known.
-    /// The pending frame and action remain owned by their normal send/stop lifecycle.
-    pub(crate) fn accept_light_state_only_startup(
-        &self,
-        token: ActionToken,
-    ) -> Result<bool, CommandError> {
-        let mut state = self.0.state.lock().unwrap();
-        if state.queue.closed {
-            return Err(CommandError::Cancelled);
-        }
-        let snapshot = self.snapshot_locked(&state);
-        snapshot.availability.command_result()?;
-        let active_gate = state
-            .queue
-            .active
-            .as_ref()
-            .is_some_and(|gate| !gate.is_finished());
-        let power_order = state.queue.pending.front().map(|pending| pending.order);
-        let coordinator = state
-            .light_commands
-            .as_mut()
-            .ok_or(CommandError::Unsupported)?;
-        let action = coordinator
-            .current(token)
-            .cloned()
-            .ok_or(CommandError::Superseded)?;
-        if active_gate
-            || action.accepted.is_finished()
-            || action.startup_sent.load(Ordering::Relaxed)
-            || coordinator
-                .flight
-                .as_ref()
-                .is_some_and(|flight| flight.action.token == token)
-        {
-            return Ok(false);
-        }
-        let Some(frame) = coordinator.pending[token.dimension.index()]
-            .as_ref()
-            .filter(|frame| frame.action.token == token)
-        else {
-            return Ok(false);
-        };
-        if coordinator.first_pending() != Some((token.dimension.index(), frame.order))
-            || power_order.is_some_and(|order| frame.order >= order)
-        {
-            return Ok(false);
-        }
-        let target = frame.target;
-        let lighting = snapshot.lighting.expect("light has lighting state");
-        let unchanged = target
-            .power
-            .is_none_or(|power| snapshot.power == power.into())
-            && target
-                .brightness_percent
-                .is_none_or(|value| lighting.brightness_percent == Some(value))
-            && target.color.is_none_or(|color| match color {
-                LightColorTarget::Temperature(value) => {
-                    lighting.mode == Some(LightMode::Temperature)
-                        && lighting.temperature_kelvin == Some(value)
-                }
-                LightColorTarget::Rgb(value) => {
-                    lighting.mode == Some(LightMode::Rgb) && lighting.color == Some(value)
-                }
-            });
-        if !unchanged {
-            return Ok(false);
-        }
-        action.accepted_while_current.store(true, Ordering::Relaxed);
-        action.accepted.finish(Ok(snapshot));
-        coordinator.record(token, Ok(()));
-        self.notify_light_actions();
-        Ok(true)
     }
 
     fn validate_light_available(&self, state: &RuntimeState) -> Result<(), CommandError> {
@@ -649,9 +588,9 @@ impl LightRequest {
         self.finish(Ok(snapshot.clone()), true);
         Ok(snapshot)
     }
-    /// Quantized nonfinal duplicates release the gate without accepting startup.
-    /// A final no-write operation may complete locally using the known snapshot.
-    pub fn skip_unchanged(self) -> Result<FunctionSnapshot, CommandError> {
+    /// Settle a source-confirmed target that needs no transport write.
+    /// Transition startup still waits for a write unless its whole target stays constant.
+    pub fn accept_unchanged(self) -> Result<FunctionSnapshot, CommandError> {
         if !self.is_current() {
             return Err(self
                 .flight
@@ -667,7 +606,10 @@ impl LightRequest {
             ));
         }
         let snapshot = self.function.snapshot();
-        self.finish(Ok(snapshot.clone()), self.final_frame);
+        self.finish(
+            Ok(snapshot.clone()),
+            self.final_frame || self.flight.action.allow_unchanged_startup,
+        );
         Ok(snapshot)
     }
     pub fn reject(self, error: CommandError) {

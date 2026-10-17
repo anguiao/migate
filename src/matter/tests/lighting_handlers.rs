@@ -581,7 +581,7 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
         let DeviceRequest::Light(first) = receiver.next_operation().await.unwrap() else {
             panic!("missing light startup")
         };
-        first.skip_unchanged().unwrap();
+        first.accept_unchanged().unwrap();
         assert!(poll_once(invoke.as_mut()).await.is_none());
         let mut final_seen = false;
         futures_lite::future::or(
@@ -1014,7 +1014,7 @@ fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_po
                 request.target.power,
                 if command == 4 { Some(false) } else { None }
             );
-            request.skip_unchanged().unwrap();
+            request.accept_unchanged().unwrap();
             invoke.await.unwrap();
         }
         ctx.command.cmd_id = 4;

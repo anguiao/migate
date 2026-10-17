@@ -222,7 +222,6 @@ async fn member_task(
             BatchAttempt::Settled(receipt) => break receipt,
         }
     };
-    refresh_mode(&member.work);
     operation.0.finish(receipt.result.clone());
     (receipt.result, receipt.maintenance)
 }
