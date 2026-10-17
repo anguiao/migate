@@ -5,7 +5,7 @@ use super::{
     refresh::{ReadFlight, Refresh},
     state::{Context, DeviceRecord, Lifetime},
 };
-use crate::device::{ActionToken, LightDimension, LightMode, LightPatch, Power, Rgb};
+use crate::device::{ActionToken, LightDimension};
 use crate::xiaomi::{capability::PropertyBinding, central::SessionHandle};
 use event_listener::Event;
 use futures_lite::future;
@@ -15,29 +15,6 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-/// The last actual member observation used for repaired state and auxiliary
-/// decisions. Optimistic accepted targets never enter this record.
-#[derive(Clone, Copy, Default, PartialEq)]
-pub(super) struct ConfirmedLight {
-    pub(super) power: Option<Power>,
-    pub(super) brightness_percent: Option<f64>,
-    pub(super) temperature_kelvin: Option<u32>,
-    pub(super) color: Option<Rgb>,
-    pub(super) mode: Option<LightMode>,
-}
-impl ConfirmedLight {
-    fn merge(&mut self, patch: LightPatch) {
-        self.power = patch.power.map(Power::from).or(self.power);
-        self.brightness_percent = patch.brightness_percent.or(self.brightness_percent);
-        self.temperature_kelvin = patch.temperature_kelvin.or(self.temperature_kelvin);
-        self.color = patch.color.or(self.color);
-        self.mode = patch.mode.or(self.mode);
-    }
-    pub(super) fn power_value(&self) -> Option<bool> {
-        self.power.and_then(Power::value)
-    }
-}
-
 /// One committed repaired-group member handle, so an action keeps the member
 /// universe captured at its first frame.
 #[derive(Clone)]
@@ -47,107 +24,56 @@ pub(super) struct RepairMemberRef {
 }
 
 struct FrameOwnership {
-    token: Option<ActionToken>,
+    token: ActionToken,
     epoch: u64,
     members: Rc<Vec<RepairMemberRef>>,
-    missing: usize,
-    accepted_final: bool,
 }
 
-/// The newest frame ownership per light dimension on a group function. A slow
-/// member task checks this before submitting so it cannot replay an obsolete
-/// fade step after a newer frame replaced it, and so Stop/takeover retires
-/// queued writes without cancelling a successful final acceptance.
+/// The newest RGB frame on a group function. A slow member checks ownership
+/// before submitting so a newer frame, Stop or takeover retires queued writes
+/// without cancelling a successful final acceptance.
 #[derive(Default)]
 pub(super) struct LightFrames {
-    light: [Option<FrameOwnership>; 2],
-    power: Option<FrameOwnership>,
+    light: Option<FrameOwnership>,
 }
 impl LightFrames {
-    fn index(dimension: LightDimension) -> usize {
-        match dimension {
-            LightDimension::Brightness => 0,
-            LightDimension::Color => 1,
-        }
-    }
     pub(super) fn next_light(
         &mut self,
         token: ActionToken,
-        snapshot: impl FnOnce() -> (Vec<RepairMemberRef>, usize),
-    ) -> (u64, Rc<Vec<RepairMemberRef>>, usize) {
-        let index = Self::index(token.dimension());
-        if let Some(frame) = self.light[index].as_mut()
-            && frame.token == Some(token)
+        snapshot: impl FnOnce() -> Vec<RepairMemberRef>,
+    ) -> (u64, Rc<Vec<RepairMemberRef>>) {
+        if let Some(frame) = self.light.as_mut()
+            && frame.token == token
         {
             frame.epoch += 1;
-            frame.accepted_final = false;
-            return (frame.epoch, frame.members.clone(), frame.missing);
+            return (frame.epoch, frame.members.clone());
         }
-        let (members, missing) = snapshot();
-        let members = Rc::new(members);
+        let members = Rc::new(snapshot());
         let epoch = 1;
-        self.light[index] = Some(FrameOwnership {
-            token: Some(token),
+        self.light = Some(FrameOwnership {
+            token,
             epoch,
             members: members.clone(),
-            missing,
-            accepted_final: false,
         });
-        (epoch, members, missing)
-    }
-    pub(super) fn next_power(
-        &mut self,
-        snapshot: impl FnOnce() -> (Vec<RepairMemberRef>, usize),
-    ) -> (u64, Rc<Vec<RepairMemberRef>>, usize) {
-        let (members, missing) = snapshot();
-        let members = Rc::new(members);
-        let epoch = self.power.as_ref().map_or(1, |frame| frame.epoch + 1);
-        self.power = Some(FrameOwnership {
-            token: None,
-            epoch,
-            members: members.clone(),
-            missing,
-            accepted_final: false,
-        });
-        (epoch, members, missing)
+        (epoch, members)
     }
     pub(super) fn current_light(&self, token: ActionToken, epoch: u64) -> bool {
-        matches!(self.light[Self::index(token.dimension())], Some(ref frame) if frame.token == Some(token) && frame.epoch == epoch)
-    }
-    pub(super) fn accepted_final_light(&self, token: ActionToken, epoch: u64) -> bool {
-        matches!(self.light[Self::index(token.dimension())], Some(ref frame) if frame.token == Some(token) && frame.epoch == epoch && frame.accepted_final)
-    }
-    pub(super) fn current_power(&self, epoch: u64) -> bool {
-        self.power
-            .as_ref()
-            .is_some_and(|frame| frame.epoch == epoch)
-    }
-    pub(super) fn settle_light(&mut self, token: ActionToken, epoch: u64, final_frame: bool) {
-        if let Some(frame) = self.light[Self::index(token.dimension())].as_mut()
-            && frame.token == Some(token)
-            && frame.epoch == epoch
-        {
-            frame.accepted_final = final_frame;
-        }
+        matches!(self.light, Some(ref frame) if frame.token == token && frame.epoch == epoch)
     }
     pub(super) fn cancel_light(&mut self, token: ActionToken, epoch: u64) {
         if self.current_light(token, epoch) {
-            self.light[Self::index(token.dimension())] = None;
-        }
-    }
-    pub(super) fn cancel_power(&mut self, epoch: u64) {
-        if self.current_power(epoch) {
-            self.power = None;
+            self.light = None;
         }
     }
     pub(super) fn cancel_dimension(&mut self, dimension: LightDimension) {
-        self.light[Self::index(dimension)] = None;
+        if dimension == LightDimension::Color {
+            self.light = None;
+        }
     }
 
     /// A committed rebuild or runtime reset retires every queued frame.
     pub(super) fn cancel_all(&mut self) {
-        self.light = [None, None];
-        self.power = None;
+        self.light = None;
     }
 }
 
@@ -175,8 +101,6 @@ pub(super) struct DeviceWork {
     /// A dirty member event sets this instead of invalidating the current read.
     pub(super) dirty_again: RefCell<BTreeSet<super::lighting::PropertyKey>>,
     pub(super) refresh_changed: Rc<Event>,
-    /// Confirmed observations keyed by the binding generation that produced them.
-    pub(super) confirmed: RefCell<Option<(u64, ConfirmedLight)>>,
     pub(super) light_frames: RefCell<LightFrames>,
     changed: Event,
     subscribe_problem: RefCell<Option<String>>,
@@ -209,7 +133,6 @@ impl DeviceWork {
             refresh_inflight: RefCell::new(BTreeMap::new()),
             dirty_again: RefCell::new(BTreeSet::new()),
             refresh_changed,
-            confirmed: RefCell::new(None),
             light_frames: RefCell::new(LightFrames::default()),
             changed: Event::new(),
             subscribe_problem: RefCell::new(None),
@@ -225,7 +148,7 @@ impl DeviceWork {
     }
     pub(super) fn source_changed(&self) {
         self.observations.source_changed();
-        self.clear_confirmed();
+        self.record.physical.clear_light_state();
         super::refresh::cancel(self);
         self.refresh();
     }
@@ -259,28 +182,32 @@ impl DeviceWork {
     }
     #[cfg(test)]
     pub(super) fn notify(&self, binding: PropertyBinding, value: bool) {
-        self.notify_value(binding, &serde_json::Value::Bool(value), false);
+        self.notify_value(binding, &serde_json::Value::Bool(value), false, true);
     }
     pub(super) fn notify_value(
         &self,
         binding: PropertyBinding,
         value: &serde_json::Value,
         cached_report: bool,
-    ) -> Option<super::lighting::ObservedLight> {
+        takeover: bool,
+    ) -> bool {
         if self.life.is_closed() {
-            return None;
+            return false;
         }
         let cached = self.record.cached.borrow();
         if cached.device.refresh_trigger == Some(binding) && value.as_bool().is_some() {
             drop(cached);
             self.refresh();
-            return None;
+            return false;
         }
-        let function = cached
+        let Some(function) = cached
             .device
             .functions
             .iter()
-            .find(|function| super::lighting::bindings(function).contains(&binding))?;
+            .find(|function| super::lighting::bindings(function).contains(&binding))
+        else {
+            return false;
+        };
         let id = function.description.id.clone();
         let light = function.lighting.is_some();
         drop(cached);
@@ -290,58 +217,19 @@ impl DeviceWork {
             } else {
                 super::lighting::Origin::Notification
             };
-            match self.observe_report(&id, binding, value, origin) {
-                Ok(observed) => Some(observed),
+            match super::lighting::observe(self, &id, binding, value, origin, takeover) {
+                Ok(()) => true,
                 Err(error) => {
                     log::warn!("Ignoring invalid light property: {error}");
-                    None
+                    false
                 }
             }
         } else {
             if let Some(value) = value.as_bool() {
                 self.observations.notify(&self.record, &id, value);
             }
-            None
+            false
         }
-    }
-    /// Validate and apply one actual light observation, keeping the confirmed
-    /// record used by repaired groups separate from optimistic targets.
-    pub(super) fn observe_report(
-        &self,
-        id: &str,
-        binding: PropertyBinding,
-        value: &serde_json::Value,
-        origin: super::lighting::Origin,
-    ) -> Result<super::lighting::ObservedLight, crate::xiaomi::capability::CapabilityError> {
-        let observed = super::lighting::observe(self, id, binding, value, origin)?;
-        {
-            let mut confirmed = self.confirmed.borrow_mut();
-            let generation = self.record.binding_generation.get();
-            match confirmed.as_mut() {
-                Some((known, _)) if *known == generation => {}
-                _ => {
-                    *confirmed = Some((generation, ConfirmedLight::default()));
-                }
-            }
-            confirmed.as_mut().unwrap().1.merge(observed.patch);
-        }
-        super::lighting::apply_report(self, id, binding, observed.patch, observed.external, origin);
-        Ok(observed)
-    }
-    /// The confirmed observation for the current binding authority, if any.
-    pub(super) fn confirmed_light(&self) -> Option<ConfirmedLight> {
-        match &*self.confirmed.borrow() {
-            Some((generation, confirmed))
-                if *generation == self.record.binding_generation.get()
-                    && !self.record.life.is_closed() =>
-            {
-                Some(*confirmed)
-            }
-            _ => None,
-        }
-    }
-    pub(super) fn clear_confirmed(&self) {
-        self.confirmed.borrow_mut().take();
     }
     pub(super) fn request_local_subscriptions(&self) {
         if !self.subscribe_running.get() && !self.local_exhausted.get() {
@@ -481,7 +369,14 @@ impl DeviceWork {
             .lighting
             .is_some();
         if light {
-            let _ = self.observe_report(id, binding, value, super::lighting::Origin::Read)?;
+            super::lighting::observe(
+                self,
+                id,
+                binding,
+                value,
+                super::lighting::Origin::Read,
+                false,
+            )?;
         } else {
             let value =
                 value

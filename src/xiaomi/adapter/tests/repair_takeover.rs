@@ -88,7 +88,7 @@ fn new_group_and_member_targets_take_over_shared_groups_by_dimension() {
 }
 
 #[test]
-fn member_wire_changes_use_confirmed_fields_and_actual_mode_for_group_takeover() {
+fn member_notifications_update_feedback_without_stopping_group_actions() {
     block_on(repair_rig(0, true).run(|c| async move {
         repair_ready(&c).await;
         let peer = Rc::new(Peer::default());
@@ -111,41 +111,31 @@ fn member_wire_changes_use_confirmed_fields_and_actual_mode_for_group_takeover()
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("member-a") == Some(PathKind::Local))
                 .await;
+            let member = function(&control.context.registry, "member-a", "main");
+            until(|| {
+                member.snapshot().power == Power::On
+                    && member.snapshot().lighting.unwrap().mode
+                        == Some(crate::device::LightMode::Temperature)
+            })
+            .await;
+            let group = function(&control.context.registry, "group-1", "main");
+            // Local reads alone must refresh the representative, without a push.
             let work = control.context.live.borrow().devices["member-a"]
                 .work
                 .clone()
                 .unwrap();
+            for (piid, value) in [(1, json!(0xaabbcc)), (2, json!(1))] {
+                let binding = crate::xiaomi::capability::PropertyBinding { siid: 4, piid };
+                peer.value("member-a", binding, value);
+                work.request_dirty_read("main", binding);
+            }
             until(|| {
-                work.confirmed_light().is_some_and(|actual| {
-                    actual.brightness_percent == Some(50.0)
-                        && actual.mode == Some(crate::device::LightMode::Temperature)
-                })
+                let state = group.snapshot().lighting.unwrap();
+                state.mode == Some(crate::device::LightMode::Rgb)
+                    && state.color == Rgb::from_packed(0xaabbcc)
             })
             .await;
-            let member = function(&control.context.registry, "member-a", "main");
-            member
-                .begin_light_action(
-                    LightDimension::Brightness,
-                    LightTarget {
-                        brightness_percent: Some(80.0),
-                        ..Default::default()
-                    },
-                    true,
-                )
-                .unwrap()
-                .accepted()
-                .await
-                .unwrap();
-            assert_eq!(
-                member.snapshot().lighting.unwrap().brightness_percent,
-                Some(80.0)
-            );
-            assert_eq!(
-                work.confirmed_light().unwrap().brightness_percent,
-                Some(50.0)
-            );
-            let group = function(&control.context.registry, "group-1", "main");
-            let fade = group
+            let brightness = group
                 .begin_light_action(
                     LightDimension::Brightness,
                     LightTarget {
@@ -155,42 +145,42 @@ fn member_wire_changes_use_confirmed_fields_and_actual_mode_for_group_takeover()
                     false,
                 )
                 .unwrap();
-            fade.accepted().await.unwrap();
-            control.clock.advance(Duration::from_secs(4));
-            peer.notify_value(
-                "member-a",
-                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 2 },
-                json!(80),
-                false,
-            );
-            until(|| {
-                work.confirmed_light()
-                    .is_some_and(|actual| actual.brightness_percent == Some(80.0))
-            })
-            .await;
-            assert!(
-                !group.light_action_current(fade.token()),
-                "an actual change equal to an old accepted target still takes over the group"
-            );
-
+            brightness.accepted().await.unwrap();
             let color = group
                 .begin_light_action(LightDimension::Color, rgb(0x00ff00), false)
                 .unwrap();
             color.accepted().await.unwrap();
-            peer.notify_value(
-                "member-a",
-                crate::xiaomi::capability::PropertyBinding { siid: 4, piid: 1 },
-                json!(0x0000ff),
-                false,
-            );
+            for (siid, piid, value) in [
+                (2, 2, json!(80)),
+                (4, 1, json!(0x0000ff)),
+                (4, 2, json!(1)),
+                (2, 1, json!(false)),
+            ] {
+                peer.notify_value(
+                    "member-a",
+                    crate::xiaomi::capability::PropertyBinding { siid, piid },
+                    value,
+                    false,
+                );
+            }
             until(|| {
-                work.confirmed_light()
-                    .is_some_and(|actual| actual.color == Rgb::from_packed(0x0000ff))
+                let state = member.snapshot();
+                let lighting = state.lighting.unwrap();
+                state.power == Power::Off
+                    && lighting.brightness_percent == Some(80.0)
+                    && lighting.color == Rgb::from_packed(0x0000ff)
+                    && lighting.mode == Some(crate::device::LightMode::Rgb)
             })
             .await;
+            assert!(group.light_action_current(brightness.token()));
             assert!(
                 group.light_action_current(color.token()),
-                "an inactive RGB cache update in confirmed white mode is synchronization"
+                "member off is feedback, not a group Stop"
+            );
+            assert_eq!(
+                group.snapshot().lighting.unwrap().brightness_percent,
+                Some(50.0),
+                "native group state is not aggregated from members"
             );
         })
         .await;

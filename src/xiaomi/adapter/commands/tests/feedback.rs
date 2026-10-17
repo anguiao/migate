@@ -77,19 +77,3 @@ fn missing_notifications_cannot_grow_history_without_bound() {
     assert!(feedback.matches(TEMPERATURE, &json!(2700 + CAPACITY), Duration::ZERO));
     assert!(feedback.is_empty(Duration::from_secs(3)));
 }
-
-#[test]
-fn native_echo_tickets_survive_overlapping_pending_and_scope_ack_and_clear() {
-    let mut feedback = LightFeedback::default();
-    let first = feedback.expect_pending(&[(BRIGHTNESS, json!(20))]);
-    let second = feedback.expect_pending(&[(BRIGHTNESS, json!(40))]);
-    // Pending expectations do not expire before their own receipt, even far
-    // past the short post-ack window.
-    assert!(feedback.matches(BRIGHTNESS, &json!(20), Duration::from_secs(30)));
-    assert!(feedback.matches(BRIGHTNESS, &json!(40), Duration::from_secs(30)));
-    feedback.expect_ack(first, Duration::ZERO);
-    assert!(!feedback.matches(BRIGHTNESS, &json!(20), Duration::from_secs(30)));
-    assert!(feedback.matches(BRIGHTNESS, &json!(40), Duration::from_secs(30)));
-    feedback.clear_expected(second);
-    assert!(!feedback.matches(BRIGHTNESS, &json!(40), Duration::from_secs(30)));
-}

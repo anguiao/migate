@@ -1,10 +1,10 @@
 use super::{
     state::{Context, DeviceRecord},
-    work::{ConfirmedLight, DeviceWork},
+    work::DeviceWork,
 };
 use crate::{
     device::{
-        Availability, CommandError, DeviceKey, LightColorTarget, LightDimension, LightMode,
+        Availability, Capability, CommandError, LightColorTarget, LightDimension, LightMode,
         LightPatch, LightTarget, Rgb,
     },
     xiaomi::capability::{CapabilityError, ParsedFunction, PropertyBinding},
@@ -64,17 +64,11 @@ pub(super) fn decode(
     }
     Ok(patch)
 }
-pub(super) fn merge(patch: &mut LightPatch, next: LightPatch) {
-    patch.power = next.power.or(patch.power);
-    patch.brightness_percent = next.brightness_percent.or(patch.brightness_percent);
-    patch.temperature_kelvin = next.temperature_kelvin.or(patch.temperature_kelvin);
-    patch.color = next.color.or(patch.color);
-    patch.mode = next.mode.or(patch.mode);
-}
 pub(super) fn encode(
     record: &DeviceRecord,
     id: &str,
     target: LightTarget,
+    force: bool,
 ) -> Result<Vec<(PropertyBinding, Value)>, CommandError> {
     let cached = record.cached.borrow();
     let function = cached
@@ -128,6 +122,9 @@ pub(super) fn encode(
                 LightMode::Rgb => binding.rgb_value,
             }),
         ));
+    }
+    if force {
+        return Ok(values);
     }
     values.retain(|(binding, value)| {
         let current = if *binding == function.power {
@@ -228,12 +225,6 @@ pub(super) fn refresh_missing_active(
     }
 }
 
-/// One validated light report and whether it is an external operation.
-pub(super) struct ObservedLight {
-    pub(super) patch: LightPatch,
-    pub(super) external: bool,
-}
-
 /// Validate at the MIoT boundary before counters or action ownership change.
 pub(super) fn observe(
     work: &DeviceWork,
@@ -241,7 +232,8 @@ pub(super) fn observe(
     binding: PropertyBinding,
     value: &Value,
     origin: Origin,
-) -> Result<ObservedLight, CapabilityError> {
+    takeover: bool,
+) -> Result<(), CapabilityError> {
     let record = &work.record;
     let cached = record.cached.borrow();
     let description = cached
@@ -250,7 +242,7 @@ pub(super) fn observe(
         .iter()
         .find(|function| function.description.id == id)
         .unwrap();
-    let patch = decode(description, binding, value)?;
+    let mut patch = decode(description, binding, value)?;
     drop(cached);
     let function = record.physical.function(id).unwrap();
     let before = function.snapshot();
@@ -266,30 +258,13 @@ pub(super) fn observe(
             .is_some_and(|value| state.temperature_kelvin != Some(value))
         || patch.color.is_some_and(|value| state.color != Some(value))
         || patch.mode.is_some_and(|value| state.mode != Some(value));
-    let feedback = matches!(origin, Origin::Notification)
+    let feedback = takeover
+        && matches!(origin, Origin::Notification)
         && work
             .light_write
             .as_ref()
             .is_some_and(|gate| gate.is_feedback(binding, value));
-    Ok(ObservedLight {
-        patch,
-        external: matches!(origin, Origin::Notification) && changed && !feedback,
-    })
-}
-
-/// Apply one validated report. `external` was decided without applying state;
-/// values the logical description cannot express become unknown instead of
-/// being rounded to a requested target.
-pub(super) fn apply_report(
-    work: &DeviceWork,
-    id: &str,
-    binding: PropertyBinding,
-    mut patch: LightPatch,
-    external: bool,
-    origin: Origin,
-) {
-    let record = &work.record;
-    let function = record.physical.function(id).unwrap();
+    let external = takeover && matches!(origin, Origin::Notification) && changed && !feedback;
     if let Some(value) = patch.temperature_kelvin
         && function
             .description()
@@ -299,8 +274,6 @@ pub(super) fn apply_report(
         function.clear_light_temperature();
         patch.temperature_kelvin = None;
     }
-    let before = function.snapshot();
-    let state = before.lighting.unwrap();
     if external {
         if patch.power == Some(false) {
             function.take_over_light_all().expect("light");
@@ -327,32 +300,23 @@ pub(super) fn apply_report(
     if patch.mode.is_some() {
         refresh_missing_active(work, id, state.mode);
     }
-}
-
-/// Whether an observed patch differs from the prior confirmed fields; this is
-/// the attribution basis for group-owned member operations, never an
-/// optimistic accepted member target.
-pub(super) fn confirmed_differs(confirmed: &ConfirmedLight, patch: LightPatch) -> bool {
-    patch
-        .power
-        .is_some_and(|power| confirmed.power_value() != Some(power))
-        || patch
-            .brightness_percent
-            .is_some_and(|value| confirmed.brightness_percent != Some(value))
-        || patch
-            .temperature_kelvin
-            .is_some_and(|value| confirmed.temperature_kelvin != Some(value))
-        || patch
-            .color
-            .is_some_and(|value| confirmed.color != Some(value))
-        || patch
-            .mode
-            .is_some_and(|value| confirmed.mode != Some(value))
+    Ok(())
 }
 
 impl Context {
+    pub(super) fn is_independent_light(&self, did: &str) -> bool {
+        let live = self.live.borrow();
+        live.devices
+            .get(did)
+            .is_some_and(|slot| slot.effective_group.is_none())
+            && !live
+                .devices
+                .values()
+                .filter_map(|slot| slot.effective_group.as_ref())
+                .any(|group| group.members.iter().any(|member| member == did))
+    }
+
     /// New source targets take over other effective groups sharing members.
-    /// Internal auxiliary batches never enter this command boundary.
     pub(super) fn take_over_related_targets(&self, did: &str, target: LightTarget) {
         let members = {
             let live = self.live.borrow();
@@ -365,28 +329,12 @@ impl Context {
                 None => vec![did.to_owned()],
             }
         };
-        self.take_over_group_tracks(
-            &members,
-            Some(did),
-            target.power == Some(false),
-            target.brightness_percent.is_some(),
-            target.color.is_some(),
-        );
-    }
-
-    fn take_over_group_tracks(
-        &self,
-        members: &[String],
-        except: Option<&str>,
-        off: bool,
-        brightness: bool,
-        color: bool,
-    ) {
+        let off = target.power == Some(false);
         let mut dimensions = Vec::new();
-        if brightness {
+        if target.brightness_percent.is_some() {
             dimensions.push(LightDimension::Brightness);
         }
-        if color {
+        if target.color.is_some() {
             dimensions.push(LightDimension::Color);
         }
         if !off && dimensions.is_empty() {
@@ -398,7 +346,7 @@ impl Context {
                 .iter()
                 .filter_map(|(group_did, slot)| {
                     let group = slot.effective_group.as_ref()?;
-                    if except.is_some_and(|did| group_did == did)
+                    if group_did == did
                         || !group.members.iter().any(|member| members.contains(member))
                     {
                         return None;
@@ -422,11 +370,11 @@ impl Context {
                 let description = function.description();
                 let supported = match dimension {
                     LightDimension::Brightness => {
-                        description.has_capability(crate::device::Capability::Brightness)
+                        description.has_capability(Capability::Brightness)
                     }
                     LightDimension::Color => {
                         description.temperature_range().is_some()
-                            || description.has_capability(crate::device::Capability::ColorRgb)
+                            || description.has_capability(Capability::ColorRgb)
                     }
                 };
                 if supported {
@@ -441,31 +389,19 @@ impl Context {
         }
     }
 
-    /// A member operation observed on the wire stops the conflicting dimension
-    /// of every effective group that shares the member. Stop stays local to the
-    /// group the user targeted.
-    pub(super) fn take_over_member_groups(&self, member_did: &str, patch: LightPatch) {
-        self.take_over_group_tracks(
-            &[member_did.to_owned()],
-            None,
-            patch.power == Some(false),
-            patch.brightness_percent.is_some(),
-            patch.mode.is_some() || patch.color.is_some() || patch.temperature_kelvin.is_some(),
-        );
-    }
-
-    /// Recompute repaired state for every group sharing this member after a
-    /// member observation or availability change.
+    /// Recompute a source group's repaired state and groups sharing this source
+    /// after an observation or availability change.
     pub(super) fn refresh_repair_groups(&self, member_did: &str) {
         let groups = {
             let live = self.live.borrow();
             live.devices
                 .iter()
-                .filter(|(_, slot)| {
+                .filter(|(did, slot)| {
                     slot.effective_repair.is_some()
-                        && slot.effective_group.as_ref().is_some_and(|group| {
-                            group.members.iter().any(|member| member == member_did)
-                        })
+                        && (*did == member_did
+                            || slot.effective_group.as_ref().is_some_and(|group| {
+                                group.members.iter().any(|member| member == member_did)
+                            }))
                 })
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
@@ -475,107 +411,48 @@ impl Context {
         }
     }
 
-    /// Apply the confirmed representative's color and mode to one repaired
-    /// group. Losing or replacing the representative clears the old values
-    /// first; the native power, brightness and color temperature stay.
+    /// Replace RGB and mode together from one current member snapshot.
     pub(super) fn refresh_repair_group(&self, group_did: &str) {
-        let (plan, function) = {
-            let live = self.live.borrow();
-            let Some(slot) = live.devices.get(group_did) else {
-                return;
-            };
-            let Some(plan) = slot.effective_repair.clone() else {
-                return;
-            };
-            let Some(function) = slot
-                .admitted
-                .as_ref()
-                .and_then(|record| record.physical.function("main"))
-            else {
-                return;
-            };
-            (plan, function)
-        };
-        let representative = self.representative(&plan);
-        let changed = self
-            .live
-            .borrow()
-            .devices
-            .get(group_did)
-            .is_none_or(|slot| slot.representative != representative);
-        if changed {
-            function.clear_light_color();
-            if let Some(slot) = self.live.borrow_mut().devices.get_mut(group_did) {
-                slot.representative = representative.clone();
-            }
-        }
-        let Some(confirmed) = representative
-            .as_ref()
-            .and_then(|key| self.confirmed_member(key))
-        else {
+        let live = self.live.borrow();
+        let Some(slot) = live.devices.get(group_did) else {
             return;
         };
-        let previous = function.snapshot().lighting.unwrap();
-        if (previous.mode.is_some() && confirmed.mode.is_none())
-            || (previous.color.is_some() && confirmed.color.is_none())
-        {
-            // Missing fields in the current confirmed authority cannot retain
-            // another authority's mode or inactive RGB cache.
-            function.clear_light_color();
-        }
-        let patch = LightPatch {
-            // The chosen member's cached RGB travels even while its current
-            // mode is white; fields are never combined across members.
-            color: confirmed.color,
-            mode: confirmed.mode,
-            ..LightPatch::default()
+        let Some(plan) = &slot.effective_repair else {
+            return;
         };
-        if let Err(error) = function.observe_light(patch) {
-            log::warn!("repaired group {group_did} state rejected: {error}");
-        }
-    }
-
-    fn confirmed_member(&self, key: &DeviceKey) -> Option<ConfirmedLight> {
-        let live = self.live.borrow();
-        let slot = live.devices.get(&key.id)?;
-        let record = slot.admitted.as_ref()?;
+        let Some(record) = &slot.admitted else {
+            return;
+        };
+        let function = record.physical.function("main").unwrap();
         if record.life.is_closed() || record.physical.availability() != Availability::Available {
-            return None;
+            function.replace_light_color(None, None);
+            return;
         }
-        slot.work.as_ref()?.confirmed_light()
-    }
-
-    /// Prefer an ON member whose current mode and matching value are both
-    /// confirmed, then the other readable members by stable DID order.
-    fn representative(&self, plan: &crate::xiaomi::capability::RepairPlan) -> Option<DeviceKey> {
-        let live = self.live.borrow();
-        let mut candidates = Vec::new();
-        for key in &plan.members {
-            let Some(slot) = live.devices.get(&key.id) else {
-                continue;
-            };
-            let Some(record) = &slot.admitted else {
-                continue;
-            };
-            if record.life.is_closed() || record.physical.availability() != Availability::Available
-            {
-                continue;
-            }
-            let Some(confirmed) = slot.work.as_ref().and_then(|work| work.confirmed_light()) else {
-                continue;
-            };
-            let valid = match confirmed.mode {
-                Some(LightMode::Temperature) => confirmed.temperature_kelvin.is_some(),
-                Some(LightMode::Rgb) => confirmed.color.is_some(),
-                None => false,
-            };
-            // Exact two tiers: ON with a valid current mode and matching
-            // value first, then every other readable confirmed member
-            // (unknown mode stays unknown). Stable DeviceKey within each tier.
-            let priority = valid && confirmed.power_value() == Some(true);
-            candidates.push((priority, key.id.clone(), key.clone()));
-        }
-        candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-        candidates.into_iter().next().map(|(_, _, key)| key)
+        let representative = plan
+            .members
+            .iter()
+            .filter_map(|key| {
+                let slot = live.devices.get(&key.id)?;
+                let record = slot.admitted.as_ref()?;
+                if record.life.is_closed()
+                    || record.physical.availability() != Availability::Available
+                    || slot.work.as_ref().is_none_or(|work| work.life.is_closed())
+                {
+                    return None;
+                }
+                let snapshot = record.physical.function("main").unwrap().snapshot();
+                let light = snapshot.lighting.unwrap();
+                let valid = match light.mode {
+                    Some(LightMode::Temperature) => light.temperature_kelvin.is_some(),
+                    Some(LightMode::Rgb) => light.color.is_some(),
+                    None => false,
+                };
+                let priority = valid && snapshot.power.value() == Some(true);
+                Some((!priority, &key.id, light))
+            })
+            .min_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
+            .map(|(_, _, light)| light);
+        let (color, mode) = representative.map_or((None, None), |light| (light.color, light.mode));
+        function.replace_light_color(color, mode);
     }
 }

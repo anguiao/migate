@@ -6,7 +6,7 @@ use super::{
     work::DeviceWork,
 };
 use crate::{
-    device::{DeviceKey, DeviceRegistry, PhysicalDevice},
+    device::{DeviceRegistry, PhysicalDevice},
     storage::{CachedPhysicalDevice, CachedScope, Store, XiaomiRecord},
     xiaomi::{
         auth::{AuthenticationState, CertificateUpdate},
@@ -77,8 +77,6 @@ pub(super) struct DeviceSlot {
     /// independent-lamp contract, retained for confirmed group planning.
     pub(super) native_confirmed: Option<CachedPhysicalDevice>,
 
-    /// Currently selected confirmed representative member of a repaired group.
-    pub(super) representative: Option<DeviceKey>,
     pub(super) confirmed: bool,
     /// A description awaiting admission; accepted descriptions live only in the record.
     pub(super) candidate: Option<(CachedPhysicalDevice, Option<String>)>,

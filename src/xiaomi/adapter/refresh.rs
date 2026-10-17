@@ -349,7 +349,9 @@ fn read_one(
                                         &value,
                                     );
                                     if observed_validation.borrow().is_ok() {
-                                        result_context.refresh_repair_groups(&observed_id);
+                                        result_context.refresh_repair_groups(
+                                            &observing.record.physical.key().id,
+                                        );
                                     }
                                 }
                             },

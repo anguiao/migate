@@ -55,21 +55,19 @@ fn native_rgb_group_uses_member_temperature_interval_without_repair() {
             )
             .unwrap();
         action.accepted().await.unwrap();
-        let gate = c.context.live.borrow().devices["group-1"]
-            .work
-            .as_ref()
-            .unwrap()
-            .light_write
-            .clone()
-            .unwrap();
-        let mode = bindings.mode.unwrap();
+        let writes = c.cloud.lock().unwrap();
+        let items: Vec<_> = writes
+            .numeric_writes
+            .iter()
+            .flat_map(|(items, _)| items)
+            .collect();
+        assert!(items.iter().all(|item| item["did"] == "group-1"));
         assert!(
-            gate.is_feedback(mode.property, &json!(mode.rgb_value)),
-            "the native group's required mode receipt must own its short late echo"
+            items
+                .iter()
+                .any(|item| item["siid"] == 4 && item["piid"] == 1 && item["value"] == 0xff0000),
+            "native RGB must use its own binding"
         );
-        assert!(!gate.is_feedback(mode.property, &json!(mode.temperature_value)));
-        c.clock.advance(Duration::from_secs(4));
-        assert!(!gate.is_feedback(mode.property, &json!(mode.rgb_value)));
     }));
 }
 

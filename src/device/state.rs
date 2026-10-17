@@ -164,6 +164,19 @@ impl PhysicalDevice {
             revision: self.inner.state.lock().unwrap().revision,
         }
     }
+    /// A new feedback authority starts with unknown fields, without cancelling actions.
+    pub(crate) fn clear_light_state(&self) {
+        for function in self.functions.iter() {
+            let changed = clear_light_state(
+                function.description(),
+                &mut function.0.state.lock().unwrap(),
+            );
+            if changed {
+                function.0.changed.notify(usize::MAX);
+            }
+        }
+    }
+
     /// Cancel light actions and unsent frames without closing live consumers.
     pub(crate) fn reset_actions(&self) {
         for function in self.functions.iter() {
@@ -314,28 +327,20 @@ impl Function {
         }
         Ok(self.snapshot_locked(&state))
     }
-    /// Clear repaired color and mode while keeping native power, brightness and
-    /// temperature. Used when a repaired group loses its representative or a
-    /// source loses all paths.
-    pub(crate) fn clear_light_color(&self) -> FunctionSnapshot {
-        let changed = {
-            let mut state = self.0.state.lock().unwrap();
-            let before = (state.power, state.lighting);
-            let mode = self.description().inferred_color_mode();
-            if let Some(lighting) = state.lighting.as_mut() {
-                lighting.color = None;
-                lighting.mode = mode;
-            }
-            let changed = before != (state.power, state.lighting);
-            if changed {
-                state.revision = state.revision.wrapping_add(1);
-            }
-            changed
-        };
-        if changed {
+    /// Replace the represented RGB and mode, including unknown fields.
+    pub(crate) fn replace_light_color(
+        &self,
+        color: Option<super::Rgb>,
+        mode: Option<super::LightMode>,
+    ) {
+        let mut state = self.0.state.lock().unwrap();
+        let light = state.lighting.as_mut().expect("light has lighting state");
+        if (light.color, light.mode) != (color, mode) {
+            light.color = color;
+            light.mode = mode;
+            state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
-        self.snapshot()
     }
     /// Clear an out-of-publication color temperature to unknown.
     pub(crate) fn clear_light_temperature(&self) -> FunctionSnapshot {

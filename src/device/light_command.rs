@@ -113,6 +113,8 @@ pub(super) struct LightCoordinator {
     serial: u64,
     order: u64,
     current: [Option<Arc<Action>>; 2],
+    // Final acceptance releases the action but not its remaining owned writes.
+    write_serials: [u64; 2],
     pending: [Option<Frame>; 2],
     flight: Option<Arc<Flight>>,
     last: Option<LightActionResult>,
@@ -126,6 +128,7 @@ impl LightCoordinator {
             serial: 0,
             order: 0,
             current: [None, None],
+            write_serials: [0, 0],
             pending: [None, None],
             flight: None,
             last: None,
@@ -159,6 +162,7 @@ impl LightCoordinator {
     }
     pub(super) fn cancel(&mut self, dimension: LightDimension, error: CommandError) {
         let index = dimension.index();
+        self.write_serials[index] = 0;
         self.pending[index] = None;
         if let Some(action) = self.current[index].take() {
             action.ended.finish(Err(error.clone()));
@@ -297,6 +301,7 @@ impl Function {
             startup_sent: AtomicBool::new(false),
             final_submitted: AtomicBool::new(final_frame),
         });
+        coordinator.write_serials[dimension.index()] = action.token.serial;
         coordinator.current[dimension.index()] = Some(action.clone());
         coordinator.enqueue(action.clone(), target, final_frame);
         coordinator.revision += 1;
@@ -431,6 +436,19 @@ impl Function {
             .light_commands
             .as_ref()
             .is_some_and(|coordinator| coordinator.current(token).is_some())
+    }
+    /// A completed final frame can finish its remaining writes until takeover or Stop.
+    pub(crate) fn light_action_owns_writes(&self, token: ActionToken) -> bool {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .light_commands
+            .as_ref()
+            .is_some_and(|coordinator| {
+                coordinator.owner == token.owner
+                    && coordinator.write_serials[token.dimension.index()] == token.serial
+            })
     }
     pub fn stop_light(&self, dimension: LightDimension) -> Result<FunctionSnapshot, CommandError> {
         self.cancel_light_dimension(dimension, CommandError::Stopped)

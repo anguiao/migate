@@ -337,9 +337,6 @@ impl Context {
             Availability::Unavailable(blocked.unwrap_or_else(|| "no usable control path".into()))
         });
         if !available {
-            if let Some(work) = &work {
-                work.clear_confirmed();
-            }
             self.refresh_repair_groups(did);
         } else if !was_available && let Some(work) = &work {
             work.refresh();

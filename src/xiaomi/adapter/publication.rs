@@ -341,7 +341,6 @@ impl SourceHandle {
                 .as_ref()
                 .is_some_and(|old| !same_bindings(&old.cached.borrow(), &entry.cached));
             let group_changed = self.0.live.borrow().devices[did].effective_group != entry.group;
-            let repair_changed = self.0.live.borrow().devices[did].effective_repair != entry.repair;
             if replaced || bindings_changed {
                 self.0.light_writes.clear_authority(did);
                 self.0.retire_device_notifications(did);
@@ -364,6 +363,7 @@ impl SourceHandle {
             }
             if bindings_changed {
                 entry.physical.reset_actions();
+                entry.physical.clear_light_state();
                 entry
                     .record
                     .binding_generation
@@ -375,9 +375,6 @@ impl SourceHandle {
                 let slot = live.devices.get_mut(did).unwrap();
                 slot.admitted = Some(entry.record.clone());
                 slot.effective_group = entry.group.clone();
-                if repair_changed {
-                    slot.representative = None;
-                }
                 slot.effective_repair = entry.repair.clone();
                 slot.candidate = None;
             }

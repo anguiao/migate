@@ -29,7 +29,6 @@ pub(super) struct ReadStamp {
 }
 #[derive(Clone)]
 pub(super) struct WriteStamp {
-    source: u64,
     binding: u64,
     notified: u64,
 }
@@ -107,7 +106,6 @@ impl Observations {
         binding: PropertyBinding,
     ) -> WriteStamp {
         WriteStamp {
-            source: self.source_epoch.get(),
             binding: record.binding_generation.get(),
             notified: self
                 .channels
@@ -153,23 +151,5 @@ impl Observations {
         let counts = channels.entry(key(id, binding)).or_default();
         counts.observed += 1;
         counts.notified += u64::from(notified);
-    }
-    pub(super) fn write_is_current(
-        &self,
-        record: &DeviceRecord,
-        id: &str,
-        binding: PropertyBinding,
-        stamp: &WriteStamp,
-    ) -> bool {
-        !record.life.is_closed()
-            && record.binding_generation.get() == stamp.binding
-            && self.source_epoch.get() == stamp.source
-            && self
-                .channels
-                .borrow_mut()
-                .entry(key(id, binding))
-                .or_default()
-                .notified
-                == stamp.notified
     }
 }

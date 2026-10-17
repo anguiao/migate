@@ -2065,6 +2065,16 @@ fn same_member_readd_in_session_ignores_stale_suback_and_fresh_ack_delivers() {
             .await;
             let new_lifetime =
                 Rc::as_ptr(&c.context.watches.borrow().members["member-a"].lifetime) as usize;
+            let reads_settled = || {
+                let live = c.context.live.borrow();
+                let work = live.devices["group-1"].work.as_ref().unwrap();
+                work.refresh_pending.borrow().is_empty()
+                    && work.refresh_inflight.borrow().is_empty()
+                    && work.dirty_again.borrow().is_empty()
+            };
+            // Remove/re-add actively refreshes the native group independently
+            // of subscription ACKs; finish that work before attributing reads.
+            until(reads_settled).await;
             // Release only the stale ACK.
             let stale = {
                 let mut state = peer.state.borrow_mut();
@@ -2110,6 +2120,7 @@ fn same_member_readd_in_session_ignores_stale_suback_and_fresh_ack_delivers() {
                 state.held.remove(index)
             };
             assert_ne!(fresh.pkid, old_pkid);
+            let ready_reads = reads();
             peer.send(Packet::SubAck(SubAck::new(
                 fresh.pkid,
                 vec![SubscribeReasonCode::QoS2],
@@ -2124,8 +2135,7 @@ fn same_member_readd_in_session_ignores_stale_suback_and_fresh_ack_delivers() {
             })
             .await;
             // Settle the Ready-refresh read before attributing any later read.
-            let ready_reads = reads();
-            until(|| reads() > ready_reads).await;
+            until(|| reads() > ready_reads && reads_settled()).await;
             let before_event = reads();
             // A real native change arrives through the fresh watcher.
             c.cloud

@@ -140,6 +140,23 @@ pub(super) async fn repair_ready(c: &Control) {
             .is_some_and(|physical| physical.availability() == Availability::Available)
     })
     .await;
+    until(|| {
+        ["member-a", "member-b"].iter().all(|did| {
+            function(&c.context.registry, did, "main")
+                .snapshot()
+                .lighting
+                .is_some_and(|state| state.mode.is_some() && state.color.is_some())
+        })
+    })
+    .await;
+    until(|| {
+        let state = function(&c.context.registry, "group-1", "main").snapshot();
+        state.power != Power::Unknown
+            && state.lighting.is_some_and(|light| {
+                light.brightness_percent.is_some() && light.temperature_kelvin.is_some()
+            })
+    })
+    .await;
 }
 
 fn member_writes(c: &Control, did: &str, siid: u32, piid: u32) -> Vec<Value> {
@@ -177,14 +194,17 @@ fn repaired_group_publishes_extended_color_and_dispatches_rgb_to_members() {
                 step: 1
             })
         );
+        let before = light.snapshot();
+        c.cloud.lock().unwrap().property_reads.clear();
+        // The same cached RGB must still be sent to switch from white mode.
         let action = light
             .begin_light_action(
                 LightDimension::Color,
                 LightTarget {
                     color: Some(LightColorTarget::Rgb(Rgb {
-                        red: 0,
-                        green: 255,
-                        blue: 0,
+                        red: 0x11,
+                        green: 0x22,
+                        blue: 0x33,
                     })),
                     ..Default::default()
                 },
@@ -206,16 +226,25 @@ fn repaired_group_publishes_extended_color_and_dispatches_rgb_to_members() {
                 member_writes(&c, did, MEMBER_COLOR.siid, MEMBER_COLOR.piid)
                     .last()
                     .cloned(),
-                Some(json!(0x00ff00))
+                Some(json!(0x112233))
             );
-            assert_eq!(
-                member_writes(&c, did, MEMBER_MODE.siid, MEMBER_MODE.piid)
-                    .last()
-                    .cloned(),
-                Some(json!(1)),
-                "member color mode must switch to RGB"
-            );
+            assert!(member_writes(&c, did, 4, 2).is_empty());
+            assert!(member_writes(&c, did, 2, 1).is_empty());
         }
+        wait_for(
+            || {
+                ["member-a", "member-b"].iter().all(|did| {
+                    c.cloud
+                        .lock()
+                        .unwrap()
+                        .property_reads
+                        .contains(&(did.to_string(), 4, 2))
+                })
+            },
+            "RGB acceptance must refresh the real mode property",
+        )
+        .await;
+        assert_eq!(light.snapshot(), before, "acceptance is not feedback");
         assert!(
             group_writes(&c, "group-1", MEMBER_COLOR.siid, MEMBER_COLOR.piid).is_empty(),
             "the group DID has no ambient binding"
@@ -224,84 +253,56 @@ fn repaired_group_publishes_extended_color_and_dispatches_rgb_to_members() {
 }
 
 #[test]
-fn repaired_group_ct_target_writes_native_value_and_member_white_mode() {
+fn repaired_group_native_controls_do_not_depend_on_member_writes() {
     let rig = repair_rig(1, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "main");
-        let action = light
-            .begin_light_action(
+        for did in ["member-a", "member-b"] {
+            c.context.block_device(did, "member unavailable".into());
+        }
+        let before = light.snapshot();
+        light.execute(Command::On).await.unwrap();
+        light.execute(Command::Off).await.unwrap();
+        for (dimension, target) in [
+            (LightDimension::Brightness, brightness(80.0)),
+            (
                 LightDimension::Color,
                 LightTarget {
-                    color: Some(LightColorTarget::Temperature(4000)),
+                    // The native value already equals this target, but writing it
+                    // still selects white mode on the members.
+                    color: Some(LightColorTarget::Temperature(2700)),
                     ..Default::default()
                 },
-                true,
-            )
-            .unwrap();
-        action.accepted().await.unwrap();
-        wait_for(
-            || {
-                ["member-a", "member-b"].iter().all(|did| {
-                    !member_writes(&c, did, MEMBER_MODE.siid, MEMBER_MODE.piid).is_empty()
-                })
-            },
-            "member mode writes were not dispatched",
-        )
-        .await;
-        assert_eq!(
-            group_writes(&c, "group-1", 2, 3).last().cloned(),
-            Some(json!(4000))
-        );
-        for did in ["member-a", "member-b"] {
-            assert_eq!(
-                member_writes(&c, did, MEMBER_MODE.siid, MEMBER_MODE.piid)
-                    .last()
-                    .cloned(),
-                Some(json!(0)),
-                "CT must select the member white mode"
-            );
-            assert!(
-                member_writes(&c, did, MEMBER_COLOR.siid, MEMBER_COLOR.piid).is_empty(),
-                "CT must not write member color"
-            );
-            assert!(
-                member_writes(&c, did, 2, 3).is_empty(),
-                "CT stays on the native group DID"
-            );
+            ),
+        ] {
+            light
+                .begin_light_action(dimension, target, true)
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
         }
-    }));
-}
-
-#[test]
-fn repaired_group_native_on_restores_known_member_rgb_mode() {
-    let rig = repair_rig(1, true);
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
-        light.execute(Command::On).await.unwrap();
-        wait_for(
-            || {
-                ["member-a", "member-b"].iter().all(|did| {
-                    !member_writes(&c, did, MEMBER_MODE.siid, MEMBER_MODE.piid).is_empty()
-                })
-            },
-            "member mode writes were not dispatched",
-        )
-        .await;
         assert_eq!(
-            group_writes(&c, "group-1", 2, 1).last().cloned(),
-            Some(json!(true))
+            group_writes(&c, "group-1", 2, 1),
+            [json!(true), json!(false)]
         );
-        for did in ["member-a", "member-b"] {
-            assert_eq!(
-                member_writes(&c, did, MEMBER_MODE.siid, MEMBER_MODE.piid)
-                    .last()
-                    .cloned(),
-                Some(json!(1)),
-                "native On must not silently drop the known RGB mode"
-            );
-        }
+        assert_eq!(group_writes(&c, "group-1", 2, 2), [json!(80)]);
+        assert_eq!(group_writes(&c, "group-1", 2, 3), [json!(2700)]);
+        assert!(
+            c.cloud
+                .lock()
+                .unwrap()
+                .numeric_writes
+                .iter()
+                .flat_map(|(items, _)| items)
+                .all(|item| item["did"] == "group-1")
+        );
+        assert_eq!(
+            light.snapshot(),
+            before,
+            "native acceptance is not feedback"
+        );
     }));
 }
 
@@ -315,8 +316,8 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
             .work
             .clone()
             .unwrap();
-        work.notify_value(MEMBER_COLOR, &json!(0x00ff00), false);
-        work.notify_value(MEMBER_MODE, &json!(1), false);
+        work.notify_value(MEMBER_COLOR, &json!(0x00ff00), false, false);
+        work.notify_value(MEMBER_MODE, &json!(1), false, false);
         // The production notification path refreshes repaired group state
         // after an actual member observation.
         c.context.refresh_repair_groups("member-a");
@@ -408,139 +409,167 @@ async fn settle() {
 }
 
 #[test]
-fn repaired_group_stop_retires_queued_member_sends() {
-    let (rig, release) = gated_rig(0, true);
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let (released, wait_released) = flume::bounded::<()>(1);
-        let command = {
+fn queued_rgb_rechecks_action_and_member_power_before_sending() {
+    #[derive(Debug)]
+    enum Change {
+        Stop,
+        NewTarget,
+        Rebuild,
+        MemberOff,
+        NativeTemperature,
+        NativeOff,
+    }
+    for change in [
+        Change::Stop,
+        Change::NewTarget,
+        Change::Rebuild,
+        Change::MemberOff,
+        Change::NativeTemperature,
+        Change::NativeOff,
+    ] {
+        let (rig, release) = gated_rig(0, true);
+        block_on(rig.run(|c| async move {
+            repair_ready(&c).await;
             let member = function(&c.context.registry, "member-b", "main");
-            async move {
-                let _ = member.execute(Command::Off).await;
-                let _ = released.send(());
+            let holding = async {
+                member.execute(Command::Off).await.unwrap();
+            };
+            let scenario = async {
+                wait_holding_member_b(&c).await;
+                let light = function(&c.context.registry, "group-1", "main");
+                let action = light
+                    .begin_light_action(LightDimension::Color, rgb(0x00ff00), true)
+                    .unwrap();
+                action.accepted().await.unwrap();
+                match change {
+                    Change::Stop => {
+                        light.stop_light(LightDimension::Color).unwrap();
+                    }
+                    Change::NewTarget => {
+                        light
+                            .begin_light_action(LightDimension::Color, rgb(0xff0000), true)
+                            .unwrap()
+                            .accepted()
+                            .await
+                            .unwrap();
+                    }
+                    Change::NativeTemperature => {
+                        light
+                            .begin_light_action(
+                                LightDimension::Color,
+                                LightTarget {
+                                    color: Some(LightColorTarget::Temperature(4000)),
+                                    ..Default::default()
+                                },
+                                true,
+                            )
+                            .unwrap()
+                            .accepted()
+                            .await
+                            .unwrap();
+                    }
+                    Change::NativeOff => {
+                        light.execute(Command::Off).await.unwrap();
+                    }
+                    Change::Rebuild => c.publication.stop_actions(),
+                    Change::MemberOff => {
+                        let work = c.context.live.borrow().devices["member-b"]
+                            .work
+                            .clone()
+                            .unwrap();
+                        work.notify_value(
+                            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                            &json!(false),
+                            false,
+                            false,
+                        );
+                    }
+                }
+                c.cloud.lock().unwrap().write_gates.remove("member-b");
+                release.send(()).unwrap();
+            };
+            future::zip(holding, scenario).await;
+            if matches!(change, Change::NewTarget) {
+                wait_for(
+                    || member_writes(&c, "member-b", 4, 1).contains(&json!(0xff0000)),
+                    "replacement frame did not reach the released member",
+                )
+                .await;
+            } else {
+                settle().await;
             }
+            assert!(
+                !member_writes(&c, "member-b", 4, 1).contains(&json!(0x00ff00)),
+                "queued RGB must be discarded after {change:?}"
+            );
+        }));
+    }
+}
+
+#[test]
+fn submitted_rgb_receipt_survives_stop_before_or_after_early_success() {
+    for early_success in [false, true] {
+        let rig = repair_rig(0, true);
+        let held = if early_success {
+            "member-b"
+        } else {
+            "member-a"
         };
-        let scenario = async {
-            wait_holding_member_b(&c).await;
+        let (release, gate) = flume::bounded(1);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.write_gates.insert(held.into(), gate);
+            if !early_success {
+                cloud
+                    .raw_values
+                    .insert(("member-b".into(), 2, 1), json!(false));
+            }
+        }
+        block_on(rig.run(|c| async move {
+            repair_ready(&c).await;
             let light = function(&c.context.registry, "group-1", "main");
             let action = light
-                .begin_light_action(LightDimension::Color, rgb(0x00ff00), false)
+                .begin_light_action(LightDimension::Color, rgb(0x0000ff), true)
                 .unwrap();
-            action.accepted().await.unwrap();
+            if early_success {
+                action.accepted().await.unwrap();
+            }
             wait_for(
-                || !member_writes(&c, "member-a", MEMBER_COLOR.siid, MEMBER_COLOR.piid).is_empty(),
-                "fast member did not receive its RGB batch",
+                || member_writes(&c, held, 4, 1).contains(&json!(0x0000ff)),
+                "held member write was not submitted",
             )
             .await;
+            // Stop cannot retract a submitted RGB write or change its real receipt.
             light.stop_light(LightDimension::Color).unwrap();
             release.send(()).unwrap();
-            let _ = wait_released.recv_async().await;
-            settle().await;
-            assert!(
-                member_writes(&c, "member-b", MEMBER_COLOR.siid, MEMBER_COLOR.piid).is_empty(),
-                "Stop must retire queued member sends"
-            );
-        };
-        future::zip(command, scenario).await;
-    }));
-}
-
-#[test]
-fn repaired_group_final_early_success_keeps_owned_member_sends() {
-    let (rig, release) = gated_rig(0, true);
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
-        let action = light
-            .begin_light_action(LightDimension::Color, rgb(0x0000ff), true)
-            .unwrap();
-        action.accepted().await.unwrap();
-        drop(action);
-        // Stop after a completed final action is a no-op and must not cancel
-        // the already-owned member receipt.
-        light.stop_light(LightDimension::Color).unwrap();
-        release.send(()).unwrap();
-        wait_for(
-            || {
-                member_writes(&c, "member-b", MEMBER_COLOR.siid, MEMBER_COLOR.piid)
-                    .last()
-                    .cloned()
-                    == Some(json!(0x0000ff))
-            },
-            "slow member lost its owned final send after early acceptance",
-        )
-        .await;
-    }));
-}
-
-#[test]
-fn repaired_group_new_action_retires_old_queued_member_sends() {
-    let (rig, release) = gated_rig(0, true);
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let (released, wait_released) = flume::bounded::<()>(1);
-        let command = {
-            let member = function(&c.context.registry, "member-b", "main");
-            async move {
-                let _ = member.execute(Command::Off).await;
-                let _ = released.send(());
-            }
-        };
-        let scenario = async {
-            wait_holding_member_b(&c).await;
-            let light = function(&c.context.registry, "group-1", "main");
-            let action = light
-                .begin_light_action(LightDimension::Color, rgb(0x00ff00), false)
-                .unwrap();
             action.accepted().await.unwrap();
-            let next = light
-                .begin_light_action(LightDimension::Color, rgb(0xff0000), true)
-                .unwrap();
-            next.accepted().await.unwrap();
-            release.send(()).unwrap();
-            let _ = wait_released.recv_async().await;
-            settle().await;
-            assert!(
-                !member_writes(&c, "member-b", MEMBER_COLOR.siid, MEMBER_COLOR.piid)
-                    .contains(&json!(0x00ff00)),
-                "the obsolete frame must not reach the slow member"
-            );
-        };
-        future::zip(command, scenario).await;
-    }));
-}
-
-#[test]
-fn repaired_group_rebuild_retires_unsent_member_sends() {
-    let (rig, release) = gated_rig(0, true);
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let (released, wait_released) = flume::bounded::<()>(1);
-        let command = {
-            let member = function(&c.context.registry, "member-b", "main");
-            async move {
-                let _ = member.execute(Command::Off).await;
-                let _ = released.send(());
+            if !early_success {
+                assert_eq!(
+                    action.ended().await,
+                    Err(crate::device::CommandError::Stopped)
+                );
+                assert!(
+                    !light.light_action_current(action.token()),
+                    "the late receipt must not revive the action"
+                );
             }
-        };
-        let scenario = async {
-            wait_holding_member_b(&c).await;
-            let light = function(&c.context.registry, "group-1", "main");
-            let action = light
-                .begin_light_action(LightDimension::Color, rgb(0x00ff00), false)
-                .unwrap();
-            action.accepted().await.unwrap();
-            c.publication.stop_actions();
-            release.send(()).unwrap();
-            let _ = wait_released.recv_async().await;
-            settle().await;
-            assert!(
-                member_writes(&c, "member-b", MEMBER_COLOR.siid, MEMBER_COLOR.piid).is_empty(),
-                "a committed rebuild must retire unsent member frames"
-            );
-        };
-        future::zip(command, scenario).await;
-    }));
+            wait_for(
+                || {
+                    let status = c
+                        .context
+                        .commands
+                        .snapshot(held, ["main".to_owned()].into_iter());
+                    status[0].inflight.is_none()
+                        && status[0]
+                            .last
+                            .as_ref()
+                            .is_some_and(|last| last.result == Some(Ok(())))
+                },
+                "submitted member receipt did not finish after Stop",
+            )
+            .await;
+        }));
+    }
 }
 
 #[test]
@@ -611,14 +640,6 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
             "logical target must quantize on the genuine native grid",
         )
         .await;
-        for did in ["member-a", "member-b"] {
-            assert_eq!(
-                member_writes(&c, did, MEMBER_MODE.siid, MEMBER_MODE.piid)
-                    .last()
-                    .cloned(),
-                Some(json!(0)),
-            );
-        }
         // Actual feedback on the native grid outside the logical interval
         // becomes unknown instead of being rounded to the target.
         c.cloud
@@ -855,6 +876,12 @@ fn repaired_group_unauthorized_member_path_recovers_after_token_refresh() {
         until(|| c.cloud.lock().unwrap().tokens > 0).await;
         c.cloud.lock().unwrap().property_status = 200;
         until(|| c.context.token_usable()).await;
+        until(|| {
+            ["member-a", "member-b"]
+                .iter()
+                .all(|did| function(&c.context.registry, did, "main").snapshot().power == Power::On)
+        })
+        .await;
         let next = light
             .begin_light_action(LightDimension::Color, rgb(0x0000ff), true)
             .unwrap();
@@ -869,266 +896,6 @@ fn repaired_group_unauthorized_member_path_recovers_after_token_refresh() {
             "member writes did not recover after token refresh",
         )
         .await;
-    }));
-}
-
-const SHARED_BRIGHTNESS: crate::xiaomi::capability::PropertyBinding =
-    crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 2 };
-const SHARED_TEMPERATURE: crate::xiaomi::capability::PropertyBinding =
-    crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 3 };
-
-#[test]
-fn shared_typed_member_echo_and_stop_are_group_local() {
-    // group-1 is repaired (both ls2307 members); group-2 is native-only
-    // because it also contains the ordinary OBCT member-c, yet it shares the
-    // genuine typed ls2307 member-a.
-    let rig = Rig::lights(&[
-        ("member-a", "devcea.light.ls2307"),
-        ("member-b", "devcea.light.ls2307"),
-        ("member-c", "yeelink.light.light3"),
-    ]);
-    {
-        let mut cloud = rig.cloud.lock().unwrap();
-        cloud.catalog_groups = vec![
-            group_record("group-record", "group-1", &["member-a", "member-b"], false),
-            group_record(
-                "group-record-2",
-                "group-2",
-                &["member-a", "member-c"],
-                false,
-            ),
-        ];
-        cloud.catalog_instances.insert(
-            group_instance()["type"].as_str().unwrap().into(),
-            group_instance(),
-        );
-        cloud
-            .online
-            .extend(["group-1", "group-2", "member-a", "member-b", "member-c"].map(str::to_string));
-        for did in ["group-1", "group-2", "member-a", "member-b", "member-c"] {
-            for (siid, piid, value) in [(2, 1, json!(true)), (2, 2, json!(50)), (2, 3, json!(2700))]
-            {
-                cloud.raw_values.insert((did.into(), siid, piid), value);
-            }
-        }
-        for did in ["member-a", "member-b"] {
-            cloud.raw_values.insert(
-                (did.into(), MEMBER_COLOR.siid, MEMBER_COLOR.piid),
-                json!(0x112233),
-            );
-            cloud
-                .raw_values
-                .insert((did.into(), MEMBER_MODE.siid, MEMBER_MODE.piid), json!(0));
-        }
-    }
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        until(|| {
-            ["group-2", "member-c"].iter().all(|did| {
-                c.context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", *did))
-                    .is_some()
-            })
-        })
-        .await;
-        let peer = Rc::new(Peer::default());
-        peer.value("member-a", SHARED_BRIGHTNESS, json!(50));
-        peer.value("member-a", SHARED_TEMPERATURE, json!(2700));
-        peer.value("member-a", MEMBER_MODE, json!(0));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| control.context.active_notification("member-a") == Some(PathKind::Local))
-                .await;
-            let group1 = function(&control.context.registry, "group-1", "main");
-            let group2 = function(&control.context.registry, "group-2", "main");
-            assert!(control.context.group_repair("group-2").is_none());
-
-            // Own converted echo must not stop the native group's fade. The
-            // group keeps its own native value; only the member observation
-            // moves to 80.
-            let fade2 = group2
-                .begin_light_action(LightDimension::Brightness, brightness(80.0), false)
-                .unwrap();
-            fade2.accepted().await.unwrap();
-            peer.notify_value("member-a", SHARED_BRIGHTNESS, json!(80), false);
-            let member_a = function(&control.context.registry, "member-a", "main");
-            until(|| member_a.snapshot().lighting.unwrap().brightness_percent == Some(80.0)).await;
-            assert!(
-                group2.light_action_current(fade2.token()),
-                "own converted member echo must not stop the native group fade"
-            );
-            assert_eq!(
-                group2.snapshot().lighting.unwrap().brightness_percent,
-                Some(50.0),
-                "member values never aggregate into native group state"
-            );
-
-            // An unmatched external member value stops the dimension on every
-            // group that shares the member.
-            let fade1 = group1
-                .begin_light_action(LightDimension::Brightness, brightness(30.0), false)
-                .unwrap();
-            fade1.accepted().await.unwrap();
-            peer.notify_value("member-a", SHARED_BRIGHTNESS, json!(42), false);
-            until(|| {
-                !group1.light_action_current(fade1.token())
-                    && !group2.light_action_current(fade2.token())
-            })
-            .await;
-
-            // Stop applies only to the targeted group's own dimension: group-1
-            // runs a brightness track while group-2 runs CT.
-            let fade1 = group1
-                .begin_light_action(LightDimension::Brightness, brightness(20.0), false)
-                .unwrap();
-            fade1.accepted().await.unwrap();
-            let color2 = group2
-                .begin_light_action(
-                    LightDimension::Color,
-                    LightTarget {
-                        color: Some(LightColorTarget::Temperature(4200)),
-                        ..LightTarget::default()
-                    },
-                    false,
-                )
-                .unwrap();
-            color2.accepted().await.unwrap();
-            group2.stop_light(LightDimension::Color).unwrap();
-            assert!(!group2.light_action_current(color2.token()));
-            assert!(
-                group1.light_action_current(fade1.token()),
-                "Stop must not stop a shared member's other group"
-            );
-        })
-        .await;
-    }));
-}
-
-fn batch_containing(c: &Control, did: &str, siid: u32, piid: u32, value: Value) -> Option<usize> {
-    c.cloud
-        .lock()
-        .unwrap()
-        .numeric_writes
-        .iter()
-        .position(|(items, _)| {
-            items.iter().any(|item| {
-                item["did"] == did
-                    && item["siid"] == siid
-                    && item["piid"] == piid
-                    && item["value"] == value
-            })
-        })
-}
-
-#[test]
-fn repaired_group_known_off_rgb_sends_final_off_after_color_and_mode() {
-    let rig = repair_rig(0, true);
-    rig.cloud
-        .lock()
-        .unwrap()
-        .raw_values
-        .insert(("group-1".into(), 2, 1), json!(false));
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
-        wait_for(
-            || light.snapshot().power == Power::Off,
-            "group high/low state did not settle to off",
-        )
-        .await;
-        let action = light
-            .begin_light_action(LightDimension::Color, rgb(0x00ff00), true)
-            .unwrap();
-        action.accepted().await.unwrap();
-        wait_for(
-            || {
-                batch_containing(&c, "member-a", 4, 1, json!(0x00ff00)).is_some()
-                    && batch_containing(&c, "member-a", 2, 1, json!(false)).is_some()
-            },
-            "member RGB/mode batch and final off did not arrive",
-        )
-        .await;
-        let color_at =
-            batch_containing(&c, "member-a", 4, 1, json!(0x00ff00)).expect("member color batch");
-        let off_at =
-            batch_containing(&c, "member-a", 2, 1, json!(false)).expect("member off batch");
-        assert!(off_at > color_at, "final off must follow color/mode");
-        {
-            let writes = c.cloud.lock().unwrap();
-            let (items, _) = &writes.numeric_writes[color_at];
-            assert!(
-                items
-                    .iter()
-                    .any(|item| item["siid"] == 4 && item["piid"] == 2),
-                "mode travels with the member color batch"
-            );
-        }
-        assert!(
-            group_writes(&c, "group-1", 4, 1).is_empty(),
-            "no fabricated group RGB binding"
-        );
-        // Real per-DID diagnostics for the member's own OFF batch.
-        wait_for(
-            || {
-                let status = c
-                    .context
-                    .commands
-                    .snapshot("member-a", ["main".to_string()].into_iter());
-                status[0].last.as_ref().is_some_and(|last| {
-                    last.actual_path == Some(PathKind::Cloud)
-                        && last.result == Some(Ok(()))
-                        && last.properties.iter().any(|(binding, value)| {
-                            *binding
-                                == (crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 })
-                                && value == &json!(false)
-                        })
-                })
-            },
-            "member OFF batch diagnostics were not recorded",
-        )
-        .await;
-    }));
-}
-
-#[test]
-fn repaired_group_partial_required_off_is_not_full_but_other_member_succeeds() {
-    let rig = repair_rig(0, false);
-    rig.cloud
-        .lock()
-        .unwrap()
-        .raw_values
-        .insert(("group-1".into(), 2, 1), json!(false));
-    {
-        let mut cloud = rig.cloud.lock().unwrap();
-        cloud
-            .property_codes
-            .insert(("member-a".into(), 2, 1), -704_030_013);
-    }
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
-        wait_for(
-            || light.snapshot().power == Power::Off,
-            "group state did not settle off",
-        )
-        .await;
-        let action = light
-            .begin_light_action(LightDimension::Color, rgb(0x0000ff), true)
-            .unwrap();
-        action.accepted().await.unwrap();
-        wait_for(
-            || {
-                !member_writes(&c, "member-a", 4, 1).is_empty()
-                    && !member_writes(&c, "member-a", 2, 1).is_empty()
-            },
-            "rejected member's owned batch must still be attempted",
-        )
-        .await;
-        assert!(
-            !member_writes(&c, "member-b", 4, 1).is_empty(),
-            "the full member satisfies logical acceptance"
-        );
     }));
 }
 
@@ -1172,335 +939,75 @@ fn repaired_group_native_partial_failure_fails_without_optimistic_state() {
             "no optimistic native/member state"
         );
         assert!(
-            member_writes(&c, "member-a", 4, 2).is_empty(),
-            "member auxiliaries must not start after a native failure"
+            member_writes(&c, "member-a", 4, 1).is_empty(),
+            "native failure must not dispatch member RGB"
         );
     }));
 }
 
 #[test]
-fn repaired_group_ct_from_rgb_selects_member_white_and_keeps_known_on() {
-    let rig = repair_rig(1, true);
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
-        let action = light
-            .begin_light_action(
-                LightDimension::Color,
-                LightTarget {
-                    color: Some(LightColorTarget::Temperature(4000)),
-                    ..LightTarget::default()
-                },
-                true,
-            )
-            .unwrap();
-        action.accepted().await.unwrap();
-        wait_for(
-            || {
-                ["member-a", "member-b"]
-                    .iter()
-                    .all(|did| member_writes(&c, did, 4, 2).last().cloned() == Some(json!(0)))
-            },
-            "CT must select the real member white mode",
-        )
-        .await;
-        assert_eq!(
-            group_writes(&c, "group-1", 2, 3).last().cloned(),
-            Some(json!(4000))
-        );
-        for did in ["member-a", "member-b"] {
-            assert!(
-                member_writes(&c, did, 2, 3).is_empty(),
-                "native CT stays on the group DID"
-            );
-            assert!(
-                member_writes(&c, did, 2, 1).is_empty(),
-                "known-on member needs no power restore"
-            );
+fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
+    for (powers, failures, accepted) in [
+        ([Some(true), Some(false)], [false, false], true),
+        ([None, Some(true)], [false, false], true),
+        ([Some(false), None], [false, false], false),
+        ([Some(true), Some(true)], [true, true], false),
+        ([Some(true), Some(true)], [true, false], true),
+        ([Some(true), Some(false)], [true, false], false),
+    ] {
+        let rig = repair_rig(0, true);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            for (index, did) in ["member-a", "member-b"].into_iter().enumerate() {
+                cloud
+                    .raw_values
+                    .insert((did.into(), 2, 1), json!(powers[index]));
+                if failures[index] {
+                    cloud
+                        .property_codes
+                        .insert((did.into(), 4, 1), -704_030_013);
+                }
+            }
         }
-    }));
-}
-
-#[test]
-fn repaired_group_all_members_partial_is_a_logical_failure() {
-    let rig = repair_rig(0, true);
-    rig.cloud
-        .lock()
-        .unwrap()
-        .raw_values
-        .insert(("group-1".into(), 2, 1), json!(false));
-    {
-        let mut cloud = rig.cloud.lock().unwrap();
-        cloud
-            .property_codes
-            .insert(("member-a".into(), 4, 2), -704_030_013);
-        cloud
-            .property_codes
-            .insert(("member-b".into(), 4, 1), -704_030_013);
-    }
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
-        wait_for(
-            || light.snapshot().power == Power::Off,
-            "group state did not settle off",
-        )
-        .await;
-        let action = light
-            .begin_light_action(LightDimension::Color, rgb(0x00ff00), true)
-            .unwrap();
-        assert!(action.accepted().await.is_err());
-    }));
-}
-
-#[test]
-fn repaired_native_receipt_keeps_mode_and_ct_echoes_but_unmatched_mode_is_external() {
-    let rig = repair_rig(1, true);
-    let (release, gate) = flume::bounded::<()>(1);
-    rig.cloud
-        .lock()
-        .unwrap()
-        .write_gates
-        .insert("group-1".into(), gate);
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let peer = Rc::new(Peer::default());
-        peer.value("member-a", SHARED_BRIGHTNESS, json!(50));
-        peer.value("member-a", SHARED_TEMPERATURE, json!(2700));
-        peer.value("member-a", MEMBER_MODE, json!(1));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| control.context.active_notification("member-a") == Some(PathKind::Local))
-                .await;
-            let light = function(&control.context.registry, "group-1", "main");
+        block_on(rig.run(|c| async move {
+            repair_ready(&c).await;
+            let light = function(&c.context.registry, "group-1", "main");
+            assert_eq!(light.snapshot().power, Power::On);
             let action = light
-                .begin_light_action(
-                    LightDimension::Color,
-                    LightTarget {
-                        color: Some(LightColorTarget::Temperature(4200)),
-                        ..LightTarget::default()
-                    },
-                    false,
-                )
+                .begin_light_action(LightDimension::Color, rgb(0x00ff00), true)
                 .unwrap();
-            // Hold the native CT receipt; expectations are pending.
-            until(|| {
-                !group_writes(control, "group-1", 2, 3)
-                    .iter()
-                    .filter(|value| *value == &json!(4200))
-                    .collect::<Vec<_>>()
-                    .is_empty()
-            })
-            .await;
-            peer.notify_value("member-a", MEMBER_MODE, json!(0), false);
-            peer.notify_value("member-a", SHARED_TEMPERATURE, json!(4200), false);
-            for _ in 0..64 {
-                future::yield_now().await;
-            }
-            assert!(
-                light.light_action_current(action.token()),
-                "own mode/CT echoes before native ACK must not cancel"
+            assert_eq!(
+                action.accepted().await.is_ok(),
+                accepted,
+                "{powers:?} {failures:?}"
             );
-            release.send(()).unwrap();
-            action.accepted().await.unwrap();
-            // The accepted 3s window still owns the same mode/CT echoes.
-            peer.notify_value("member-a", MEMBER_MODE, json!(0), false);
-            for _ in 0..64 {
-                future::yield_now().await;
+            settle().await;
+            for (index, did) in ["member-a", "member-b"].into_iter().enumerate() {
+                assert_eq!(
+                    !member_writes(&c, did, 4, 1).is_empty(),
+                    powers[index] == Some(true)
+                );
+                assert!(member_writes(&c, did, 4, 2).is_empty());
+                assert!(member_writes(&c, did, 2, 1).is_empty());
+                if powers[index] != Some(true) {
+                    let work = c.context.live.borrow().devices[did].work.clone().unwrap();
+                    work.notify_value(
+                        crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                        &json!(true),
+                        false,
+                        false,
+                    );
+                }
             }
-            assert!(light.light_action_current(action.token()));
-            // An unmatched mode value remains an external operation.
-            peer.notify_value("member-a", MEMBER_MODE, json!(1), false);
-            until(|| !light.light_action_current(action.token())).await;
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn native_cloud_partial_retains_accepted_expectation_and_retires_rejected() {
-    let rig = repair_rig(0, true);
-    {
-        let mut cloud = rig.cloud.lock().unwrap();
-        cloud
-            .property_codes
-            .insert(("group-1".into(), 2, 1), -704_030_013);
+            settle().await;
+            for (index, did) in ["member-a", "member-b"].into_iter().enumerate() {
+                if powers[index] != Some(true) {
+                    assert!(
+                        member_writes(&c, did, 4, 1).is_empty(),
+                        "power recovery must not replay skipped RGB"
+                    );
+                }
+            }
+        }));
     }
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let peer = Rc::new(Peer::default());
-        peer.value("member-a", SHARED_BRIGHTNESS, json!(50));
-        peer.value("member-a", SHARED_TEMPERATURE, json!(2700));
-        peer.value("member-a", MEMBER_MODE, json!(0));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| control.context.active_notification("member-a") == Some(PathKind::Local))
-                .await;
-            let light = function(&control.context.registry, "group-1", "main");
-            // Power rejected, brightness accepted in one cloud native batch.
-            let denied = light
-                .begin_light_action(
-                    LightDimension::Brightness,
-                    LightTarget {
-                        power: Some(false),
-                        brightness_percent: Some(70.0),
-                        ..LightTarget::default()
-                    },
-                    true,
-                )
-                .unwrap();
-            assert!(denied.accepted().await.is_err());
-            // A later real fade: the accepted native brightness expectation
-            // must still own the encoded member echo.
-            let fade = light
-                .begin_light_action(LightDimension::Brightness, brightness(30.0), false)
-                .unwrap();
-            fade.accepted().await.unwrap();
-            peer.notify_value("member-a", SHARED_BRIGHTNESS, json!(70), false);
-            for _ in 0..96 {
-                future::yield_now().await;
-            }
-            assert!(
-                light.light_action_current(fade.token()),
-                "accepted cloud native property must keep its expectation"
-            );
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn native_only_group_cloud_partial_retains_accepted_echo_and_retires_rejected() {
-    let rig = Rig::lights(&[
-        ("member-a", "devcea.light.ls2307"),
-        ("member-c", "yeelink.light.light3"),
-    ]);
-    {
-        let mut cloud = rig.cloud.lock().unwrap();
-        let mut instance = group_instance();
-        instance["type"] = json!("urn:miot-spec-v2:device:light:0000A001:mijia-group3:5:0000C804");
-        cloud
-            .catalog_instances
-            .insert(instance["type"].as_str().unwrap().into(), instance);
-        cloud.catalog_instances.insert(
-            group_instance()["type"].as_str().unwrap().into(),
-            group_instance(),
-        );
-        cloud.catalog_groups.push(group_record(
-            "group-record-n",
-            "group-n",
-            &["member-a", "member-c"],
-            false,
-        ));
-        cloud
-            .online
-            .extend(["group-n", "member-a", "member-c"].map(str::to_string));
-        for did in ["group-n", "member-a", "member-c"] {
-            for (siid, piid, value) in [(2, 1, json!(true)), (2, 2, json!(50)), (2, 3, json!(2700))]
-            {
-                cloud.raw_values.insert((did.into(), siid, piid), value);
-            }
-        }
-        cloud
-            .property_codes
-            .insert(("group-n".into(), 2, 1), -704_030_013);
-    }
-    block_on(rig.run(|c| async move {
-        c.announce();
-        until(|| {
-            c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "group-n"))
-                .is_some()
-        })
-        .await;
-        let peer = Rc::new(Peer::default());
-        peer.value("member-a", SHARED_BRIGHTNESS, json!(50));
-        peer.value("member-a", SHARED_TEMPERATURE, json!(2700));
-        peer.value("member-a", MEMBER_MODE, json!(0));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| control.context.active_notification("member-a") == Some(PathKind::Local))
-                .await;
-            let light = function(&control.context.registry, "group-n", "main");
-            assert!(control.context.is_group("group-n"));
-            assert!(control.context.group_repair("group-n").is_none());
-            // Power rejected, brightness accepted in one ordinary cloud batch.
-            let denied = light
-                .begin_light_action(
-                    LightDimension::Brightness,
-                    LightTarget {
-                        power: Some(false),
-                        brightness_percent: Some(70.0),
-                        ..LightTarget::default()
-                    },
-                    true,
-                )
-                .unwrap();
-            assert!(denied.accepted().await.is_err());
-            let fade = light
-                .begin_light_action(LightDimension::Brightness, brightness(30.0), false)
-                .unwrap();
-            fade.accepted().await.unwrap();
-            peer.notify_value("member-a", SHARED_BRIGHTNESS, json!(70), false);
-            for _ in 0..96 {
-                future::yield_now().await;
-            }
-            assert!(
-                light.light_action_current(fade.token()),
-                "accepted ordinary native property must keep its expectation"
-            );
-            peer.notify_value("member-a", SHARED_BRIGHTNESS, json!(55), false);
-            until(|| !light.light_action_current(fade.token())).await;
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn repaired_native_transport_unknown_retains_submitted_expectation() {
-    let rig = repair_rig(0, true);
-    block_on(rig.run(|c| async move {
-        repair_ready(&c).await;
-        let peer = Rc::new(Peer::default());
-        peer.value("member-a", SHARED_BRIGHTNESS, json!(50));
-        peer.value("member-a", SHARED_TEMPERATURE, json!(2700));
-        peer.value("member-a", MEMBER_MODE, json!(0));
-        let control = &c;
-        c.peer(peer, |_peer| async move {
-            let light = function(&control.context.registry, "group-1", "main");
-            let gate = control.context.live.borrow().devices["member-a"]
-                .work
-                .as_ref()
-                .unwrap()
-                .light_write
-                .clone()
-                .unwrap();
-            // The transport provably submitted but the receipt is unknown.
-            control.cloud.lock().unwrap().property_status = 503;
-            let denied = light
-                .begin_light_action(
-                    LightDimension::Brightness,
-                    LightTarget {
-                        power: Some(true),
-                        brightness_percent: Some(70.0),
-                        ..LightTarget::default()
-                    },
-                    true,
-                )
-                .unwrap();
-            assert!(denied.accepted().await.is_err());
-            assert!(
-                gate.is_feedback(SHARED_BRIGHTNESS, &json!(70)),
-                "unknown-submitted property must keep its exact bounded expectation"
-            );
-            assert!(!gate.is_feedback(SHARED_BRIGHTNESS, &json!(55)));
-            control.clock.advance(Duration::from_secs(4));
-            assert!(
-                !gate.is_feedback(SHARED_BRIGHTNESS, &json!(70)),
-                "the bounded window must expire"
-            );
-        })
-        .await;
-    }));
 }

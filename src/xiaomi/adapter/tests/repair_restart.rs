@@ -85,6 +85,12 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         let applying = apply_restored(&publication);
         let testing = async {
             until(|| group.availability() == Availability::Available).await;
+            until(|| {
+                ["member-a", "member-b"]
+                    .iter()
+                    .all(|did| function(&registry, did, "main").snapshot().power == Power::On)
+            })
+            .await;
             let target = Rgb {
                 red: 19,
                 green: 122,

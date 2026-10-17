@@ -480,8 +480,13 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
                 let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
-                work.notify_value(PropertyBinding { siid: 4, piid: 2 }, &json!(0), true);
-                work.notify_value(PropertyBinding { siid: 2, piid: 1 }, &json!(false), true);
+                work.notify_value(PropertyBinding { siid: 4, piid: 2 }, &json!(0), true, true);
+                work.notify_value(
+                    PropertyBinding { siid: 2, piid: 1 },
+                    &json!(false),
+                    true,
+                    true,
+                );
                 assert!(light.light_action_current(action.token()));
                 wire.allow(usize::MAX);
                 until(|| !wire.written.borrow().is_empty()).await;
@@ -509,8 +514,11 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
                 }));
                 action.accepted().await.unwrap();
                 let snapshot = light.snapshot();
-                assert_eq!(snapshot.power, Power::On);
-                assert_eq!(snapshot.lighting.unwrap().mode, Some(LightMode::Rgb));
+                assert_eq!(snapshot.power, Power::Off);
+                assert_eq!(
+                    snapshot.lighting.unwrap().mode,
+                    Some(LightMode::Temperature)
+                );
             },
         )
         .await;
@@ -586,10 +594,7 @@ fn latest_tick_withdraws_unsent_transport_frame_and_preserves_linked_power() {
                 wire.reply(json!({"result":result}));
                 action.accepted().await.unwrap();
                 action.ended().await.unwrap();
-                assert_eq!(
-                    light.snapshot().power,
-                    if power == Some(false) { Power::Off } else { Power::On }
-                );
+                assert_eq!(light.snapshot().power, Power::Off);
             };
             future::or(driving, commanding).await;
         }));
@@ -668,7 +673,12 @@ fn an_unsent_light_target_is_not_own_feedback() {
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
                 let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
-                work.notify_value(PropertyBinding { siid: 2, piid: 2 }, &json!(60), false);
+                work.notify_value(
+                    PropertyBinding { siid: 2, piid: 2 },
+                    &json!(60),
+                    false,
+                    true,
+                );
                 assert!(!light.light_action_current(action.token()));
                 assert_eq!(action.ended().await.unwrap_err(), CommandError::Superseded);
                 assert_eq!(
