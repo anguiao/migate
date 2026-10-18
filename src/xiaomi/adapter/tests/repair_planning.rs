@@ -117,14 +117,33 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
                 .native_confirmed = Some(cached);
         };
         set_range(3000, 6400);
-        let prepared = c.publication.prepare().unwrap().unwrap();
         let db = rusqlite::Connection::open(c.store.path()).unwrap();
+        let subscription_key = rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START;
+        c.store.matter().put(subscription_key, &[1, 2, 3]).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fail_subscription_delete BEFORE DELETE ON blobs
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .unwrap();
+        let prepared = c.publication.prepare().unwrap().unwrap();
+        assert!(c.publication.apply(prepared).is_err());
+        assert!(c.publication.failure().is_some());
+        assert!(c.store.matter().contains(subscription_key).unwrap());
+        assert_eq!(
+            c.store.devices().load_published(&key).unwrap().unwrap(),
+            before
+        );
+        db.execute_batch("DROP TRIGGER fail_subscription_delete")
+            .unwrap();
+
         db.execute_batch(
             "CREATE TRIGGER fail_config BEFORE INSERT ON device_cache
              BEGIN SELECT RAISE(ABORT, 'injected'); END;",
         )
         .unwrap();
+        let prepared = c.publication.prepare().unwrap().unwrap();
         assert!(c.publication.apply(prepared).is_err());
+        assert!(!c.store.matter().contains(subscription_key).unwrap());
         assert_eq!(
             c.store.devices().load_published(&key).unwrap().unwrap(),
             before,

@@ -2,9 +2,21 @@ use crate::storage::{MatterStore, StorageError};
 use event_listener::Event;
 use rs_matter::{
     error::{Error, ErrorCode},
-    persist::KvBlobStore,
+    im::subscriptions::DEFAULT_MAX_SUBSCRIPTIONS,
+    persist::{KvBlobStore, PERSISTENT_SUBSCRIPTIONS_START},
 };
 use std::{cell::RefCell, rc::Rc};
+
+/// Forget the subscription slots used by EthInteractionModelState before
+/// committing a configuration that replaces the stopped Matter instance.
+/// Clearing first also prevents a process restart from resuming the old set
+/// against the new configuration. All other protocol records stay intact.
+pub(crate) fn discard_subscriptions(store: &MatterStore) -> Result<(), StorageError> {
+    for slot in 0..DEFAULT_MAX_SUBSCRIPTIONS {
+        store.delete(PERSISTENT_SUBSCRIPTIONS_START + slot as u16)?;
+    }
+    Ok(())
+}
 
 /// Adapt protocol callbacks while preserving the first storage failure for the runtime.
 #[derive(Clone)]

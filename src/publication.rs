@@ -327,7 +327,13 @@ impl Publication {
     }
 
     pub(crate) fn apply(&self, prepared: Prepared) -> Result<(), StorageError> {
-        if let Err(error) = self.store.devices().apply_publication(&prepared.commit) {
+        let result = (|| {
+            if prepared.rebuild {
+                crate::matter::discard_subscriptions(&self.store.matter())?;
+            }
+            self.store.devices().apply_publication(&prepared.commit)
+        })();
+        if let Err(error) = result {
             *self.failure.borrow_mut() = Some(error.to_string());
             return Err(error);
         }

@@ -61,7 +61,14 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
             !prepared.rebuild,
             "restoring the same fixed configuration needs no rebuild"
         );
+        let subscription_key = rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START;
+        c.store.matter().put(subscription_key, &[1, 2, 3]).unwrap();
         publication.apply(prepared).unwrap();
+        assert_eq!(
+            c.store.matter().get(subscription_key).unwrap(),
+            Some(vec![1, 2, 3]),
+            "restoring an unchanged configuration must retain saved subscriptions"
+        );
         assert!(context.group_repair("group-1").is_some());
         let after = c.store.devices().load_publication(Some(&scope)).unwrap();
         assert_eq!(after.root_version, before.root_version);

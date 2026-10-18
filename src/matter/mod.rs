@@ -10,6 +10,7 @@ mod storage;
 pub(crate) use bridge::Advertisement;
 pub use bridge::Bridge;
 pub use pairing::PairingEvent;
+pub(crate) use storage::discard_subscriptions;
 
 /// Shared canonical fixed-shape comparison consumed by publication next.
 pub(crate) use shape::same_fixed_description;

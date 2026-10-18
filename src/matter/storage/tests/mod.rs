@@ -22,6 +22,38 @@ fn raw_blob_roundtrip_and_removal() {
 }
 
 #[test]
+fn discarding_subscriptions_preserves_other_protocol_records() {
+    use rs_matter::persist::{BASIC_INFO_KEY, BINDINGS_KEY, EVENT_EPOCH_KEY, FABRIC_KEYS_START};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap().matter();
+    let retained = [
+        FABRIC_KEYS_START + 1,
+        BASIC_INFO_KEY,
+        EVENT_EPOCH_KEY,
+        BINDINGS_KEY,
+    ];
+    for key in retained {
+        store.put(key, &[1, 2, 3]).unwrap();
+    }
+    for slot in 0..DEFAULT_MAX_SUBSCRIPTIONS {
+        store
+            .put(PERSISTENT_SUBSCRIPTIONS_START + slot as u16, &[4, 5, 6])
+            .unwrap();
+    }
+    discard_subscriptions(&store).unwrap();
+    for slot in 0..DEFAULT_MAX_SUBSCRIPTIONS {
+        assert!(
+            !store
+                .contains(PERSISTENT_SUBSCRIPTIONS_START + slot as u16)
+                .unwrap()
+        );
+    }
+    for key in retained {
+        assert_eq!(store.get(key).unwrap(), Some(vec![1, 2, 3]));
+    }
+}
+
+#[test]
 fn database_failures_reach_fatal_watcher() {
     for (operation, context) in [
         ("load", "read Matter data for key 1"),
