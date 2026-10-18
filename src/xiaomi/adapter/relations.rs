@@ -105,12 +105,19 @@ impl Relations {
                 confirmations.insert(membership.group_did.clone(), (membership.clone(), device));
             }
         }
+        let retain_previous = |group: &ConfirmedGroup| {
+            present_records.contains(&group.record_did)
+                && group.scope.uid == scope.uid
+                && group.scope.home_id == scope.home_id
+        };
         let mut errors = Vec::new();
         let nested: BTreeSet<String> = confirmations
             .iter()
             .filter(|(_, (membership, _))| {
                 membership.members.iter().any(|member| {
-                    confirmations.contains_key(member) && member != &membership.group_did
+                    member != &membership.group_did
+                        && (confirmations.contains_key(member)
+                            || self.groups.get(member).is_some_and(retain_previous))
                 })
             })
             .map(|(did, _)| did.clone())
@@ -216,10 +223,7 @@ impl Relations {
             if confirmations.contains_key(group_did) {
                 continue;
             }
-            if present_records.contains(&group.record_did)
-                && group.scope.uid == scope.uid
-                && group.scope.home_id == scope.home_id
-            {
+            if retain_previous(group) {
                 let reason = "group membership is missing or invalid for a present record";
                 // Membership confirmation failed, but a present record's own
                 // trusted access metadata still updates; the confirmed member

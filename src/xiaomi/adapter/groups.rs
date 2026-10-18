@@ -109,6 +109,10 @@ impl Context {
                     )
                 });
                 slot.confirmed = true;
+                // Retained relations with a read error cannot restore revoked access.
+                if group.error.is_none() {
+                    slot.cloud_forbidden = false;
+                }
                 slot.group = Some(GroupSource {
                     record_did: group.record_did.clone(),
                     model: group.model.clone(),

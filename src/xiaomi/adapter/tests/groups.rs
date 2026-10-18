@@ -4,6 +4,45 @@ use std::cell::Cell;
 use super::repair::group_record;
 
 #[test]
+fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
+    let rig = super::repair::repair_rig(1, true);
+    block_on(rig.run(|c| async move {
+        super::repair::repair_ready(&c).await;
+        c.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let light = function(&c.context.registry, "group-1", "main");
+        c.cloud.lock().unwrap().property_code = -704_012_904;
+        assert!(light.execute(Command::Off).await.is_err());
+        assert!(matches!(
+            light.snapshot().availability,
+            Availability::Unavailable(_)
+        ));
+
+        // A failed membership read retains the group but cannot restore access.
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.property_code = 0;
+            cloud.catalog_groups[0]["extra"]["member_list"]["status"] = json!("invalid");
+        }
+        c.context.request_sync();
+        until(|| c.context.relations.borrow().snapshot()[0].error.is_some()).await;
+        assert!(matches!(
+            light.execute(Command::Off).await,
+            Err(crate::device::CommandError::Unavailable(_))
+        ));
+        assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 1);
+
+        c.cloud.lock().unwrap().catalog_groups[0]["extra"]["member_list"]["status"] = json!("1");
+        c.context.request_sync();
+        until(|| c.context.relations.borrow().snapshot()[0].error.is_none()).await;
+        assert_eq!(light.snapshot().availability, Availability::Available);
+        light.execute(Command::Off).await.unwrap();
+        assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 2);
+    }));
+}
+
+#[test]
 fn native_group_publication_preserves_complete_configuration_on_storage_failure() {
     let rig = Rig::new(false, &["one"]);
     let instance: Value = serde_json::from_str(include_str!(

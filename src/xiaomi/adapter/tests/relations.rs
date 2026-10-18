@@ -194,28 +194,34 @@ fn first_time_empty_relation_cannot_establish_scope() {
 #[test]
 fn nested_group_members_produce_a_diagnostic_without_hiding() {
     let mut relations = Relations::default();
-    let update = relations.apply(
-        &catalog(vec![
-            device(
-                "outer",
-                CloudGroupStatus::Confirmed(membership("outer", &["inner"], false)),
-            ),
-            device(
-                "inner",
-                CloudGroupStatus::Confirmed(membership("inner", &["member-2"], false)),
-            ),
-        ]),
-        &scope(),
-        &home(&["member-2"]),
+    let outer = device(
+        "outer",
+        CloudGroupStatus::Confirmed(membership("outer", &["inner", "member-3"], false)),
     );
-    let active = update
-        .active
-        .iter()
-        .map(|group| group.membership.group_did.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(active, ["inner"]);
-    assert_eq!(update.errors.len(), 1);
-    assert_eq!(update.errors[0].0, "outer");
+    let members = home(&["member-2", "member-3"]);
+    // A failed read must still identify the retained relation as a group.
+    for inner in [
+        CloudGroupStatus::Confirmed(membership("inner", &["member-2"], false)),
+        CloudGroupStatus::Failed,
+    ] {
+        let update = relations.apply(
+            &catalog(vec![outer.clone(), device("inner-record", inner)]),
+            &scope(),
+            &members,
+        );
+        assert_eq!(update.active.len(), 1);
+        assert_eq!(update.active[0].membership.group_did, "inner");
+        assert!(update.errors.iter().any(|(did, reason)| {
+            did == "outer" && reason == "nested group members are not supported"
+        }));
+    }
+    // Once the complete directory removes the inner group, its old identity
+    // must not keep rejecting an otherwise valid relation with an unknown member.
+    let update = relations.apply(&catalog(vec![outer]), &scope(), &members);
+    assert_eq!(update.active.len(), 1);
+    assert_eq!(update.active[0].membership.group_did, "outer");
+    assert_eq!(update.withdrawn, ["inner"]);
+    assert!(update.errors.is_empty());
 }
 
 #[test]
