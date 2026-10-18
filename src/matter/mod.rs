@@ -7,6 +7,7 @@ mod pairing;
 mod shape;
 mod storage;
 
+pub(crate) use bridge::Advertisement;
 pub use bridge::Bridge;
 pub use pairing::PairingEvent;
 

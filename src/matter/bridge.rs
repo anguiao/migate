@@ -26,6 +26,35 @@ use std::{net::UdpSocket, time::Duration};
 
 const WINDOW_SECONDS: u16 = 900;
 
+#[cfg(test)]
+#[path = "tests/bridge.rs"]
+mod tests;
+
+/// Service registrations belong to the bridge, not one frozen Matter instance.
+pub(crate) struct Advertisement {
+    mdns: AstroMdns,
+    port: u16,
+}
+impl Advertisement {
+    pub(crate) fn new(port: u16) -> Self {
+        Self {
+            mdns: AstroMdns::new(),
+            port,
+        }
+    }
+
+    fn bind(&mut self) -> Result<async_io::Async<UdpSocket>, RuntimeError> {
+        let mut address = MATTER_SOCKET_BIND_ADDR;
+        address.set_port(self.port);
+        let socket = async_io::Async::<UdpSocket>::bind(address)
+            .map_err(|error| format!("Failed to bind Matter UDP port {}: {error}", self.port))?;
+        // A dynamically chosen port must remain valid for the retained mDNS
+        // registrations. Each instance still owns and releases its socket.
+        self.port = socket.get_ref().local_addr()?.port();
+        Ok(socket)
+    }
+}
+
 /// One frozen Matter instance and storage failures that outlive its run future.
 pub struct Bridge<'a> {
     storage: Store,
@@ -60,14 +89,20 @@ impl<'a> Bridge<'a> {
         port: u16,
         report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
     ) -> Result<(), RuntimeError> {
+        self.run_with_advertisement(&mut Advertisement::new(port), report_pairing)
+            .await
+    }
+
+    pub(crate) async fn run_with_advertisement(
+        &self,
+        advertisement: &mut Advertisement,
+        report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
+    ) -> Result<(), RuntimeError> {
         self.check_failure()?;
         let (frozen, root_version) = self.frozen.clone()?;
         let store = &self.store;
-        let mut bind_addr = MATTER_SOCKET_BIND_ADDR;
-        bind_addr.set_port(port);
-        let socket = async_io::Async::<UdpSocket>::bind(bind_addr)
-            .map_err(|e| format!("Failed to bind Matter UDP port {port}: {e}"))?;
-        let bound_port = socket.get_ref().local_addr()?.port();
+        let socket = advertisement.bind()?;
+        let bound_port = advertisement.port;
         let info = basic_info(self.identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, bound_port);
         let kv = matter.kv(store.clone());
@@ -117,7 +152,8 @@ impl<'a> Bridge<'a> {
                 .map_err(|e| format!("Matter transport task failed: {e}").into())
         };
         let mdns = async {
-            AstroMdns::new()
+            advertisement
+                .mdns
                 .run(&matter)
                 .await
                 .map_err(|e| format!("mDNS service failed: {e}").into())

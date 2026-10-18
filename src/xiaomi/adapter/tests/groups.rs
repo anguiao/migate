@@ -1083,6 +1083,19 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         let group_before = store.devices().load_published(&group).unwrap().unwrap();
         let group_physical = c.publication.current().published.get(&group).unwrap();
 
+        // Recovery requires the hidden member's own description to be saved;
+        // its admission may lag the group's native publication.
+        until(|| {
+            store
+                .devices()
+                .load_publication(None)
+                .unwrap()
+                .records
+                .iter()
+                .any(|record| record.key == one)
+        })
+        .await;
+
         // The real complete-catalog deletion closes the retained authority and
         // writes its tombstone while the identity update keeps failing.
         let db = rusqlite::Connection::open(store.path()).unwrap();

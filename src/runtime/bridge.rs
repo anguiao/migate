@@ -1,7 +1,7 @@
 use crate::{
     RuntimeError,
     device::DeviceRegistry,
-    matter::{Bridge, PairingEvent},
+    matter::{Advertisement, Bridge, PairingEvent},
     publication::Publication,
     storage::{Identity, Store},
     terminal::{self, AuthStatus},
@@ -90,6 +90,10 @@ pub(super) async fn run_lifecycle(
     });
     let mut retry_at = None;
     let mut retry_delay = Duration::from_secs(1);
+    // Keep unchanged mDNS registrations while replacing the protocol instance.
+    // astro-dnssd unregisters asynchronously, so immediate re-registration of
+    // the same name can otherwise overlap its previous registration.
+    let mut advertisement = Advertisement::new(options.port);
     loop {
         let effective = publication
             .as_ref()
@@ -102,7 +106,7 @@ pub(super) async fn run_lifecycle(
             options.store,
             options.identity,
         );
-        let mut runner = Box::pin(bridge.run(options.port, &pairing));
+        let mut runner = Box::pin(bridge.run_with_advertisement(&mut advertisement, &pairing));
         loop {
             let changed = async {
                 match &publication {
