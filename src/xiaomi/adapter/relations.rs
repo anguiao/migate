@@ -8,7 +8,6 @@
 //! outer record DID used to fetch details.
 
 use crate::{
-    device::DeviceKey,
     storage::CachedScope,
     xiaomi::cloud::{
         CloudCatalogDevice, CloudDeviceCatalog, CloudGroupMembership, CloudGroupStatus,
@@ -266,22 +265,5 @@ impl Relations {
             .filter(|group| group.active)
             .map(|group| group.membership.group_did.clone())
             .collect()
-    }
-
-    /// Raw member observers for virtual groups only, keyed by member DID.
-    pub(super) fn member_watches(&self) -> BTreeMap<String, BTreeSet<DeviceKey>> {
-        let mut watches = BTreeMap::new();
-        for group in self.groups.values().filter(|group| group.active) {
-            if group.membership.is_physical {
-                continue;
-            }
-            for member in &group.membership.members {
-                watches
-                    .entry(member.clone())
-                    .or_insert_with(BTreeSet::new)
-                    .insert(DeviceKey::new("xiaomi", group.membership.group_did.clone()));
-            }
-        }
-        watches
     }
 }

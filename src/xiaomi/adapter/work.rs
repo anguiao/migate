@@ -98,7 +98,7 @@ pub(super) struct DeviceWork {
     pub(super) refresh_pending: RefCell<VecDeque<Refresh>>,
     pub(super) refresh_inflight: RefCell<BTreeMap<super::lighting::PropertyKey, Rc<ReadFlight>>>,
     /// Reads that must be repeated after the current in-flight read completes.
-    /// A dirty member event sets this instead of invalidating the current read.
+    /// Write feedback uses this to coalesce a follow-up read.
     pub(super) dirty_again: RefCell<BTreeSet<super::lighting::PropertyKey>>,
     pub(super) refresh_changed: Rc<Event>,
     pub(super) light_frames: RefCell<LightFrames>,
@@ -112,7 +112,7 @@ impl DeviceWork {
         refresh_changed: Rc<Event>,
         light_write: Option<Rc<LightWriteGate>>,
     ) -> Self {
-        let work = Self {
+        Self {
             life: Lifetime::default(),
             observations: Observations::default(),
             light_write,
@@ -137,9 +137,7 @@ impl DeviceWork {
             changed: Event::new(),
             subscribe_problem: RefCell::new(None),
             read_problems: RefCell::new(BTreeMap::new()),
-        };
-        work.refresh();
-        work
+        }
     }
     pub(super) fn local_connected(&self) {
         self.local_disconnected();
@@ -266,30 +264,6 @@ impl DeviceWork {
             });
         }
         self.refresh_changed.notify(usize::MAX);
-    }
-    /// A member event marks the group dirty. Changes arriving while a read is
-    /// in flight are coalesced into exactly one follow-up read; the current
-    /// read is never repeatedly invalidated by an event stream.
-    pub(super) fn request_member_read(&self) {
-        if self.life.is_closed() {
-            return;
-        }
-        let pairs = self
-            .record
-            .cached
-            .borrow()
-            .device
-            .functions
-            .iter()
-            .flat_map(|function| {
-                super::lighting::bindings(function)
-                    .into_iter()
-                    .map(|binding| (function.description.id.clone(), binding))
-            })
-            .collect::<Vec<_>>();
-        for (id, binding) in pairs {
-            self.request_dirty_read(&id, binding);
-        }
     }
     /// Queue one real read for a binding without dropping an in-flight read:
     /// a demand arriving during a read coalesces into exactly one follow-up.
@@ -426,17 +400,7 @@ impl DeviceWork {
             return;
         }
         let blocked = context.live.borrow().devices[did].blocked.clone();
-        // Group diagnostics derive from the actual per-DID watch state map, so
-        // one member's success cannot hide another member's failure.
-        let watch = context
-            .is_group(did)
-            .then(|| context.watch_problem(did))
-            .flatten();
-        let values = watch
-            .into_iter()
-            .chain(self.diagnostic())
-            .collect::<Vec<_>>();
-        let problem = blocked.or_else(|| (!values.is_empty()).then(|| values.join("; ")));
+        let problem = blocked.or_else(|| self.diagnostic());
         context.problem(did, problem);
     }
     pub(super) fn problem(

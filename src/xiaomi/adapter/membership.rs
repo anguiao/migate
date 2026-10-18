@@ -157,7 +157,7 @@ impl Context {
         }
         self.changed.notify(usize::MAX);
         self.unavailable_device(did, reason.clone());
-        self.refresh_repair_groups(did);
+        self.refresh_group_states(did);
         self.problem(did, Some(reason));
     }
     pub(super) fn remove(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {

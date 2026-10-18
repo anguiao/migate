@@ -281,3 +281,28 @@ fn removal_and_disconnect_cancel_pending_rounds_and_property_backoff() {
         }));
     }
 }
+
+#[test]
+fn dirty_again_produces_exactly_one_follow_up_read() {
+    let cached = cached("uid", "member", false);
+    let (physical, _receivers) =
+        crate::device::PhysicalDevice::new(cached.physical_description("member"));
+    let record = Rc::new(super::super::state::DeviceRecord {
+        life: super::super::state::Lifetime::default(),
+        binding_generation: std::cell::Cell::new(0),
+        cached: RefCell::new(cached),
+        physical,
+    });
+    let work = super::super::work::DeviceWork::new(record, Rc::new(Event::new()), None);
+    let id = "main";
+    let binding = crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 };
+    let key = super::super::lighting::key(id, binding);
+    work.refresh_pending.borrow_mut().clear();
+    work.dirty_again.borrow_mut().insert(key.clone());
+    work.finish_dirty_read(id, binding);
+    assert!(!work.dirty_again.borrow().contains(&key));
+    assert_eq!(work.refresh_pending.borrow().len(), 1);
+    // A second completion without another dirty event must not queue again.
+    work.finish_dirty_read(id, binding);
+    assert_eq!(work.refresh_pending.borrow().len(), 1);
+}

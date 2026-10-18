@@ -43,7 +43,7 @@ fn catalog(devices: Vec<CloudCatalogDevice>) -> CloudDeviceCatalog {
 }
 
 #[test]
-fn confirmed_group_is_active_and_virtual_members_are_watched() {
+fn confirmed_group_is_active_and_preserves_members() {
     let mut relations = Relations::default();
     let update = relations.apply(
         &catalog(vec![device(
@@ -56,15 +56,11 @@ fn confirmed_group_is_active_and_virtual_members_are_watched() {
     assert_eq!(update.active.len(), 1);
     assert!(update.withdrawn.is_empty());
     assert_eq!(update.active[0].record_did, "group-1");
-    let watches = relations.member_watches();
-    assert_eq!(watches.len(), 2);
     assert_eq!(
-        watches["member-2"]
-            .iter()
-            .map(|key| key.id.as_str())
-            .collect::<Vec<_>>(),
-        ["group-1"]
+        update.active[0].membership.members,
+        ["member-2", "member-3"]
     );
+    assert!(!update.active[0].membership.is_physical);
 }
 
 #[test]
@@ -114,7 +110,6 @@ fn confirmed_empty_withdraws_while_the_record_remains_reserved() {
     assert!(update.active.is_empty());
     assert_eq!(update.withdrawn, ["group-1"]);
     assert!(update.errors.is_empty(), "empty is not a parse failure");
-    assert!(relations.member_watches().is_empty());
     // The reserved record is still associated with its outer DID, so a later
     // present-but-invalid record is not mistaken for an absent group.
     let update = relations.apply(
@@ -170,20 +165,6 @@ fn out_of_home_members_are_inactive_and_authorship_did_may_differ() {
     assert_eq!(update.active.len(), 1);
     assert_eq!(update.active[0].record_did, "outer-record-2");
     assert!(update.withdrawn.is_empty());
-}
-
-#[test]
-fn physical_groups_do_not_create_member_watches() {
-    let mut relations = Relations::default();
-    relations.apply(
-        &catalog(vec![device(
-            "group-1",
-            CloudGroupStatus::Confirmed(membership("group-1", &["member-2", "member-3"], true)),
-        )]),
-        &scope(),
-        &home(&["member-2", "member-3"]),
-    );
-    assert!(relations.member_watches().is_empty());
 }
 
 #[test]

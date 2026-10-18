@@ -152,6 +152,59 @@ fn refresh_after_write(
             return;
         }
         let light = function.lighting.as_ref().unwrap();
+        if context.is_virtual_group(&work.record.physical.key().id) {
+            let written = |property| properties.iter().any(|(binding, _)| *binding == property);
+            let power = written(function.power);
+            let brightness = light
+                .brightness
+                .is_some_and(|binding| written(binding.property));
+            let temperature = light
+                .temperature
+                .is_some_and(|binding| written(binding.property));
+            let color = light.color.is_some_and(|binding| written(binding.property));
+            for member in context.group_member_work(&work.record.physical.key().id) {
+                let cached = member.record.cached.borrow();
+                let function = cached
+                    .device
+                    .functions
+                    .iter()
+                    .find(|function| function.description.id == "main")
+                    .unwrap();
+                let light = function.lighting.as_ref().unwrap();
+                // Power can restore the member's remembered settings. Other
+                // writes refresh the affected value and its actual mode.
+                let bindings = if power {
+                    super::super::lighting::bindings(function)
+                } else {
+                    [
+                        light
+                            .brightness
+                            .filter(|_| brightness)
+                            .map(|binding| binding.property),
+                        light
+                            .temperature
+                            .filter(|_| temperature)
+                            .map(|binding| binding.property),
+                        light
+                            .color
+                            .filter(|_| color)
+                            .map(|binding| binding.property),
+                        light
+                            .mode
+                            .filter(|_| temperature || color)
+                            .map(|binding| binding.property),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect()
+                };
+                for binding in bindings {
+                    member.observations.invalidate_write("main", binding);
+                    member.request_dirty_read("main", binding);
+                }
+            }
+            return;
+        }
         let color_written = [light.color, light.temperature]
             .into_iter()
             .flatten()
@@ -564,7 +617,9 @@ pub(super) async fn send(
                 request = pending.borrow_mut().take().unwrap();
             }
             BatchAttempt::Settled(receipt) => {
-                if matches!(target.color, Some(LightColorTarget::Temperature(_))) {
+                if !context.is_virtual_group(&did)
+                    && matches!(target.color, Some(LightColorTarget::Temperature(_)))
+                {
                     repair::refresh_native_color_mode(&context, &did);
                 }
                 let request = pending.borrow_mut().take().unwrap();

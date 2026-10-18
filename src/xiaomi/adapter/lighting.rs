@@ -2,7 +2,7 @@ use super::{state::Context, work::DeviceWork};
 use crate::{
     device::{
         Availability, Capability, CommandError, LightColorTarget, LightDimension, LightMode,
-        LightPatch, LightTarget, Rgb,
+        LightPatch, LightSnapshot, LightTarget, Power, Rgb,
     },
     xiaomi::capability::{CapabilityError, ParsedFunction, PropertyBinding},
 };
@@ -393,50 +393,72 @@ impl Context {
         }
     }
 
-    /// Recompute a source group's repaired state and groups sharing this source
+    pub(super) fn is_virtual_group(&self, did: &str) -> bool {
+        self.live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.effective_group.as_ref())
+            .is_some_and(|group| !group.is_physical)
+    }
+
+    /// Recompute a source group's state and groups sharing this source
     /// after an observation or availability change.
-    pub(super) fn refresh_repair_groups(&self, member_did: &str) {
+    pub(super) fn refresh_group_states(&self, member_did: &str) {
         let groups = {
             let live = self.live.borrow();
             live.devices
                 .iter()
                 .filter(|(did, slot)| {
-                    slot.effective_repair.is_some()
-                        && (*did == member_did
-                            || slot.effective_group.as_ref().is_some_and(|group| {
-                                group.members.iter().any(|member| member == member_did)
-                            }))
+                    slot.effective_group.as_ref().is_some_and(|group| {
+                        (!group.is_physical || slot.effective_repair.is_some())
+                            && (*did == member_did
+                                || group.members.iter().any(|member| member == member_did))
+                    })
                 })
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
         };
         for did in groups {
-            self.refresh_repair_group(&did);
+            self.refresh_group_state(&did);
         }
     }
 
-    /// Replace RGB and mode together from one current member snapshot.
-    pub(super) fn refresh_repair_group(&self, group_did: &str) {
+    /// Derive virtual state from members; physical groups only repair RGB/mode.
+    pub(super) fn refresh_group_state(&self, group_did: &str) {
         let live = self.live.borrow();
         let Some(slot) = live.devices.get(group_did) else {
             return;
         };
-        let Some(plan) = &slot.effective_repair else {
+        let Some(group) = &slot.effective_group else {
             return;
         };
+        if group.is_physical && slot.effective_repair.is_none() {
+            return;
+        }
         let Some(record) = &slot.admitted else {
             return;
         };
         let function = record.physical.function("main").unwrap();
+        let mut state = LightSnapshot {
+            brightness_percent: None,
+            temperature_kelvin: None,
+            color: None,
+            mode: None,
+        };
         if record.life.is_closed() || record.physical.availability() != Availability::Available {
-            function.replace_light_color(None, None);
+            if group.is_physical {
+                function.replace_light_color(None, None);
+            } else {
+                function.replace_light_state(Power::Unknown, state);
+            }
             return;
         }
-        let representative = plan
+        let members = group
             .members
             .iter()
-            .filter_map(|key| {
-                let slot = live.devices.get(&key.id)?;
+            .filter_map(|did| {
+                let slot = live.devices.get(did)?;
                 let record = slot.admitted.as_ref()?;
                 if record.life.is_closed()
                     || record.physical.availability() != Availability::Available
@@ -444,19 +466,69 @@ impl Context {
                 {
                     return None;
                 }
-                let snapshot = record.physical.function("main").unwrap().snapshot();
-                let light = snapshot.lighting.unwrap();
+                let function = record.physical.function("main")?;
+                let snapshot = function.snapshot();
+                let light = snapshot.lighting?;
+                let color = function.description().temperature_range().is_some()
+                    || function.description().has_capability(Capability::ColorRgb);
+                Some((did, snapshot.power, light, color))
+            })
+            .collect::<Vec<_>>();
+        let description = function.description();
+        let representative = members
+            .iter()
+            .filter(|(_, _, _, color)| *color)
+            .map(|(did, power, light, _)| {
+                let mut light = *light;
+                light.temperature_kelvin = light.temperature_kelvin.filter(|value| {
+                    description
+                        .temperature_range()
+                        .is_some_and(|range| range.contains(*value))
+                });
+                if !description.has_capability(Capability::ColorRgb) {
+                    light.color = None;
+                }
+                light.mode = light.mode.filter(|mode| match mode {
+                    LightMode::Temperature => description.temperature_range().is_some(),
+                    LightMode::Rgb => description.has_capability(Capability::ColorRgb),
+                });
                 let valid = match light.mode {
                     Some(LightMode::Temperature) => light.temperature_kelvin.is_some(),
                     Some(LightMode::Rgb) => light.color.is_some(),
                     None => false,
                 };
-                let priority = valid && snapshot.power.value() == Some(true);
-                Some((!priority, &key.id, light))
+                let priority = valid && *power == Power::On;
+                (!priority, did, light)
             })
             .min_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
             .map(|(_, _, light)| light);
-        let (color, mode) = representative.map_or((None, None), |light| (light.color, light.mode));
-        function.replace_light_color(color, mode);
+        if let Some(light) = representative {
+            state.temperature_kelvin = light.temperature_kelvin;
+            state.color = light.color;
+            state.mode = light.mode;
+        }
+        if group.is_physical {
+            function.replace_light_color(state.color, state.mode);
+            return;
+        }
+        let power = if members.iter().any(|(_, power, _, _)| *power == Power::On) {
+            Power::On
+        } else if members.len() == group.members.len()
+            && members.iter().all(|(_, power, _, _)| *power == Power::Off)
+        {
+            Power::Off
+        } else {
+            Power::Unknown
+        };
+        if description.has_capability(Capability::Brightness) && power != Power::Unknown {
+            let values = members
+                .iter()
+                .filter(|(_, member_power, _, _)| *member_power == power)
+                .filter_map(|(_, _, light, _)| light.brightness_percent);
+            let (sum, count) =
+                values.fold((0.0, 0), |(sum, count), value| (sum + value, count + 1));
+            state.brightness_percent = (count > 0).then(|| sum / f64::from(count));
+        }
+        function.replace_light_state(power, state);
     }
 }

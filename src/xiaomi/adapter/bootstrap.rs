@@ -155,7 +155,6 @@ impl XiaomiAdapter {
         let context = Rc::new(Context {
             commands: Rc::new(super::commands::Commands::default()),
             light_writes: super::commands::LightWriteGates::default(),
-            watches: RefCell::new(super::watch::Watches::default()),
             relations: RefCell::new(relations),
             notifications: RefCell::new(None),
             credentials_changed: Event::new(),

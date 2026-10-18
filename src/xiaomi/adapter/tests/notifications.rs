@@ -1644,183 +1644,35 @@ fn notification_after_write_preserves_state_and_advances_the_channel_fifo() {
     }));
 }
 
-fn raw_group_record(record_did: &str, group_did: &str, members: &[&str]) -> Value {
-    let member_ship = members
-        .iter()
-        .map(|did| ((*did).to_string(), json!("1")))
-        .collect::<serde_json::Map<_, _>>();
-    json!({
-        "did": record_did,
-        "name": "Native group",
-        "model": "mijia.light.group3",
-        "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
-        "isOnline": true,
-        "extra": {
-            "member_list": {
-                "group_did": group_did,
-                "status": "1",
-                "display_member_switch": 0,
-                "member_ship": member_ship,
-                "is_physical": false
-            }
-        }
-    })
-}
-
 #[test]
-fn virtual_group_member_raw_event_reads_own_properties_with_one_followup() {
-    let rig = Rig::new(false, &["one"]);
-    let instance: Value = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/group3-instance.json"
-    ))
-    .unwrap();
-    let instance_type = instance["type"].as_str().unwrap().to_string();
+fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
+    let rig = Rig::lights(&[
+        ("one", "xiaomi.light.ceil04"),
+        ("two", "xiaomi.light.ceil04"),
+    ]);
     {
         let mut cloud = rig.cloud.lock().unwrap();
-        cloud.online.insert("one".into());
-        cloud.members.push("member-a".into());
-        cloud.catalog_groups = vec![raw_group_record("group-record", "group-1", &["member-a"])];
-        cloud.catalog_instances.insert(instance_type, instance);
-        cloud
-            .raw_values
-            .insert(("group-1".into(), 2, 1), json!(false));
-    }
-    let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        super::super::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
-    let peer = Rc::new(CloudPeer::default());
-    let (release_read, read_gate) = flume::bounded::<()>(2);
-    block_on(rig.run(|c| async move {
-        let peer_run = peer.clone();
-        future::or(peer_run.run(&listener), async {
-            c.announce();
-            let raw_path = "device/member-a/up/properties_changed/#";
-            until(|| peer.count(raw_path) == 1).await;
-            // The wildcard is observed and its SUBACK is processed (Ready).
-            until(|| {
-                c.context
-                    .watches
-                    .borrow()
-                    .members
-                    .get("member-a")
-                    .is_some_and(|watch| watch.state == super::super::watch::WatchState::Ready)
-            })
-            .await;
-            until(|| {
-                c.context
-                    .live
-                    .borrow()
-                    .devices
-                    .get("group-1")
-                    .is_some_and(|slot| slot.admitted.is_some())
-            })
-            .await;
-            let (id, power) = {
-                let live = c.context.live.borrow();
-                let record = live.devices["group-1"].admitted.as_ref().unwrap();
-                let cached = record.cached.borrow();
-                let function = cached
-                    .device
-                    .functions
-                    .iter()
-                    .find(|function| function.lighting.is_some())
-                    .unwrap();
-                (function.description.id.clone(), function.power)
-            };
-            let light = function(&c.context.registry, "group-1", &id);
-            until(|| light.snapshot().power == Power::Off).await;
-            // Virtual groups never open their own property subscription.
-            assert!(!peer.state.borrow().seen.iter().any(|packet| matches!(
-                packet,
-                Packet::Subscribe(subscribe)
-                    if subscribe.filters.iter().any(|filter| filter.path.contains("group-1"))
-            )));
-            let reads = || {
-                c.cloud
-                    .lock()
-                    .unwrap()
-                    .property_reads
-                    .iter()
-                    .filter(|key| key.0 == "group-1" && key.1 == power.siid && key.2 == power.piid)
-                    .count()
-            };
-            let before = reads();
-            {
-                let mut cloud = c.cloud.lock().unwrap();
-                cloud
-                    .raw_values
-                    .insert(("group-1".into(), power.siid, power.piid), json!(true));
-                cloud
-                    .read_gates
-                    .insert(("group-1".into(), power.siid, power.piid), read_gate);
-            }
-            // First valid member event starts a genuine own HTTP read, held open.
-            peer.send(Packet::Publish(Publish::new(
-                format!("device/member-a/up/properties_changed/{}/{}", power.siid, power.piid),
-                QoS::AtMostOnce,
-                json!({"params":{"did":"member-a","siid":power.siid,"piid":power.piid,"value":true}})
-                    .to_string(),
-            )));
-            until(|| reads() == before + 1).await;
-            // Repeated QoS2 events are known dispatched before the read is
-            // released: PUBREC then PUBREL/PUBCOMP for each one.
-            assert_eq!(power.piid, 1);
-            for (pkid, value) in [(101u16, false), (102, true)] {
-                peer.qos2("member-a", power.siid, value, pkid);
-                until(|| peer.received(pkid, false)).await;
-                peer.send(Packet::PubRel(mqttbytes::v5::PubRel::new(pkid)));
-                until(|| peer.received(pkid, true)).await;
-            }
-            assert_eq!(light.snapshot().power, Power::Off);
-            // The follow-up read observes a different actual value.
-            c.cloud
-                .lock()
-                .unwrap()
-                .raw_values
-                .insert(("group-1".into(), power.siid, power.piid), json!(false));
-            release_read.send(()).unwrap();
-            until(|| light.snapshot().power == Power::On).await;
-            until(|| reads() == before + 2).await;
-            release_read.send(()).unwrap();
-            until(|| light.snapshot().power == Power::Off).await;
-            // Exactly one follow-up: no further own reads after quiescence.
-            for _ in 0..50 {
-                future::yield_now().await;
-            }
-            assert_eq!(reads(), before + 2);
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn raw_watch_failure_survives_other_member_ready_and_clears_after_restart() {
-    let rig = Rig::new(false, &["one"]);
-    rig.clock
-        .automatic
-        .store(false, std::sync::atomic::Ordering::Relaxed);
-    let instance: Value = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/group3-instance.json"
-    ))
-    .unwrap();
-    {
-        let mut cloud = rig.cloud.lock().unwrap();
-        cloud.online.insert("one".into());
-        cloud.members.extend(["member-a".into(), "member-b".into()]);
-        cloud.catalog_groups = vec![raw_group_record(
-            "group-record",
-            "group-1",
-            &["member-a", "member-b"],
-        )];
+        let instance = super::repair::group_instance();
         cloud
             .catalog_instances
             .insert(instance["type"].as_str().unwrap().into(), instance);
-        for (piid, value) in [(1, json!(false)), (2, json!(50)), (3, json!(4000))] {
-            cloud.raw_values.insert(("group-1".into(), 2, piid), value);
+        cloud.catalog_groups = vec![
+            super::repair::group_record("record-1", "group-1", &["one"], false),
+            super::repair::group_record("record-2", "group-2", &["two"], false),
+        ];
+        cloud.online.extend(["one", "two"].map(str::to_owned));
+        for did in ["one", "two"] {
+            for (piid, value) in [(1, json!(false)), (2, json!(50)), (3, json!(2700))] {
+                cloud.raw_values.insert((did.into(), 2, piid), value);
+            }
         }
+        // Deliberately stale group values must never overwrite member feedback.
+        cloud
+            .raw_values
+            .insert(("group-1".into(), 2, 1), json!(true));
+        cloud
+            .raw_values
+            .insert(("group-2".into(), 2, 1), json!(true));
     }
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
     rig.source.context.notification_connector.set(
@@ -1829,405 +1681,182 @@ fn raw_watch_failure_survives_other_member_ready_and_clears_after_restart() {
         ),
     );
     let peer = Rc::new(CloudPeer::default());
-    let a_path = "device/member-a/up/properties_changed/#";
-    let b_path = "device/member-b/up/properties_changed/#";
+    block_on(rig.run(|c| async move {
+        let peer_run = peer.clone();
+        future::or(peer_run.run(&listener), async {
+            c.announce();
+            until(|| {
+                ["group-1", "group-2"].iter().all(|did| {
+                    c.context
+                        .registry
+                        .get(&DeviceKey::new("xiaomi", *did))
+                        .is_some()
+                })
+            })
+            .await;
+            until(|| cloud_active(&c, "one") && cloud_active(&c, "two")).await;
+            let first = function(&c.context.registry, "group-1", "main");
+            let second = function(&c.context.registry, "group-2", "main");
+            until(|| first.snapshot().power == Power::Off && second.snapshot().power == Power::Off)
+                .await;
+
+            c.cloud
+                .lock()
+                .unwrap()
+                .raw_values
+                .insert(("one".into(), 2, 1), json!(true));
+            peer.property("one", 2, true);
+            until(|| first.snapshot().power == Power::On).await;
+            assert_eq!(second.snapshot().power, Power::Off);
+            for (piid, value) in [(2, json!(70)), (3, json!(4000))] {
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .raw_values
+                    .insert(("one".into(), 2, piid), value.clone());
+                peer.send(Packet::Publish(Publish::new(
+                    format!("device/one/up/properties_changed/2/{piid}"),
+                    QoS::AtMostOnce,
+                    json!({"params":{"did":"one","siid":2,"piid":piid,"value":value}}).to_string(),
+                )));
+            }
+            until(|| {
+                first.snapshot().lighting.is_some_and(|light| {
+                    light.brightness_percent == Some(70.0) && light.temperature_kelvin == Some(4000)
+                })
+            })
+            .await;
+
+            // Adding an already observed member applies its current state;
+            // no new event or duplicate subscription is needed.
+            let subscriptions = peer.count("device/one/up/properties_changed/2/1");
+            c.cloud.lock().unwrap().catalog_groups[1] =
+                super::repair::group_record("record-2", "group-2", &["two", "one"], false);
+            c.context.request_sync();
+            until(|| second.snapshot().power == Power::On).await;
+            assert_eq!(
+                peer.count("device/one/up/properties_changed/2/1"),
+                subscriptions
+            );
+            c.cloud
+                .lock()
+                .unwrap()
+                .raw_values
+                .insert(("one".into(), 2, 1), json!(false));
+            peer.property("one", 2, false);
+            until(|| first.snapshot().power == Power::Off && second.snapshot().power == Power::Off)
+                .await;
+
+            // Losing a member's actual source invalidates both groups instead
+            // of treating the unavailable member as off.
+            peer.online("one", false);
+            until(|| {
+                first.snapshot().power == Power::Unknown
+                    && second.snapshot().power == Power::Unknown
+            })
+            .await;
+            c.cloud
+                .lock()
+                .unwrap()
+                .raw_values
+                .insert(("one".into(), 2, 1), json!(true));
+            peer.online("one", true);
+            until(|| first.snapshot().power == Power::On && second.snapshot().power == Power::On)
+                .await;
+
+            assert!(
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .property_reads
+                    .iter()
+                    .all(|(did, _, _)| !did.starts_with("group-"))
+            );
+            assert!(!peer.state.borrow().seen.iter().any(|packet| matches!(packet,
+                Packet::Subscribe(subscribe) if subscribe.filters.iter().any(|filter|
+                    (filter.path.contains("group-") && filter.path.contains("properties_changed"))
+                        || filter.path.ends_with("properties_changed/#")
+                )
+            )));
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail() {
+    let rig = super::repair::repair_rig(0, false);
+    let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
+    rig.source.context.notification_connector.set(
+        super::super::notifications::NotificationConnector::Plaintext(
+            listener.get_ref().local_addr().unwrap(),
+        ),
+    );
+    let peer = Rc::new(CloudPeer::default());
+    let property = "device/member-a/up/properties_changed/2/1";
     peer.state
         .borrow_mut()
         .reject
-        .insert(a_path.into(), SubscribeReasonCode::Unspecified);
-    peer.state.borrow_mut().hold.insert(b_path.into());
+        .insert(property.into(), SubscribeReasonCode::QuotaExceeded);
     block_on(rig.run(|c| async move {
-        let peer_run = peer.clone();
-        future::or(peer_run.run(&listener), async {
-            c.announce();
-            // Advance only after each retry has registered its virtual deadline.
-            for attempt in 1..=3 {
-                let due = Duration::from_secs(attempt as u64);
-                until(|| {
-                    peer.count(a_path) == attempt
-                        && c.clock.deadlines.lock().unwrap().contains(&due)
-                })
-                .await;
-                c.clock.advance(Duration::from_secs(1));
-            }
-            until(|| {
-                c.context
-                    .watches
-                    .borrow()
-                    .members
-                    .get("member-a")
-                    .is_some_and(|watch| {
-                        matches!(watch.state, super::super::watch::WatchState::Failed(_))
-                    })
-            })
-            .await;
-            assert_eq!(peer.count(a_path), 4);
-            assert_eq!(peer.count(b_path), 1);
-            until(|| {
-                peer.state
-                    .borrow()
-                    .held
-                    .iter()
-                    .any(|subscribe| subscribe.filters[0].path == b_path)
-            })
-            .await;
-            peer.state.borrow_mut().hold.remove(b_path);
-            peer.release(b_path);
-            until(|| {
-                c.context.watches.borrow().members["member-b"].state
-                    == super::super::watch::WatchState::Ready
-            })
-            .await;
-            until(|| {
-                c.context
-                    .live
-                    .borrow()
-                    .devices
-                    .get("group-1")
-                    .is_some_and(|slot| slot.admitted.is_some())
-            })
-            .await;
-            let group = function(&c.context.registry, "group-1", "main");
-            until(|| group.snapshot().power == Power::Off).await;
-            let status = c.context.diagnostics();
-            let device = status
-                .devices
-                .iter()
-                .find(|device| device.did == "group-1")
+        future::or(peer.run(&listener), async {
+            super::repair::repair_ready(&c).await;
+            let member = c.context.live.borrow().devices["member-a"]
+                .work
+                .clone()
                 .unwrap();
-            assert!(
-                device
-                    .sync_limited_reason
-                    .as_ref()
-                    .is_some_and(|reason| reason.contains("member-a")),
-                "{device:?}"
-            );
-            // Use a real disconnect and a fresh connection, without member events.
+            until(|| member.cloud_exhausted.get()).await;
+            c.clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            assert!(member.active.borrow().is_none());
+            let group = function(&c.context.registry, "group-1", "main");
+            assert_eq!(group.snapshot().power, Power::Off);
+            let key = ("member-a".to_string(), 2, 1);
+            let reads = || {
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .property_reads
+                    .iter()
+                    .filter(|read| **read == key)
+                    .count()
+            };
+            let before = reads();
+            let subscriptions = peer.count(property);
             c.cloud
                 .lock()
                 .unwrap()
                 .raw_values
-                .insert(("group-1".into(), 2, 1), json!(true));
-            peer.state.borrow_mut().reject.remove(a_path);
+                .insert(key.clone(), json!(true));
             peer.send(Packet::Disconnect(Disconnect::new()));
             until(|| c.context.notifications.borrow().is_none()).await;
-            let reconnect = c.clock.now() + Duration::from_secs(10);
-            until(|| c.clock.deadlines.lock().unwrap().contains(&reconnect)).await;
+            let due = c.clock.now() + Duration::from_secs(10);
+            until(|| c.clock.deadlines.lock().unwrap().contains(&due)).await;
             c.clock.advance(Duration::from_secs(10));
             until(|| peer.state.borrow().connects.len() == 2).await;
-            until(|| {
-                ["member-a", "member-b"].iter().all(|did| {
-                    c.context.watches.borrow().members[*did].state
-                        == super::super::watch::WatchState::Ready
-                })
-            })
-            .await;
-            let status = c.context.diagnostics();
-            let device = status
-                .devices
-                .iter()
-                .find(|device| device.did == "group-1")
-                .unwrap();
-            assert!(device.sync_limited_reason.is_none(), "{device:?}");
-            until(|| group.snapshot().power == Power::On).await;
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn same_member_readd_in_session_ignores_stale_suback_and_fresh_ack_delivers() {
-    let rig = Rig::new(false, &["one"]);
-    let instance: Value = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/group3-instance.json"
-    ))
-    .unwrap();
-    let instance_type = instance["type"].as_str().unwrap().to_string();
-    {
-        let mut cloud = rig.cloud.lock().unwrap();
-        cloud.online.insert("one".into());
-        cloud.members.push("member-a".into());
-        cloud.members.push("member-b".into());
-        cloud.catalog_groups = vec![raw_group_record("group-record", "group-1", &["member-a"])];
-        cloud.catalog_instances.insert(instance_type, instance);
-        for (siid, value) in [(1, json!(false)), (2, json!(50)), (3, json!(2700))] {
-            cloud.raw_values.insert(("group-1".into(), 2, siid), value);
-        }
-    }
-    let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        super::super::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
-    let peer = Rc::new(CloudPeer::default());
-    let a_path = "device/member-a/up/properties_changed/#";
-    peer.state.borrow_mut().hold.insert(a_path.into());
-    block_on(rig.run(|c| async move {
-        let peer_run = peer.clone();
-        future::or(peer_run.run(&listener), async {
-            c.announce();
-            until(|| {
+            c.clock
+                .automatic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            until(|| peer.count(property) > subscriptions && member.cloud_exhausted.get()).await;
+            until(|| reads() > before && group.snapshot().power == Power::On).await;
+            assert!(member.active.borrow().is_none());
+            assert_eq!(group.snapshot().availability, Availability::Available);
+            assert!(
                 c.context
-                    .live
-                    .borrow()
+                    .diagnostics()
                     .devices
-                    .get("group-1")
-                    .is_some_and(|slot| slot.admitted.is_some())
-            })
-            .await;
-            let (id, power) = {
-                let live = c.context.live.borrow();
-                let record = live.devices["group-1"].admitted.as_ref().unwrap();
-                let cached = record.cached.borrow();
-                let function = cached
-                    .device
-                    .functions
                     .iter()
-                    .find(|function| function.lighting.is_some())
-                    .unwrap();
-                (function.description.id.clone(), function.power)
-            };
-            let light = function(&c.context.registry, "group-1", &id);
-            until(|| light.snapshot().power == Power::Off).await;
-            let reads = || {
+                    .any(|device| device.did == "group-1" && device.sync_limited_reason.is_some())
+            );
+            assert!(
                 c.cloud
                     .lock()
                     .unwrap()
                     .property_reads
                     .iter()
-                    .filter(|key| key.0 == "group-1" && key.1 == power.siid && key.2 == power.piid)
-                    .count()
-            };
-            until(|| {
-                c.context
-                    .watches
-                    .borrow()
-                    .members
-                    .get("member-a")
-                    .is_some_and(|watch| {
-                        matches!(watch.state, super::super::watch::WatchState::Preparing)
-                    })
-                    && peer
-                        .state
-                        .borrow()
-                        .held
-                        .iter()
-                        .any(|subscribe| subscribe.filters[0].path == a_path)
-            })
-            .await;
-            let old_lifetime =
-                Rc::as_ptr(&c.context.watches.borrow().members["member-a"].lifetime) as usize;
-            let old_pkid = peer
-                .state
-                .borrow()
-                .held
-                .iter()
-                .find(|subscribe| subscribe.filters[0].path == a_path)
-                .unwrap()
-                .pkid;
-            // Complete catalog member set changes to b: a is retired with a
-            // real UNSUBSCRIBE while its SUBACK is still held.
-            c.cloud.lock().unwrap().catalog_groups =
-                vec![raw_group_record("group-record", "group-1", &["member-b"])];
-            c.context.request_sync();
-            until(|| {
-                !c.context.watches.borrow().members.contains_key("member-a")
-                    && peer.state.borrow().seen.iter().any(|packet| {
-                        matches!(
-                            packet,
-                            Packet::Unsubscribe(unsubscribe)
-                                if unsubscribe.filters == [a_path.to_string()]
-                        )
-                    })
-            })
-            .await;
-            // Same DID is confirmed again in the same session.
-            c.cloud.lock().unwrap().catalog_groups =
-                vec![raw_group_record("group-record", "group-1", &["member-a"])];
-            c.context.request_sync();
-            until(|| {
-                c.context
-                    .watches
-                    .borrow()
-                    .members
-                    .get("member-a")
-                    .is_some_and(|watch| Rc::as_ptr(&watch.lifetime) as usize != old_lifetime)
-                    && peer
-                        .state
-                        .borrow()
-                        .held
-                        .iter()
-                        .filter(|subscribe| subscribe.filters[0].path == a_path)
-                        .count()
-                        == 2
-            })
-            .await;
-            let new_lifetime =
-                Rc::as_ptr(&c.context.watches.borrow().members["member-a"].lifetime) as usize;
-            let reads_settled = || {
-                let live = c.context.live.borrow();
-                let work = live.devices["group-1"].work.as_ref().unwrap();
-                work.refresh_pending.borrow().is_empty()
-                    && work.refresh_inflight.borrow().is_empty()
-                    && work.dirty_again.borrow().is_empty()
-            };
-            // Remove/re-add actively refreshes the native group independently
-            // of subscription ACKs; finish that work before attributing reads.
-            until(reads_settled).await;
-            // Release only the stale ACK.
-            let stale = {
-                let mut state = peer.state.borrow_mut();
-                let index = state
-                    .held
-                    .iter()
-                    .position(|subscribe| subscribe.pkid == old_pkid)
-                    .unwrap();
-                state.held.remove(index)
-            };
-            peer.send(Packet::SubAck(SubAck::new(
-                stale.pkid,
-                vec![SubscribeReasonCode::QoS2],
-            )));
-            // Driver barrier: a full legal QoS2 event completes while the new
-            // raw subscription is still pending.
-            let pending_reads = reads();
-            peer.qos2("member-a", power.siid, true, 126);
-            until(|| peer.received(126, false)).await;
-            peer.send(Packet::PubRel(mqttbytes::v5::PubRel::new(126)));
-            until(|| peer.received(126, true)).await;
-            {
-                let watches = c.context.watches.borrow();
-                let watch = &watches.members["member-a"];
-                assert_eq!(Rc::as_ptr(&watch.lifetime) as usize, new_lifetime);
-                assert!(matches!(
-                    watch.state,
-                    super::super::watch::WatchState::Preparing
-                ));
-            }
-            // The unacknowledged event did not apply typed state or read.
-            assert_eq!(light.snapshot().power, Power::Off);
-            assert_eq!(reads(), pending_reads);
-            // Fresh ACK makes the re-added watcher Ready and queues its
-            // reconnect read, which settles with valid native B/CT values.
-            let fresh = {
-                let mut state = peer.state.borrow_mut();
-                let index = state
-                    .held
-                    .iter()
-                    .position(|subscribe| subscribe.filters[0].path == a_path)
-                    .unwrap();
-                state.held.remove(index)
-            };
-            assert_ne!(fresh.pkid, old_pkid);
-            let ready_reads = reads();
-            peer.send(Packet::SubAck(SubAck::new(
-                fresh.pkid,
-                vec![SubscribeReasonCode::QoS2],
-            )));
-            until(|| {
-                c.context
-                    .watches
-                    .borrow()
-                    .members
-                    .get("member-a")
-                    .is_some_and(|watch| watch.state == super::super::watch::WatchState::Ready)
-            })
-            .await;
-            // Settle the Ready-refresh read before attributing any later read.
-            until(|| reads() > ready_reads && reads_settled()).await;
-            let before_event = reads();
-            // A real native change arrives through the fresh watcher.
-            c.cloud
-                .lock()
-                .unwrap()
-                .raw_values
-                .insert(("group-1".into(), power.siid, power.piid), json!(true));
-            peer.qos2("member-a", power.siid, true, 128);
-            until(|| peer.received(128, false)).await;
-            peer.send(Packet::PubRel(mqttbytes::v5::PubRel::new(128)));
-            until(|| peer.received(128, true)).await;
-            until(|| reads() > before_event).await;
-            until(|| light.snapshot().power == Power::On).await;
-            // The remove + re-add happened inside one actual session.
-            assert_eq!(peer.state.borrow().connects.len(), 1);
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn new_group_association_on_ready_member_refreshes_without_member_event() {
-    let rig = Rig::new(false, &["one"]);
-    let instance: Value = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/group3-instance.json"
-    ))
-    .unwrap();
-    let instance_type = instance["type"].as_str().unwrap().to_string();
-    {
-        let mut cloud = rig.cloud.lock().unwrap();
-        cloud.online.insert("one".into());
-        cloud.online.insert("member-b".into());
-        cloud.members.push("one".into());
-        cloud.members.push("member-b".into());
-        cloud.catalog_groups = vec![
-            raw_group_record("group-record", "group-1", &["one"]),
-            raw_group_record("group-record-2", "group-2", &["member-b"]),
-        ];
-        cloud.catalog_instances.insert(instance_type, instance);
-        for did in ["group-1", "group-2"] {
-            for (siid, value) in [(1, json!(false)), (2, json!(50)), (3, json!(2700))] {
-                cloud.raw_values.insert((did.into(), 2, siid), value);
-            }
-        }
-    }
-    let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        super::super::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
-    let peer = Rc::new(CloudPeer::default());
-    block_on(rig.run(|c| async move {
-        let peer_run = peer.clone();
-        future::or(peer_run.run(&listener), async {
-            c.announce();
-            until(|| {
-                c.context.live.borrow().devices.contains_key("group-1")
-                    && c.context.live.borrow().devices.contains_key("group-2")
-            })
-            .await;
-            until(|| {
-                let watches = c.context.watches.borrow();
-                watches
-                    .members
-                    .get("one")
-                    .is_some_and(|watch| watch.state == super::super::watch::WatchState::Ready)
-                    && watches
-                        .members
-                        .get("member-b")
-                        .is_some_and(|watch| watch.state == super::super::watch::WatchState::Ready)
-            })
-            .await;
-            let reads = || {
-                c.cloud
-                    .lock()
-                    .unwrap()
-                    .property_reads
-                    .iter()
-                    .filter(|key| key.0 == "group-2" && key.1 == 2 && key.2 == 1)
-                    .count()
-            };
-            until(|| reads() > 0).await;
-            let before = reads();
-            // group-2 keeps member-b; member one is newly associated without a
-            // new subscription or member event.
-            c.cloud.lock().unwrap().catalog_groups = vec![
-                raw_group_record("group-record", "group-1", &["one"]),
-                raw_group_record("group-record-2", "group-2", &["member-b", "one"]),
-            ];
-            c.context.request_sync();
-            until(|| reads() > before).await;
+                    .all(|(did, _, _)| did != "group-1")
+            );
         })
         .await;
     }));

@@ -84,7 +84,9 @@ fn configuration_lines(status: &AuthStatus, did: &str) -> Vec<String> {
                 } else {
                     "none"
                 },
-                if repaired {
+                if !group.is_physical {
+                    "members: any on, mean brightness, representative color"
+                } else if repaired {
                     "native group; RGB/mode from member representative"
                 } else {
                     "native group"

@@ -376,7 +376,6 @@ pub(super) async fn run(
                             group.membership.members.len()
                         );
                     }
-                    context.sync_member_watches(false);
                     context.sync_groups(cloud, token, &update.active);
                 }
                 Some(Err(error)) => {

@@ -271,7 +271,6 @@ pub(super) struct Live {
 pub(super) struct Context {
     pub(super) commands: Rc<super::commands::Commands>,
     pub(super) light_writes: super::commands::LightWriteGates,
-    pub(super) watches: RefCell<super::watch::Watches>,
     pub(super) relations: RefCell<super::relations::Relations>,
     pub(super) notifications: RefCell<Option<Rc<super::notifications::CloudSession>>>,
     pub(super) credentials_changed: Event,

@@ -11,7 +11,6 @@ mod list_scheduling;
 mod local_device_errors;
 mod local_recovery;
 mod local_sessions;
-mod member_dirty;
 mod membership;
 mod notifications;
 mod observation_lifetimes;

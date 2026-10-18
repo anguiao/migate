@@ -578,8 +578,7 @@ impl NotificationDriver {
         Ok(())
     }
 
-    /// The one ready registration selected for a topic: exact first, then the
-    /// raw wildcard. At most one callback per receipt.
+    /// Capture the ready exact property or wildcard online registration.
     fn delivery(&self, topic: &str) -> Option<Delivery> {
         let registrations = self.shared.registrations.borrow();
         let ready = |filter: &str| {
@@ -599,25 +598,15 @@ impl NotificationDriver {
         if let Some((did, suffix)) = topic
             .strip_prefix("device/")
             .and_then(|rest| rest.split_once('/'))
+            && (suffix == "state" || suffix.starts_with("state/"))
         {
-            let wildcard = if suffix == "state" || suffix.starts_with("state/") {
-                format!("device/{did}/state/#")
-            } else if suffix == "up/properties_changed"
-                || suffix.starts_with("up/properties_changed/")
-            {
-                format!("device/{did}/up/properties_changed/#")
-            } else {
-                String::new()
-            };
-            if !wildcard.is_empty() {
-                return ready(&wildcard);
-            }
+            return ready(&format!("device/{did}/state/#"));
         }
         None
     }
 
     fn message(&self, publish: Publish, on_event: &mut impl FnMut(NotificationEvent)) {
-        // QoS0/1: one callback for the first ready registration, exact or raw.
+        // QoS0/1 dispatch through the current ready registration.
         let Some(delivery) = self.delivery(&publish.topic) else {
             return;
         };
@@ -686,58 +675,6 @@ impl NotificationDriver {
                     }
                 };
                 on_event(event);
-            }
-            Target::RawProperties { did } => {
-                let prefix = format!("device/{did}/up/properties_changed/");
-                let suffix = publish
-                    .topic
-                    .strip_prefix(&prefix)
-                    .ok_or(NotificationError::Protocol)?;
-                let mut levels = suffix.split('/');
-                let component = |value: Option<&str>| {
-                    value
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .filter(|value| *value != 0)
-                };
-                let topic_siid = component(levels.next()).ok_or(NotificationError::Protocol)?;
-                let topic_piid = component(levels.next()).ok_or(NotificationError::Protocol)?;
-                if levels.next().is_some() {
-                    return Err(NotificationError::Protocol);
-                }
-                let params = payload
-                    .get("params")
-                    .and_then(Value::as_object)
-                    .ok_or(NotificationError::Protocol)?;
-                for candidate in [payload.get("did"), params.get("did")] {
-                    if let Some(candidate) = candidate
-                        && candidate.as_str() != Some(&did)
-                    {
-                        return Err(NotificationError::Protocol);
-                    }
-                }
-                let payload_component = |name: &str| {
-                    params
-                        .get(name)
-                        .and_then(Value::as_u64)
-                        .and_then(|value| u32::try_from(value).ok())
-                        .filter(|value| *value != 0)
-                };
-                let siid = payload_component("siid").ok_or(NotificationError::Protocol)?;
-                let piid = payload_component("piid").ok_or(NotificationError::Protocol)?;
-                if siid != topic_siid || piid != topic_piid {
-                    return Err(NotificationError::Protocol);
-                }
-                let value = params
-                    .get("value")
-                    .filter(|value| crate::xiaomi::property::valid_value(value))
-                    .ok_or(NotificationError::Protocol)?;
-                on_event(NotificationEvent::MemberProperty {
-                    did,
-                    siid,
-                    piid,
-                    value: value.clone(),
-                    retained: publish.retain,
-                });
             }
             Target::Online { did } => {
                 if payload.get("device_id").and_then(Value::as_str) != Some(&did) {

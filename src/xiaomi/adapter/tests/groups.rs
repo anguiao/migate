@@ -1,28 +1,7 @@
 use super::*;
 use std::cell::Cell;
 
-fn group_record(record_did: &str, group_did: &str, members: &[&str], physical: bool) -> Value {
-    let member_ship = members
-        .iter()
-        .map(|did| ((*did).to_string(), serde_json::json!("1")))
-        .collect::<serde_json::Map<_, _>>();
-    serde_json::json!({
-        "did": record_did,
-        "name": "Native group",
-        "model": "mijia.light.group3",
-        "spec_type": "urn:miot-spec-v2:device:light:0000A001:mijia-group3:3:0000C802",
-        "isOnline": true,
-        "extra": {
-            "member_list": {
-                "group_did": group_did,
-                "status": "1",
-                "display_member_switch": 0,
-                "member_ship": member_ship,
-                "is_physical": physical
-            }
-        }
-    })
-}
+use super::repair::group_record;
 
 #[test]
 fn native_group_publication_preserves_complete_configuration_on_storage_failure() {
@@ -60,7 +39,7 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
             cloud.catalog_groups = vec![group_record("record-1", "group-1", &["one", "member-new"], false)];
         }
         c.context.request_sync();
-        until(|| c.context.relations.borrow().member_watches().contains_key("member-new")).await;
+        until(|| c.context.relations.borrow().snapshot().iter().any(|group| group.membership.members.iter().any(|member| member == "member-new"))).await;
         until(|| c.publication.failure().is_some()).await;
         assert_eq!(c.context.live.borrow().devices["group-1"].effective_group.as_ref().unwrap().members, ["one"]);
         let saved = c.store.devices().load_publication(Some(&scope)).unwrap();
@@ -83,8 +62,16 @@ fn first_binding_applies_the_initial_catalog_without_a_cached_scope() {
                 .context
                 .relations
                 .borrow()
-                .member_watches()
-                .contains_key("one")
+                .snapshot()
+                .iter()
+                .any(|group| {
+                    group.active
+                        && group
+                            .membership
+                            .members
+                            .iter()
+                            .any(|member| member == "one")
+                })
         })
         .await;
         assert!(control.context.live.borrow().scope.is_some());
@@ -93,7 +80,7 @@ fn first_binding_applies_the_initial_catalog_without_a_cached_scope() {
 }
 
 #[test]
-fn missing_description_member_group_is_admitted_and_cloud_owned() {
+fn missing_description_member_group_is_controllable_with_unknown_state() {
     let rig = Rig::new(false, &["one"]);
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/group3-instance.json"
@@ -148,7 +135,7 @@ fn missing_description_member_group_is_admitted_and_cloud_owned() {
             }));
             // The member has no description and no source of its own.
             assert!(live.devices["member-a"].admitted.is_none());
-            // Virtual group is cloud-only: no local session work for its DID.
+            // Native group commands use cloud access; its state needs known members.
             assert!(
                 live.session
                     .as_ref()
@@ -164,6 +151,23 @@ fn missing_description_member_group_is_admitted_and_cloud_owned() {
             .clone()
             .unwrap();
         assert_eq!(first.physical.label(), "Native group");
+        let light = first.physical.functions()[0].clone();
+        assert_eq!(light.snapshot().power, Power::Unknown);
+        let state = light.snapshot().lighting.unwrap();
+        assert_eq!(state.brightness_percent, None);
+        assert_eq!(state.temperature_kelvin, None);
+        assert_eq!(state.color, None);
+        assert_eq!(state.mode, None);
+        light.execute(Command::On).await.unwrap();
+        assert_eq!(light.snapshot().power, Power::Unknown);
+        assert!(
+            c.cloud
+                .lock()
+                .unwrap()
+                .property_reads
+                .iter()
+                .all(|(did, _, _)| did != "group-1")
+        );
         // A repeated complete directory must preserve the native instance.
         c.context.request_sync();
         until(|| c.cloud.lock().unwrap().catalogs >= 2).await;
@@ -187,7 +191,7 @@ fn missing_description_member_group_is_admitted_and_cloud_owned() {
 }
 
 #[test]
-fn native_group_write_uses_its_own_did_and_read_owns_state() {
+fn physical_group_write_uses_its_own_did_and_read_owns_state() {
     let rig = Rig::new(false, &["one"]);
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/group3-instance.json"
@@ -197,12 +201,7 @@ fn native_group_write_uses_its_own_did_and_read_owns_state() {
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.members.push("member-a".into());
-        cloud.catalog_groups = vec![group_record(
-            "group-record",
-            "group-1",
-            &["member-a"],
-            false,
-        )];
+        cloud.catalog_groups = vec![group_record("group-record", "group-1", &["member-a"], true)];
         cloud.catalog_instances.insert(instance_type, instance);
     }
     let (release_read, read_gate) = flume::bounded::<()>(2);
@@ -311,7 +310,7 @@ fn native_group_write_uses_its_own_did_and_read_owns_state() {
 }
 
 #[test]
-fn native_compound_target_requires_every_property_and_readback_owns_state() {
+fn physical_group_compound_target_requires_every_property_and_readback_owns_state() {
     let rig = Rig::new(false, &["one"]);
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/group3-instance.json"
@@ -321,12 +320,7 @@ fn native_compound_target_requires_every_property_and_readback_owns_state() {
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.members.push("member-a".into());
-        cloud.catalog_groups = vec![group_record(
-            "group-record",
-            "group-1",
-            &["member-a"],
-            false,
-        )];
+        cloud.catalog_groups = vec![group_record("group-record", "group-1", &["member-a"], true)];
         cloud.catalog_instances.insert(instance_type, instance);
         for (piid, value) in [(1, json!(false)), (2, json!(50)), (3, json!(2700))] {
             cloud.raw_values.insert(("group-1".into(), 2, piid), value);
@@ -437,12 +431,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.members.push("member-a".into());
-        cloud.catalog_groups = vec![group_record(
-            "group-record",
-            "group-1",
-            &["member-a"],
-            false,
-        )];
+        cloud.catalog_groups = vec![group_record("group-record", "group-1", &["member-a"], true)];
         cloud.catalog_instances.insert(instance_type, instance);
         for (piid, value) in [(1, json!(true)), (2, json!(50)), (3, json!(2700))] {
             cloud.raw_values.insert(("group-1".into(), 2, piid), value);
@@ -527,7 +516,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
 }
 
 #[test]
-fn withdrawn_native_group_clears_retained_view_and_retires_own_subscriptions() {
+fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
     let mut rig = Rig::new(false, &["one"]);
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/group3-instance.json"
@@ -601,6 +590,30 @@ fn withdrawn_native_group_clears_retained_view_and_retires_own_subscriptions() {
                     .clone()
             };
             let light = function(&control.context.registry, "group-p", &id);
+            until(|| light.snapshot().power == Power::On).await;
+            until(|| control.context.active_notification("group-p").is_some()).await;
+            let before = peer.count("subscribe", "group-p", 2);
+            let mut virtual_group = group.clone();
+            virtual_group["extra"]["member_list"]["is_physical"] = json!(false);
+            control.cloud.lock().unwrap().catalog_groups = vec![virtual_group];
+            control.context.request_sync();
+            until(|| control.context.is_virtual_group("group-p")).await;
+            until(|| {
+                control.context.live.borrow().devices["group-p"]
+                    .work
+                    .as_ref()
+                    .unwrap()
+                    .active
+                    .borrow()
+                    .is_none()
+            })
+            .await;
+            assert_eq!(light.snapshot().power, Power::Unknown);
+            control.cloud.lock().unwrap().catalog_groups = vec![group.clone()];
+            control.context.request_sync();
+            until(|| !control.context.is_virtual_group("group-p")).await;
+            until(|| peer.count("subscribe", "group-p", 2) > before).await;
+            until(|| control.context.active_notification("group-p").is_some()).await;
             until(|| light.snapshot().power == Power::On).await;
             // Withdraw the confirmed relation in a complete catalog.
             control.cloud.lock().unwrap().catalog_groups = vec![];
@@ -712,11 +725,14 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
     block_on(rig.run_result_without_publication(|c| async move {
         c.announce();
         until(|| {
-            c.context
-                .relations
-                .borrow()
-                .member_watches()
-                .contains_key("one")
+            c.context.relations.borrow().snapshot().iter().any(|group| {
+                group.active
+                    && group
+                        .membership
+                        .members
+                        .iter()
+                        .any(|member| member == "one")
+            })
         })
         .await;
         let port = free_udp_port();
@@ -1071,11 +1087,14 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         let group = DeviceKey::new("xiaomi", "group-1");
         let one = DeviceKey::new("xiaomi", "one");
         until(|| {
-            c.context
-                .relations
-                .borrow()
-                .member_watches()
-                .contains_key("one")
+            c.context.relations.borrow().snapshot().iter().any(|group| {
+                group.active
+                    && group
+                        .membership
+                        .members
+                        .iter()
+                        .any(|member| member == "one")
+            })
         })
         .await;
         until(|| c.store.devices().load_published(&group).unwrap().is_some()).await;
@@ -1458,6 +1477,117 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
         assert!(
             list.contains("group-1 (native group): not published (native group withdrawn)."),
             "{list}"
+        );
+    }));
+}
+
+#[test]
+fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
+    let rig = super::repair::repair_rig(1, true);
+    block_on(rig.run(|c| async move {
+        super::repair::repair_ready(&c).await;
+        let light = function(&c.context.registry, "group-1", "main");
+        // Native control acceptance does not manufacture actual state. Reads
+        // must use the members, including mode when a CT command selects white.
+        for (dimension, target, values) in [
+            (
+                None,
+                crate::device::LightTarget {
+                    power: Some(false),
+                    ..Default::default()
+                },
+                vec![(2, 1, json!(false))],
+            ),
+            (
+                Some(crate::device::LightDimension::Brightness),
+                crate::device::LightTarget {
+                    brightness_percent: Some(70.0),
+                    ..Default::default()
+                },
+                vec![(2, 2, json!(60))],
+            ),
+            (
+                Some(crate::device::LightDimension::Color),
+                crate::device::LightTarget {
+                    color: Some(crate::device::LightColorTarget::Temperature(4000)),
+                    ..Default::default()
+                },
+                vec![(2, 3, json!(3800)), (4, 2, json!(0))],
+            ),
+        ] {
+            until(|| {
+                c.context
+                    .live
+                    .borrow()
+                    .devices
+                    .values()
+                    .filter_map(|slot| slot.work.as_ref())
+                    .all(|work| {
+                        work.refresh_pending.borrow().is_empty()
+                            && work.refresh_inflight.borrow().is_empty()
+                    })
+            })
+            .await;
+            {
+                let mut cloud = c.cloud.lock().unwrap();
+                cloud.property_reads.clear();
+                for did in ["member-a", "member-b"] {
+                    for (siid, piid, value) in &values {
+                        cloud
+                            .raw_values
+                            .insert((did.into(), *siid, *piid), value.clone());
+                    }
+                }
+            }
+            if let Some(dimension) = dimension {
+                light
+                    .begin_light_action(dimension, target, true)
+                    .unwrap()
+                    .accepted()
+                    .await
+                    .unwrap();
+            } else {
+                light.execute(Command::Off).await.unwrap();
+            }
+            until(|| {
+                let cloud = c.cloud.lock().unwrap();
+                ["member-a", "member-b"].iter().all(|did| {
+                    values.iter().all(|(siid, piid, _)| {
+                        cloud
+                            .property_reads
+                            .contains(&(did.to_string(), *siid, *piid))
+                    })
+                })
+            })
+            .await;
+            assert!(
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .property_reads
+                    .iter()
+                    .all(|(did, _, _)| did != "group-1")
+            );
+            until(|| match dimension {
+                None => light.snapshot().power == Power::Off,
+                Some(crate::device::LightDimension::Brightness) => {
+                    light.snapshot().lighting.unwrap().brightness_percent == Some(60.0)
+                }
+                Some(crate::device::LightDimension::Color) => {
+                    let state = light.snapshot().lighting.unwrap();
+                    state.temperature_kelvin == Some(3800)
+                        && state.mode == Some(crate::device::LightMode::Temperature)
+                }
+            })
+            .await;
+        }
+        assert!(
+            c.cloud
+                .lock()
+                .unwrap()
+                .numeric_writes
+                .iter()
+                .all(|(items, _)| items.iter().all(|item| item["did"] == "group-1"))
         );
     }));
 }

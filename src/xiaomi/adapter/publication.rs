@@ -331,6 +331,7 @@ impl SourceHandle {
     }
 
     pub(crate) fn install(&self, snapshot: &SourceSnapshot) {
+        let mut refresh = Vec::new();
         for entry in &snapshot.entries {
             let did = &entry.cached.device.key.id;
             let old = self.0.live.borrow().devices[did].admitted.clone();
@@ -387,14 +388,17 @@ impl SourceHandle {
             if let Some(work) = self.0.live.borrow().devices[did].work.as_ref() {
                 work.report(&self.0, did);
             }
-            if entry.repair.is_some() {
-                self.0.refresh_repair_group(did);
+            if old.is_none() || replaced || bindings_changed || group_changed {
+                refresh.push(did);
             }
-            if (old.is_none() || replaced || bindings_changed || group_changed)
-                && let Some(work) = self.0.live.borrow().devices[did].work.as_ref()
-            {
-                work.request_member_read();
-            }
+        }
+        // All members and effective relations must be installed before refresh
+        // and aggregation, regardless of catalog or DID ordering.
+        for did in refresh {
+            self.0.refresh_source(did);
+        }
+        for entry in &snapshot.entries {
+            self.0.refresh_group_states(&entry.cached.device.key.id);
         }
         self.0.changed.notify(usize::MAX);
     }
@@ -498,7 +502,7 @@ impl Context {
                     reason: reason.into(),
                 }])?;
         }
-        self.refresh_repair_groups(did);
+        self.refresh_group_states(did);
         Ok(())
     }
 }

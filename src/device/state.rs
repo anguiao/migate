@@ -342,6 +342,16 @@ impl Function {
             self.0.changed.notify(usize::MAX);
         }
     }
+    /// Replace a derived light snapshot, including fields that became unknown.
+    pub(crate) fn replace_light_state(&self, power: Power, lighting: super::LightSnapshot) {
+        let mut state = self.0.state.lock().unwrap();
+        if (state.power, state.lighting) != (power, Some(lighting)) {
+            state.power = power;
+            state.lighting = Some(lighting);
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+    }
     /// Clear an out-of-publication color temperature to unknown.
     pub(crate) fn clear_light_temperature(&self) -> FunctionSnapshot {
         let changed = {

@@ -349,7 +349,7 @@ fn read_one(
                                         &value,
                                     );
                                     if observed_validation.borrow().is_ok() {
-                                        result_context.refresh_repair_groups(
+                                        result_context.refresh_group_states(
                                             &observing.record.physical.key().id,
                                         );
                                     }
@@ -392,7 +392,7 @@ fn read_one(
                                 validation =
                                     work.observe_read(&read.id, read.binding, &stamp, &value);
                                 if validation.is_ok() {
-                                    context.refresh_repair_groups(&did);
+                                    context.refresh_group_states(&did);
                                 }
                             }
                             Ok(if flight.current(&context, &did) {

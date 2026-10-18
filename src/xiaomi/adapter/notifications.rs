@@ -68,12 +68,6 @@ pub(super) struct CloudSession {
     pub(super) subscriptions: Rc<SubscriptionBudget>,
 }
 
-impl CloudSession {
-    pub(super) fn token(&self) -> &str {
-        &self.key.token
-    }
-}
-
 // Online and property handshakes share capacity, leaving transport slots for cleanup.
 const SUBSCRIPTION_LIMIT: usize = 16;
 
@@ -144,30 +138,21 @@ fn connection_credentials(context: &Context) -> Option<(ConnectionKey, XiaomiRec
 
 impl Context {
     pub(super) fn active_notification(&self, did: &str) -> Option<super::model::PathKind> {
-        {
+        if self.is_virtual_group(did) {
+            self.control_path(did)?;
             let live = self.live.borrow();
-            if let Some(group) = live
-                .devices
-                .get(did)
-                .and_then(|slot| slot.effective_group.as_ref())
-                .filter(|group| !group.is_physical)
-            {
-                let connected = self
-                    .notifications
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|session| self.current_notifications(&session.handle));
-                let watches = self.watches.borrow();
-                let key = crate::device::DeviceKey::new("xiaomi", did);
-                let ready = group.members.iter().all(|member| {
-                    watches.members.get(member).is_some_and(|watch| {
-                        watch.groups.contains(&key)
-                            && watch.state == super::watch::WatchState::Ready
+            let group = live.devices[did].effective_group.as_ref().unwrap();
+            return group
+                .members
+                .iter()
+                .try_fold(super::model::PathKind::Local, |path, member| {
+                    let member_path = self.active_notification(member)?;
+                    Some(if member_path == super::model::PathKind::Cloud {
+                        member_path
+                    } else {
+                        path
                     })
                 });
-                return (connected && ready && self.cloud_candidate(did, true))
-                    .then_some(super::model::PathKind::Cloud);
-            }
         }
         let work = self
             .live
@@ -191,17 +176,8 @@ impl Context {
         })
     }
     pub(super) fn notification_source(&self, did: &str) -> Option<NotificationSource> {
-        // Virtual groups have no own property subscription: their own state is
-        // read over HTTP and member raw events only mark them dirty. Physical
-        // groups keep their own native property subscription.
-        if self
-            .live
-            .borrow()
-            .devices
-            .get(did)
-            .and_then(|slot| slot.effective_group.as_ref())
-            .is_some_and(|group| !group.is_physical)
-        {
+        // Virtual groups derive their state from ordinary member subscriptions.
+        if self.is_virtual_group(did) {
             return None;
         }
         let local = self
@@ -232,6 +208,9 @@ impl Context {
         }
     }
     fn source_valid(&self, did: &str, source: &NotificationSource) -> bool {
+        if self.is_virtual_group(did) {
+            return false;
+        }
         match source {
             NotificationSource::Local(handle) => self
                 .local_candidate(did, true)
@@ -261,9 +240,6 @@ impl Context {
         if !self.source_valid(did, source) {
             return;
         }
-        // Exact member subscriptions still mark every observing virtual group
-        // dirty; member state itself continues through the ordinary path.
-        self.notify_member_watch(did);
         let work = self
             .live
             .borrow()
@@ -284,7 +260,7 @@ impl Context {
             )
             && !self.is_group(did)
         {
-            self.refresh_repair_groups(did);
+            self.refresh_group_states(did);
         }
     }
     fn online_event(&self, handle: &NotificationHandle, did: &str, online: bool) {
@@ -370,11 +346,8 @@ fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
     }
     *work.active.borrow_mut() = Some(source);
     work.source_changed();
-    context.refresh_repair_groups(did);
+    context.refresh_group_states(did);
     context.note_notification_switch(did, "notification subscriptions ready; source activated");
-    // Once the new source is ready, its watched groups refresh actively; a
-    // discarded switching hint must not wait for a future member event.
-    context.notify_member_watch(did);
 }
 async fn selections(context: Rc<Context>) -> Result<(), AdapterError> {
     loop {
@@ -407,9 +380,8 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         old.retire(&work, &did);
         work.active.borrow_mut().take();
         work.source_changed();
-        context.refresh_repair_groups(&did);
+        context.refresh_group_states(&did);
         context.update_routing("notification source access conditions invalidated");
-        context.notify_member_watch(&did);
     }
     let desired = context.notification_source(&did);
     // Keep the desired preparation and the active source while handing over to it.
@@ -424,7 +396,6 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         && let Some(session) = context.live.borrow().session.as_ref()
     {
         NotificationSource::Local(session.handle.clone()).retire(&work, &did);
-        context.notify_member_watch(&did);
     }
     if !keep_cloud
         && (!work.cloud_subscribed.borrow().is_empty() || work.cloud_running.get())
@@ -432,7 +403,6 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     {
         NotificationSource::Cloud(session.handle.clone()).retire(&work, &did);
         work.cloud_running.set(false);
-        context.notify_member_watch(&did);
     }
     let Some(desired) = desired else { return };
 
@@ -502,7 +472,7 @@ fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
         if works.contains_key(did) {
             true
         } else {
-            // Only online ownership is reconciled here; exact property and raw
+            // Only online ownership is reconciled here; exact property
             // member subscriptions have their own retirement lifecycles.
             drop(session.handle.unsubscribe_online(did));
             false
@@ -752,7 +722,6 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     subscriptions: Rc::new(SubscriptionBudget::default()),
                 });
                 *context.notifications.borrow_mut() = Some(session.clone());
-                context.sync_member_watches(true);
                 for work in context
                     .live
                     .borrow()
@@ -762,7 +731,15 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                 {
                     work.cloud_disconnected();
                     work.retry_subscriptions();
+                    // HTTP feedback must also recover when property
+                    // subscriptions never became active in the old session.
+                    if work.active.borrow().is_none()
+                        && !context.is_virtual_group(&work.record.physical.key().id)
+                    {
+                        work.refresh();
+                    }
                 }
+                context.update_all_availability();
                 context.changed.notify(usize::MAX);
                 context.update_routing("cloud notification connection established");
                 let events = context.clone();
@@ -805,20 +782,6 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                                 &value,
                                 true,
                             ),
-                            NotificationEvent::MemberProperty {
-                                did,
-                                siid,
-                                piid,
-                                value,
-                                retained,
-                            } => events.member_property_event(
-                                &event_handle,
-                                &did,
-                                siid,
-                                piid,
-                                &value,
-                                retained,
-                            ),
                         })
                         .await
                         .err();
@@ -851,6 +814,7 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     work.cloud_disconnected();
                     work.retry_subscriptions();
                 }
+                context.update_all_availability();
                 context.changed.notify(usize::MAX);
                 context.update_routing("cloud notification connection ended");
                 result

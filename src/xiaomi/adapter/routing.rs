@@ -136,7 +136,7 @@ impl Context {
                     .collect::<Vec<_>>();
                 for work in works {
                     work.retry_subscriptions();
-                    work.refresh();
+                    self.refresh_source(&work.record.physical.key().id);
                 }
                 self.refresh_changed.notify(usize::MAX);
                 self.changed.notify(usize::MAX);
@@ -148,6 +148,11 @@ impl Context {
         let mut live = self.live.borrow_mut();
         let slot = live.devices.get_mut(did).unwrap();
         let record = slot.admitted.as_ref().unwrap().clone();
+        let created = slot.work.is_none();
+        let virtual_group = slot
+            .effective_group
+            .as_ref()
+            .is_some_and(|group| !group.is_physical);
         let work = slot
             .work
             .get_or_insert_with(|| {
@@ -166,6 +171,9 @@ impl Context {
                 ))
             })
             .clone();
+        if created && !virtual_group {
+            work.refresh();
+        }
         if !slot.access.as_ref().is_some_and(|access| {
             access.as_ref().is_ok_and(|access| {
                 let cached = work.record.cached.borrow();
@@ -311,21 +319,65 @@ impl Context {
     }
     /// Automatic local reads never bypass the shared slow recovery schedule.
     pub(super) fn read_path(&self, did: &str) -> Option<ControlPath> {
+        if self.is_virtual_group(did) {
+            return None;
+        }
         match self.control_path(did) {
             Some(ControlPath::Local(_)) if self.priority() == PathPriority::CloudFirst => None,
             path => path,
         }
     }
+    pub(super) fn group_member_work(&self, did: &str) -> Vec<Rc<DeviceWork>> {
+        let live = self.live.borrow();
+        let group = live.devices[did].effective_group.as_ref().unwrap();
+        group
+            .members
+            .iter()
+            .filter_map(|member| {
+                live.devices
+                    .get(member)?
+                    .work
+                    .as_ref()
+                    .filter(|work| {
+                        !work.life.is_closed()
+                            && !work.record.life.is_closed()
+                            && work
+                                .record
+                                .cached
+                                .borrow()
+                                .device
+                                .functions
+                                .iter()
+                                .any(|function| {
+                                    function.description.id == "main" && function.lighting.is_some()
+                                })
+                    })
+                    .cloned()
+            })
+            .collect()
+    }
+    /// Refresh the actual feedback source, sharing ordinary member work.
+    pub(super) fn refresh_source(&self, did: &str) {
+        if self.is_virtual_group(did) {
+            for work in self.group_member_work(did) {
+                work.refresh();
+            }
+        } else if let Some(work) = self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.work.as_ref())
+        {
+            work.refresh();
+        }
+    }
     pub(super) fn update_availability(&self, did: &str) {
         let available = self.control_path(did).is_some();
-        let (record, work, blocked) = {
+        let (record, blocked) = {
             let live = self.live.borrow();
             let slot = &live.devices[did];
-            (
-                slot.admitted.clone(),
-                slot.work.clone(),
-                slot.blocked.clone(),
-            )
+            (slot.admitted.clone(), slot.blocked.clone())
         };
         let Some(record) = record else {
             return;
@@ -336,11 +388,10 @@ impl Context {
         } else {
             Availability::Unavailable(blocked.unwrap_or_else(|| "no usable control path".into()))
         });
-        if !available {
-            self.refresh_repair_groups(did);
-        } else if !was_available && let Some(work) = &work {
-            work.refresh();
+        if available && !was_available {
+            self.refresh_source(did);
         }
+        self.refresh_group_states(did);
     }
     pub(super) fn update_all_availability(&self) {
         let dids = self

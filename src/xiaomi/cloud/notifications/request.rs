@@ -46,9 +46,6 @@ pub(super) enum Target {
         did: String,
         binding: PropertyBinding,
     },
-    RawProperties {
-        did: String,
-    },
     Online {
         did: String,
     },
@@ -57,7 +54,7 @@ pub(super) enum Target {
 impl Target {
     pub(super) fn did(&self) -> &str {
         match self {
-            Self::Property { did, .. } | Self::RawProperties { did } | Self::Online { did } => did,
+            Self::Property { did, .. } | Self::Online { did } => did,
         }
     }
     fn retired_by(&self, did: &str, scope: Retire) -> bool {
@@ -67,19 +64,16 @@ impl Target {
         match scope {
             Retire::Device => true,
             Retire::Properties => matches!(self, Self::Property { .. }),
-            Retire::RawProperties => matches!(self, Self::RawProperties { .. }),
             Retire::Online => matches!(self, Self::Online { .. }),
         }
     }
 }
 
-/// Subscription ownership: ordinary exact properties and raw member watchers
-/// are retired independently so one cleanup cannot silently remove the other.
+/// Property and online subscriptions have independent ownership.
 #[derive(Clone, Copy)]
 pub(super) enum Retire {
     Device,
     Properties,
-    RawProperties,
     Online,
 }
 
@@ -201,19 +195,6 @@ impl NotificationHandle {
         async move { completion?.wait().await }
     }
 
-    /// Subscribe to every valid property event of a device without a parsed
-    /// description. Payloads are validated by the driver before delivery.
-    pub fn subscribe_raw_properties(
-        &self,
-        did: &str,
-    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
-        let completion = self.subscribe(
-            format!("device/{did}/up/properties_changed/#"),
-            Target::RawProperties { did: did.into() },
-        );
-        async move { completion?.wait().await }
-    }
-
     pub fn subscribe_online(
         &self,
         did: &str,
@@ -292,18 +273,8 @@ impl NotificationHandle {
         async move { completion?.wait().await }
     }
 
-    /// Retire only raw member watchers. Ordinary exact subscriptions and
-    /// online notifications stay active.
-    pub fn unsubscribe_raw_properties(
-        &self,
-        did: &str,
-    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
-        let completion = self.unsubscribe(did, Retire::RawProperties);
-        async move { completion?.wait().await }
-    }
-
-    /// Retire only online notifications. Exact and raw member subscriptions
-    /// are owned by other lifecycles and must survive an online reconcile.
+    /// Retire only online notifications. Property subscriptions have their own
+    /// lifecycle and survive an online reconcile.
     pub fn unsubscribe_online(
         &self,
         did: &str,

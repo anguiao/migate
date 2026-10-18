@@ -204,8 +204,8 @@ impl Context {
         }
     }
     fn notification_reason(&self, did: &str) -> String {
-        if let Some(reason) = self.watch_problem(did) {
-            return reason;
+        if self.is_virtual_group(did) {
+            return "member feedback unavailable or subscriptions not ready".into();
         }
         let work = self.live.borrow().devices[did].work.clone();
         if let Some(work) = work {

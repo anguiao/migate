@@ -25,6 +25,5 @@ use support::*;
 
 mod connection;
 mod messages;
-mod raw;
 mod subscriptions;
 pub(crate) mod support;

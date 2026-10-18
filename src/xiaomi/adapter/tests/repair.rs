@@ -320,7 +320,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
         work.notify_value(MEMBER_MODE, &json!(1), false, false);
         // The production notification path refreshes repaired group state
         // after an actual member observation.
-        c.context.refresh_repair_groups("member-a");
+        c.context.refresh_group_states("member-a");
         wait_for(
             || {
                 let snapshot = light.snapshot();
@@ -588,7 +588,7 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
             "group-record",
             "group-1",
             &["member-a", "member-b"],
-            false,
+            true,
         )];
         cloud
             .catalog_instances
@@ -959,9 +959,6 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
         {
             let mut cloud = rig.cloud.lock().unwrap();
             for (index, did) in ["member-a", "member-b"].into_iter().enumerate() {
-                cloud
-                    .raw_values
-                    .insert((did.into(), 2, 1), json!(powers[index]));
                 if failures[index] {
                     cloud
                         .property_codes
@@ -972,7 +969,35 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
         block_on(rig.run(|c| async move {
             repair_ready(&c).await;
             let light = function(&c.context.registry, "group-1", "main");
-            assert_eq!(light.snapshot().power, Power::On);
+            for (index, did) in ["member-a", "member-b"].into_iter().enumerate() {
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .raw_values
+                    .insert((did.into(), 2, 1), json!(powers[index]));
+                let work = c.context.live.borrow().devices[did].work.clone().unwrap();
+                work.source_changed();
+                c.context.refresh_group_states(did);
+            }
+            until(|| {
+                ["member-a", "member-b"]
+                    .iter()
+                    .enumerate()
+                    .all(|(index, did)| {
+                        let snapshot = function(&c.context.registry, did, "main").snapshot();
+                        snapshot.power.value() == powers[index]
+                            && snapshot.lighting.unwrap().mode.is_some()
+                    })
+            })
+            .await;
+            assert_eq!(
+                light.snapshot().power,
+                if powers.contains(&Some(true)) {
+                    Power::On
+                } else {
+                    Power::Unknown
+                }
+            );
             let action = light
                 .begin_light_action(LightDimension::Color, rgb(0x00ff00), true)
                 .unwrap();
