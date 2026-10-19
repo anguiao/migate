@@ -9,7 +9,7 @@
 
 use super::{
     model::AdapterError,
-    state::{Context, DeviceSlot, LogicalSink},
+    state::{Context, LogicalSink},
     work::DeviceWork,
 };
 use crate::{
@@ -40,7 +40,7 @@ pub(crate) struct PreparedSource {
     kind: OperationKind,
     work: Rc<DeviceWork>,
     sink: Rc<LogicalSink>,
-    receivers: Option<Vec<CommandReceiver>>,
+    receivers: Vec<CommandReceiver>,
 }
 
 /// Explicit prepared resources for the planned operations.
@@ -160,20 +160,7 @@ impl SourceHandle {
             let key = operation.key.clone();
             match operation.kind {
                 OperationKind::Removed => removed.push(key),
-                OperationKind::Reused => {
-                    let work = self.0.live.borrow().devices[&key.id]
-                        .admitted
-                        .clone()
-                        .expect("a reused device keeps its native runtime");
-                    let sink = work.current_sink();
-                    installed.push(PreparedSource {
-                        key,
-                        kind: operation.kind,
-                        work,
-                        sink,
-                        receivers: None,
-                    });
-                }
+                OperationKind::Reused => {}
                 OperationKind::ReplacedLogical => {
                     let work = self.0.live.borrow().devices[&key.id]
                         .admitted
@@ -190,7 +177,7 @@ impl SourceHandle {
                         kind: operation.kind,
                         work,
                         sink: Rc::new(LogicalSink::new(physical)),
-                        receivers: Some(receivers),
+                        receivers,
                     });
                 }
                 OperationKind::Added
@@ -229,7 +216,7 @@ impl SourceHandle {
                         kind: operation.kind,
                         work,
                         sink,
-                        receivers: Some(receivers),
+                        receivers,
                     });
                 }
             }
@@ -243,6 +230,9 @@ impl SourceHandle {
     /// recomputation. The caller guarantees that no await happens between
     /// prepare, commit and install.
     pub(crate) fn install(&self, plan: &Plan, prepared: PreparedSources) -> Vec<Rc<SourceEntry>> {
+        let changed = !prepared.installed.is_empty()
+            || !prepared.removed.is_empty()
+            || self.0.graph.borrow().rules != plan.derived.rules;
         for key in &prepared.removed {
             self.0.retire_work(&key.id);
         }
@@ -250,11 +240,6 @@ impl SourceHandle {
         for source in prepared.installed {
             let did = source.key.id.clone();
             match source.kind {
-                OperationKind::Reused => {
-                    if let Some(device) = plan.configuration.device(&source.key) {
-                        source.sink.physical.set_label(device.label.clone());
-                    }
-                }
                 OperationKind::ReplacedLogical => {
                     let old = source.work.replace_sink(source.sink.clone());
                     old.physical.set_availability(Availability::Unavailable(
@@ -262,18 +247,12 @@ impl SourceHandle {
                     ));
                     old.close();
                     self.0.registry.remove(old.physical.key());
-                    if let Some(device) = plan.configuration.device(&source.key) {
-                        source.sink.physical.set_label(device.label.clone());
-                    }
                     self.0.registry.insert(source.sink.physical.clone());
                 }
                 OperationKind::Added
                 | OperationKind::ReplacedNative
                 | OperationKind::ReplacedAuthority => {
                     self.0.retire_work(&source.key.id);
-                    if let Some(device) = plan.configuration.device(&source.key) {
-                        source.sink.physical.set_label(device.label.clone());
-                    }
                     self.0.registry.insert(source.sink.physical.clone());
                     // Binding feedback history is retired only when the real
                     // control bindings changed; authority and logical
@@ -282,53 +261,55 @@ impl SourceHandle {
                         self.0.light_writes.clear_authority(&did);
                     }
                 }
-                OperationKind::Removed => unreachable!("removed operations are retired above"),
+                OperationKind::Removed | OperationKind::Reused => {
+                    unreachable!("only new instances need prepared resources")
+                }
             }
-            let committed = plan
-                .configuration
-                .device(&source.key)
-                .and_then(|device| device.native.clone())
-                .expect("an installed device has planned native facts");
-            {
-                let mut live = self.0.live.borrow_mut();
-                let slot: &mut DeviceSlot = live.devices.get_mut(&did).unwrap();
-                slot.admitted = Some(source.work.clone());
-                slot.latest = Some(committed);
-                slot.latest_name = None;
-                slot.group = plan.derived.groups.contains_key(&did);
-            }
+            self.0
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut(&did)
+                .unwrap()
+                .admitted = Some(source.work.clone());
             started.push(source);
         }
-        // Every member and group is installed and the committed graph is in
-        // place before any work, refresh or aggregation starts.
+        // Reused entries receive committed metadata without preparing resources
+        // or refreshing their unchanged native feedback.
+        for operation in &plan.operations {
+            if operation.kind == OperationKind::Removed {
+                continue;
+            }
+            let device = plan.configuration.device(&operation.key).unwrap();
+            let mut live = self.0.live.borrow_mut();
+            let slot = live.devices.get_mut(&operation.key.id).unwrap();
+            slot.admitted
+                .as_ref()
+                .unwrap()
+                .physical()
+                .set_label(device.label.clone());
+            slot.latest = device.native.clone();
+            slot.latest_name = None;
+            slot.group = plan.derived.groups.contains_key(&operation.key.id);
+        }
+        // Install every instance and the graph before starting consumers or
+        // deriving group feedback. Each group is recomputed once per commit.
         *self.0.graph.borrow_mut() = plan.derived.clone();
-        let mut refreshed = Vec::new();
         for source in started {
-            let did = source.key.id.clone();
-            if let Some(receivers) = source.receivers {
-                self.0
-                    .add_consumers(source.work.clone(), source.sink.clone(), receivers);
+            let did = &source.key.id;
+            self.0
+                .add_consumers(source.work.clone(), source.sink, source.receivers);
+            if source.kind != OperationKind::ReplacedLogical {
+                self.0.install_work(did);
             }
-            self.0.install_work(&did);
-            self.0.update_availability(&did);
-            if let Some(work) = self.0.live.borrow().devices[&did].admitted.as_ref() {
-                work.report(&self.0, &did);
+            self.0.update_device_availability(did);
+            source.work.report(&self.0, did);
+        }
+        if changed {
+            for did in plan.derived.rules.keys() {
+                self.0.update_device_availability(did);
             }
-            refreshed.push(did);
-        }
-        for did in refreshed {
-            self.0.refresh_source(&did);
-        }
-        for did in self
-            .0
-            .live
-            .borrow()
-            .devices
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            self.0.refresh_group_states(&did);
+            self.0.refresh_all_group_states();
         }
         let entries = self.entries(&plan.configuration);
         self.0.changed.notify(usize::MAX);

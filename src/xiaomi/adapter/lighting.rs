@@ -377,17 +377,13 @@ impl Context {
             groups.extend(affected.iter().cloned());
         }
         for did in groups {
-            let Some(group) = graph.rules.get(&did) else {
-                continue;
-            };
-            let repair = graph
-                .served
-                .get(&DeviceKey::new("xiaomi", &did))
-                .and_then(|served| served.repair.as_ref());
-            if group.is_physical && repair.is_none() {
-                continue;
-            }
             self.refresh_group_state(&did);
+        }
+    }
+    pub(super) fn refresh_all_group_states(&self) {
+        let graph = self.graph.borrow().clone();
+        for did in graph.rules.keys() {
+            self.refresh_group_state(did);
         }
     }
 

@@ -496,10 +496,37 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
 
 #[test]
 fn metadata_only_type_change_reuses_the_instance_without_refetching() {
-    let rig = light_rig();
+    let rig = Rig::lights(&[
+        ("one", "xiaomi.light.ceil04"),
+        ("two", "xiaomi.light.ceil04"),
+    ]);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.online.extend(["one".into(), "two".into()]);
+        for did in ["one", "two"] {
+            for (piid, value) in [(1, json!(true)), (2, json!(50)), (3, json!(4000))] {
+                cloud.raw_values.insert((did.into(), 2, piid), value);
+            }
+        }
+    }
     block_on(rig.run(|c| async move {
         let key = DeviceKey::new("xiaomi", "one");
         ready(&c).await;
+        c.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let idle = || {
+            c.context.live.borrow().devices.values().all(|slot| {
+                slot.admitted.as_ref().is_some_and(|work| {
+                    let state = work.refresh.borrow().snapshot();
+                    work.physical().availability() == Availability::Available
+                        && state.pending.is_empty()
+                        && state.inflight.is_empty()
+                })
+            })
+        };
+        until(idle).await;
+        let property_reads = c.cloud.lock().unwrap().property_reads.clone();
 
         let before = c.publication.current();
         let root_version = before.configuration.root_version;
@@ -548,6 +575,15 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
         })
         .await;
 
+        assert!(
+            idle(),
+            "metadata commit must not queue reads for reused devices"
+        );
+        assert_eq!(
+            c.cloud.lock().unwrap().property_reads,
+            property_reads,
+            "metadata commit must not read the changed device or its unchanged neighbor"
+        );
         let reads = c.cloud.lock().unwrap().instance_reads[new_urn];
         assert_eq!(
             reads, 1,

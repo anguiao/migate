@@ -359,6 +359,10 @@ impl Context {
         }
     }
     pub(super) fn update_availability(&self, did: &str) {
+        self.update_device_availability(did);
+        self.refresh_group_states(did);
+    }
+    pub(super) fn update_device_availability(&self, did: &str) {
         let available = self.control_path(did).is_some();
         let (work, blocked) = {
             let live = self.live.borrow();
@@ -378,7 +382,6 @@ impl Context {
         if available && !was_available {
             self.refresh_source(did);
         }
-        self.refresh_group_states(did);
     }
     pub(super) fn update_all_availability(&self) {
         let dids = self
@@ -389,8 +392,9 @@ impl Context {
             .cloned()
             .collect::<Vec<_>>();
         for did in dids {
-            self.update_availability(&did);
+            self.update_device_availability(&did);
         }
+        self.refresh_all_group_states();
     }
     pub(super) fn disconnect(&self, reason: String) {
         let priority_changed =
