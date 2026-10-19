@@ -6,6 +6,7 @@ mod on_off;
 mod pairing;
 mod shape;
 mod storage;
+pub(crate) mod units;
 
 pub(crate) use bridge::Advertisement;
 pub use bridge::Bridge;

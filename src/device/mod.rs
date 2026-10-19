@@ -9,11 +9,12 @@ pub use command::{
     LightActionDiagnostics, LightActionResult, LightDimension, LightRequest,
 };
 pub use light_command::{LightActionChanges, LightColorTarget, LightTarget};
+pub(crate) use model::mired_span;
 pub use model::{
     Availability, Capability, Command, CommandError, DescriptionError, DeviceKey,
     FunctionDescription, FunctionKey, FunctionKind, FunctionSnapshot, LightMode, LightPatch,
     LightProfile, LightProfileKind, LightSnapshot, NumericRange, PhysicalDeviceDescription, Power,
-    RangeError, Rgb, TemperatureInterval, brightness_from_matter_level, brightness_to_matter_level,
+    RangeError, Rgb, TemperatureInterval,
 };
 pub use registry::{DeviceRegistry, RegistryChanges, RegistrySnapshot};
 pub use state::{AvailabilityChanges, Function, FunctionChanges, PhysicalDevice};

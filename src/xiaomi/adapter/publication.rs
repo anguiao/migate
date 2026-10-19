@@ -449,9 +449,9 @@ fn same_kind(a: FunctionKind, b: FunctionKind) -> bool {
         (Some(a), Some(b)) => {
             a.kind() == b.kind()
                 && a.temperature_interval()
-                    .map(crate::lighting::temperature::mired_bounds)
+                    .map(crate::matter::units::mired_bounds)
                     == b.temperature_interval()
-                        .map(crate::lighting::temperature::mired_bounds)
+                        .map(crate::matter::units::mired_bounds)
         }
         _ => false,
     }

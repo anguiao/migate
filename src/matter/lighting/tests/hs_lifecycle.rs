@@ -380,7 +380,7 @@ fn an_external_rgb_change_versions_and_reports_the_hs_attributes() {
         .unwrap();
     light.reports(&ctx);
     ctx.changes.borrow_mut().clear();
-    let version = light.color_version.get();
+    let version = light.report.color_version.get();
     function
         .observe_light(LightPatch {
             color: Some(Rgb {
@@ -392,7 +392,7 @@ fn an_external_rgb_change_versions_and_reports_the_hs_attributes() {
         })
         .unwrap();
     light.sync_versions();
-    assert_ne!(light.color_version.get(), version);
+    assert_ne!(light.report.color_version.get(), version);
     assert!(ctx.changes.borrow().is_empty());
     light.reports(&ctx);
     assert!(ctx.changes.borrow().contains(&(2, 0x300, 0)));

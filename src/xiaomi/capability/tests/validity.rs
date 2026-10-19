@@ -185,7 +185,7 @@ fn profile_interval_uses_the_effective_grid_maximum_for_the_mired_span() {
         TemperatureInterval::new(2700, 6500).unwrap()
     );
     assert_eq!(
-        crate::lighting::temperature::mired_bounds(binding.interval()),
+        crate::matter::units::mired_bounds(binding.interval()),
         (154, 370)
     );
 }
@@ -193,7 +193,7 @@ fn profile_interval_uses_the_effective_grid_maximum_for_the_mired_span() {
 #[test]
 fn mired_conversion_keeps_precision_until_one_native_quantization() {
     let binding = temperature(2000, 4000, 2);
-    let kelvin = crate::lighting::temperature::kelvin_from_mireds(253);
+    let kelvin = crate::matter::units::kelvin_from_mireds(253);
     assert!((kelvin - 1_000_000.0 / 253.0).abs() < f64::EPSILON);
     // Baseline: quantize(3952.569) = 3952. Rounding to 3953 first would
     // double-round to 3954.

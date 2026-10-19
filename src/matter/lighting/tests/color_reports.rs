@@ -1,18 +1,22 @@
 use super::*;
 use crate::lighting::hs;
-use c::ClusterAsyncHandler as _;
 
-fn reported<H>(ctx: &Context<'_, H>) -> Vec<u32> {
-    let mut attributes: Vec<_> = ctx
-        .changes
-        .borrow_mut()
-        .drain(..)
-        .filter_map(|(endpoint, cluster, attribute)| {
-            (endpoint == 2 && cluster == 0x300).then_some(attribute)
-        })
+fn reported(light: &Lighting) -> Vec<u32> {
+    let mut attributes: Vec<_> = collect_reports(light)
+        .into_iter()
+        .filter_map(|(cluster, attribute)| (cluster == 0x300).then_some(attribute))
         .collect();
     attributes.sort_unstable();
     attributes
+}
+
+fn hue_sat(light: &Lighting) -> Option<(u8, u8)> {
+    light.refresh().hs.map(|value| {
+        (
+            value.hue.round().clamp(0.0, 254.0) as u8,
+            value.saturation.round().clamp(0.0, 254.0) as u8,
+        )
+    })
 }
 
 fn cached_colors(mode: LightMode) -> LightPatch {
@@ -31,12 +35,11 @@ fn cached_colors(mode: LightMode) -> LightPatch {
 
 #[test]
 fn external_cold_white_reports_one_consistent_color_without_changing_the_rgb_cache() {
-    setup!(true, function, receiver, light, clock, ctx);
+    let (light, function, mut receiver, clock) = light_fixture(true);
     function
         .observe_light(cached_colors(LightMode::Rgb))
         .unwrap();
-    light.reports(&ctx);
-    reported(&ctx);
+    collect_reports(&light);
 
     function
         .observe_light(LightPatch {
@@ -45,23 +48,14 @@ fn external_cold_white_reports_one_consistent_color_without_changing_the_rgb_cac
             ..Default::default()
         })
         .unwrap();
-    light.reports(&ctx);
-    assert_eq!(reported(&ctx), [0, 1, 3, 4, 7, 8, 0x4001]);
-    block_on(async {
-        let handler = ColorHandler::<true>(&light);
-        assert_eq!(handler.color_temperature_mireds(&ctx).await.unwrap(), 154);
-        assert!(handler.current_saturation(&ctx).await.unwrap() <= 10);
-        assert!((20000..22000).contains(&handler.current_x(&ctx).await.unwrap()));
-        assert!((20000..22000).contains(&handler.current_y(&ctx).await.unwrap()));
-        assert_eq!(
-            handler.color_mode(&ctx).await.unwrap(),
-            c::ColorModeEnum::ColorTemperatureMireds
-        );
-        assert_eq!(
-            handler.enhanced_color_mode(&ctx).await.unwrap(),
-            c::EnhancedColorModeEnum::ColorTemperatureMireds
-        );
-    });
+    assert_eq!(reported(&light), [0, 1, 3, 4, 7, 8, 0x4001]);
+    assert_eq!(light.refresh().temperature, Some(154));
+    let (_, saturation) = hue_sat(&light).unwrap();
+    assert!(saturation <= 10);
+    let (x, y) = light.refresh().xy.unwrap();
+    assert!((20000..22000).contains(&x));
+    assert!((20000..22000).contains(&y));
+    assert_eq!(light.refresh().color_mode, Some(2));
     assert_eq!(
         function.snapshot().lighting.unwrap().color,
         cached_colors(LightMode::Rgb).color
@@ -73,31 +67,28 @@ fn external_cold_white_reports_one_consistent_color_without_changing_the_rgb_cac
             ..Default::default()
         })
         .unwrap();
-    light.reports(&ctx);
-    assert_eq!(reported(&ctx), [0, 1, 3, 4, 7]);
-    block_on(async {
-        let handler = ColorHandler::<true>(&light);
-        assert_eq!(handler.color_temperature_mireds(&ctx).await.unwrap(), 250);
-        assert!((15..35).contains(&handler.current_hue(&ctx).await.unwrap()));
-        assert!((70..110).contains(&handler.current_saturation(&ctx).await.unwrap()));
-        assert!((24000..26000).contains(&handler.current_x(&ctx).await.unwrap()));
-        assert!((24000..26000).contains(&handler.current_y(&ctx).await.unwrap()));
-    });
+    assert_eq!(reported(&light), [0, 1, 3, 4, 7]);
+    assert_eq!(light.refresh().temperature, Some(250));
+    let (hue, saturation) = hue_sat(&light).unwrap();
+    assert!((15..35).contains(&hue));
+    assert!((70..110).contains(&saturation));
+    let (x, y) = light.refresh().xy.unwrap();
+    assert!((24000..26000).contains(&x));
+    assert!((24000..26000).contains(&y));
     assert_eq!(clock.now(), 0);
     assert!(block_on(poll_once(receiver.next_operation())).is_none());
 }
 
 #[test]
 fn mode_only_changes_report_the_new_group_even_when_temperature_encoding_is_unchanged() {
-    setup!(true, function, receiver, light, clock, ctx);
+    let (light, function, mut receiver, clock) = light_fixture(true);
     function
         .observe_light(LightPatch {
             temperature_kelvin: Some(6494),
             ..cached_colors(LightMode::Rgb)
         })
         .unwrap();
-    light.reports(&ctx);
-    reported(&ctx);
+    collect_reports(&light);
     assert_eq!(light.refresh().temperature, Some(154));
 
     function
@@ -106,8 +97,7 @@ fn mode_only_changes_report_the_new_group_even_when_temperature_encoding_is_unch
             ..Default::default()
         })
         .unwrap();
-    light.reports(&ctx);
-    assert!(reported(&ctx).is_empty());
+    assert!(reported(&light).is_empty());
     assert_eq!(light.refresh().temperature, Some(154));
 
     function
@@ -116,8 +106,7 @@ fn mode_only_changes_report_the_new_group_even_when_temperature_encoding_is_unch
             ..Default::default()
         })
         .unwrap();
-    light.reports(&ctx);
-    assert_eq!(reported(&ctx), [0, 1, 3, 4, 7, 8, 0x4001]);
+    assert_eq!(reported(&light), [0, 1, 3, 4, 7, 8, 0x4001]);
     assert!(light.refresh().encoded_hs().unwrap().1 <= 10);
 
     function
@@ -126,8 +115,7 @@ fn mode_only_changes_report_the_new_group_even_when_temperature_encoding_is_unch
             ..Default::default()
         })
         .unwrap();
-    light.reports(&ctx);
-    assert_eq!(reported(&ctx), [0, 1, 3, 4, 8, 0x4001]);
+    assert_eq!(reported(&light), [0, 1, 3, 4, 8, 0x4001]);
     assert_eq!(light.refresh().encoded_hs(), Some((0, 254)));
     assert_eq!(light.refresh().xy, Some((41943, 21627)));
     assert_eq!(clock.now(), 0);
@@ -137,11 +125,10 @@ fn mode_only_changes_report_the_new_group_even_when_temperature_encoding_is_unch
 #[test]
 fn inactive_cache_updates_only_version_values_exposed_by_the_current_projection() {
     for mode in [LightMode::Temperature, LightMode::Rgb] {
-        setup!(true, function, receiver, light, clock, ctx);
+        let (light, function, mut receiver, clock) = light_fixture(true);
         function.observe_light(cached_colors(mode)).unwrap();
-        light.reports(&ctx);
-        reported(&ctx);
-        let old_version = light.color_version.get();
+        collect_reports(&light);
+        let old_version = light.report.color_version.get();
         let old = light.refresh();
         let patch = match mode {
             LightMode::Temperature => LightPatch {
@@ -158,33 +145,26 @@ fn inactive_cache_updates_only_version_values_exposed_by_the_current_projection(
             },
         };
         function.observe_light(patch).unwrap();
-        ColorHandler::<true>(&light).dataver();
-        light.reports(&ctx);
-        assert!(reported(&ctx).is_empty());
-        block_on(async {
-            let handler = ColorHandler::<true>(&light);
-            match mode {
-                LightMode::Temperature => {
-                    assert_eq!(light.color_version.get(), old_version);
-                    let (hue, saturation) = old.encoded_hs().unwrap();
-                    let (x, y) = old.xy.unwrap();
-                    assert_eq!(handler.current_hue(&ctx).await.unwrap(), hue);
-                    assert_eq!(handler.current_saturation(&ctx).await.unwrap(), saturation);
-                    assert_eq!(handler.current_x(&ctx).await.unwrap(), x);
-                    assert_eq!(handler.current_y(&ctx).await.unwrap(), y);
-                    assert_eq!(function.snapshot().lighting.unwrap().color, patch.color);
-                }
-                LightMode::Rgb => {
-                    assert_ne!(light.color_version.get(), old_version);
-                    assert_eq!(handler.color_temperature_mireds(&ctx).await.unwrap(), 200);
-                    assert_eq!(light.refresh().encoded_hs(), old.encoded_hs());
-                    assert_eq!(light.refresh().xy, old.xy);
-                }
+        light.sync_versions();
+        assert!(reported(&light).is_empty());
+        match mode {
+            LightMode::Temperature => {
+                assert_eq!(light.report.color_version.get(), old_version);
+                let (hue, saturation) = old.encoded_hs().unwrap();
+                let (x, y) = old.xy.unwrap();
+                assert_eq!(hue_sat(&light), Some((hue, saturation)));
+                assert_eq!(light.refresh().xy, Some((x, y)));
+                assert_eq!(function.snapshot().lighting.unwrap().color, patch.color);
             }
-        });
+            LightMode::Rgb => {
+                assert_ne!(light.report.color_version.get(), old_version);
+                assert_eq!(light.refresh().temperature, Some(200));
+                assert_eq!(light.refresh().encoded_hs(), old.encoded_hs());
+                assert_eq!(light.refresh().xy, old.xy);
+            }
+        }
         clock.set(1000);
-        light.reports(&ctx);
-        assert!(reported(&ctx).is_empty());
+        assert!(reported(&light).is_empty());
         assert!(block_on(poll_once(receiver.next_operation())).is_none());
     }
 }
@@ -192,7 +172,7 @@ fn inactive_cache_updates_only_version_values_exposed_by_the_current_projection(
 #[test]
 fn unknown_active_color_reports_its_own_group_without_using_the_other_cache() {
     for mode in [LightMode::Temperature, LightMode::Rgb] {
-        setup!(true, function, receiver, light, clock, ctx);
+        let (light, function, mut receiver, clock) = light_fixture(true);
         let patch = match mode {
             LightMode::Temperature => LightPatch {
                 color: Some(Rgb {
@@ -208,8 +188,8 @@ fn unknown_active_color_reports_its_own_group_without_using_the_other_cache() {
             },
         };
         function.observe_light(patch).unwrap();
-        light.reports(&ctx);
-        assert!(reported(&ctx).is_empty());
+        collect_reports(&light);
+        assert!(reported(&light).is_empty());
         assert!(light.refresh().hs.is_none());
         assert!(light.refresh().xy.is_none());
         function
@@ -218,24 +198,20 @@ fn unknown_active_color_reports_its_own_group_without_using_the_other_cache() {
                 ..Default::default()
             })
             .unwrap();
-        light.reports(&ctx);
-        block_on(async {
-            let handler = ColorHandler::<true>(&light);
-            assert!(handler.current_hue(&ctx).await.is_err());
-            assert!(handler.current_saturation(&ctx).await.is_err());
-            assert!(handler.current_x(&ctx).await.is_err());
-            assert!(handler.current_y(&ctx).await.is_err());
-            match mode {
-                LightMode::Temperature => {
-                    assert_eq!(reported(&ctx), [0, 1, 3, 4, 7, 8, 0x4001]);
-                    assert!(handler.color_temperature_mireds(&ctx).await.is_err());
-                }
-                LightMode::Rgb => {
-                    assert_eq!(reported(&ctx), [0, 1, 3, 4, 8, 0x4001]);
-                    assert_eq!(handler.color_temperature_mireds(&ctx).await.unwrap(), 154);
-                }
+        match mode {
+            LightMode::Temperature => {
+                assert_eq!(reported(&light), [0, 1, 3, 4, 7, 8, 0x4001]);
+                assert!(hue_sat(&light).is_none());
+                assert!(light.refresh().xy.is_none());
+                assert!(light.refresh().temperature.is_none());
             }
-        });
+            LightMode::Rgb => {
+                assert_eq!(reported(&light), [0, 1, 3, 4, 8, 0x4001]);
+                assert!(hue_sat(&light).is_none());
+                assert!(light.refresh().xy.is_none());
+                assert_eq!(light.refresh().temperature, Some(154));
+            }
+        }
         assert_eq!(clock.now(), 0);
         assert!(block_on(poll_once(receiver.next_operation())).is_none());
     }
@@ -244,7 +220,7 @@ fn unknown_active_color_reports_its_own_group_without_using_the_other_cache() {
 #[test]
 fn mode_boundary_flushes_the_new_group_and_discards_the_old_quiet_report() {
     for rgb in [false, true] {
-        setup!(true, function, receiver, light, clock, ctx);
+        let (light, function, mut receiver, clock) = light_fixture(true);
         function
             .observe_light(LightPatch {
                 temperature_kelvin: Some(5000),
@@ -255,8 +231,7 @@ fn mode_boundary_flushes_the_new_group_and_discards_the_old_quiet_report() {
                 })
             })
             .unwrap();
-        light.reports(&ctx);
-        reported(&ctx);
+        collect_reports(&light);
         let task = if rgb {
             ColorTask::XyMove {
                 start_x: 41943,
@@ -276,14 +251,12 @@ fn mode_boundary_flushes_the_new_group_and_discards_the_old_quiet_report() {
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
-            light.reports(&ctx);
-            reported(&ctx);
+            collect_reports(&light);
             clock.set(100);
             light.advance();
             accept(&function, frame(&mut receiver).await);
-            light.reports(&ctx);
-            assert!(reported(&ctx).is_empty());
-            assert!(light.color_dirty.get());
+            assert!(reported(&light).is_empty());
+            assert!(light.report.is_pending());
 
             function.take_over_light(LightDimension::Color).unwrap();
             function
@@ -296,19 +269,17 @@ fn mode_boundary_flushes_the_new_group_and_discards_the_old_quiet_report() {
                     ..Default::default()
                 })
                 .unwrap();
-            light.reports(&ctx);
             assert_eq!(
-                reported(&ctx),
+                reported(&light),
                 if rgb {
                     vec![0, 1, 3, 4, 7, 8, 0x4001]
                 } else {
                     vec![0, 1, 3, 4, 8, 0x4001]
                 }
             );
-            assert!(!light.color_dirty.get());
+            assert!(!light.report.is_pending());
             clock.set(1000);
-            light.reports(&ctx);
-            assert!(reported(&ctx).is_empty());
+            assert!(reported(&light).is_empty());
         });
     }
 }
@@ -316,7 +287,7 @@ fn mode_boundary_flushes_the_new_group_and_discards_the_old_quiet_report() {
 #[test]
 fn short_color_transitions_report_the_active_group_at_the_end() {
     for rgb in [false, true] {
-        setup!(true, function, receiver, light, clock, ctx);
+        let (light, function, mut receiver, clock) = light_fixture(true);
         function
             .observe_light(LightPatch {
                 temperature_kelvin: Some(5000),
@@ -327,8 +298,7 @@ fn short_color_transitions_report_the_active_group_at_the_end() {
                 })
             })
             .unwrap();
-        light.reports(&ctx);
-        reported(&ctx);
+        collect_reports(&light);
         let task = if rgb {
             ColorTask::XyMoveTo {
                 start_x: 41943,
@@ -348,22 +318,19 @@ fn short_color_transitions_report_the_active_group_at_the_end() {
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
-            light.reports(&ctx);
-            reported(&ctx);
+            collect_reports(&light);
             clock.set(50);
             light.advance();
             accept(&function, frame(&mut receiver).await);
-            light.reports(&ctx);
-            assert!(reported(&ctx).is_empty());
+            assert!(reported(&light).is_empty());
 
             clock.set(100);
             light.advance();
             let request = frame(&mut receiver).await;
             assert!(request.final_frame);
             accept(&function, request);
-            light.reports(&ctx);
             assert_eq!(
-                reported(&ctx),
+                reported(&light),
                 if rgb {
                     vec![0, 1, 3, 4]
                 } else {
@@ -377,7 +344,7 @@ fn short_color_transitions_report_the_active_group_at_the_end() {
 
 #[test]
 fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
-    setup!(true, function, receiver, light, clock, ctx);
+    let (light, function, mut receiver, clock) = light_fixture(true);
     function
         .observe_light(LightPatch {
             temperature_kelvin: Some(6500),
@@ -396,11 +363,8 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
     block_on(async {
         accept(&function, frame(&mut receiver).await);
         action.accepted().await.unwrap();
-        light.reports(&ctx);
-        reported(&ctx);
-        let handler = ColorHandler::<true>(&light);
-        assert_eq!(handler.current_hue(&ctx).await.unwrap(), 170);
-        assert_eq!(handler.current_saturation(&ctx).await.unwrap(), 0);
+        collect_reports(&light);
+        assert_eq!(hue_sat(&light), Some((170, 0)));
         light.advance();
         assert!(light.scheduler.observe(LightDimension::Color).is_none());
         let rgb_cache = function.snapshot().lighting.unwrap().color;
@@ -411,10 +375,10 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
                 ..Default::default()
             })
             .unwrap();
-        light.reports(&ctx);
-        assert_eq!(reported(&ctx), [0, 1, 3, 4, 7, 8, 0x4001]);
-        assert_ne!(handler.current_hue(&ctx).await.unwrap(), 170);
-        assert!(handler.current_saturation(&ctx).await.unwrap() <= 10);
+        assert_eq!(reported(&light), [0, 1, 3, 4, 7, 8, 0x4001]);
+        let (hue, saturation) = hue_sat(&light).unwrap();
+        assert_ne!(hue, 170);
+        assert!(saturation <= 10);
         assert_eq!(function.snapshot().lighting.unwrap().color, rgb_cache);
 
         function
@@ -423,10 +387,8 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
                 ..Default::default()
             })
             .unwrap();
-        light.reports(&ctx);
-        assert_eq!(reported(&ctx), [0, 1, 3, 4, 8, 0x4001]);
-        assert_eq!(handler.current_hue(&ctx).await.unwrap(), 170);
-        assert_eq!(handler.current_saturation(&ctx).await.unwrap(), 0);
+        assert_eq!(reported(&light), [0, 1, 3, 4, 8, 0x4001]);
+        assert_eq!(hue_sat(&light), Some((170, 0)));
         assert_eq!(function.snapshot().lighting.unwrap().color, rgb_cache);
     });
     assert_eq!(clock.now(), 0);

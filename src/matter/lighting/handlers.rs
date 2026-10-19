@@ -1,6 +1,6 @@
-use super::{Lighting, settings};
+use super::{Lighting, plan, plan_error};
 use crate::device::{Command, LightDimension};
-use crate::lighting::{color, hs};
+use crate::lighting::{hs, level};
 use rs_matter::{
     dm::{
         Cluster, HandlerContext, InvokeContext, ReadContext, WriteContext,
@@ -24,10 +24,10 @@ impl o::ClusterAsyncHandler for OnOffHandler<'_> {
         ));
     fn dataver(&self) -> u32 {
         self.0.sync_versions();
-        self.0.on_off_version.get()
+        self.0.report.on_off_version.get()
     }
     fn dataver_changed(&self) {
-        self.0.on_off_version.changed();
+        self.0.report.on_off_version.changed();
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         self.0.run(ctx).await
@@ -79,6 +79,12 @@ fn validate_power(ctx: &impl InvokeContext) -> Result<(), Error> {
         .map(|_| ())
 }
 
+impl LevelHandler<'_> {
+    async fn apply(&self, plan: Result<plan::Plan, plan::PlanError>) -> Result<(), Error> {
+        self.0.execute(plan.map_err(plan_error)?).await
+    }
+}
+
 macro_rules! level_to {
     ($name:ident,$request:ident,$with:expr) => {
         async fn $name(
@@ -86,16 +92,21 @@ macro_rules! level_to {
             _ctx: impl InvokeContext,
             request: l::$request<'_>,
         ) -> Result<(), Error> {
-            let feedback = self.0.refresh();
-            let task = self.0.level.borrow().move_to_level(
-                request.level()?,
-                $with,
-                request.transition_time()?.into_option(),
+            let level = request.level()?;
+            let transition = request.transition_time()?.into_option();
+            let (mask, override_) = (
                 request.options_mask()?.bits(),
                 request.options_override()?.bits(),
-                feedback,
-            )?;
-            self.0.execute_level(task).await
+            );
+            let input = self.0.plan_input();
+            self.apply(plan::move_to_level(
+                level,
+                $with,
+                transition,
+                plan::Options::new(mask, override_),
+                &input,
+            ))
+            .await
         }
     };
 }
@@ -106,16 +117,24 @@ macro_rules! level_move {
             _ctx: impl InvokeContext,
             request: l::$request<'_>,
         ) -> Result<(), Error> {
-            let feedback = self.0.refresh();
-            let task = self.0.level.borrow().move_level(
-                $with,
-                request.move_mode()?,
-                request.rate()?.into_option(),
+            let mode = match request.move_mode()? {
+                l::MoveModeEnum::Up => level::Direction::Up,
+                l::MoveModeEnum::Down => level::Direction::Down,
+            };
+            let rate = request.rate()?.into_option();
+            let (mask, override_) = (
                 request.options_mask()?.bits(),
                 request.options_override()?.bits(),
-                feedback,
-            )?;
-            self.0.execute_level(task).await
+            );
+            let input = self.0.plan_input();
+            self.apply(plan::move_level(
+                $with,
+                mode,
+                rate,
+                plan::Options::new(mask, override_),
+                &input,
+            ))
+            .await
         }
     };
 }
@@ -126,17 +145,26 @@ macro_rules! level_step {
             _ctx: impl InvokeContext,
             request: l::$request<'_>,
         ) -> Result<(), Error> {
-            let feedback = self.0.refresh();
-            let task = self.0.level.borrow().step(
-                $with,
-                request.step_mode()?,
-                request.step_size()?,
-                request.transition_time()?.into_option(),
+            let mode = match request.step_mode()? {
+                l::StepModeEnum::Up => plan::StepMode::Up,
+                l::StepModeEnum::Down => plan::StepMode::Down,
+            };
+            let size = request.step_size()?;
+            let transition = request.transition_time()?.into_option();
+            let (mask, override_) = (
                 request.options_mask()?.bits(),
                 request.options_override()?.bits(),
-                feedback,
-            )?;
-            self.0.execute_level(task).await
+            );
+            let input = self.0.plan_input();
+            self.apply(plan::step(
+                $with,
+                mode,
+                size,
+                transition,
+                plan::Options::new(mask, override_),
+                &input,
+            ))
+            .await
         }
     };
 }
@@ -147,25 +175,17 @@ macro_rules! level_stop {
             _ctx: impl InvokeContext,
             request: l::$request<'_>,
         ) -> Result<(), Error> {
-            let power = self.0.refresh().power;
             let (mask, override_) = (
                 request.options_mask()?.bits(),
                 request.options_override()?.bits(),
             );
-            if $with {
-                settings::validate_options(mask, override_)?;
-            }
-            if !$with
-                && !settings::should_continue(
-                    power,
-                    self.0.level.borrow().options,
-                    mask,
-                    override_,
-                )?
-            {
-                return Ok(());
-            }
-            self.0.stop(LightDimension::Brightness)
+            let input = self.0.plan_input();
+            self.apply(plan::stop_level(
+                $with,
+                plan::Options::new(mask, override_),
+                &input,
+            ))
+            .await
         }
     };
 }
@@ -185,10 +205,10 @@ impl l::ClusterAsyncHandler for LevelHandler<'_> {
         ));
     fn dataver(&self) -> u32 {
         self.0.sync_versions();
-        self.0.level_version.get()
+        self.0.report.level_version.get()
     }
     fn dataver_changed(&self) {
-        self.0.level_version.changed();
+        self.0.report.level_version.changed();
     }
     async fn current_level(&self, _ctx: impl ReadContext) -> Result<Nullable<u8>, Error> {
         Ok(Nullable::new(self.0.refresh().level))
@@ -204,11 +224,11 @@ impl l::ClusterAsyncHandler for LevelHandler<'_> {
     }
     async fn options(&self, _ctx: impl ReadContext) -> Result<l::OptionsBitmap, Error> {
         Ok(l::OptionsBitmap::from_bits_retain(
-            self.0.level.borrow().options,
+            self.0.level_options.get(),
         ))
     }
     async fn on_level(&self, _ctx: impl ReadContext) -> Result<Nullable<u8>, Error> {
-        Ok(Nullable::new(self.0.level.borrow().on_level))
+        Ok(Nullable::new(self.0.on_level.get()))
     }
     async fn set_options(
         &self,
@@ -218,8 +238,8 @@ impl l::ClusterAsyncHandler for LevelHandler<'_> {
         if value.bits() & !1 != 0 {
             return Err(ErrorCode::ConstraintError.into());
         }
-        let changed = self.0.level.borrow().options != value.bits();
-        self.0.level.borrow_mut().options = value.bits();
+        let changed = self.0.level_options.get() != value.bits();
+        self.0.level_options.set(value.bits());
         if changed {
             ctx.notify_changed();
         }
@@ -230,8 +250,8 @@ impl l::ClusterAsyncHandler for LevelHandler<'_> {
         if value.is_some_and(|v| !(1..=254).contains(&v)) {
             return Err(ErrorCode::ConstraintError.into());
         }
-        let changed = self.0.level.borrow().on_level != value;
-        self.0.level.borrow_mut().on_level = value;
+        let changed = self.0.on_level.get() != value;
+        self.0.on_level.set(value);
         if changed {
             ctx.notify_changed();
         }
@@ -267,79 +287,29 @@ fn hs_direction(direction: c::DirectionEnum) -> hs::Direction {
     }
 }
 
+fn color_move_mode(mode: c::MoveModeEnum) -> plan::MoveMode {
+    match mode {
+        c::MoveModeEnum::Up => plan::MoveMode::Up,
+        c::MoveModeEnum::Down => plan::MoveMode::Down,
+        c::MoveModeEnum::Stop => plan::MoveMode::Stop,
+    }
+}
+
+fn color_step_mode(mode: c::StepModeEnum) -> plan::StepMode {
+    match mode {
+        c::StepModeEnum::Up => plan::StepMode::Up,
+        c::StepModeEnum::Down => plan::StepMode::Down,
+    }
+}
+
 macro_rules! unsupported_color {
     ($($name:ident:$request:ident),* $(,)?) => {$ (
         async fn $name(&self,_ctx:impl InvokeContext,_request:c::$request<'_>)->Result<(),Error>{Err(ErrorCode::CommandNotFound.into())}
     )*};
 }
 impl<const RGB: bool> ColorHandler<'_, RGB> {
-    fn proceed(&self, mask: c::OptionsBitmap, override_: c::OptionsBitmap) -> Result<bool, Error> {
-        let power = self.0.refresh().power;
-        settings::should_continue(
-            power,
-            self.0.color_options.get(),
-            mask.bits(),
-            override_.bits(),
-        )
-    }
-    fn temperature_task(
-        &self,
-        current: Option<u16>,
-        target: u16,
-        transition: u16,
-    ) -> Result<color::Task, Error> {
-        if target > color::XY_MAX || transition == u16::MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        let (lo, hi) = self.0.bounds.ok_or(ErrorCode::InvalidState)?;
-        let target = target.clamp(lo, hi);
-        let start = if transition == 0 {
-            current.unwrap_or(target)
-        } else {
-            current.ok_or(ErrorCode::InvalidState)?
-        };
-        Ok(color::Task::ColorTemperatureMoveTo {
-            start,
-            target_mireds: target,
-            transition_ms: transition as u64 * 100,
-        })
-    }
-    fn xy_task(&self, x: u16, y: u16, transition: u16) -> Result<color::Task, Error> {
-        if x > color::XY_MAX || y > color::XY_MAX || transition == u16::MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        let (start_x, start_y) = if transition == 0 {
-            (x, y)
-        } else {
-            self.0.xy_start()?
-        };
-        Ok(color::Task::XyMoveTo {
-            start_x,
-            start_y,
-            target_x: x,
-            target_y: y,
-            transition_ms: transition as u64 * 100,
-        })
-    }
-    fn bounds(&self, min: u16, max: u16) -> Result<(u16, u16), Error> {
-        if min > color::XY_MAX || max > color::XY_MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        let (bound_lo, bound_hi) = self.0.bounds.ok_or(ErrorCode::InvalidState)?;
-        let lo = if min == 0 {
-            bound_lo
-        } else {
-            min.max(bound_lo)
-        };
-        let hi = if max == 0 {
-            bound_hi
-        } else {
-            max.min(bound_hi)
-        };
-        if lo > hi {
-            return Err(ErrorCode::InvalidCommand.into());
-        }
-        Ok((lo, hi))
+    async fn apply(&self, plan: Result<plan::Plan, plan::PlanError>) -> Result<(), Error> {
+        self.0.execute(plan.map_err(plan_error)?).await
     }
 }
 impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
@@ -378,10 +348,10 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
     };
     fn dataver(&self) -> u32 {
         self.0.sync_versions();
-        self.0.color_version.get()
+        self.0.report.color_version.get()
     }
     fn dataver_changed(&self) {
-        self.0.color_version.changed();
+        self.0.report.color_version.changed();
     }
     async fn remaining_time(&self, _ctx: impl ReadContext) -> Result<u16, Error> {
         Ok(self.0.remaining_time(LightDimension::Color))
@@ -458,16 +428,16 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         }))
     }
     async fn color_temp_physical_min_mireds(&self, _ctx: impl ReadContext) -> Result<u16, Error> {
-        Ok(self.0.bounds.ok_or(ErrorCode::InvalidState)?.0)
+        Ok(self.0.bounds().ok_or(ErrorCode::InvalidState)?.0)
     }
     async fn color_temp_physical_max_mireds(&self, _ctx: impl ReadContext) -> Result<u16, Error> {
-        Ok(self.0.bounds.ok_or(ErrorCode::InvalidState)?.1)
+        Ok(self.0.bounds().ok_or(ErrorCode::InvalidState)?.1)
     }
     async fn couple_color_temp_to_level_min_mireds(
         &self,
         _ctx: impl ReadContext,
     ) -> Result<u16, Error> {
-        Ok(self.0.bounds.ok_or(ErrorCode::InvalidState)?.0)
+        Ok(self.0.bounds().ok_or(ErrorCode::InvalidState)?.0)
     }
     async fn set_options(
         &self,
@@ -489,285 +459,195 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         _ctx: impl InvokeContext,
         r: c::MoveToHueRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (hue, direction, duration) = (r.hue()?, r.direction()?, r.transition_time()?);
-        if hue == u8::MAX || duration == u16::MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        let (mut task, start) = self.0.continuing_hs()?;
-        task.hue = hs::HueAxis::move_to(
-            start.hue,
-            hue as f64,
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::move_to_hue(
+            hue,
             hs_direction(direction),
-            duration as u64 * 100,
-        );
-        self.0.execute_color(color::Task::Hs(task)).await
+            duration,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_move_hue(
         &self,
         _ctx: impl InvokeContext,
         r: c::MoveHueRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (mode, rate) = (r.move_mode()?, r.rate()?);
-        if mode != c::MoveModeEnum::Stop && rate == 0 {
-            return Err(ErrorCode::InvalidCommand.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        if mode == c::MoveModeEnum::Stop {
-            return self.0.stop_hs();
-        }
-        let (mut task, start) = self.0.continuing_hs()?;
-        let rate = if mode == c::MoveModeEnum::Up {
-            rate as f64
-        } else {
-            -(rate as f64)
-        };
-        task.hue = hs::HueAxis::move_at(start.hue, rate);
-        self.0.execute_color(color::Task::Hs(task)).await
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::move_hue(
+            color_move_mode(mode),
+            rate,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_step_hue(
         &self,
         _ctx: impl InvokeContext,
         r: c::StepHueRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (mode, size, duration) = (r.step_mode()?, r.step_size()?, r.transition_time()?);
-        if size == 0 {
-            return Err(ErrorCode::InvalidCommand.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        let (mut task, start) = self.0.continuing_hs()?;
-        let delta = if mode == c::StepModeEnum::Up {
-            size as f64
-        } else {
-            -(size as f64)
-        };
-        task.hue = hs::HueAxis::step(start.hue, delta, duration as u64 * 100);
-        self.0.execute_color(color::Task::Hs(task)).await
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::step_hue(
+            color_step_mode(mode),
+            size,
+            duration,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_move_to_saturation(
         &self,
         _ctx: impl InvokeContext,
         r: c::MoveToSaturationRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (saturation, duration) = (r.saturation()?, r.transition_time()?);
-        if saturation == u8::MAX || duration == u16::MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        let (mut task, start) = self.0.continuing_hs()?;
-        task.saturation =
-            hs::SaturationAxis::move_to(start.saturation, saturation as f64, duration as u64 * 100);
-        self.0.execute_color(color::Task::Hs(task)).await
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::move_to_saturation(
+            saturation,
+            duration,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_move_saturation(
         &self,
         _ctx: impl InvokeContext,
         r: c::MoveSaturationRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (mode, rate) = (r.move_mode()?, r.rate()?);
-        if mode != c::MoveModeEnum::Stop && rate == 0 {
-            return Err(ErrorCode::InvalidCommand.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        if mode == c::MoveModeEnum::Stop {
-            return self.0.stop_hs();
-        }
-        let (mut task, start) = self.0.continuing_hs()?;
-        let rate = if mode == c::MoveModeEnum::Up {
-            rate as f64
-        } else {
-            -(rate as f64)
-        };
-        task.saturation = hs::SaturationAxis::move_at(start.saturation, rate);
-        self.0.execute_color(color::Task::Hs(task)).await
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::move_saturation(
+            color_move_mode(mode),
+            rate,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_step_saturation(
         &self,
         _ctx: impl InvokeContext,
         r: c::StepSaturationRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (mode, size, duration) = (r.step_mode()?, r.step_size()?, r.transition_time()?);
-        if size == 0 {
-            return Err(ErrorCode::InvalidCommand.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        let (mut task, start) = self.0.continuing_hs()?;
-        let delta = if mode == c::StepModeEnum::Up {
-            size as f64
-        } else {
-            -(size as f64)
-        };
-        task.saturation = hs::SaturationAxis::move_to(
-            start.saturation,
-            (start.saturation + delta).clamp(0.0, 254.0),
-            duration as u64 * 100,
-        );
-        self.0.execute_color(color::Task::Hs(task)).await
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::step_saturation(
+            color_step_mode(mode),
+            size,
+            duration,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_move_to_hue_and_saturation(
         &self,
         _ctx: impl InvokeContext,
         r: c::MoveToHueAndSaturationRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (hue, saturation, duration) = (r.hue()?, r.saturation()?, r.transition_time()?);
-        if hue == u8::MAX || saturation == u8::MAX || duration == u16::MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        let target = hs::Hs {
-            hue: hue as f64,
-            saturation: saturation as f64,
-        };
-        let task = if duration == 0 {
-            hs::HsTask::stationary(target)
-        } else {
-            let start = self.0.hs_start()?;
-            hs::HsTask {
-                hue: hs::HueAxis::move_to(
-                    start.hue,
-                    target.hue,
-                    hs::Direction::Shortest,
-                    duration as u64 * 100,
-                ),
-                saturation: hs::SaturationAxis::move_to(
-                    start.saturation,
-                    target.saturation,
-                    duration as u64 * 100,
-                ),
-            }
-        };
-        self.0.execute_color(color::Task::Hs(task)).await
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::move_to_hue_and_saturation(
+            hue,
+            saturation,
+            duration,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_move_to_color_temperature(
         &self,
         _ctx: impl InvokeContext,
         r: c::MoveToColorTemperatureRequest<'_>,
     ) -> Result<(), Error> {
-        let target = r.color_temperature_mireds()?;
-        let duration = r.transition_time()?;
-        if target > color::XY_MAX || duration == u16::MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        self.0
-            .execute_color(self.temperature_task(self.0.refresh().temperature, target, duration)?)
-            .await
+        let (target, duration) = (r.color_temperature_mireds()?, r.transition_time()?);
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::move_to_color_temperature(
+            target,
+            duration,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_move_to_color(
         &self,
         _ctx: impl InvokeContext,
         r: c::MoveToColorRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (x, y, duration) = (r.color_x()?, r.color_y()?, r.transition_time()?);
-        if x > color::XY_MAX || y > color::XY_MAX || duration == u16::MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        self.0.execute_color(self.xy_task(x, y, duration)?).await
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::move_to_color(
+            x,
+            y,
+            duration,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_move_color(
         &self,
         _ctx: impl InvokeContext,
         r: c::MoveColorRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (rate_x, rate_y) = (r.rate_x()?, r.rate_y()?);
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        if rate_x == 0 && rate_y == 0 {
-            return self.0.stop(LightDimension::Color);
-        }
-        let (start_x, start_y) = self.0.xy_start()?;
-        self.0
-            .execute_color(color::Task::XyMove {
-                start_x,
-                start_y,
-                rate_x,
-                rate_y,
-            })
-            .await
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::move_color(
+            rate_x,
+            rate_y,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_step_color(
         &self,
         _ctx: impl InvokeContext,
         r: c::StepColorRequest<'_>,
     ) -> Result<(), Error> {
-        if !RGB {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         let (x, y, duration) = (r.step_x()?, r.step_y()?, r.transition_time()?);
-        if x == 0 && y == 0 {
-            return Err(ErrorCode::InvalidCommand.into());
-        }
-        if duration == u16::MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        let (start_x, start_y) = self.0.xy_start()?;
-        self.0
-            .execute_color(self.xy_task(
-                (start_x as i32 + x as i32).clamp(0, color::XY_MAX as i32) as u16,
-                (start_y as i32 + y as i32).clamp(0, color::XY_MAX as i32) as u16,
-                duration,
-            )?)
-            .await
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::step_color(
+            x,
+            y,
+            duration,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_stop_move_step(
         &self,
         _ctx: impl InvokeContext,
         r: c::StopMoveStepRequest<'_>,
     ) -> Result<(), Error> {
-        if !self.proceed(r.options_mask()?, r.options_override()?)? {
-            return Ok(());
-        }
-        self.0.stop(LightDimension::Color)
+        let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
+        let input = self.0.plan_input();
+        self.apply(plan::stop_move_step(
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_move_color_temperature(
         &self,
@@ -779,40 +659,19 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             r.rate()?,
             r.color_temperature_minimum_mireds()?,
             r.color_temperature_maximum_mireds()?,
-            r.options_mask()?,
-            r.options_override()?,
+            r.options_mask()?.bits(),
+            r.options_override()?.bits(),
         );
-        if min > color::XY_MAX || max > color::XY_MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        if mode != c::MoveModeEnum::Stop && rate == 0 {
-            return Err(ErrorCode::InvalidCommand.into());
-        }
-        if !self.proceed(mask, override_)? {
-            return Ok(());
-        }
-        if mode == c::MoveModeEnum::Stop {
-            return self.0.stop(LightDimension::Color);
-        }
-        let (min_mireds, max_mireds) = self.bounds(min, max)?;
-        let start = self
-            .0
-            .refresh()
-            .temperature
-            .ok_or(ErrorCode::InvalidState)?;
-        let rate_mireds_per_sec = if mode == c::MoveModeEnum::Up {
-            rate as i32
-        } else {
-            -(rate as i32)
-        };
-        self.0
-            .execute_color(color::Task::ColorTemperatureMove {
-                start,
-                rate_mireds_per_sec,
-                min_mireds,
-                max_mireds,
-            })
-            .await
+        let input = self.0.plan_input();
+        self.apply(plan::move_color_temperature(
+            color_move_mode(mode),
+            rate,
+            min,
+            max,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     async fn handle_step_color_temperature(
         &self,
@@ -825,43 +684,20 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             r.transition_time()?,
             r.color_temperature_minimum_mireds()?,
             r.color_temperature_maximum_mireds()?,
-            r.options_mask()?,
-            r.options_override()?,
+            r.options_mask()?.bits(),
+            r.options_override()?.bits(),
         );
-        if min > color::XY_MAX || max > color::XY_MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        if size == 0 {
-            return Err(ErrorCode::InvalidCommand.into());
-        }
-        if duration == u16::MAX {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        if !self.proceed(mask, override_)? {
-            return Ok(());
-        }
-        let (lo, hi) = self.bounds(min, max)?;
-        let start = self
-            .0
-            .refresh()
-            .temperature
-            .ok_or(ErrorCode::InvalidState)?;
-        let target = if mode == c::StepModeEnum::Up {
-            start.saturating_add(size.min(hi.saturating_sub(start)))
-        } else {
-            start.saturating_sub(size.min(start.saturating_sub(lo)))
-        };
-        // Matter 1.6 preserves the requested Step rate when a bound clips
-        // the distance. XY Step intentionally retains its whole transition.
-        let transition_ms =
-            (duration as u64 * 100 * start.abs_diff(target) as u64).div_ceil(size as u64);
-        self.0
-            .execute_color(color::Task::ColorTemperatureMoveTo {
-                start,
-                target_mireds: target,
-                transition_ms,
-            })
-            .await
+        let input = self.0.plan_input();
+        self.apply(plan::step_color_temperature(
+            color_step_mode(mode),
+            size,
+            duration,
+            min,
+            max,
+            plan::Options::new(mask, override_),
+            &input,
+        ))
+        .await
     }
     unsupported_color!(handle_enhanced_move_to_hue:EnhancedMoveToHueRequest,
         handle_enhanced_move_hue:EnhancedMoveHueRequest,handle_enhanced_step_hue:EnhancedStepHueRequest,

@@ -1,10 +1,8 @@
 use super::{new_device, outlet};
 use crate::device::{
     DeviceKey, FunctionDescription, FunctionKind, LightMode, LightPatch, LightProfile,
-    PhysicalDeviceDescription, Rgb, TemperatureInterval, brightness_from_matter_level,
-    brightness_to_matter_level,
+    PhysicalDeviceDescription, Rgb, TemperatureInterval,
 };
-use crate::lighting::temperature::{kelvin_from_mireds, mired_bounds, mireds_from_kelvin};
 
 fn interval() -> TemperatureInterval {
     TemperatureInterval::new(2700, 6500).unwrap()
@@ -251,36 +249,4 @@ fn one_light_report_updates_power_and_values_with_one_revision_and_keeps_mode_ex
     };
     assert!(function.observe_light(invalid).is_err());
     assert_eq!(function.snapshot().power, crate::device::Power::On);
-}
-
-#[test]
-fn brightness_and_temperature_matter_conversion_preserve_physical_ranges() {
-    for level in 1..=254 {
-        assert_eq!(
-            brightness_to_matter_level(brightness_from_matter_level(level).unwrap()).unwrap(),
-            level
-        );
-    }
-    assert_eq!(brightness_from_matter_level(1).unwrap(), 1.0);
-    assert_eq!(brightness_from_matter_level(254).unwrap(), 100.0);
-    assert!(brightness_from_matter_level(0).is_err());
-    assert!(brightness_to_matter_level(f64::INFINITY).is_err());
-    let interval = TemperatureInterval::new(2700, 5700).unwrap();
-    let (min, max) = mired_bounds(interval);
-    assert_eq!((min, max), (176, 370));
-    for mired in min..=max {
-        let kelvin = kelvin_from_mireds(mired);
-        assert!((2700.0..=5700.0).contains(&kelvin));
-    }
-    assert!(!kelvin_from_mireds(0).is_finite());
-}
-
-#[test]
-fn matter_temperature_rejects_unrepresentable_ranges_without_panicking() {
-    for (min, max) in [(4500, 4501), (10, 6500), (1, 6500)] {
-        assert!(TemperatureInterval::new(min, max).is_err());
-    }
-    let interval = TemperatureInterval::new(4000, 4001).unwrap();
-    assert_eq!(mireds_from_kelvin(interval, 4000).unwrap(), 250);
-    assert_eq!(kelvin_from_mireds(250).round() as u32, 4000);
 }

@@ -422,26 +422,15 @@ impl TemperatureInterval {
 }
 
 /// The Matter mired span of a valid temperature range, with its upper bound
-/// taken from the interval itself.
-fn mired_span(min: u32, max: u32) -> Option<(u16, u16)> {
+/// taken from the interval itself. The interval constructors use this as their
+/// private encoding-representability invariant; the Matter boundary projects
+/// the same span through `matter::units`.
+pub(crate) fn mired_span(min: u32, max: u32) -> Option<(u16, u16)> {
     let lo = 1_000_000_u64.div_ceil(max as u64);
     let hi = 1_000_000_u64 / min as u64;
     (lo > 0 && lo <= hi && hi <= 0xfeff).then_some((lo as u16, hi as u16))
 }
 
-/// Nonzero brightness uses [1, 100] percent; zero is handled by command semantics.
-pub fn brightness_from_matter_level(level: u8) -> Result<f64, CommandError> {
-    if !(1..=254).contains(&level) {
-        return Err(CommandError::Rejected(
-            "brightness level is outside 1..254".into(),
-        ));
-    }
-    Ok(1.0 + (level as f64 - 1.0) * 99.0 / 253.0)
-}
-pub fn brightness_to_matter_level(percent: f64) -> Result<u8, CommandError> {
-    validate_brightness(percent)?;
-    Ok((1.0 + (percent - 1.0) * 253.0 / 99.0).round() as u8)
-}
 pub(crate) fn validate_brightness(percent: f64) -> Result<(), CommandError> {
     if !percent.is_finite() || !(1.0..=100.0).contains(&percent) {
         return Err(CommandError::Rejected(

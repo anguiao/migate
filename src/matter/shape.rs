@@ -7,10 +7,10 @@
 //! live state and every generated attribute/command are deliberately excluded.
 //! Equivalent Kelvin encodings of the same mired span compare equal.
 
+use super::units;
 use crate::device::{
     FunctionDescription, FunctionKind, LightProfileKind, PhysicalDeviceDescription,
 };
-use crate::lighting::temperature;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FixedShape {
@@ -47,9 +47,7 @@ fn fixed_shape(functions: &[FunctionDescription]) -> FixedShape {
                     FunctionKind::Outlet => FixedKind::Outlet,
                     FunctionKind::Light(profile) => FixedKind::Light {
                         profile: profile.kind(),
-                        mired: profile
-                            .temperature_interval()
-                            .map(temperature::mired_bounds),
+                        mired: profile.temperature_interval().map(units::mired_bounds),
                     },
                 },
                 child_label: multiple.then(|| function.label.clone()),

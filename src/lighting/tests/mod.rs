@@ -1,5 +1,4 @@
 use super::{
-    RemainingTime,
     color::{self, Task as ColorTask},
     level::{Direction, Task},
 };
@@ -118,7 +117,7 @@ fn short_level_transition_uses_deadline_and_move_does_not_follow_slow_ack() {
 }
 
 #[test]
-fn long_color_move_remaining_time_saturates_without_wrapping() {
+fn long_color_move_saturates_at_the_xy_boundary() {
     let task = ColorTask::XyMove {
         start_x: 0,
         start_y: 0,
@@ -127,24 +126,6 @@ fn long_color_move_remaining_time_saturates_without_wrapping() {
     };
     assert_eq!(task.duration(), 65279000);
     assert_eq!(task.frame(65279000), (color::Target::Xy(65279, 0), true));
-    let mut remaining = RemainingTime::default();
-    assert!(remaining.write(task.duration(), true, 0xfffe));
-    assert_eq!(remaining.value, 0xfffe);
-    assert!(!remaining.write(1000, false, 0xfffe));
-    assert!(remaining.write(0, false, 0xfffe));
-}
-
-#[test]
-fn short_remaining_time_is_readable_without_subscription_reports() {
-    let mut remaining = RemainingTime::default();
-    assert!(!remaining.write(100, true, 0xfffe));
-    assert_eq!(remaining.value, 1);
-    assert!(!remaining.write(0, false, 0xfffe));
-    assert!(!remaining.write(1000, true, 0xfffe));
-    assert!(remaining.write(0, false, 0xfffe));
-    assert!(remaining.write(2000, true, 0xfffe));
-    assert!(!remaining.write(100, false, 0xfffe));
-    assert!(remaining.write(0, false, 0xfffe));
 }
 
 #[test]

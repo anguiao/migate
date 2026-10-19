@@ -52,7 +52,7 @@ async fn accepted_color(
     receiver: &mut CommandReceiver,
     task: ColorTask,
 ) {
-    let mut invoke = pin!(light.execute_color(task));
+    let mut invoke = pin!(execute_color(light, task));
     assert!(poll_once(invoke.as_mut()).await.is_none());
     accept(function, frame(receiver).await);
     invoke.await.unwrap();
@@ -78,7 +78,7 @@ fn accepted_color_mode_survives_dropped_hs_and_xy_invoke_waiters() {
                     }
                 );
 
-                let mut invoke = Box::pin(light.execute_color(color_task(use_hs, transition_ms)));
+                let mut invoke = Box::pin(execute_color(&light, color_task(use_hs, transition_ms)));
                 assert!(poll_once(invoke.as_mut()).await.is_none());
                 let startup = frame(&mut receiver).await;
                 startup.mark_sent().unwrap();
@@ -118,7 +118,7 @@ fn accepted_startup_keeps_its_mode_when_a_later_frame_fails_before_invoke_resume
             };
             assert_ne!(previous, expected);
 
-            let mut invoke = Box::pin(light.execute_color(color_task(use_hs, 1000)));
+            let mut invoke = Box::pin(execute_color(&light, color_task(use_hs, 1000)));
             assert!(poll_once(invoke.as_mut()).await.is_none());
             let startup = frame(&mut receiver).await;
             let token = startup.token;
@@ -152,12 +152,12 @@ fn gray_hue_waits_for_older_red_receipt_and_rejects_failed_white_correction() {
     setup!(true, function, receiver, light, clock, ctx);
     white_state(&function);
     block_on(async {
-        let mut old_invoke = pin!(light.execute_color(red_target()));
+        let mut old_invoke = pin!(execute_color(&light, red_target()));
         assert!(poll_once(old_invoke.as_mut()).await.is_none());
         let old = frame(&mut receiver).await;
         old.mark_sent().unwrap();
 
-        let mut new_invoke = pin!(light.execute_color(gray_hue_move()));
+        let mut new_invoke = pin!(execute_color(&light, gray_hue_move()));
         assert!(poll_once(new_invoke.as_mut()).await.is_none());
         light.advance();
         assert!(poll_once(new_invoke.as_mut()).await.is_none());
@@ -196,11 +196,11 @@ fn gray_hue_waits_for_its_source_receipt_even_when_an_older_write_failed() {
     setup!(true, function, receiver, light, clock, ctx);
     white_state(&function);
     block_on(async {
-        let mut old_invoke = pin!(light.execute_color(red_target()));
+        let mut old_invoke = pin!(execute_color(&light, red_target()));
         assert!(poll_once(old_invoke.as_mut()).await.is_none());
         let old = frame(&mut receiver).await;
         old.mark_sent().unwrap();
-        let mut new_invoke = pin!(light.execute_color(gray_hue_move()));
+        let mut new_invoke = pin!(execute_color(&light, gray_hue_move()));
         assert!(poll_once(new_invoke.as_mut()).await.is_none());
 
         old.reject(CommandError::Rejected("old red write rejected".into()));

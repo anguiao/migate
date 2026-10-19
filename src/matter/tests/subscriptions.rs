@@ -1352,7 +1352,7 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
                     wait_committed(&state).await;
                     assert_eq!(
                         initial.lighting[&(2, 8, 0)].1,
-                        crate::device::brightness_to_matter_level(50.0).unwrap() as u16
+                        crate::matter::units::level_from_brightness(50.0).unwrap() as u16
                     );
                     assert_eq!(initial.lighting[&(2, 0x300, 0)].1, 0);
                     assert_eq!(initial.lighting[&(2, 0x300, 1)].1, 254);
@@ -1476,7 +1476,7 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
                     let report = receive_observed(&client, id).await.unwrap();
                     assert_eq!(
                         report.lighting[&(2, 8, 0)].1,
-                        crate::device::brightness_to_matter_level(23.5).unwrap() as u16
+                        crate::matter::units::level_from_brightness(23.5).unwrap() as u16
                     );
                     assert_eq!(report.lighting[&(2, 0x300, 3)].1, 33935);
                     assert_eq!(report.lighting[&(2, 0x300, 4)].1, 25220);

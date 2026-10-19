@@ -870,7 +870,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                 let percent = request.target.brightness_percent().unwrap();
                 assert_eq!(
                     percent,
-                    crate::device::brightness_from_matter_level(111).unwrap()
+                    crate::matter::units::brightness_from_level(111).unwrap()
                 );
                 let raw = binding.brightness().unwrap().brightness_to_raw(percent);
                 let actual = binding
@@ -891,7 +891,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                     report_value(&read_bytes(&handler, &ctx).await.unwrap())
                         .u8()
                         .unwrap(),
-                    crate::device::brightness_to_matter_level(actual).unwrap()
+                    crate::matter::units::level_from_brightness(actual).unwrap()
                 );
                 if binding.brightness().unwrap().range().max() == 65535 {
                     assert!(actual.fract() > 0.0);
@@ -903,10 +903,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                 report_value(&read_bytes(&handler, &ctx).await.unwrap())
                     .u16()
                     .unwrap(),
-                crate::lighting::temperature::mired_bounds(
-                    binding.temperature().unwrap().interval(),
-                )
-                .0
+                crate::matter::units::mired_bounds(binding.temperature().unwrap().interval(),).0
             );
             ctx.command.cluster_id = 0x300;
             ctx.command.cmd_id = 10;

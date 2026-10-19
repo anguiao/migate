@@ -1,4 +1,3 @@
-use super::settings::level::LevelControlState;
 use crate::{
     device::Rgb,
     lighting::{
@@ -6,65 +5,8 @@ use crate::{
         level::{Direction, Task},
     },
 };
-use rs_matter::{
-    dm::clusters::decl::level_control::{MoveModeEnum, StepModeEnum},
-    error::ErrorCode,
-};
 
-#[test]
-fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks() {
-    let state = LevelControlState::default();
-    let feedback = |power| super::Projection {
-        power,
-        level: Some(100),
-        ..Default::default()
-    };
-    for wire in [0, 1] {
-        assert_eq!(
-            state
-                .move_to_level(wire, true, Some(0), 0, 0, feedback(Some(true)))
-                .unwrap()
-                .unwrap()
-                .frame(0),
-            (1, true, Some(false))
-        );
-        assert_eq!(
-            state
-                .move_to_level(wire, false, Some(0), 0, 0, feedback(Some(true)))
-                .unwrap()
-                .unwrap()
-                .frame(0),
-            (1, true, None)
-        );
-    }
-    assert_eq!(
-        state
-            .move_to_level(255, true, Some(0), 0, 0, feedback(Some(true)))
-            .unwrap_err()
-            .code(),
-        ErrorCode::InvalidCommand
-    );
-    assert!(
-        state
-            .move_to_level(50, false, Some(0), 0, 0, feedback(Some(false)))
-            .unwrap()
-            .is_none()
-    );
-    let task = state
-        .step(
-            false,
-            StepModeEnum::Up,
-            255,
-            Some(u16::MAX),
-            0,
-            0,
-            feedback(Some(true)),
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(task.duration(), u16::MAX as u64 * 154 / 255 * 100);
-}
-
+use super::plan as lighting_plan;
 use super::{
     Lighting, Task as LightingTask,
     handlers::{ColorHandler, LevelHandler},
@@ -83,6 +25,7 @@ use crate::{
     storage::Store,
 };
 use futures_lite::future::{block_on, poll_once};
+use rs_matter::error::ErrorCode;
 use rs_matter::{
     MATTER_PORT, Matter,
     crypto::default_crypto,
@@ -102,6 +45,54 @@ use std::{
     pin::{Pin, pin},
     rc::Rc,
 };
+
+async fn execute_color(light: &Lighting, task: ColorTask) -> Result<(), rs_matter::error::Error> {
+    light
+        .begin(LightingTask::Color(task), None)?
+        .accepted()
+        .await
+        .map_err(super::command_error)?;
+    light.refresh();
+    Ok(())
+}
+
+/// Lightweight report fixture: a plain published Function, a controllable
+/// clock and the real Report owner, without a database or Matter node.
+fn light_fixture(
+    rgb: bool,
+) -> (
+    Lighting,
+    Function,
+    crate::device::CommandReceiver,
+    Rc<TestClock>,
+) {
+    let (device, receiver) = support::light(rgb);
+    let function = device.functions()[0].clone();
+    device.set_availability(Availability::Available);
+    let clock = Rc::new(TestClock::default());
+    let light = Lighting::with_clock(
+        function.clone(),
+        2,
+        Dataver::new(1),
+        Dataver::new(2),
+        Dataver::new(3),
+        clock.clone(),
+    )
+    .unwrap();
+    (light, function, receiver, clock)
+}
+
+/// Collect the compact notification list the report owner would emit.
+fn collect_reports(light: &Lighting) -> Vec<(u32, u32)> {
+    let mut changes = Vec::new();
+    light.report.reports(
+        &light.function,
+        &light.scheduler,
+        light.profile,
+        |cluster, attribute| changes.push((cluster, attribute)),
+    );
+    changes
+}
 
 #[derive(Default)]
 struct TestClock {
@@ -318,12 +309,20 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
             Some(1)
         );
         assert_eq!(function.snapshot().power.value(), Some(true));
-        let task = light
-            .level
-            .borrow()
-            .move_level(false, MoveModeEnum::Up, Some(1), 0, 0, light.refresh())
-            .unwrap()
-            .unwrap();
+        let input = light.plan_input();
+        let lighting_plan::Plan::Execute {
+            task: LightingTask::Level(task),
+        } = lighting_plan::move_level(
+            false,
+            Direction::Up,
+            Some(1),
+            lighting_plan::Options::new(0, 0),
+            &input,
+        )
+        .unwrap()
+        else {
+            panic!("expected a level execution")
+        };
         assert_eq!(task.frame(0).0, 1);
         let action = light.begin(LightingTask::Level(task), None).unwrap();
         let request = frame(&mut receiver).await;
@@ -447,7 +446,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
         let before = function.snapshot().lighting.unwrap().brightness_percent;
         assert_eq!(
             light.refresh().level,
-            Some(crate::device::brightness_to_matter_level(before.unwrap()).unwrap())
+            Some(crate::matter::units::level_from_brightness(before.unwrap()).unwrap())
         );
         let action = light
             .begin(
@@ -473,12 +472,20 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
         assert!(!function.light_action_current(action.token()));
         assert!(poll_once(receiver.next_operation()).await.is_none());
         let projected = light.refresh().level.unwrap();
-        let next = light
-            .level
-            .borrow()
-            .move_level(false, MoveModeEnum::Down, Some(2), 0, 0, light.refresh())
-            .unwrap()
-            .unwrap();
+        let input = light.plan_input();
+        let lighting_plan::Plan::Execute {
+            task: LightingTask::Level(next),
+        } = lighting_plan::move_level(
+            false,
+            Direction::Down,
+            Some(2),
+            lighting_plan::Options::new(0, 0),
+            &input,
+        )
+        .unwrap()
+        else {
+            panic!("expected a level execution")
+        };
         assert_eq!(next.frame(0).0, projected);
         assert!(ctx.changes.borrow().is_empty());
     });
@@ -487,7 +494,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
 #[test]
 fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_changes_version() {
     for rgb in [false, true] {
-        setup!(rgb, function, receiver, light, clock, ctx);
+        let (light, function, mut receiver, clock) = light_fixture(rgb);
         let patch = if rgb {
             LightPatch {
                 color: Some(Rgb {
@@ -511,8 +518,7 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
                 ..patch
             })
             .unwrap();
-        light.reports(&ctx);
-        ctx.changes.borrow_mut().clear();
+        collect_reports(&light);
         let task = if rgb {
             ColorTask::XyMove {
                 start_x: 41943,
@@ -532,32 +538,31 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
-            light.reports(&ctx);
-            ctx.changes.borrow_mut().clear();
+            collect_reports(&light);
+            let mut reported = Vec::new();
             for now in [100, 200, 300, 900] {
                 clock.set(now);
                 light.advance();
                 accept(&function, frame(&mut receiver).await);
-                light.reports(&ctx);
+                reported.extend(collect_reports(&light));
             }
             assert_eq!(
-                ctx.changes
-                    .borrow()
+                reported
                     .iter()
-                    .filter(|(_, c, a)| *c == 0x300 && matches!(*a, 0 | 1 | 3 | 4 | 7))
+                    .filter(|(cluster, attribute)| {
+                        *cluster == 0x300 && matches!(*attribute, 0 | 1 | 3 | 4 | 7)
+                    })
                     .count(),
                 0
             );
             clock.set(1000);
             light.advance();
             accept(&function, frame(&mut receiver).await);
-            light.reports(&ctx);
-            let mut attributes: Vec<_> = ctx
-                .changes
-                .borrow()
-                .iter()
-                .filter_map(|(_, c, a)| {
-                    (*c == 0x300 && matches!(*a, 0 | 1 | 3 | 4 | 7)).then_some(*a)
+            let mut attributes: Vec<_> = collect_reports(&light)
+                .into_iter()
+                .filter_map(|(cluster, attribute)| {
+                    (cluster == 0x300 && matches!(attribute, 0 | 1 | 3 | 4 | 7))
+                        .then_some(attribute)
                 })
                 .collect();
             attributes.sort_unstable();
@@ -578,9 +583,8 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
-            light.reports(&ctx);
-            ctx.changes.borrow_mut().clear();
-            let old = light.color_version.get();
+            collect_reports(&light);
+            let old = light.report.color_version.get();
             assert_eq!(light.remaining_time(LightDimension::Color), 100);
 
             clock.set(1100);
@@ -588,20 +592,16 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
             assert!(poll_once(receiver.next_operation()).await.is_none());
             assert_eq!(light.remaining_time(LightDimension::Color), 99);
             light.sync_versions();
-            assert_ne!(light.color_version.get(), old);
-            light.reports(&ctx);
-            assert!(ctx.changes.borrow().is_empty());
+            assert_ne!(light.report.color_version.get(), old);
+            assert!(collect_reports(&light).is_empty());
         });
     }
 }
 
 #[test]
 fn version_reads_preserve_quiet_final_and_unknown_reports() {
-    use c::ClusterAsyncHandler as _;
-    use l::ClusterAsyncHandler as _;
-
     for dimension in [LightDimension::Brightness, LightDimension::Color] {
-        setup!(false, function, receiver, light, clock, ctx);
+        let (light, function, mut receiver, clock) = light_fixture(false);
         function
             .observe_light(LightPatch {
                 power: Some(true),
@@ -610,7 +610,7 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
                 ..Default::default()
             })
             .unwrap();
-        light.reports(&ctx);
+        collect_reports(&light);
         let task = if dimension == LightDimension::Brightness {
             LightingTask::Level(Task::MoveToLevel {
                 with_on_off: false,
@@ -629,8 +629,7 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
-            light.reports(&ctx);
-            ctx.changes.borrow_mut().clear();
+            collect_reports(&light);
             let (cluster, attribute) = if dimension == LightDimension::Brightness {
                 (8, 0)
             } else {
@@ -640,24 +639,18 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
                 clock.set(now);
                 light.advance();
                 accept(&function, frame(&mut receiver).await);
-                if dimension == LightDimension::Brightness {
-                    LevelHandler(&light).dataver();
-                } else {
-                    ColorHandler::<false>(&light).dataver();
-                }
-                assert!(ctx.changes.borrow().is_empty());
-                light.reports(&ctx);
+                light.sync_versions();
+                let changes = collect_reports(&light);
                 assert_eq!(
-                    ctx.changes.borrow().contains(&(2, cluster, attribute)),
+                    changes.contains(&(cluster, attribute)),
                     matches!(now, 1000 | 1500)
                 );
-                ctx.changes.borrow_mut().clear();
             }
             action.ended().await.unwrap();
         });
     }
 
-    setup!(true, function, receiver, light, clock, ctx);
+    let (light, function, mut receiver, _clock) = light_fixture(true);
     function
         .observe_light(LightPatch {
             color: Some(Rgb {
@@ -669,8 +662,7 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
             ..Default::default()
         })
         .unwrap();
-    light.reports(&ctx);
-    ctx.changes.borrow_mut().clear();
+    collect_reports(&light);
     function
         .observe_light(LightPatch {
             color: Some(Rgb {
@@ -681,11 +673,10 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
             ..Default::default()
         })
         .unwrap();
-    ColorHandler::<true>(&light).dataver();
-    assert!(ctx.changes.borrow().is_empty());
-    light.reports(&ctx);
-    assert!(ctx.changes.borrow().contains(&(2, 0x300, 3)));
-    assert!(ctx.changes.borrow().contains(&(2, 0x300, 4)));
+    light.sync_versions();
+    let changes = collect_reports(&light);
+    assert!(changes.contains(&(0x300, 3)));
+    assert!(changes.contains(&(0x300, 4)));
     assert!(block_on(poll_once(receiver.next_operation())).is_none());
 }
 
@@ -700,7 +691,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
             ..Default::default()
         })
         .unwrap();
-    light.level.borrow_mut().on_level = Some(1);
+    light.on_level.set(Some(1));
     block_on(async {
         let mut on = pin!(light.power(Command::On));
         assert!(poll_once(on.as_mut()).await.is_none());
@@ -766,7 +757,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
             function.snapshot().lighting.unwrap().brightness_percent,
             Some(30.0)
         );
-        light.level.borrow_mut().on_level = None;
+        light.on_level.set(None);
         function
             .observe_light(LightPatch {
                 power: Some(true),
@@ -1026,3 +1017,9 @@ mod hs_endpoints;
 mod hs_async;
 
 mod color_reports;
+
+mod plan;
+
+mod report;
+
+mod units;

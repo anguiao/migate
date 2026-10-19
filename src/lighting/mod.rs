@@ -5,8 +5,9 @@
 // Shared lighting scheduler extracted from the Matter lighting layer. It owns
 // per-dimension trajectories, action tokens, elapsed-deadline frame
 // progression, final-frame handling, cancellation observation, the clock seam
-// and remaining-time data for ordinary Function/LightTarget/LightAction
-// targets. Protocol decoding and cluster representation stay in Matter.
+// and raw action progress for ordinary Function/LightTarget/LightAction
+// targets. Protocol decoding, unit conversion and cluster representation stay
+// in Matter.
 #[cfg(test)]
 mod tests;
 
@@ -14,11 +15,9 @@ pub(crate) mod clock;
 pub(crate) mod color;
 pub(crate) mod hs;
 pub(crate) mod level;
-pub(crate) mod temperature;
 
 use crate::device::{
     ActionToken, CommandError, Function, LightAction, LightDimension, LightTarget,
-    brightness_from_matter_level,
 };
 use clock::Clock;
 use futures_util::FutureExt;
@@ -29,33 +28,7 @@ use std::{
     rc::Rc,
 };
 
-/// Quiet-report state adapted from rs-matter 0.4.1 Level/Color RemainingTime.
-#[derive(Default)]
-struct RemainingTime {
-    value: u16,
-    short_transition: bool,
-}
-impl RemainingTime {
-    // Adapted from LevelControlState::write_remaining_time_quietly and
-    // ColorControlState::write_remaining_time_quietly; saturation avoids wrap.
-    fn write(&mut self, millis: u64, start: bool, maximum: u16) -> bool {
-        // Matter 1.6 Level §1.6.6.3 / Color §3.2.7.4 suppress RemainingTime
-        // reports for an entire transition shorter than one second. A longer
-        // transition keeps its end/Stop report even when the remainder is short.
-        if start {
-            self.short_transition = millis > 0 && millis < 1000;
-        }
-        let new = millis.div_ceil(100).min(maximum as u64) as u16;
-        let old = self.value;
-        self.value = new;
-        !self.short_transition
-            && ((new == 0 && old != 0)
-                || (old == 0 && new > 10)
-                || (start && new.abs_diff(old) > 10))
-    }
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Task {
     Level(level::Task),
     Color(color::Task),
@@ -73,14 +46,19 @@ impl Task {
             Self::Color(task) => task.duration(),
         }
     }
-    fn target(self, elapsed: u64) -> Result<(LightTarget, bool), CommandError> {
+    /// Convert one sampled frame into a validated device target. The unit
+    /// functions are supplied by the protocol boundary so encoding stays out
+    /// of the trajectory; interpolation and rounding are unchanged.
+    fn target(
+        self,
+        elapsed: u64,
+        brightness: fn(u8) -> Result<f64, CommandError>,
+        temperature: fn(u16) -> f64,
+    ) -> Result<(LightTarget, bool), CommandError> {
         match self {
             Self::Level(task) => {
                 let (level, end, power) = task.frame(elapsed);
-                Ok((
-                    LightTarget::brightness(power, brightness_from_matter_level(level)?)?,
-                    end,
-                ))
+                Ok((LightTarget::brightness(power, brightness(level)?)?, end))
             }
             Self::Color(task) => {
                 let (target, end) = task.frame(elapsed);
@@ -88,7 +66,7 @@ impl Task {
                     color::Target::Xy(x, y) => LightTarget::rgb(None, color::xy_to_rgb(x, y)),
                     color::Target::Hs(value) => LightTarget::rgb(None, hs::hs_to_rgb(value)),
                     color::Target::Temperature(mireds) => {
-                        LightTarget::temperature(None, temperature::kelvin_from_mireds(mireds))?
+                        LightTarget::temperature(None, temperature(mireds))?
                     }
                 };
                 Ok((target, end))
@@ -104,26 +82,23 @@ struct Active {
     start: u64,
     last: LightTarget,
     final_submitted: bool,
-    accepted: bool,
 }
 
-/// Trajectory state exposed for Matter representation and reporting.
+/// Raw trajectory observation. Report encoding, version counters and
+/// notification cursors belong to the Matter report owner.
 #[derive(Clone, Copy)]
 pub(crate) struct Observation {
+    pub(crate) token: ActionToken,
     pub(crate) task: Task,
     /// The startup receipt was committed while this action still owned its dimension.
-    pub(crate) accepted: bool,
+    pub(crate) accepted_while_current: bool,
     pub(crate) final_submitted: bool,
     pub(crate) current: bool,
     pub(crate) ended_ok: bool,
     pub(crate) elapsed: u64,
-}
-
-/// The transition where an accepted startup receipt becomes representation metadata.
-#[derive(Clone, Copy)]
-pub(crate) struct Acceptance {
-    pub(crate) task: Task,
-    pub(crate) ended_ok: bool,
+    pub(crate) duration: u64,
+    /// Raw remaining transition time in milliseconds, before protocol encoding.
+    pub(crate) remaining_ms: u64,
 }
 
 fn index(dimension: LightDimension) -> usize {
@@ -134,24 +109,29 @@ fn index(dimension: LightDimension) -> usize {
 }
 
 /// Per-dimension trajectory scheduler. It works with ordinary Function targets
-/// and action tokens and knows nothing about Matter or native groups.
+/// and action tokens and knows nothing about Matter, units or native groups.
 pub(crate) struct Scheduler {
     function: Function,
     clock: Rc<dyn Clock>,
+    brightness: fn(u8) -> Result<f64, CommandError>,
+    temperature: fn(u16) -> f64,
     active: RefCell<[Option<Active>; 2]>,
-    remaining: RefCell<[RemainingTime; 2]>,
-    remaining_revision: Cell<[u64; 2]>,
-    remaining_report: Cell<[bool; 2]>,
+    remaining: Cell<[u64; 2]>,
 }
 impl Scheduler {
-    pub(crate) fn new(function: Function, clock: Rc<dyn Clock>) -> Self {
+    pub(crate) fn new(
+        function: Function,
+        clock: Rc<dyn Clock>,
+        brightness: fn(u8) -> Result<f64, CommandError>,
+        temperature: fn(u16) -> f64,
+    ) -> Self {
         Self {
             function,
             clock,
+            brightness,
+            temperature,
             active: RefCell::new([None, None]),
-            remaining: RefCell::new([RemainingTime::default(), RemainingTime::default()]),
-            remaining_revision: Cell::new([0, 0]),
-            remaining_report: Cell::new([false, false]),
+            remaining: Cell::new([0, 0]),
         }
     }
     pub(crate) fn begin(
@@ -159,7 +139,7 @@ impl Scheduler {
         task: Task,
         forced_power: Option<bool>,
     ) -> Result<Rc<LightAction>, CommandError> {
-        let (mut target, final_frame) = task.target(0)?;
+        let (mut target, final_frame) = task.target(0, self.brightness, self.temperature)?;
         if forced_power.is_some() {
             target = target.with_power(forced_power);
         }
@@ -178,9 +158,8 @@ impl Scheduler {
             start: self.clock.now(),
             last: target,
             final_submitted: final_frame,
-            accepted: false,
         });
-        self.update_remaining(dimension, task.duration(), true);
+        self.set_remaining(dimension, task.duration());
         Ok(action)
     }
     pub(crate) fn advance(&self) {
@@ -194,7 +173,7 @@ impl Scheduler {
             if !self.function.light_action_current(active.token) {
                 actions[index] = None;
                 drop(actions);
-                self.update_remaining(dimension, 0, false);
+                self.set_remaining(dimension, 0);
                 continue;
             }
             if active.final_submitted {
@@ -203,7 +182,7 @@ impl Scheduler {
             let elapsed = now.saturating_sub(active.start);
             let (target, final_frame) = active
                 .task
-                .target(elapsed)
+                .target(elapsed, self.brightness, self.temperature)
                 .expect("validated controller task");
             let mut remaining = active.task.duration().saturating_sub(elapsed);
             if final_frame || target != active.last {
@@ -223,13 +202,13 @@ impl Scheduler {
                 }
             }
             drop(actions);
-            self.update_remaining(dimension, remaining, false);
+            self.set_remaining(dimension, remaining);
         }
     }
     pub(crate) fn stop(&self, dimension: LightDimension) -> Result<(), CommandError> {
         self.function.stop_light(dimension)?;
         self.active.borrow_mut()[index(dimension)] = None;
-        self.update_remaining(dimension, 0, false);
+        self.set_remaining(dimension, 0);
         Ok(())
     }
     pub(crate) fn observe(&self, dimension: LightDimension) -> Option<Observation> {
@@ -237,77 +216,21 @@ impl Scheduler {
         let active = actions[index(dimension)].as_ref()?;
         let ended = active.action.ended().now_or_never();
         Some(Observation {
+            token: active.token,
             task: active.task,
-            accepted: active.accepted,
+            accepted_while_current: active.action.accepted_while_current(),
             final_submitted: active.final_submitted,
             current: self.function.light_action_current(active.token),
             ended_ok: matches!(ended, Some(Ok(_))),
             elapsed: self.clock.now().saturating_sub(active.start),
+            duration: active.task.duration(),
+            remaining_ms: self.remaining.get()[index(dimension)],
         })
     }
-    /// Commit representation metadata ownership for an action whose startup
-    /// receipt arrived while it still owned the color dimension.
-    pub(crate) fn accept_color(&self) -> Option<Acceptance> {
-        let mut actions = self.active.borrow_mut();
-        let active = actions[1].as_mut()?;
-        let ended = active.action.ended().now_or_never();
-        if active.accepted || !active.action.accepted_while_current() {
-            return None;
-        }
-        active.accepted = true;
-        Some(Acceptance {
-            task: active.task,
-            ended_ok: matches!(ended, Some(Ok(_))),
-        })
-    }
-    /// Resume an HS trajectory while retaining the other axis's timeline.
-    pub(crate) fn continue_hs(&self, start: hs::Hs) -> hs::HsTask {
-        let actions = self.active.borrow();
-        match &actions[1] {
-            Some(active) if self.function.light_action_current(active.token) => {
-                if let Task::Color(color::Task::Hs(task)) = active.task {
-                    task.resume(self.clock.now().saturating_sub(active.start))
-                } else {
-                    hs::HsTask::stationary(start)
-                }
-            }
-            _ => hs::HsTask::stationary(start),
-        }
-    }
-    pub(crate) fn remaining_time(&self, dimension: LightDimension) -> u16 {
-        self.remaining.borrow()[index(dimension)].value
-    }
-    pub(crate) fn remaining_revision(&self, dimension: LightDimension) -> u64 {
-        self.remaining_revision.get()[index(dimension)]
-    }
-    pub(crate) fn take_remaining_report(&self, dimension: LightDimension) -> bool {
-        let index = index(dimension);
-        let mut dirty = self.remaining_report.get();
-        let report = dirty[index];
-        dirty[index] = false;
-        self.remaining_report.set(dirty);
-        report
-    }
-    fn update_remaining(&self, dimension: LightDimension, millis: u64, start: bool) {
-        let index = index(dimension);
-        let (old, new, report) = {
-            let mut remaining = self.remaining.borrow_mut();
-            let remaining = &mut remaining[index];
-            let old = remaining.value;
-            let maximum = if index == 0 { u16::MAX } else { 0xfffe };
-            let report = remaining.write(millis, start, maximum);
-            (old, remaining.value, report)
-        };
-        if old != new {
-            let mut revisions = self.remaining_revision.get();
-            revisions[index] += 1;
-            self.remaining_revision.set(revisions);
-        }
-        if report {
-            let mut dirty = self.remaining_report.get();
-            dirty[index] = true;
-            self.remaining_report.set(dirty);
-        }
+    fn set_remaining(&self, dimension: LightDimension, millis: u64) {
+        let mut remaining = self.remaining.get();
+        remaining[index(dimension)] = millis;
+        self.remaining.set(remaining);
     }
     pub(crate) fn is_ticking(&self) -> bool {
         self.active.borrow().iter().any(Option::is_some)

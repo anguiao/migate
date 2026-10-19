@@ -416,22 +416,14 @@ impl Entry {
             if cluster.is_none_or(|id| id == 3) {
                 control.identify.dataver_changed();
             }
-            if cluster.is_none_or(|id| id == 6) {
-                match &control.kind {
-                    ControlKind::Light(light) => {
-                        light.on_off_version.changed();
-                    }
-                    ControlKind::Outlet(handler) => handler.dataver_changed(),
-                }
+            if cluster.is_none_or(|id| id == 6)
+                && let ControlKind::Outlet(handler) = &control.kind
+            {
+                handler.dataver_changed();
             }
         }
         if let Some(light) = self.role.control().and_then(Control::light) {
-            if light.level() && cluster.is_none_or(|id| id == 8) {
-                light.level_version.changed();
-            }
-            if light.ct() && cluster.is_none_or(|id| id == 0x300) {
-                light.color_version.changed();
-            }
+            light.bump_version(cluster);
         }
         if let Some(handler) = self.role.bridged()
             && cluster.is_none_or(|id| id == 0x39)

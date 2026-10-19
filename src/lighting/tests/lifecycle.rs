@@ -1,11 +1,20 @@
 use crate::device::{
-    Availability, CommandReceiver, DeviceKey, DeviceRequest, Function, FunctionDescription,
-    FunctionKind, LightDimension, LightPatch, LightProfile, PhysicalDevice,
+    Availability, CommandError, CommandReceiver, DeviceKey, DeviceRequest, Function,
+    FunctionDescription, FunctionKind, LightDimension, LightPatch, LightProfile, PhysicalDevice,
     PhysicalDeviceDescription, TemperatureInterval,
 };
 use crate::lighting::{Scheduler, Task, clock::Clock, level};
 use futures_lite::future::{block_on, poll_once};
 use std::{cell::Cell, future::Future, pin::Pin, rc::Rc};
+
+/// Test-only unit seam: the real level conversion lives at the Matter boundary.
+fn brightness(level: u8) -> Result<f64, CommandError> {
+    Ok(1.0 + (level as f64 - 1.0) * 99.0 / 253.0)
+}
+
+fn temperature(mireds: u16) -> f64 {
+    1_000_000.0 / mireds as f64
+}
 
 #[derive(Default)]
 struct TestClock {
@@ -77,7 +86,7 @@ fn level_task() -> Task {
 fn canceled_token_suppresses_frames_and_delayed_receipt_keeps_the_original_deadline() {
     let (function, mut receiver) = light_device();
     let clock = Rc::new(TestClock::default());
-    let scheduler = Scheduler::new(function.clone(), clock.clone());
+    let scheduler = Scheduler::new(function.clone(), clock.clone(), brightness, temperature);
     function
         .observe_light(LightPatch {
             power: Some(true),
@@ -100,7 +109,13 @@ fn canceled_token_suppresses_frames_and_delayed_receipt_keeps_the_original_deadl
         assert_eq!(final_frame.token, action.token());
         assert!(final_frame.final_frame);
         assert_eq!(final_frame.target.brightness_percent(), Some(100.0));
-        assert_eq!(scheduler.remaining_time(LightDimension::Brightness), 0);
+        assert_eq!(
+            scheduler
+                .observe(LightDimension::Brightness)
+                .map(|observation| observation.remaining_ms)
+                .unwrap_or(0),
+            0
+        );
         final_frame.mark_sent().unwrap();
         final_frame.accept().unwrap();
         action.ended().await.unwrap();
@@ -113,13 +128,25 @@ fn canceled_token_suppresses_frames_and_delayed_receipt_keeps_the_original_deadl
         first.mark_sent().unwrap();
         first.accept().unwrap();
         action.accepted().await.unwrap();
-        assert_eq!(scheduler.remaining_time(LightDimension::Brightness), 1);
+        assert_eq!(
+            scheduler
+                .observe(LightDimension::Brightness)
+                .map(|observation| observation.remaining_ms)
+                .unwrap_or(0),
+            100
+        );
         scheduler.stop(LightDimension::Brightness).unwrap();
         assert!(action.ended().await.is_err());
         clock.set(1000);
         scheduler.advance();
         assert!(poll_once(receiver.next_operation()).await.is_none());
-        assert_eq!(scheduler.remaining_time(LightDimension::Brightness), 0);
+        assert_eq!(
+            scheduler
+                .observe(LightDimension::Brightness)
+                .map(|observation| observation.remaining_ms)
+                .unwrap_or(0),
+            0
+        );
         assert!(!function.light_action_current(action.token()));
     });
 }
