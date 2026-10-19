@@ -211,7 +211,7 @@ fn attr(cluster_id: u32, attr_id: u32) -> AttrDetails {
         dataver: None,
         wildcard: false,
         array: false,
-        cluster_status: Cell::new(0),
+        cluster_status: Cell::new(None),
     }
 }
 #[test]
