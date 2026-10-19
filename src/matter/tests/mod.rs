@@ -37,27 +37,18 @@ fn topology_and_identity_are_fixed() {
     assert_eq!(info.unique_id, identity.bridge_id);
     assert_eq!(info.product_name, "MiGate");
     assert_eq!(
-        model_handler(
-            &test_registry(&store, &test_device().0),
-            &store,
-            rand::rng()
-        )
-        .unwrap()
-        .access(|node| node.endpoints.iter().map(|e| e.id).collect::<Vec<_>>()),
+        model_handler(vec![single_entry(&test_device().0)]).access(|node| node
+            .endpoints
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>()),
         [0, 1, 2]
     );
 }
 
 #[test]
 fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let model = model_handler(
-        &test_registry(&store, &test_device().0),
-        &store,
-        rand::rng(),
-    )
-    .unwrap();
+    let model = model_handler(vec![single_entry(&test_device().0)]);
     model.access(|node| {
         let endpoint = &node.endpoints[2];
         assert!(
@@ -113,9 +104,7 @@ fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
 fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
     for rgb in [false, true] {
         let (device, _receiver) = support::light(rgb);
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        let model = model_handler(&test_registry(&store, &device), &store, rand::rng()).unwrap();
+        let model = model_handler(vec![single_entry(&device)]);
         model.access(|node| {
             let endpoint = &node.endpoints[2];
             assert!(
@@ -206,9 +195,7 @@ fn on_off_and_dimmable_light_metadata_use_their_standard_device_types() {
         (LightProfile::Dimmable, 0x0101u16, true),
     ] {
         let (device, _receiver) = support::light_with(profile);
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        let model = model_handler(&test_registry(&store, &device), &store, rand::rng()).unwrap();
+        let model = model_handler(vec![single_entry(&device)]);
         model.access(|node| {
             let endpoint = &node.endpoints[2];
             assert!(
@@ -238,13 +225,12 @@ fn unused_legacy_scenes_blob_is_preserved_without_loading() {
             store.matter().put(key, &[0xff, 0x11]).unwrap();
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
-            let registry = test_registry(&store, &device);
             let bridge = Bridge::new(
-                frozen_entries(&registry, &store).unwrap(),
-                store.devices().load_configuration().unwrap().root_version,
+                vec![single_entry(&device)],
+                1,
                 &store,
                 &identity,
-                renamer(&registry, &store),
+                std::rc::Rc::new(NoLabels),
             );
             let error =
                 block_on(bridge.run(0, |_| Err(std::io::Error::other("startup completed"))))
@@ -373,13 +359,12 @@ fn cancelled_run_keeps_a_recorded_storage_failure() {
             let store = Store::open(dir.path()).unwrap();
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
-            let registry = test_registry(&store, &device);
             let bridge = Bridge::new(
-                frozen_entries(&registry, &store).unwrap(),
-                store.devices().load_configuration().unwrap().root_version,
+                vec![single_entry(&device)],
+                1,
                 &store,
                 &identity,
-                renamer(&registry, &store),
+                std::rc::Rc::new(NoLabels),
             );
             let running = bridge.run(0, |_| Ok(()));
             let mut callback_store = bridge.store.clone();

@@ -131,9 +131,7 @@ macro_rules! setup {
         let $function = device.functions()[0].clone();
         device.set_availability(Availability::Available);
 
-        let registry = support::test_registry(&store, &device);
-        let handler =
-            crate::matter::tests::support::model_handler(&registry, &store, rand::rng()).unwrap();
+        let handler = support::model_handler(vec![support::single_entry(&device)]);
 
         let info = model::basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);

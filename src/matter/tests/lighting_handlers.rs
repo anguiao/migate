@@ -25,16 +25,15 @@ use rs_matter::{
 use std::pin::pin;
 
 macro_rules! setup_light {
-    ($rgb:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
-        setup_light!(@source crate::matter::tests::support::light($rgb),$device,$receiver,$registry,$handler,$ctx);
+    ($rgb:expr, $device:ident, $receiver:ident, $handler:ident, $ctx:ident) => {
+        setup_light!(@source crate::matter::tests::support::light($rgb),$device,$receiver,$handler,$ctx);
     };
-    (@source $source:expr, $device:ident, $receiver:ident, $registry:ident, $handler:ident, $ctx:ident) => {
+    (@source $source:expr, $device:ident, $receiver:ident, $handler:ident, $ctx:ident) => {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let identity = store.load_identity().unwrap();
         let ($device, mut $receiver) = $source;
-        let $registry = crate::matter::tests::support::test_registry(&store, &$device);
-        let $handler = model_handler(&$registry, &store, rand::rng()).unwrap();
+        let $handler = model_handler(vec![super::support::single_entry(&$device)]);
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
@@ -96,7 +95,7 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
             8,
         ),
     ] {
-        setup_light!(true, device, receiver, registry, handler, ctx);
+        setup_light!(true, device, receiver, handler, ctx);
         let function = device.functions()[0].clone();
         function
             .observe_light(LightPatch {
@@ -185,7 +184,6 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
             );
             assert!(poll_once(receiver.next_operation()).await.is_none());
         });
-        assert_eq!(registry.list().len(), 1);
     }
 }
 
@@ -193,7 +191,7 @@ fn light_reads_sync_cluster_versions_before_filtering_without_polling_run() {
 fn ct_projection_reads_ignore_inactive_rgb_and_rgb_keeps_its_ct_cache_readable() {
     use crate::device::{LightMode, Rgb};
 
-    setup_light!(true, device, receiver, registry, handler, ctx);
+    setup_light!(true, device, receiver, handler, ctx);
     let function = device.functions()[0].clone();
     function
         .observe_light(LightPatch {
@@ -287,14 +285,13 @@ fn ct_projection_reads_ignore_inactive_rgb_and_rgb_keeps_its_ct_cache_readable()
         assert!(reports.changes.borrow().is_empty());
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
-    assert_eq!(registry.list().len(), 1);
 }
 
 #[test]
 fn light_unfiltered_reads_use_new_versions_and_encoded_equal_values_keep_versions() {
     use crate::device::{LightMode, Rgb};
 
-    setup_light!(true, device, receiver, registry, handler, ctx);
+    setup_light!(true, device, receiver, handler, ctx);
     let function = device.functions()[0].clone();
     function
         .observe_light(LightPatch {
@@ -357,14 +354,13 @@ fn light_unfiltered_reads_use_new_versions_and_encoded_equal_values_keep_version
         assert_eq!(report_value(&after).u8().unwrap(), 190);
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
-    assert_eq!(registry.list().len(), 1);
 }
 
 #[test]
 fn light_unknown_projection_edges_invalidate_filters_before_run() {
     use crate::device::{LightMode, Rgb};
 
-    setup_light!(true, device, receiver, registry, handler, ctx);
+    setup_light!(true, device, receiver, handler, ctx);
     let function = device.functions()[0].clone();
     block_on(async {
         let level_before = report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
@@ -411,13 +407,12 @@ fn light_unknown_projection_edges_invalidate_filters_before_run() {
         );
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
-    assert_eq!(registry.list().len(), 1);
 }
 
 #[test]
 fn light_remaining_time_start_and_stop_change_versions_before_run() {
     for cluster in [8, 0x300] {
-        setup_light!(false, device, receiver, registry, handler, ctx);
+        setup_light!(false, device, receiver, handler, ctx);
         device.set_availability(Availability::Available);
         let function = device.functions()[0].clone();
         function
@@ -487,14 +482,13 @@ fn light_remaining_time_start_and_stop_change_versions_before_run() {
             );
             assert!(poll_once(receiver.next_operation()).await.is_none());
         });
-        assert_eq!(registry.list().len(), 1);
     }
 }
 
 #[test]
 fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes() {
     for rgb in [false, true] {
-        setup_light!(rgb, device, receiver, registry, handler, ctx);
+        setup_light!(rgb, device, receiver, handler, ctx);
         device.set_availability(Availability::Available);
         block_on(async {
             assert!(
@@ -570,13 +564,12 @@ fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes(
             );
             assert!(poll_once(receiver.next_operation()).await.is_none());
         });
-        assert_eq!(registry.list().len(), 1);
     }
 }
 
 #[test]
 fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
-    setup_light!(false, device, receiver, registry, handler, ctx);
+    setup_light!(false, device, receiver, handler, ctx);
     let function = device.functions()[0].clone();
     device.set_availability(Availability::Available);
     function
@@ -654,17 +647,17 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
             .take_over_light(LightDimension::Brightness)
             .unwrap();
     });
-    assert_eq!(registry.list().len(), 1);
 }
 
 #[test]
-fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds() {
+fn frozen_light_instance_keeps_versions_and_a_new_instance_uses_new_bounds() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
     let (device, mut receiver) = crate::matter::tests::support::light(false);
-    let registry = crate::matter::tests::support::test_registry(&store, &device);
-    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
+    let handler = crate::matter::tests::support::model_handler(vec![
+        crate::matter::tests::support::single_entry(&device),
+    ]);
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
@@ -696,9 +689,8 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
             154
         );
 
-        // Commit a fixed change: narrower CT bounds and a bumped endpoint
+        // A new publication carries narrower CT bounds and a bumped endpoint
         // version. The running frozen instance must not notice it.
-        let mut configuration = store.devices().load_configuration().unwrap();
         let description = device.description();
         let mut functions = description.functions().to_vec();
         functions[0].kind =
@@ -713,21 +705,10 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
             )
             .unwrap(),
         );
-        let updated = configuration
-            .devices
-            .iter_mut()
-            .find(|entry| &entry.key == device.key())
-            .unwrap();
-        updated.configuration_version = 2;
-        updated.native = Some(super::support::native_for(&replacement.description()));
-        configuration.root_version += 1;
-        store
-            .devices()
-            .commit_configuration(&configuration, &[])
-            .unwrap();
+        let mut replacement_entry = super::support::single_entry(&replacement);
+        replacement_entry.identity.configuration_version = 2;
         replacement.set_availability(Availability::Available);
-        registry.remove(device.key()).unwrap();
-        registry.insert(replacement);
+        device.close();
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
@@ -758,12 +739,12 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
         handler.access(|node| assert!(node.endpoints.iter().any(|e| e.id == 2)));
         assert!(receiver.next_operation().await.is_none());
 
-        // The next frozen instance reads the committed bounds and the frozen
+        // The next frozen instance reads its supplied bounds and the frozen
         // endpoint version from BDBI and the Descriptor cluster. Its root
         // catches up through the same pre-startup alignment the bridge uses.
-        let settings = model::prepare_basic_info(&kv, configuration.root_version).unwrap();
+        let settings = model::prepare_basic_info(&kv, 2).unwrap();
         matter.with_state(|state| state.basic_info_settings = settings);
-        let replacement_handler = model_handler(&registry, &store, rand::rng()).unwrap();
+        let replacement_handler = model_handler(vec![replacement_entry]);
         let replacement_im = InteractionModel::new(
             &matter,
             &crypto,
@@ -810,7 +791,7 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
         .await
         .unwrap();
         assert_ne!(report_dataver(&descriptor), descriptor_before);
-        // The root BasicInfo ConfigurationVersion catches up to the committed
+        // The root BasicInfo ConfigurationVersion catches up to the supplied
         // publication root through the same state the attribute serves.
         assert_eq!(
             matter.with_state(|state| state.basic_info_settings.configuration_version),
@@ -834,7 +815,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
         let binding = parsed.functions()[0].lighting().cloned().unwrap();
         let description = parsed.physical_description("Precision");
         let (device, mut receivers) = crate::device::PhysicalDevice::new(description);
-        setup_light!(@source (device,receivers.remove(0)),device,receiver,registry,handler,ctx);
+        setup_light!(@source (device,receivers.remove(0)),device,receiver,handler,ctx);
         let function = device.functions()[0].clone();
         device.set_availability(Availability::Available);
         function.observe(true);
@@ -932,13 +913,12 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                 300
             );
         });
-        assert_eq!(registry.list().len(), 1);
     }
 }
 
 #[test]
 fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_power() {
-    setup_light!(false, device, receiver, registry, handler, ctx);
+    setup_light!(false, device, receiver, handler, ctx);
     let function = device.functions()[0].clone();
     device.set_availability(Availability::Available);
     function
@@ -1023,14 +1003,13 @@ fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_po
         );
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
-    assert_eq!(registry.list().len(), 1);
 }
 
 #[test]
 fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
     use crate::device::{LightColorTarget, LightMode};
 
-    setup_light!(true, device, receiver, registry, handler, ctx);
+    setup_light!(true, device, receiver, handler, ctx);
     device.set_availability(Availability::Available);
     let function = device.functions()[0].clone();
     function.observe(true);
@@ -1153,5 +1132,4 @@ fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
         assert!(ctx.changes.borrow().contains(&(2, 0x300, 1)));
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
-    assert_eq!(registry.list().len(), 1);
 }

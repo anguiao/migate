@@ -103,6 +103,17 @@ impl AppSource {
         }
     }
 
+    pub(crate) fn describe(&self, description: PhysicalDeviceDescription) {
+        let mut live = self.handle.0.live.borrow_mut();
+        let slot = live
+            .devices
+            .entry(description.key().id.clone())
+            .or_default();
+        slot.latest = Some(native_for(&description));
+        slot.latest_name = Some(description.label().to_owned());
+        slot.confirmed = true;
+    }
+
     pub(crate) fn directory_name(&self, key: &DeviceKey, name: &str) {
         let mut live = self.handle.0.live.borrow_mut();
         let slot = live.devices.get_mut(&key.id).unwrap();

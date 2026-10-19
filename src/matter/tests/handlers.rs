@@ -1,10 +1,13 @@
 use super::super::{bridged_info::BridgedHandler, model::basic_info, storage::StoreAdapter};
 use super::support::{
-    Context, model_handler, next_power, read_bytes, report_dataver, report_value,
+    Context, entry, model_handler, next_power, read_bytes, report_dataver, report_value,
+    single_entry,
 };
 use crate::{
+    app::App,
     device::{Availability, CommandError, Power},
     storage::Store,
+    xiaomi::adapter::tests::app_source::AppSource,
 };
 use futures_lite::future::{block_on, poll_once};
 use rs_matter::{
@@ -22,7 +25,7 @@ use rs_matter::{
     transport::exchange::MatterBuffers,
     utils::storage::WriteBuf,
 };
-use std::pin::pin;
+use std::{pin::pin, rc::Rc};
 
 #[test]
 fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values() {
@@ -36,8 +39,9 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let registry = super::test_registry(&store, &device);
-    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
+    let handler = crate::matter::tests::support::model_handler(vec![
+        crate::matter::tests::support::single_entry(&device),
+    ]);
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let mut ctx = Context::new(&im, 6, 0);
     block_on(async {
@@ -147,29 +151,29 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
-    let (device, _receiver) = super::test_device();
+    let source = AppSource::new(&store, Some(super::test_device().0.description()));
+    let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+    let device = source.physical.as_ref().unwrap();
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let registry = super::test_registry(&store, &device);
-    let physical = registry.get(device.key()).unwrap();
-    let stored = store
-        .devices()
-        .load_configuration()
-        .unwrap()
+    let entry = app.frozen().remove(0);
+    let stored = app
+        .current()
+        .configuration
         .device(device.key())
-        .cloned()
-        .unwrap();
+        .unwrap()
+        .clone();
     let bridged = BridgedHandler::new(
-        physical,
+        device.clone(),
         Dataver::new(1),
-        &super::support::published_identity(&store, device.key()),
-        super::support::renamer(&registry, &store),
+        &entry.identity,
+        app.clone(),
     );
-    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
+    let handler = crate::matter::model::handler_from(vec![entry], rand::rng(), app.clone());
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let ctx = Context::new(&im, 57, bridged::AttributeId::NodeLabel as _);
     assert!(!bridged.reachable(&ctx).unwrap());
@@ -216,7 +220,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
 }
 
 #[test]
-fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
+fn frozen_topology_and_replacement_instances_keep_independent_channels() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -229,11 +233,10 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let protocol = StoreAdapter::new(store.matter());
         let kv = matter.kv(protocol.clone());
-        let registry = crate::device::DeviceRegistry::new();
 
-        // An empty committed set serves only the root and aggregator.
+        // An empty publication serves only the root and aggregator.
         {
-            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
+            let handler = model_handler(vec![]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -248,17 +251,12 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
             );
         }
 
-        // Commit one single-function and one multi-function outlet, then build
-        // the next frozen instance from the committed set.
         let (single, mut single_receivers) = super::physical("single", false);
-        let single_stored = super::support::add_device(&store, &single.description());
-        assert_eq!(single_stored.endpoint, 2);
         let (multi, mut receivers) = super::physical("multi", true);
-        let stored = super::support::add_device(&store, &multi.description());
-        registry.insert(single.clone());
-        registry.insert(multi.clone());
+        let multi_entry = entry(&multi, 3, &[("outlet_1", 4), ("outlet_2", 5), ("usb", 6)]);
+        let stored = multi_entry.identity.clone();
         {
-            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
+            let handler = model_handler(vec![single_entry(&single), multi_entry.clone()]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -385,68 +383,16 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                 report_dataver(&read_bytes(&handler, &single_context).await.unwrap()),
                 before.wrapping_add(1)
             );
-            // The frozen instance keeps serving the old single even though the
-            // committed set changes; the rejoin is served by the next one.
-            super::support::renamer(&registry, &store)
-                .write_label(&single_stored.key, "Retained name")
-                .unwrap();
-            let mut configuration = store.devices().load_configuration().unwrap();
-            configuration
-                .devices
-                .iter_mut()
-                .find(|device| device.key == single_stored.key)
-                .unwrap()
-                .native = None;
-            store
-                .devices()
-                .commit_configuration(&configuration, &[])
-                .unwrap();
-            assert!(
-                !configuration
-                    .derive()
-                    .published
-                    .contains(&single_stored.key)
-            );
-            registry.remove(&single_stored.key);
-            let restored = configuration
-                .devices
-                .iter_mut()
-                .find(|device| device.key == single_stored.key)
-                .unwrap();
-            restored.native = single_stored.native.clone();
-            let restored = restored.clone();
-            store
-                .devices()
-                .commit_configuration(&configuration, &[])
-                .unwrap();
-            assert!(
-                configuration
-                    .derive()
-                    .published
-                    .contains(&single_stored.key)
-            );
-            assert_eq!(restored.unique_id, single_stored.unique_id);
-            assert_eq!(restored.endpoint, 2);
-            assert_eq!(restored.label, "Retained name");
         }
 
-        // The rejoin reuses the retained identity, label and endpoint in a new
-        // frozen instance; the old receiver is never used again.
-        let (rejoined, mut replacement_receivers) = crate::device::PhysicalDevice::new(
-            store
-                .devices()
-                .load_configuration()
-                .unwrap()
-                .derive()
-                .served[&single_stored.key]
-                .description
-                .clone(),
-        );
+        // A replacement uses the same explicit identity with a new command channel.
+        single.close();
+        let (rejoined, mut replacement_receivers) =
+            crate::device::PhysicalDevice::new(single.description());
         rejoined.set_availability(Availability::Available);
         rejoined.functions()[0].observe(false);
-        registry.insert(rejoined.clone());
         {
-            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
+            let handler = model_handler(vec![single_entry(&rejoined), multi_entry]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -489,22 +435,9 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
             );
         }
 
-        // Removing the multi is only visible in the next frozen instance.
-        let mut configuration = store.devices().load_configuration().unwrap();
-        configuration
-            .devices
-            .iter_mut()
-            .find(|device| device.key == stored.key)
-            .unwrap()
-            .native = None;
-        store
-            .devices()
-            .commit_configuration(&configuration, &[])
-            .unwrap();
-        assert!(!configuration.derive().published.contains(&stored.key));
-        registry.remove(&stored.key);
+        // A new publication omits the multi-function endpoint.
         {
-            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
+            let handler = model_handler(vec![single_entry(&rejoined)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -526,14 +459,13 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
             );
         }
 
-        // Many committed devices build one larger but still frozen instance.
-        for index in 0..20 {
-            let (device, _receivers) = super::physical(&format!("extra-{index}"), false);
-            super::support::add_device(&store, &device.description());
-            registry.insert(device);
+        let mut entries = vec![single_entry(&rejoined)];
+        for endpoint in 7..27 {
+            let (device, _receivers) = super::physical(&format!("extra-{endpoint}"), false);
+            entries.push(entry(&device, endpoint, &[("main", endpoint)]));
         }
         {
-            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
+            let handler = model_handler(entries);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -571,14 +503,30 @@ fn dynamic_device_names_are_isolated_and_write_failure_preserves_names() {
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let protocol = StoreAdapter::new(store.matter());
         let kv = matter.kv(protocol.clone());
-        let registry = crate::device::DeviceRegistry::new();
-        let (first, _first) = super::physical("first-name", false);
-        let (second, _second) = super::physical("second-name", true);
-        let first_stored = super::support::add_device(&store, &first.description());
-        let second_stored = super::support::add_device(&store, &second.description());
-        registry.insert(first.clone());
-        registry.insert(second.clone());
-        let handler = model_handler(&registry, &store, rand::rng()).unwrap();
+        let source = AppSource::new(
+            &store,
+            Some(super::physical("first-name", false).0.description()),
+        );
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let second_key = crate::device::DeviceKey::new("xiaomi", "second-name");
+        source.describe(super::physical("second-name", true).0.description());
+        app.apply(app.prepare(app.plan().unwrap().unwrap()))
+            .unwrap();
+        let first = source.physical.as_ref().unwrap();
+        let second = app.current().published.get(&second_key).unwrap();
+        let first_stored = app
+            .current()
+            .configuration
+            .device(first.key())
+            .unwrap()
+            .clone();
+        let second_stored = app
+            .current()
+            .configuration
+            .device(&second_key)
+            .unwrap()
+            .clone();
+        let handler = crate::matter::model::handler_from(app.frozen(), rand::rng(), app.clone());
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         write_label(&handler, &im, first_stored.endpoint, "Renamed first")
             .await
