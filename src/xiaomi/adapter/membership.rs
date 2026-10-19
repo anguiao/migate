@@ -134,6 +134,34 @@ impl Context {
                 .set_availability(Availability::Unavailable(reason));
         }
     }
+    pub(super) fn retire_work(&self, did: &str) {
+        let mut live = self.live.borrow_mut();
+        if let Some(slot) = live.devices.get_mut(did)
+            && let Some(work) = slot.work.take()
+        {
+            work.life.close();
+        }
+        if let Some(session) = live.session.as_mut()
+            && let Some(work) = session.devices.remove(did)
+        {
+            work.life.close();
+        }
+    }
+    pub(super) fn remove_source_slot(&self, did: &str) {
+        self.registry.remove(&DeviceKey::new("xiaomi", did));
+        self.retire_work(did);
+        if let Some(slot) = self.live.borrow_mut().devices.remove(did) {
+            if let Some(life) = slot.loading {
+                life.close();
+            }
+            if let Some(record) = slot.admitted {
+                record.life.close();
+            }
+        }
+        self.problem(did, None);
+        self.commands.remove(did);
+        self.changed.notify(usize::MAX);
+    }
     pub(super) fn block_device(&self, did: &str, reason: String) {
         {
             let mut live = self.live.borrow_mut();
@@ -144,13 +172,10 @@ impl Context {
                     .binding_generation
                     .set(record.binding_generation.get() + 1);
             }
-            if let Some(work) = slot.work.take() {
-                work.life.close();
-            }
-            if let Some(session) = live.session.as_mut() {
-                session.devices.remove(did);
-                drop(session.handle.unsubscribe_properties(did));
-            }
+        }
+        self.retire_work(did);
+        if let Some(session) = self.live.borrow().session.as_ref() {
+            drop(session.handle.unsubscribe_properties(did));
         }
         if let Some(session) = self.notifications.borrow().as_ref() {
             drop(session.handle.unsubscribe_properties(did));
@@ -170,13 +195,10 @@ impl Context {
         {
             return self.remove_group(did);
         }
-        let key = DeviceKey::new("xiaomi", did);
         self.revoke(did, "device removed from the selected home")?;
-        self.registry.remove(&key);
         let handle = {
-            let mut live = self.live.borrow_mut();
-            let slot = live.devices.remove(did).unwrap();
-            let light = slot.admitted.as_ref().is_some_and(|record| {
+            let live = self.live.borrow();
+            let light = live.devices[did].admitted.as_ref().is_some_and(|record| {
                 record
                     .cached
                     .borrow()
@@ -185,26 +207,11 @@ impl Context {
                     .iter()
                     .any(|function| function.lighting.is_some())
             });
-            if let Some(life) = slot.loading {
-                life.close();
-            }
-            if let Some(record) = slot.admitted {
-                record.life.close();
-            }
-            if let Some(work) = slot.work {
-                work.life.close();
-            }
-            if let Some(session) = live.session.as_mut() {
-                if let Some(work) = session.devices.remove(did) {
-                    work.life.close();
-                }
-                Some((session.handle.clone(), light))
-            } else {
-                None
-            }
+            live.session
+                .as_ref()
+                .map(|session| (session.handle.clone(), light))
         };
-        self.problem(did, None);
-        self.commands.remove(did);
+        self.remove_source_slot(did);
         if let Some(session) = self.notifications.borrow().as_ref() {
             drop(session.handle.unsubscribe_device(did));
         }

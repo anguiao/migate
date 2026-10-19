@@ -420,10 +420,10 @@ fn dropping_a_zero_byte_refresh_task_retires_its_operation_and_returns_the_deman
                 c.clock
                     .automatic
                     .store(false, std::sync::atomic::Ordering::Relaxed);
-                assert_eq!(work.refresh_inflight.borrow().len(), 1);
+                assert_eq!(work.refresh.borrow().snapshot().inflight.len(), 1);
                 drop(reads);
-                assert!(work.refresh_inflight.borrow().is_empty());
-                assert_eq!(work.refresh_pending.borrow().len(), 1);
+                assert!(work.refresh.borrow().snapshot().inflight.is_empty());
+                assert_eq!(work.refresh.borrow().snapshot().pending.len(), 1);
                 wire.allow(usize::MAX);
                 for _ in 0..20 {
                     future::yield_now().await;

@@ -362,7 +362,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
         // A read started before the write receipt cannot confirm its result.
         assert_eq!(light.snapshot().power, Power::Off);
         release_read.send(()).unwrap();
-        until(|| work.refresh_inflight.borrow().is_empty()).await;
+        until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
         assert_eq!(light.snapshot().power, Power::Off);
         let write = c
             .cloud
@@ -395,7 +395,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
             .set(super::routing::PathPriority::CloudFirst);
         let attempts = reads();
         light.execute(Command::On).await.unwrap();
-        until(|| reads() > attempts && !work.read_problems.borrow().is_empty()).await;
+        until(|| reads() > attempts && !work.refresh.borrow().snapshot().problems.is_empty()).await;
         assert_eq!(light.snapshot().power, Power::Off);
         c.context
             .priority
@@ -486,7 +486,8 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
             .clone()
             .unwrap();
         until(|| {
-            work.refresh_pending.borrow().is_empty() && work.refresh_inflight.borrow().is_empty()
+            work.refresh.borrow().snapshot().pending.is_empty()
+                && work.refresh.borrow().snapshot().inflight.is_empty()
         })
         .await;
         c.cloud.lock().unwrap().property_codes.clear();
@@ -1626,8 +1627,8 @@ fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
                     .values()
                     .filter_map(|slot| slot.work.as_ref())
                     .all(|work| {
-                        work.refresh_pending.borrow().is_empty()
-                            && work.refresh_inflight.borrow().is_empty()
+                        work.refresh.borrow().snapshot().pending.is_empty()
+                            && work.refresh.borrow().snapshot().inflight.is_empty()
                     })
             })
             .await;

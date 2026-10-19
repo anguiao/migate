@@ -2,7 +2,7 @@ use super::{
     commands::LightWriteGate,
     model::AdapterError,
     observations::Observations,
-    refresh::{ReadFlight, Refresh},
+    refresh::RefreshState,
     state::{Context, DeviceRecord, Lifetime},
 };
 use crate::device::{ActionToken, LightDimension};
@@ -11,7 +11,7 @@ use event_listener::Event;
 use futures_lite::future;
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::BTreeSet,
     rc::Rc,
     time::Duration,
 };
@@ -95,16 +95,11 @@ pub(super) struct DeviceWork {
     pub(super) condition_generation: Cell<u64>,
     subscribe_requested: Cell<bool>,
     pub(super) subscribe_running: Cell<bool>,
-    pub(super) refresh_pending: RefCell<VecDeque<Refresh>>,
-    pub(super) refresh_inflight: RefCell<BTreeMap<super::lighting::PropertyKey, Rc<ReadFlight>>>,
-    /// Reads that must be repeated after the current in-flight read completes.
-    /// Write feedback uses this to coalesce a follow-up read.
-    pub(super) dirty_again: RefCell<BTreeSet<super::lighting::PropertyKey>>,
+    pub(super) refresh: RefCell<RefreshState>,
     pub(super) refresh_changed: Rc<Event>,
     pub(super) light_frames: RefCell<LightFrames>,
     changed: Event,
     subscribe_problem: RefCell<Option<String>>,
-    pub(super) read_problems: RefCell<BTreeMap<super::lighting::PropertyKey, String>>,
 }
 impl DeviceWork {
     pub(super) fn new(
@@ -129,14 +124,11 @@ impl DeviceWork {
             condition_generation: Cell::new(0),
             subscribe_requested: Cell::new(false),
             subscribe_running: Cell::new(false),
-            refresh_pending: RefCell::new(VecDeque::new()),
-            refresh_inflight: RefCell::new(BTreeMap::new()),
-            dirty_again: RefCell::new(BTreeSet::new()),
+            refresh: RefCell::new(RefreshState::default()),
             refresh_changed,
             light_frames: RefCell::new(LightFrames::default()),
             changed: Event::new(),
             subscribe_problem: RefCell::new(None),
-            read_problems: RefCell::new(BTreeMap::new()),
         }
     }
     pub(super) fn local_connected(&self) {
@@ -251,60 +243,20 @@ impl DeviceWork {
     }
     pub(super) fn refresh_property(&self, id: &str, binding: PropertyBinding) {
         self.observations.refresh(id, binding);
-        let mut pending = self.refresh_pending.borrow_mut();
-        if !pending
-            .iter()
-            .any(|read| read.id == id && read.binding == binding)
-        {
-            pending.push_back(Refresh {
-                id: id.into(),
-                binding,
-                attempts: 0,
-                ready_at: Duration::ZERO,
-            });
-        }
+        self.refresh.borrow_mut().request(id, binding);
         self.refresh_changed.notify(usize::MAX);
     }
-    /// Queue one real read for a binding without dropping an in-flight read:
-    /// a demand arriving during a read coalesces into exactly one follow-up.
+    /// Changes during an in-flight read coalesce into exactly one follow-up.
     pub(super) fn request_dirty_read(&self, id: &str, binding: PropertyBinding) {
-        if self.life.is_closed() {
-            return;
-        }
-        let key = super::lighting::key(id, binding);
-        if self.refresh_inflight.borrow().contains_key(&key) {
-            self.dirty_again.borrow_mut().insert(key);
-        } else if !self
-            .refresh_pending
-            .borrow()
-            .iter()
-            .any(|read| read.id == id && read.binding == binding)
-        {
-            self.refresh_property(id, binding);
-        }
-    }
-    /// Called after a read finishes. A dirty-again marker produces the single
-    /// follow-up read that covers every change seen during the finished read.
-    pub(super) fn finish_dirty_read(&self, id: &str, binding: PropertyBinding) {
-        let key = super::lighting::key(id, binding);
-        if self.dirty_again.borrow_mut().remove(&key) {
-            self.refresh_property(id, binding);
+        if !self.life.is_closed() && self.refresh.borrow_mut().request_dirty(id, binding) {
+            self.observations.refresh(id, binding);
+            self.refresh_changed.notify(usize::MAX);
         }
     }
     pub(super) fn ensure_property_read(&self, id: &str, binding: PropertyBinding) {
-        if self
-            .refresh_pending
-            .borrow()
-            .iter()
-            .any(|read| read.id == id && read.binding == binding)
-            || self
-                .refresh_inflight
-                .borrow()
-                .contains_key(&super::lighting::key(id, binding))
-        {
-            return;
+        if !self.refresh.borrow().contains(id, binding) {
+            self.refresh_property(id, binding);
         }
-        self.refresh_property(id, binding);
     }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
         self.record
@@ -385,7 +337,7 @@ impl DeviceWork {
             .clone()
             .into_iter()
             .chain(self.cloud_problem.borrow().clone())
-            .chain(self.read_problems.borrow().values().cloned())
+            .chain(self.refresh.borrow().problems())
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
     }

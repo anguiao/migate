@@ -893,7 +893,7 @@ fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
                         .work
                         .clone()
                         .unwrap();
-                    until(|| work.refresh_inflight.borrow().is_empty()).await;
+                    until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
                     assert_eq!(one.snapshot().power, Power::Off);
                     if notify_after_send {
                         cloud.property("one", 2, true);

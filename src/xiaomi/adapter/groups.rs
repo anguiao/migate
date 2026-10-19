@@ -35,36 +35,12 @@ impl Context {
 
     /// Retire a group source without touching persisted ordinary identity.
     pub(super) fn remove_group(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
-        let key = DeviceKey::new("xiaomi", did);
         // Clear the retained physical view and retire the group's own native
         // subscriptions through the existing source mechanisms before the
         // slot disappears.
         self.revoke(did, "native group withdrawn")?;
         self.retire_device_notifications(did);
-        self.registry.remove(&key);
-        {
-            let mut live = self.live.borrow_mut();
-            let Some(slot) = live.devices.remove(did) else {
-                return Ok(());
-            };
-            if let Some(life) = slot.loading {
-                life.close();
-            }
-            if let Some(record) = slot.admitted {
-                record.life.close();
-            }
-            if let Some(work) = slot.work {
-                work.life.close();
-            }
-            if let Some(session) = live.session.as_mut()
-                && let Some(work) = session.devices.remove(did)
-            {
-                work.life.close();
-            }
-        }
-        self.problem(did, None);
-        self.commands.remove(did);
-        self.changed.notify(usize::MAX);
+        self.remove_source_slot(did);
         Ok(())
     }
 

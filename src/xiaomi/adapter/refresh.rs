@@ -10,7 +10,11 @@ use crate::xiaomi::{
 };
 use futures_lite::future;
 use futures_util::future::join_all;
-use std::{rc::Rc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    rc::Rc,
+    time::Duration,
+};
 
 const ROUND_DELAY: Duration = Duration::from_millis(200);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
@@ -26,6 +30,143 @@ enum ReadResult {
     Observed,
     Retired,
     Failed(String),
+}
+
+#[derive(Default)]
+pub(super) struct RefreshState {
+    pending: VecDeque<Refresh>,
+    inflight: BTreeMap<super::lighting::PropertyKey, Rc<ReadFlight>>,
+    dirty_again: BTreeSet<super::lighting::PropertyKey>,
+    problems: BTreeMap<super::lighting::PropertyKey, String>,
+}
+impl RefreshState {
+    pub(super) fn request(&mut self, id: &str, binding: PropertyBinding) {
+        if !self
+            .pending
+            .iter()
+            .any(|read| read.id == id && read.binding == binding)
+        {
+            self.pending.push_back(Refresh {
+                id: id.into(),
+                binding,
+                attempts: 0,
+                ready_at: Duration::ZERO,
+            });
+        }
+    }
+    pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
+        self.inflight
+            .contains_key(&super::lighting::key(id, binding))
+            || self
+                .pending
+                .iter()
+                .any(|read| read.id == id && read.binding == binding)
+    }
+    pub(super) fn request_dirty(&mut self, id: &str, binding: PropertyBinding) -> bool {
+        let key = super::lighting::key(id, binding);
+        if self.inflight.contains_key(&key) {
+            self.dirty_again.insert(key);
+            false
+        } else if self.contains(id, binding) {
+            false
+        } else {
+            self.request(id, binding);
+            true
+        }
+    }
+    fn finish_dirty(&mut self, id: &str, binding: PropertyBinding) -> bool {
+        if self.dirty_again.remove(&super::lighting::key(id, binding)) {
+            self.request(id, binding);
+            true
+        } else {
+            false
+        }
+    }
+    fn next_due(&self) -> Option<Duration> {
+        self.pending
+            .iter()
+            .filter(|read| !self.inflight.contains_key(&read.key()))
+            .map(|read| read.ready_at)
+            .min()
+    }
+    fn reserve(&mut self, now: Duration, path: ControlPath) -> Option<(Refresh, Rc<ReadFlight>)> {
+        let index = self
+            .pending
+            .iter()
+            .position(|read| read.ready_at <= now && !self.inflight.contains_key(&read.key()))?;
+        let read = self.pending.remove(index).unwrap();
+        let flight = Rc::new(ReadFlight {
+            life: Lifetime::default(),
+            path,
+        });
+        self.inflight.insert(read.key(), flight.clone());
+        Some((read, flight))
+    }
+    fn requeue(&mut self, read: Refresh) {
+        if !self.pending.iter().any(|queued| queued.key() == read.key()) {
+            self.pending.push_back(read);
+        }
+    }
+    fn complete(
+        &mut self,
+        mut read: Refresh,
+        result: ReadResult,
+        now: Duration,
+        cloud_first: bool,
+    ) {
+        match result {
+            ReadResult::Observed => {
+                self.problems.remove(&read.key());
+            }
+            ReadResult::Retired => self.requeue(read),
+            ReadResult::Failed(problem) => {
+                if cloud_first {
+                    self.problems.insert(read.key(), problem.clone());
+                }
+                if read.attempts == 3 {
+                    self.pending.retain(|queued| queued.key() != read.key());
+                    self.problems.insert(read.key(), problem);
+                } else {
+                    read.attempts += 1;
+                    read.ready_at = now + RETRY_DELAY;
+                    if let Some(queued) = self
+                        .pending
+                        .iter_mut()
+                        .find(|queued| queued.key() == read.key())
+                    {
+                        *queued = read;
+                    } else {
+                        self.pending.push_back(read);
+                    }
+                }
+            }
+        }
+    }
+    pub(super) fn problems(&self) -> Vec<String> {
+        self.problems.values().cloned().collect()
+    }
+    #[cfg(test)]
+    pub(super) fn snapshot(&self) -> RefreshSnapshot {
+        RefreshSnapshot {
+            pending: self.pending.iter().cloned().collect(),
+            inflight: self.inflight.keys().cloned().collect(),
+            problems: self.problems.clone(),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn exhaust_pending(&mut self, id: &str, binding: PropertyBinding) {
+        self.pending
+            .iter_mut()
+            .find(|read| read.id == id && read.binding == binding)
+            .unwrap()
+            .attempts = 3;
+    }
+}
+#[cfg(test)]
+pub(super) struct RefreshSnapshot {
+    pub(super) pending: Vec<Refresh>,
+    pub(super) inflight: BTreeSet<super::lighting::PropertyKey>,
+    pub(super) problems: BTreeMap<super::lighting::PropertyKey, String>,
 }
 
 pub(super) struct ReadFlight {
@@ -58,7 +199,7 @@ fn works(context: &Context) -> Vec<Rc<DeviceWork>> {
         .collect()
 }
 pub(super) fn cancel(work: &DeviceWork) {
-    for flight in work.refresh_inflight.borrow().values() {
+    for flight in work.refresh.borrow().inflight.values() {
         flight.life.close();
     }
     work.refresh_changed.notify(usize::MAX);
@@ -66,7 +207,7 @@ pub(super) fn cancel(work: &DeviceWork) {
 fn retire(context: &Context) {
     for work in works(context) {
         let did = &work.record.physical.key().id;
-        for flight in work.refresh_inflight.borrow().values() {
+        for flight in work.refresh.borrow().inflight.values() {
             if work.life.is_closed() || !flight.current(context, did) {
                 flight.life.close();
             }
@@ -85,21 +226,9 @@ fn reserve(
     if matches!(path, ControlPath::Local(_)) != local {
         return None;
     }
-    let mut pending = work.refresh_pending.borrow_mut();
-    let index = pending.iter().position(|read| {
-        read.ready_at <= context.clock.now()
-            && !work.refresh_inflight.borrow().contains_key(&read.key())
-    })?;
-    let read = pending.remove(index).unwrap();
-    let flight = Rc::new(ReadFlight {
-        life: Lifetime::default(),
-        path,
-    });
-    work.refresh_inflight
-        .borrow_mut()
-        .insert(read.key(), flight.clone());
-    Some((read, flight))
+    work.refresh.borrow_mut().reserve(context.clock.now(), path)
 }
+
 pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result<(), AdapterError> {
     let mut next_round = None;
     loop {
@@ -109,14 +238,7 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
         let ready = candidates
             .iter()
             .filter(|work| context.local_reads_allowed(&work.record.physical.key().id, &handle))
-            .filter_map(|work| {
-                work.refresh_pending
-                    .borrow()
-                    .iter()
-                    .filter(|read| !work.refresh_inflight.borrow().contains_key(&read.key()))
-                    .map(|read| read.ready_at)
-                    .min()
-            })
+            .filter_map(|work| work.refresh.borrow().next_due())
             .min();
         let Some(ready) = ready else {
             next_round = None;
@@ -172,14 +294,7 @@ pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
                     Some(ControlPath::Cloud(_))
                 )
             })
-            .filter_map(|work| {
-                work.refresh_pending
-                    .borrow()
-                    .iter()
-                    .filter(|read| !work.refresh_inflight.borrow().contains_key(&read.key()))
-                    .map(|read| read.ready_at)
-                    .min()
-            })
+            .filter_map(|work| work.refresh.borrow().next_due())
             .min();
         let wake = future::or(
             async {
@@ -211,41 +326,33 @@ struct ReadCleanup {
 impl Drop for ReadCleanup {
     fn drop(&mut self) {
         self.flight.life.close();
-        let current = self
-            .work
-            .refresh_inflight
-            .borrow()
+        let mut state = self.work.refresh.borrow_mut();
+        if state
+            .inflight
             .get(&self.read.key())
-            .is_some_and(|flight| Rc::ptr_eq(flight, &self.flight));
-        if current {
-            self.work
-                .refresh_inflight
-                .borrow_mut()
-                .remove(&self.read.key());
+            .is_some_and(|flight| Rc::ptr_eq(flight, &self.flight))
+        {
+            state.inflight.remove(&self.read.key());
         }
-        self.work
-            .finish_dirty_read(&self.read.id, self.read.binding);
+        let dirty = state.finish_dirty(&self.read.id, self.read.binding);
         if self.retry
             && !self.work.life.is_closed()
             && self.work.record.binding_generation.get() == self.generation
-            && !self
-                .work
-                .refresh_pending
-                .borrow()
-                .iter()
-                .any(|read| read.key() == self.read.key())
         {
+            state.requeue(self.read.clone());
+        }
+        drop(state);
+        if dirty {
             self.work
-                .refresh_pending
-                .borrow_mut()
-                .push_back(self.read.clone());
+                .observations
+                .refresh(&self.read.id, self.read.binding);
         }
         self.work.refresh_changed.notify(usize::MAX);
     }
 }
 fn read_one(
     work: Rc<DeviceWork>,
-    mut read: Refresh,
+    read: Refresh,
     flight: Rc<ReadFlight>,
     context: Rc<Context>,
 ) -> impl std::future::Future<Output = Result<(), AdapterError>> {
@@ -438,54 +545,20 @@ fn read_one(
             && work.record.binding_generation.get() == generation
             && work.contains(&read.id, read.binding)
         {
-            match result? {
-                ReadResult::Observed => {
-                    work.read_problems.borrow_mut().remove(&read.key());
-                }
-                ReadResult::Retired => {
-                    if !work
-                        .refresh_pending
-                        .borrow()
-                        .iter()
-                        .any(|queued| queued.key() == read.key())
-                    {
-                        work.refresh_pending.borrow_mut().push_back(read);
-                    }
-                }
-                ReadResult::Failed(problem)
-                    if !lighting
-                        || work.observations.read_is_current(
-                            &work.record,
-                            &read.id,
-                            read.binding,
-                            &stamp,
-                        ) =>
-                {
-                    if context.priority() == super::routing::PathPriority::CloudFirst {
-                        work.read_problems
-                            .borrow_mut()
-                            .insert(read.key(), problem.clone());
-                    }
-                    if read.attempts == 3 {
-                        work.refresh_pending
-                            .borrow_mut()
-                            .retain(|queued| queued.key() != read.key());
-                        work.read_problems.borrow_mut().insert(read.key(), problem);
-                    } else {
-                        read.attempts += 1;
-                        read.ready_at = context.clock.now() + RETRY_DELAY;
-                        let mut pending = work.refresh_pending.borrow_mut();
-                        if let Some(queued) =
-                            pending.iter_mut().find(|queued| queued.key() == read.key())
-                        {
-                            *queued = read;
-                        } else {
-                            pending.push_back(read);
-                        }
-                    }
-                }
-                // Routing already classified the failure; stale work cannot consume fresh demand.
-                ReadResult::Failed(_) => {}
+            let result = result?;
+            // A stale failure cannot consume demand queued after that read began.
+            if !matches!(result, ReadResult::Failed(_))
+                || !lighting
+                || work
+                    .observations
+                    .read_is_current(&work.record, &read.id, read.binding, &stamp)
+            {
+                work.refresh.borrow_mut().complete(
+                    read,
+                    result,
+                    context.clock.now(),
+                    context.priority() == super::routing::PathPriority::CloudFirst,
+                );
             }
             work.report(&context, &did);
         }
@@ -493,3 +566,6 @@ fn read_one(
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -121,7 +121,7 @@ fn a_slow_cloud_did_preserves_local_round_spacing_and_local_commands() {
                     assert!(control.cloud.lock().unwrap().property_writes.is_empty());
                 }
                 peer.release("multi", siid, json!({"value":false})).await;
-                until(|| multi.refresh_inflight.borrow().is_empty()).await;
+                until(|| multi.refresh.borrow().snapshot().inflight.is_empty()).await;
             }
 
             release.send(()).unwrap();
@@ -154,8 +154,8 @@ fn refreshes_during_a_cloud_read_coalesce_and_invalidate_its_old_value() {
         for _ in 0..10 {
             work.refresh();
         }
-        assert_eq!(work.refresh_inflight.borrow().len(), 1);
-        assert_eq!(work.refresh_pending.borrow().len(), 1);
+        assert_eq!(work.refresh.borrow().snapshot().inflight.len(), 1);
+        assert_eq!(work.refresh.borrow().snapshot().pending.len(), 1);
         assert_eq!(cloud_reads(&c, "one", 2), 1);
         {
             let mut cloud = c.cloud.lock().unwrap();
@@ -166,14 +166,14 @@ fn refreshes_during_a_cloud_read_coalesce_and_invalidate_its_old_value() {
         first_release.send(()).unwrap();
         until(|| cloud_reads(&c, "one", 2) == 2).await;
         assert_eq!(one.snapshot().power, Power::Unknown);
-        assert_eq!(work.refresh_inflight.borrow().len(), 1);
-        assert!(work.refresh_pending.borrow().is_empty());
+        assert_eq!(work.refresh.borrow().snapshot().inflight.len(), 1);
+        assert!(work.refresh.borrow().snapshot().pending.is_empty());
 
         next_release.send(()).unwrap();
         until(|| one.snapshot().power == Power::On).await;
-        until(|| work.refresh_inflight.borrow().is_empty()).await;
+        until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
         assert_eq!(cloud_reads(&c, "one", 2), 2);
-        assert!(work.refresh_pending.borrow().is_empty());
+        assert!(work.refresh.borrow().snapshot().pending.is_empty());
     }));
 }
 
@@ -234,15 +234,15 @@ fn retiring_a_source_releases_a_cloud_read_slot_before_its_response_arrives() {
         work.source_changed();
         until(|| cloud_reads(&c, "one", 2) == 2).await;
         assert_eq!(one.snapshot().power, Power::Unknown);
-        assert_eq!(work.refresh_inflight.borrow().len(), 1);
+        assert_eq!(work.refresh.borrow().snapshot().inflight.len(), 1);
 
         old_release.send(()).unwrap();
         async_io::Timer::after(Duration::from_millis(20)).await;
         assert_eq!(one.snapshot().power, Power::Unknown);
         fresh_release.send(()).unwrap();
         until(|| one.snapshot().power == Power::On).await;
-        until(|| work.refresh_inflight.borrow().is_empty()).await;
+        until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
         assert_eq!(cloud_reads(&c, "one", 2), 2);
-        assert!(work.refresh_pending.borrow().is_empty());
+        assert!(work.refresh.borrow().snapshot().pending.is_empty());
     }));
 }

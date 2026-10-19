@@ -345,15 +345,7 @@ impl SourceHandle {
             if replaced || bindings_changed {
                 self.0.light_writes.clear_authority(did);
                 self.0.retire_device_notifications(did);
-                let mut live = self.0.live.borrow_mut();
-                if let Some(work) = live.devices.get_mut(did).unwrap().work.take() {
-                    work.life.close();
-                }
-                if let Some(session) = live.session.as_mut()
-                    && let Some(work) = session.devices.remove(did)
-                {
-                    work.life.close();
-                }
+                self.0.retire_work(did);
             }
             if replaced {
                 let old = old.as_ref().unwrap();

@@ -1046,7 +1046,7 @@ fn malformed_light_read_retries_its_property_without_changing_snapshot() {
                 .work
                 .clone()
                 .unwrap();
-            until(|| !work.read_problems.borrow().is_empty()).await;
+            until(|| !work.refresh.borrow().snapshot().problems.is_empty()).await;
             assert_eq!(light.snapshot().lighting.unwrap().brightness_percent, None);
             assert!(
                 peer.state
@@ -1863,7 +1863,7 @@ fn new_mode_only_refreshes_its_missing_color_without_retiring_brightness_read() 
                     .brightness_percent
                     .is_some()
                     && light.snapshot().lighting.unwrap().mode == Some(LightMode::Temperature)
-                    && !work.read_problems.borrow().is_empty()
+                    && !work.refresh.borrow().snapshot().problems.is_empty()
             })
             .await;
             peer.state.borrow_mut().hold_reads = true;
@@ -1905,10 +1905,10 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                     .clone()
                     .unwrap();
                 let key = super::super::lighting::key("main", active);
-                until(|| work.read_problems.borrow().contains_key(&key)).await;
+                until(|| work.refresh.borrow().snapshot().problems.contains_key(&key)).await;
                 peer.state.borrow_mut().hold_reads = true;
                 peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
-                until(|| work.refresh_inflight.borrow().contains_key(&key)).await;
+                until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
                 let stamp = work.observations.read_stamp(&work.record, "main", active);
                 for _ in 0..3 {
                     peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
@@ -1922,8 +1922,10 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                 );
                 assert!(
                     !work
-                        .refresh_pending
+                        .refresh
                         .borrow()
+                        .snapshot()
+                        .pending
                         .iter()
                         .any(|read| read.id == "main" && read.binding == active)
                 );
@@ -1962,10 +1964,10 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
                 .clone()
                 .unwrap();
             let key = super::super::lighting::key("main", COLOR);
-            until(|| work.read_problems.borrow().contains_key(&key)).await;
+            until(|| work.refresh.borrow().snapshot().problems.contains_key(&key)).await;
             peer.state.borrow_mut().hold_reads = true;
             work.refresh_property("main", COLOR);
-            until(|| work.refresh_inflight.borrow().contains_key(&key)).await;
+            until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
             let stamp = work.observations.read_stamp(&work.record, "main", COLOR);
             peer.notify_value("one", MODE, json!(1), false);
             until(|| light.snapshot().lighting.unwrap().mode == Some(LightMode::Rgb)).await;
@@ -1999,15 +2001,10 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
                 .clone()
                 .unwrap();
             let key = super::super::lighting::key("main", COLOR);
-            until(|| work.read_problems.borrow().contains_key(&key)).await;
+            until(|| work.refresh.borrow().snapshot().problems.contains_key(&key)).await;
             peer.state.borrow_mut().hold_reads = true;
             work.refresh_property("main", COLOR);
-            work.refresh_pending
-                .borrow_mut()
-                .iter_mut()
-                .find(|read| read.binding == COLOR)
-                .unwrap()
-                .attempts = 3;
+            work.refresh.borrow_mut().exhaust_pending("main", COLOR);
             until(|| {
                 peer.state.borrow().held.iter().any(|(publish, _)| {
                     let payload = decode_mips(&publish.payload).unwrap().payload;
@@ -2023,10 +2020,12 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
                 future::yield_now().await;
             }
             assert!(
-                work.refresh_inflight.borrow().contains_key(&key)
+                work.refresh.borrow().snapshot().inflight.contains(&key)
                     || work
-                        .refresh_pending
+                        .refresh
                         .borrow()
+                        .snapshot()
+                        .pending
                         .iter()
                         .any(|read| read.id == "main" && read.binding == COLOR)
             );
@@ -2128,8 +2127,10 @@ fn unknown_mode_color_values_update_only_cache_until_the_mode_changes() {
                     .clone()
                     .unwrap();
                 until(|| {
-                    work.read_problems
+                    work.refresh
                         .borrow()
+                        .snapshot()
+                        .problems
                         .contains_key(&super::super::lighting::key("main", MODE))
                 })
                 .await;

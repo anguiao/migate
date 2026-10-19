@@ -113,8 +113,8 @@ fn local_device_offline_reads_continue_over_cloud_without_degrading_other_device
             until(|| {
                 control.context.live.borrow().devices.values().all(|slot| {
                     slot.work.as_ref().is_none_or(|work| {
-                        work.refresh_inflight.borrow().is_empty()
-                            && work.refresh_pending.borrow().is_empty()
+                        work.refresh.borrow().snapshot().inflight.is_empty()
+                            && work.refresh.borrow().snapshot().pending.is_empty()
                     })
                 })
             })
