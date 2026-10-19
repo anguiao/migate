@@ -13,14 +13,16 @@ use rs_matter::{
 
 #[test]
 fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks() {
-    let state = LevelControlState {
-        current_level: Some(100),
+    let state = LevelControlState::default();
+    let feedback = |power| super::Projection {
+        power,
+        level: Some(100),
         ..Default::default()
     };
     for wire in [0, 1] {
         assert_eq!(
             state
-                .move_to_level(wire, true, Some(0), 0, 0, Some(true))
+                .move_to_level(wire, true, Some(0), 0, 0, feedback(Some(true)))
                 .unwrap()
                 .unwrap()
                 .frame(0),
@@ -28,7 +30,7 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
         );
         assert_eq!(
             state
-                .move_to_level(wire, false, Some(0), 0, 0, Some(true))
+                .move_to_level(wire, false, Some(0), 0, 0, feedback(Some(true)))
                 .unwrap()
                 .unwrap()
                 .frame(0),
@@ -37,14 +39,14 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
     }
     assert_eq!(
         state
-            .move_to_level(255, true, Some(0), 0, 0, Some(true))
+            .move_to_level(255, true, Some(0), 0, 0, feedback(Some(true)))
             .unwrap_err()
             .code(),
         ErrorCode::InvalidCommand
     );
     assert!(
         state
-            .move_to_level(50, false, Some(0), 0, 0, Some(false))
+            .move_to_level(50, false, Some(0), 0, 0, feedback(Some(false)))
             .unwrap()
             .is_none()
     );
@@ -56,7 +58,7 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
             Some(u16::MAX),
             0,
             0,
-            Some(true),
+            feedback(Some(true)),
         )
         .unwrap()
         .unwrap();
@@ -319,7 +321,7 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
         let task = light
             .level
             .borrow()
-            .move_level(false, MoveModeEnum::Up, Some(1), 0, 0, Some(true))
+            .move_level(false, MoveModeEnum::Up, Some(1), 0, 0, light.refresh())
             .unwrap()
             .unwrap();
         assert_eq!(task.frame(0).0, 1);
@@ -474,7 +476,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
         let next = light
             .level
             .borrow()
-            .move_level(false, MoveModeEnum::Down, Some(2), 0, 0, Some(true))
+            .move_level(false, MoveModeEnum::Down, Some(2), 0, 0, light.refresh())
             .unwrap()
             .unwrap();
         assert_eq!(next.frame(0).0, projected);

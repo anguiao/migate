@@ -1,3 +1,5 @@
+mod dispatch;
+pub(super) use dispatch::{Dispatch, IDENTIFY};
 mod handlers;
 mod settings;
 #[cfg(test)]
@@ -18,7 +20,7 @@ use rs_matter::{
     dm::{Dataver, HandlerContext},
     error::{Error, ErrorCode},
 };
-use settings::{color::ColorControlState, level::LevelControlState};
+use settings::level::LevelControlState;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -48,7 +50,7 @@ pub(super) struct Lighting {
     bounds: Option<(u16, u16)>,
     scheduler: Scheduler,
     level: RefCell<LevelControlState>,
-    color: RefCell<ColorControlState>,
+    color_options: Cell<u8>,
     rgb_mode: Cell<u8>,
     hue_hint: Cell<f64>,
     pub(super) on_off_version: Dataver,
@@ -114,7 +116,7 @@ impl Lighting {
             bounds,
             scheduler,
             level: RefCell::new(LevelControlState::default()),
-            color: RefCell::new(ColorControlState::default()),
+            color_options: Cell::new(0),
             rgb_mode: Cell::new(0),
             hue_hint: Cell::new(0.0),
             on_off_version: on_off,
@@ -181,7 +183,7 @@ impl Lighting {
         } else {
             (None, None)
         };
-        let result = Projection {
+        Projection {
             power: snapshot.power.value(),
             // Observed zero is a known physical value; Matter's nonzero minimum
             // projects it to MinLevel without inferring the independent power state.
@@ -196,13 +198,7 @@ impl Lighting {
                 LightMode::Rgb => self.rgb_mode.get(),
                 LightMode::Temperature => 2,
             }),
-        };
-        self.level.borrow_mut().current_level = result.level;
-        let mut color = self.color.borrow_mut();
-        color.xy = result.xy;
-        color.color_temperature_mireds = result.temperature;
-        color.mode = result.mode;
-        result
+        }
     }
     fn rgb_hs(&self, rgb: crate::device::Rgb) -> hs::Hs {
         let mut value = hs::rgb_to_hs(rgb);

@@ -69,14 +69,12 @@ const RGB_LIGHT: DeviceType = DeviceType {
     dtype: 0x010d,
     drev: 4,
 };
-const LIGHT_IDENTIFY: rs_matter::dm::Cluster<'static> = identify::IdentifyHandler::<()>::CLUSTER
-    .with_cmds(rs_matter::with!(identify::CommandId::Identify));
 macro_rules! light_clusters {
     ($($extra:expr),* $(,)?) => {
         clusters!(
             desc::DescHandler::CLUSTER,
             groups::GroupsHandler::CLUSTER,
-            LIGHT_IDENTIFY,
+            lighting::IDENTIFY,
             BridgedHandler::CLUSTER,
             lighting::OnOffHandler::CLUSTER
             $(, $extra)*
@@ -200,19 +198,16 @@ enum Role {
 struct Control {
     groups: Dataver,
     identify: identify::IdentifyHandler,
-    on_off: Option<OnOffHandler>,
-    lighting: Option<lighting::Lighting>,
+    kind: ControlKind,
+}
+enum ControlKind {
+    Outlet(OnOffHandler),
+    Light(Box<lighting::Lighting>),
 }
 impl Control {
     fn new(function: Function, endpoint: u16, versions: Versions) -> Self {
-        let is_light = function.description().category == Category::Light;
-        Self {
-            groups: Dataver::new(versions.groups),
-            identify: identify::IdentifyHandler::new(Dataver::new(versions.identify)),
-            on_off: (!is_light).then(|| {
-                OnOffHandler::new(function.clone(), endpoint, Dataver::new(versions.on_off))
-            }),
-            lighting: is_light.then(|| {
+        let kind = if function.description().category == Category::Light {
+            ControlKind::Light(Box::new(
                 lighting::Lighting::new(
                     function,
                     endpoint,
@@ -220,11 +215,32 @@ impl Control {
                     Dataver::new(versions.level),
                     Dataver::new(versions.color),
                 )
-                .expect("validated published lighting capabilities")
-            }),
+                .expect("validated published lighting capabilities"),
+            ))
+        } else {
+            ControlKind::Outlet(OnOffHandler::new(
+                function,
+                endpoint,
+                Dataver::new(versions.on_off),
+            ))
+        };
+        Self {
+            groups: Dataver::new(versions.groups),
+            identify: identify::IdentifyHandler::new(Dataver::new(versions.identify)),
+            kind,
+        }
+    }
+    fn light(&self) -> Option<&lighting::Lighting> {
+        match &self.kind {
+            ControlKind::Light(light) => Some(light),
+            ControlKind::Outlet(_) => None,
         }
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
+        let matcher: fn(u16, u32) -> bool = match &self.kind {
+            ControlKind::Outlet(_) => |_, cluster| cluster == 6,
+            ControlKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
+        };
         EmptyHandler
             .chain(
                 |_, cluster| cluster == 4,
@@ -240,183 +256,61 @@ impl Control {
                 |_, cluster| cluster == 3,
                 Async(identify::HandlerAdaptor(&self.identify)),
             )
-            .chain(
-                |_, cluster| cluster == 6,
-                on_off::HandlerAsyncAdaptor(self.on_off.as_ref().unwrap()),
-            )
-    }
-    fn light_handler(&self) -> impl AsyncHandler + '_ {
-        let light = self.lighting.as_ref().unwrap();
-        EmptyHandler
-            .chain(
-                |_, cluster| cluster == 4,
-                Async(
-                    groups::GroupsHandler::new_with_identify(
-                        Dataver::new(self.groups.get()),
-                        &self.identify,
-                    )
-                    .adapt(),
-                ),
-            )
-            .chain(
-                |_, cluster| cluster == 3,
-                Async(identify::HandlerAdaptor(&self.identify)),
-            )
-            .chain(
-                |_, cluster| cluster == 6 || cluster == 8 || cluster == 0x300,
-                LightDispatch(light),
-            )
-    }
-    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        if self.lighting.is_some() {
-            self.light_handler().read(ctx, reply).await
-        } else {
-            self.handler().read(ctx, reply).await
-        }
-    }
-    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        if self.lighting.is_some() {
-            self.light_handler().write(ctx).await
-        } else {
-            self.handler().write(ctx).await
-        }
-    }
-    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        if let Some(light) = &self.lighting {
-            let commands = match ctx.cmd().cluster_id {
-                3 => Some(&LIGHT_IDENTIFY),
-                6 => Some(&lighting::OnOffHandler::CLUSTER),
-                8 if light.level() => {
-                    Some(&<lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER)
-                }
-                0x300 if light.ct() && light.rgb() => Some(
-                    &<lighting::ColorHandler<true> as color_control::ClusterAsyncHandler>::CLUSTER,
-                ),
-                0x300 if light.ct() => Some(
-                    &<lighting::ColorHandler<false> as color_control::ClusterAsyncHandler>::CLUSTER,
-                ),
-                _ => None,
-            };
-            if let Some(cluster) = commands {
-                if cluster.command(ctx.cmd().cmd_id).is_none() {
-                    return Err(ErrorCode::CommandNotFound.into());
-                }
-            } else if matches!(ctx.cmd().cluster_id, 6 | 8 | 0x300) {
-                return Err(ErrorCode::CommandNotFound.into());
-            }
-            self.light_handler().invoke(ctx, reply).await
-        } else {
-            self.handler().invoke(ctx, reply).await
-        }
-    }
-    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        if self.lighting.is_some() {
-            self.light_handler().run(ctx).await
-        } else {
-            self.handler().run(ctx).await
-        }
+            .chain(matcher, &self.kind)
     }
 }
-struct ControlHandler<'a>(&'a Control);
-struct LightDispatch<'a>(&'a lighting::Lighting);
-impl AsyncHandler for LightDispatch<'_> {
-    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        match ctx.attr().cluster_id {
-            6 => {
-                on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(self.0))
-                    .read(ctx, reply)
-                    .await
-            }
-            8 if self.0.level() => {
-                level_control::HandlerAsyncAdaptor(lighting::LevelHandler(self.0))
-                    .read(ctx, reply)
-                    .await
-            }
-            0x300 if self.0.ct() && self.0.rgb() => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
-                    .read(ctx, reply)
-                    .await
-            }
-            0x300 if self.0.ct() => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
-                    .read(ctx, reply)
-                    .await
-            }
-            _ => Err(ErrorCode::AttributeNotFound.into()),
-        }
-    }
-    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        match ctx.attr().cluster_id {
-            6 => {
-                on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(self.0))
-                    .write(ctx)
-                    .await
-            }
-            8 if self.0.level() => {
-                level_control::HandlerAsyncAdaptor(lighting::LevelHandler(self.0))
-                    .write(ctx)
-                    .await
-            }
-            0x300 if self.0.ct() && self.0.rgb() => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
-                    .write(ctx)
-                    .await
-            }
-            0x300 if self.0.ct() => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
-                    .write(ctx)
-                    .await
-            }
-            _ => Err(ErrorCode::UnsupportedAccess.into()),
-        }
-    }
-    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        match ctx.cmd().cluster_id {
-            6 => {
-                on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(self.0))
-                    .invoke(ctx, reply)
-                    .await
-            }
-            8 if self.0.level() => {
-                level_control::HandlerAsyncAdaptor(lighting::LevelHandler(self.0))
-                    .invoke(ctx, reply)
-                    .await
-            }
-            0x300 if self.0.ct() && self.0.rgb() => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<true>(self.0))
-                    .invoke(ctx, reply)
-                    .await
-            }
-            0x300 if self.0.ct() => {
-                color_control::HandlerAsyncAdaptor(lighting::ColorHandler::<false>(self.0))
-                    .invoke(ctx, reply)
-                    .await
-            }
-            _ => Err(ErrorCode::CommandNotFound.into()),
-        }
-    }
-    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        on_off::HandlerAsyncAdaptor(lighting::OnOffHandler(self.0))
-            .run(ctx)
-            .await
-    }
-    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
-    }
-}
-impl AsyncHandler for ControlHandler<'_> {
+impl AsyncHandler for Control {
     fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        self.0.read(ctx, reply).await
+        self.handler().read(ctx, reply).await
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        self.0.write(ctx).await
+        self.handler().write(ctx).await
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        self.0.invoke(ctx, reply).await
+        if self.light().is_some()
+            && ctx.cmd().cluster_id == 3
+            && lighting::IDENTIFY.command(ctx.cmd().cmd_id).is_none()
+        {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
+        self.handler().invoke(ctx, reply).await
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        self.0.run(ctx).await
+        self.handler().run(ctx).await
+    }
+}
+impl AsyncHandler for ControlKind {
+    fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
+    }
+    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        match self {
+            Self::Outlet(handler) => on_off::HandlerAsyncAdaptor(handler).read(ctx, reply).await,
+            Self::Light(light) => lighting::Dispatch(light).read(ctx, reply).await,
+        }
+    }
+    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+        match self {
+            Self::Outlet(handler) => on_off::HandlerAsyncAdaptor(handler).write(ctx).await,
+            Self::Light(light) => lighting::Dispatch(light).write(ctx).await,
+        }
+    }
+    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
+        match self {
+            Self::Outlet(handler) => {
+                on_off::HandlerAsyncAdaptor(handler)
+                    .invoke(ctx, reply)
+                    .await
+            }
+            Self::Light(light) => lighting::Dispatch(light).invoke(ctx, reply).await,
+        }
+    }
+    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        match self {
+            Self::Outlet(handler) => on_off::HandlerAsyncAdaptor(handler).run(ctx).await,
+            Self::Light(light) => lighting::Dispatch(light).run(ctx).await,
+        }
     }
 }
 impl Role {
@@ -441,7 +335,7 @@ macro_rules! dispatch {
                 &ChainedHandler::new(
                     |_, cluster| cluster == 0x39,
                     Async(bridged::HandlerAdaptor(bridged)),
-                    &ControlHandler(control),
+                    control,
                 ), $($arg),*
             ).await,
             Role::Parent { bridged, .. } => AsyncHandler::$method(
@@ -472,7 +366,7 @@ impl Entry {
     fn metadata<'a>(&'a self, tags: &'a [SemanticTag<'a>]) -> Endpoint<'a> {
         match &self.role {
             Role::Single { control, .. } => {
-                if let Some(light) = &control.lighting {
+                if let Some(light) = control.light() {
                     match light.profile() {
                         LightProfile::ExtendedColor => Endpoint::new(
                             self.endpoint,
@@ -534,14 +428,15 @@ impl Entry {
                 control.identify.dataver_changed();
             }
             if cluster.is_none_or(|id| id == 6) {
-                if let Some(light) = &control.lighting {
-                    light.on_off_version.changed();
-                } else {
-                    control.on_off.as_ref().unwrap().dataver_changed();
+                match &control.kind {
+                    ControlKind::Light(light) => {
+                        light.on_off_version.changed();
+                    }
+                    ControlKind::Outlet(handler) => handler.dataver_changed(),
                 }
             }
         }
-        if let Some(light) = self.role.control().and_then(|c| c.lighting.as_ref()) {
+        if let Some(light) = self.role.control().and_then(Control::light) {
             if light.level() && cluster.is_none_or(|id| id == 8) {
                 light.level_version.changed();
             }

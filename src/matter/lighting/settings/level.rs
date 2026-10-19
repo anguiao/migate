@@ -1,3 +1,4 @@
+use super::super::Projection;
 use super::{should_continue, validate_options};
 use crate::lighting::level::{Direction, Task};
 use rs_matter::{
@@ -5,12 +6,10 @@ use rs_matter::{
     error::{Error, ErrorCode},
 };
 
-/// Matter cluster settings and the projected current level. Trajectory state
-/// lives in the shared scheduler; these builders turn decoded wire requests
-/// into validated scheduler tasks.
+/// Writable Matter settings. Builders consume feedback explicitly; trajectories
+/// live in the shared scheduler.
 #[derive(Default)]
 pub(in crate::matter::lighting) struct LevelControlState {
-    pub current_level: Option<u8>,
     pub on_level: Option<u8>,
     pub options: u8,
 }
@@ -22,22 +21,22 @@ impl LevelControlState {
         transition_ds: Option<u16>,
         mask: u8,
         override_: u8,
-        power: Option<bool>,
+        feedback: Projection,
     ) -> Result<Option<Task>, Error> {
         if level > 254 {
             return Err(ErrorCode::InvalidCommand.into());
         }
         if with_on_off {
             validate_options(mask, override_)?;
-        } else if !should_continue(power, self.options, mask, override_)? {
+        } else if !should_continue(feedback.power, self.options, mask, override_)? {
             return Ok(None);
         }
         level = level.clamp(1, 254);
         let transition_ms = transition_ds.unwrap_or(0) as u64 * 100;
         let start = if transition_ms == 0 {
-            self.current_level.unwrap_or(level)
+            feedback.level.unwrap_or(level)
         } else {
-            self.current_level.ok_or(ErrorCode::InvalidState)?
+            feedback.level.ok_or(ErrorCode::InvalidState)?
         };
         Ok(Some(Task::MoveToLevel {
             with_on_off,
@@ -53,7 +52,7 @@ impl LevelControlState {
         rate: Option<u8>,
         mask: u8,
         override_: u8,
-        power: Option<bool>,
+        feedback: Projection,
     ) -> Result<Option<Task>, Error> {
         // Manufacturer-selected fastest planning rate, not DefaultMoveRate.
         const FASTEST_RATE: u8 = 50;
@@ -63,7 +62,7 @@ impl LevelControlState {
         }
         if with_on_off {
             validate_options(mask, override_)?;
-        } else if !should_continue(power, self.options, mask, override_)? {
+        } else if !should_continue(feedback.power, self.options, mask, override_)? {
             return Ok(None);
         }
         let move_mode = match mode {
@@ -72,7 +71,7 @@ impl LevelControlState {
         };
         Ok(Some(Task::Move {
             with_on_off,
-            start: self.current_level.ok_or(ErrorCode::InvalidState)?,
+            start: feedback.level.ok_or(ErrorCode::InvalidState)?,
             move_mode,
             rate,
         }))
@@ -86,17 +85,17 @@ impl LevelControlState {
         transition: Option<u16>,
         mask: u8,
         override_: u8,
-        power: Option<bool>,
+        feedback: Projection,
     ) -> Result<Option<Task>, Error> {
         if size == 0 {
             return Err(ErrorCode::InvalidCommand.into());
         }
         if with_on_off {
             validate_options(mask, override_)?;
-        } else if !should_continue(power, self.options, mask, override_)? {
+        } else if !should_continue(feedback.power, self.options, mask, override_)? {
             return Ok(None);
         }
-        let current = self.current_level.ok_or(ErrorCode::InvalidState)?;
+        let current = feedback.level.ok_or(ErrorCode::InvalidState)?;
         let target = match mode {
             StepModeEnum::Up => current.saturating_add(size).min(254),
             StepModeEnum::Down => current.saturating_sub(size).max(1),
@@ -109,7 +108,7 @@ impl LevelControlState {
             Some(duration as u16),
             mask,
             override_,
-            power,
+            feedback,
         )
     }
 }

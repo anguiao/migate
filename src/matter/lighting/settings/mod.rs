@@ -1,4 +1,3 @@
-pub(super) mod color;
 pub(super) mod level;
 
 use rs_matter::error::{Error, ErrorCode};

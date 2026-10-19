@@ -86,14 +86,14 @@ macro_rules! level_to {
             _ctx: impl InvokeContext,
             request: l::$request<'_>,
         ) -> Result<(), Error> {
-            let power = self.0.refresh().power;
+            let feedback = self.0.refresh();
             let task = self.0.level.borrow().move_to_level(
                 request.level()?,
                 $with,
                 request.transition_time()?.into_option(),
                 request.options_mask()?.bits(),
                 request.options_override()?.bits(),
-                power,
+                feedback,
             )?;
             self.0.execute_level(task).await
         }
@@ -106,14 +106,14 @@ macro_rules! level_move {
             _ctx: impl InvokeContext,
             request: l::$request<'_>,
         ) -> Result<(), Error> {
-            let power = self.0.refresh().power;
+            let feedback = self.0.refresh();
             let task = self.0.level.borrow().move_level(
                 $with,
                 request.move_mode()?,
                 request.rate()?.into_option(),
                 request.options_mask()?.bits(),
                 request.options_override()?.bits(),
-                power,
+                feedback,
             )?;
             self.0.execute_level(task).await
         }
@@ -126,7 +126,7 @@ macro_rules! level_step {
             _ctx: impl InvokeContext,
             request: l::$request<'_>,
         ) -> Result<(), Error> {
-            let power = self.0.refresh().power;
+            let feedback = self.0.refresh();
             let task = self.0.level.borrow().step(
                 $with,
                 request.step_mode()?,
@@ -134,7 +134,7 @@ macro_rules! level_step {
                 request.transition_time()?.into_option(),
                 request.options_mask()?.bits(),
                 request.options_override()?.bits(),
-                power,
+                feedback,
             )?;
             self.0.execute_level(task).await
         }
@@ -277,29 +277,26 @@ impl<const RGB: bool> ColorHandler<'_, RGB> {
         let power = self.0.refresh().power;
         settings::should_continue(
             power,
-            self.0.color.borrow().options,
+            self.0.color_options.get(),
             mask.bits(),
             override_.bits(),
         )
     }
-    fn temperature_task(&self, target: u16, transition: u16) -> Result<color::Task, Error> {
+    fn temperature_task(
+        &self,
+        current: Option<u16>,
+        target: u16,
+        transition: u16,
+    ) -> Result<color::Task, Error> {
         if target > color::XY_MAX || transition == u16::MAX {
             return Err(ErrorCode::ConstraintError.into());
         }
         let (lo, hi) = self.0.bounds.ok_or(ErrorCode::InvalidState)?;
         let target = target.clamp(lo, hi);
         let start = if transition == 0 {
-            self.0
-                .color
-                .borrow()
-                .color_temperature_mireds
-                .unwrap_or(target)
+            current.unwrap_or(target)
         } else {
-            self.0
-                .color
-                .borrow()
-                .color_temperature_mireds
-                .ok_or(ErrorCode::InvalidState)?
+            current.ok_or(ErrorCode::InvalidState)?
         };
         Ok(color::Task::ColorTemperatureMoveTo {
             start,
@@ -444,7 +441,7 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
     }
     async fn options(&self, _ctx: impl ReadContext) -> Result<c::OptionsBitmap, Error> {
         Ok(c::OptionsBitmap::from_bits_retain(
-            self.0.color.borrow().options,
+            self.0.color_options.get(),
         ))
     }
     async fn number_of_primaries(&self, _ctx: impl ReadContext) -> Result<Nullable<u8>, Error> {
@@ -480,8 +477,8 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         if value.bits() & !1 != 0 {
             return Err(ErrorCode::ConstraintError.into());
         }
-        let changed = self.0.color.borrow().options != value.bits();
-        self.0.color.borrow_mut().options = value.bits();
+        let changed = self.0.color_options.get() != value.bits();
+        self.0.color_options.set(value.bits());
         if changed {
             ctx.notify_changed();
         }
@@ -690,7 +687,7 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             return Ok(());
         }
         self.0
-            .execute_color(self.temperature_task(target, duration)?)
+            .execute_color(self.temperature_task(self.0.refresh().temperature, target, duration)?)
             .await
     }
     async fn handle_move_to_color(
@@ -800,9 +797,8 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (min_mireds, max_mireds) = self.bounds(min, max)?;
         let start = self
             .0
-            .color
-            .borrow()
-            .color_temperature_mireds
+            .refresh()
+            .temperature
             .ok_or(ErrorCode::InvalidState)?;
         let rate_mireds_per_sec = if mode == c::MoveModeEnum::Up {
             rate as i32
@@ -847,9 +843,8 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (lo, hi) = self.bounds(min, max)?;
         let start = self
             .0
-            .color
-            .borrow()
-            .color_temperature_mireds
+            .refresh()
+            .temperature
             .ok_or(ErrorCode::InvalidState)?;
         let target = if mode == c::StepModeEnum::Up {
             start.saturating_add(size.min(hi.saturating_sub(start)))
