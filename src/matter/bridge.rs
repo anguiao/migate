@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     RuntimeError,
-    device::DeviceRegistry,
+    device::DeviceKey,
     storage::{Identity, StorageError, Store},
 };
 use rs_matter::{
@@ -22,7 +22,7 @@ use rs_matter::{
         MATTER_SOCKET_BIND_ADDR, exchange::MatterBuffers, network::mdns::astro::AstroMdns,
     },
 };
-use std::{net::UdpSocket, time::Duration};
+use std::{net::UdpSocket, rc::Rc, time::Duration};
 
 const WINDOW_SECONDS: u16 = 900;
 
@@ -55,42 +55,42 @@ impl Advertisement {
     }
 }
 
+/// The one application configuration entry used by Matter label writes.
+pub(crate) trait LabelWriter {
+    fn write_label(&self, key: &DeviceKey, label: &str) -> Result<(), StorageError>;
+}
+
 /// One frozen Matter instance and storage failures that outlive its run future.
-pub struct Bridge<'a> {
+pub(crate) struct Bridge<'a> {
     storage: Store,
     identity: &'a Identity,
     pub(super) store: StoreAdapter,
-    /// Committed published refs, identities and root version captured at
-    /// construction; a running instance never rereads newer fixed rows.
-    frozen: Result<(Vec<model::FrozenEntry>, u32), StorageError>,
+    /// Explicit committed published references, identities and root version
+    /// captured by the application; a running instance never rereads the
+    /// device configuration tables.
+    frozen: (Vec<model::FrozenEntry>, u32),
+    renamer: Rc<dyn LabelWriter>,
 }
 impl<'a> Bridge<'a> {
-    pub fn new(registry: &DeviceRegistry, store: &Store, identity: &'a Identity) -> Self {
+    pub(crate) fn new(
+        entries: Vec<model::FrozenEntry>,
+        root_version: u32,
+        store: &Store,
+        identity: &'a Identity,
+        renamer: Rc<dyn LabelWriter>,
+    ) -> Self {
         Self {
             storage: store.clone(),
             identity,
             store: StoreAdapter::new(store.matter()),
-            frozen: model::capture(registry, store),
+            frozen: (entries, root_version),
+            renamer,
         }
     }
 
     /// Check for a recorded storage failure, including after cancelling `run`.
-    pub fn check_failure(&self) -> Result<(), StorageError> {
-        self.store.check_failure()?;
-        self.frozen.clone().map(|_| ())
-    }
-
-    /// Run protocol services on the caller's local executor until failure or cancellation.
-    /// Bind the requested UDP port; zero asks the OS to choose an available port.
-    /// Report pairing window changes through the caller's output callback.
-    /// After dropping this future, call `check_failure` before treating cancellation as success.
-    pub async fn run(
-        &self,
-        port: u16,
-        report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
-    ) -> Result<(), RuntimeError> {
-        self.run_with_advertisement(&mut Advertisement::new(port), report_pairing)
-            .await
+    pub(crate) fn check_failure(&self) -> Result<(), StorageError> {
+        self.store.check_failure()
     }
 
     pub(crate) async fn run_with_advertisement(
@@ -99,7 +99,7 @@ impl<'a> Bridge<'a> {
         report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
     ) -> Result<(), RuntimeError> {
         self.check_failure()?;
-        let (frozen, root_version) = self.frozen.clone()?;
+        let (frozen, root_version) = self.frozen.clone();
         let store = &self.store;
         let socket = advertisement.bind()?;
         let bound_port = advertisement.port;
@@ -120,7 +120,8 @@ impl<'a> Bridge<'a> {
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let handler = model::handler_from(frozen, &self.storage, store.clone(), crypto.rand()?)?;
+        let handler =
+            model::handler_from(frozen, &self.storage, crypto.rand()?, self.renamer.clone())?;
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         store.with_context("restore Matter model", im.startup().await)?;
         let persist_kv = matter.kv(store.clone());

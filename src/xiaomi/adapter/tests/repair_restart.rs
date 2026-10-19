@@ -3,18 +3,18 @@ use super::{
     *,
 };
 use crate::{
+    app::App,
     device::{LightTarget, Rgb},
-    publication::Publication,
 };
 
-async fn apply_restored(publication: &Publication) -> Result<(), AdapterError> {
+async fn apply_restored(publication: &App) -> Result<(), AdapterError> {
     loop {
         let changed = publication.listen();
-        if let Some(prepared) = publication.prepare()? {
-            if prepared.rebuild {
+        if let Some(plan) = publication.plan()? {
+            if plan.rebuild {
                 publication.stop_actions();
             }
-            publication.apply(prepared)?;
+            publication.apply(publication.prepare(plan))?;
         }
         changed.await;
     }
@@ -26,8 +26,7 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
         until(|| c.context.group_repair("group-1").is_some()).await;
-        let scope = c.context.live.borrow().scope.clone().unwrap();
-        let before = c.store.devices().load_publication(Some(&scope)).unwrap();
+        let before = c.store.devices().load_configuration().unwrap();
         let key = DeviceKey::new("xiaomi", "group-1");
         let original = c.context.registry.get(&key).unwrap();
         let (restored, ready) = XiaomiAdapter::build(
@@ -37,7 +36,8 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
             c.clock.clone(),
         )
         .unwrap();
-        let registry = ready.wait().await.unwrap();
+        ready.wait().await.unwrap();
+        let registry = restored.context.registry.clone();
         let group = registry.get(&key).unwrap();
         assert!(!original.same_instance(&group));
         let light = group.function("main").unwrap();
@@ -50,30 +50,28 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         assert_eq!(color.temperature_kelvin, None);
 
         let context = restored.context.clone();
-        let publication =
-            Rc::new(Publication::open(restored.source_handle(), c.store.clone()).unwrap());
-        assert!(context.group_repair("group-1").is_none());
-        let prepared = publication
-            .prepare()
-            .unwrap()
-            .expect("restore must install the reconstructed plan");
-        assert!(
-            !prepared.rebuild,
-            "restoring the same fixed configuration needs no rebuild"
-        );
+        let publication = Rc::new(App::open(restored.source_handle(), c.store.clone()).unwrap());
+        assert!(context.group_repair("group-1").is_some());
         let subscription_key = rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START;
         c.store.matter().put(subscription_key, &[1, 2, 3]).unwrap();
-        publication.apply(prepared).unwrap();
+        assert!(
+            publication.plan().unwrap().is_none(),
+            "the restored complete configuration is already installed"
+        );
         assert_eq!(
             c.store.matter().get(subscription_key).unwrap(),
             Some(vec![1, 2, 3]),
             "restoring an unchanged configuration must retain saved subscriptions"
         );
         assert!(context.group_repair("group-1").is_some());
-        let after = c.store.devices().load_publication(Some(&scope)).unwrap();
+        let after = c.store.devices().load_configuration().unwrap();
         assert_eq!(after.root_version, before.root_version);
-        assert_eq!(after.records, before.records);
-        for native in &after.cached {
+        assert_eq!(after.devices, before.devices);
+        for native in after
+            .devices
+            .iter()
+            .filter_map(|device| device.native.as_ref())
+        {
             if native.device.key() == &key {
                 assert!(
                     native.device.functions()[0]
@@ -124,9 +122,9 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
                 })
             })
             .await;
-            let saved = c.store.devices().load_publication(Some(&scope)).unwrap();
+            let saved = c.store.devices().load_configuration().unwrap();
             assert_eq!(saved.root_version, before.root_version);
-            assert_eq!(saved.records, before.records);
+            assert_eq!(saved.devices, before.devices);
             Ok(())
         };
         future::or(restored.run(|_| {}), future::or(applying, testing))
@@ -136,7 +134,7 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
 }
 
 #[test]
-fn fresh_adapter_keeps_downgraded_native_input_and_static_member_unavailable() {
+fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
@@ -163,8 +161,7 @@ fn fresh_adapter_keeps_downgraded_native_input_and_static_member_unavailable() {
                 .is_some_and(|group| !group.functions()[0].description().supports_rgb())
         })
         .await;
-        let scope = c.context.live.borrow().scope.clone().unwrap();
-        let before = c.store.devices().load_publication(Some(&scope)).unwrap();
+        let before = c.store.devices().load_configuration().unwrap();
         let (restored, ready) = XiaomiAdapter::build(
             c.store.clone(),
             c.context.cloud.clone(),
@@ -172,32 +169,33 @@ fn fresh_adapter_keeps_downgraded_native_input_and_static_member_unavailable() {
             c.clock.clone(),
         )
         .unwrap();
-        let registry = ready.wait().await.unwrap();
+        ready.wait().await.unwrap();
+        let registry = restored.context.registry.clone();
         let member = registry.get(&DeviceKey::new("xiaomi", "member-a")).unwrap();
         assert!(
-            member.functions()[0].description().supports_rgb(),
-            "the reserved independent description stays static"
+            !member.functions()[0].description().supports_rgb(),
+            "the committed native profile is restored without a stale logical mirror"
         );
         assert!(
             restored.context.live.borrow().devices["member-a"]
                 .blocked
-                .is_some(),
-            "bootstrap must preserve static incompatibility from genuine Native vs logical data"
+                .is_none(),
+            "the valid committed native description is not blocked on restart"
         );
-        assert!(member.functions()[0].execute(Command::On).await.is_err());
+        assert_eq!(member.functions()[0].snapshot().power, Power::Unknown);
 
-        let publication = Publication::open(restored.source_handle(), c.store.clone()).unwrap();
-        if let Some(prepared) = publication.prepare().unwrap() {
+        let publication = App::open(restored.source_handle(), c.store.clone()).unwrap();
+        if let Some(plan) = publication.plan().unwrap() {
             assert!(
-                !prepared.rebuild,
-                "restart must not migrate the static member or widen the group range"
+                !plan.rebuild,
+                "restart must not replace the committed member or widen the group range"
             );
-            publication.apply(prepared).unwrap();
+            publication.apply(publication.prepare(plan)).unwrap();
         }
         assert!(restored.context.group_repair("group-1").is_none());
-        let after = c.store.devices().load_publication(Some(&scope)).unwrap();
+        let after = c.store.devices().load_configuration().unwrap();
         assert_eq!(after.root_version, before.root_version);
-        assert_eq!(after.records, before.records);
-        assert_eq!(after.cached, before.cached);
+        assert_eq!(after.devices, before.devices);
+        assert_eq!(after.groups, before.groups);
     }));
 }

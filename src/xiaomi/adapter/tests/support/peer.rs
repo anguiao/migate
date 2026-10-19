@@ -198,7 +198,7 @@ pub(in super::super) fn topic_key(topic: &str) -> Binding {
 pub(in super::super) async fn peer_run(
     mut broker: Broker,
     peer: Rc<Peer>,
-    data: Vec<CachedPhysicalDevice>,
+    data: Vec<NativeDescription>,
 ) {
     loop {
         let listener = peer.changed.listen();

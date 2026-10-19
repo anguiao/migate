@@ -12,8 +12,8 @@ use super::{
     state::{Context, GroupSource, Lifetime},
 };
 use crate::{
+    configuration::NativeDescription,
     device::DeviceKey,
-    storage::CachedPhysicalDevice,
     xiaomi::{
         capability::parse_group,
         cloud::{CloudClient, CloudDeviceInfo},
@@ -179,9 +179,7 @@ impl Context {
                 };
                 let current = context.current_token(&token)
                     && context.live.borrow().scope.as_ref().is_some_and(|scope| {
-                        scope.uid == captured_scope.uid
-                            && scope.home_id == captured_scope.home_id
-                            && scope.group_id == captured_scope.group_id
+                        scope.uid == captured_scope.uid && scope.home_id == captured_scope.home_id
                     })
                     && context
                         .live
@@ -207,10 +205,7 @@ impl Context {
                             &instance,
                         ) {
                             Ok(device) => {
-                                let cached = CachedPhysicalDevice {
-                                    uid: scope.uid.clone(),
-                                    home_id: scope.home_id.clone(),
-                                    group_id: scope.group_id.clone(),
+                                let cached = NativeDescription {
                                     model,
                                     instance_type,
                                     device,

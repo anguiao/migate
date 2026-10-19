@@ -132,7 +132,7 @@ macro_rules! setup {
         device.set_availability(Availability::Available);
 
         let registry = support::test_registry(&store, &device);
-        let handler = model::handler(
+        let handler = crate::matter::tests::support::model_handler(
             &registry,
             &store,
             StoreAdapter::new(store.matter()),

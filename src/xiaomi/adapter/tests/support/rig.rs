@@ -59,6 +59,7 @@ pub(in super::super) struct CloudState {
     pub(in super::super) write_gates: BTreeMap<String, flume::Receiver<()>>,
 }
 pub(in super::super) struct Rig {
+    pub(in super::super) uid: String,
     pub(in super::super) _directory: tempfile::TempDir,
     pub(in super::super) source: XiaomiAdapter,
     pub(in super::super) ready: TopologyReady,
@@ -68,12 +69,13 @@ pub(in super::super) struct Rig {
     pub(in super::super) events: flume::Sender<mdns_sd::ServiceEvent>,
     pub(in super::super) listener: Async<TcpListener>,
     pub(in super::super) acceptor: TlsAcceptor,
-    pub(in super::super) data: Vec<CachedPhysicalDevice>,
+    pub(in super::super) data: Vec<NativeDescription>,
     pub(in super::super) cloud: Arc<Mutex<CloudState>>,
     pub(in super::super) clock: Arc<TestClock>,
 }
 pub(in super::super) struct Control {
-    pub(in super::super) publication: Rc<crate::publication::Publication>,
+    pub(in super::super) uid: String,
+    pub(in super::super) publication: Rc<crate::app::App>,
     pub(in super::super) ready: Option<TopologyReady>,
     pub(in super::super) store: Store,
     pub(in super::super) context: Rc<crate::xiaomi::adapter::state::Context>,
@@ -81,7 +83,7 @@ pub(in super::super) struct Control {
     pub(in super::super) events: flume::Sender<mdns_sd::ServiceEvent>,
     pub(in super::super) listener: Async<TcpListener>,
     pub(in super::super) acceptor: TlsAcceptor,
-    pub(in super::super) data: Vec<CachedPhysicalDevice>,
+    pub(in super::super) data: Vec<NativeDescription>,
     pub(in super::super) cloud: Arc<Mutex<CloudState>>,
     pub(in super::super) clock: Arc<TestClock>,
 }
@@ -131,19 +133,20 @@ impl Rig {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let tls = TlsFixture::new(false);
+        let uid = tls.credentials.uid.clone();
         let mut credentials = tls.credentials.clone();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         credentials.tokens.refresh_at = now + 1_000_000;
         credentials.tokens.expires_at = now + 2_000_000;
         store.xiaomi().replace(&credentials).unwrap();
         let mut data = vec![
-            cached(&tls.credentials.uid, "one", false),
-            cached(&tls.credentials.uid, "multi", true),
-            cached(&tls.credentials.uid, "two", false),
+            cached(&uid, "one", false),
+            cached(&uid, "multi", true),
+            cached(&uid, "two", false),
         ];
         for did in members {
             if !data.iter().any(|record| record.device.key().id == *did) {
-                data.push(cached(&tls.credentials.uid, did, false));
+                data.push(cached(&uid, did, false));
             }
         }
         if let Some(model) = light {
@@ -178,36 +181,12 @@ impl Rig {
             ));
         }
         if restore {
-            let cached = data
+            let natives = data
                 .iter()
                 .filter(|record| members.contains(&record.device.key().id.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut endpoint = 2;
-            let records = cached
-                .iter()
-                .map(|cached| {
-                    let description =
-                        cached.physical_description(format!("name {}", cached.device.key().id));
-                    let record = crate::storage::tests::fixtures::record(&description, endpoint);
-                    endpoint = record
-                        .functions
-                        .iter()
-                        .map(|function| function.endpoint)
-                        .max()
-                        .unwrap()
-                        + 1;
-                    record
-                })
-                .collect();
-            store
-                .devices()
-                .apply_publication(&crate::storage::tests::fixtures::commit(
-                    scope(&tls.credentials.uid),
-                    cached,
-                    records,
-                ))
-                .unwrap();
+            commit_natives(&store, &uid, &natives);
         }
         let cloud = Arc::new(Mutex::new(CloudState {
             members: members.iter().map(|v| v.to_string()).collect(),
@@ -240,6 +219,7 @@ impl Rig {
         };
         let responses = cloud.clone();
         let records = data.clone();
+        let account_uid = uid.clone();
         let certificate = tls.credentials.certificate_pem.clone();
         let (base, _requests) = dynamic_mock_server(200, move |request| {
             let detail_finished = responses.clone();
@@ -340,7 +320,7 @@ impl Rig {
                 } else if state.missing_home {
                     json!({"code":0,"result":{"homelist":[],"has_more":false}})
                 } else {
-                    json!({"code":0,"result":{"homelist":[{"id":if state.other_home {"other"} else {"local"},"uid":if state.foreign {"foreign"}else {&records[0].uid},"roomlist":[],"dids":state.members}]}})
+                    json!({"code":0,"result":{"homelist":[{"id":if state.other_home {"other"} else {"local"},"uid":if state.foreign {"foreign"}else {&account_uid},"roomlist":[],"dids":state.members}]}})
                 }
             } else if request.target.ends_with("/device_list_page") {
                 let body: Value = serde_json::from_str(&request.body).unwrap();
@@ -475,6 +455,7 @@ impl Rig {
         source.test_ca = Some(tls.ca_pem.clone());
         source.request_timeout = Duration::from_millis(150);
         Self {
+            uid,
             _directory: directory,
             source,
             ready,
@@ -524,7 +505,7 @@ impl Rig {
         let context = self.source.context.clone();
         let clock = self.clock.clone();
         let publication = Rc::new(
-            crate::publication::Publication::open(
+            crate::app::App::open(
                 super::super::super::publication::SourceHandle(context.clone()),
                 self.store.clone(),
             )
@@ -536,11 +517,16 @@ impl Rig {
             }
             loop {
                 let changed = publication.listen();
-                if let Some(prepared) = publication.prepare()? {
-                    if prepared.rebuild {
-                        publication.stop_actions();
+                match publication.plan() {
+                    Ok(Some(plan)) => {
+                        if plan.rebuild {
+                            publication.stop_actions();
+                        }
+                        let prepared = publication.prepare(plan);
+                        let _ = publication.apply(prepared);
                     }
-                    let _ = publication.apply(prepared);
+                    Ok(None) => {}
+                    Err(error) => publication.fail(error.to_string()),
                 }
                 changed.await;
             }
@@ -551,6 +537,7 @@ impl Rig {
             future::pending::<Result<(), AdapterError>>().await
         };
         let testing = test(Control {
+            uid: self.uid.clone(),
             ready: Some(self.ready),
             publication: publication.clone(),
             store: self.store,
@@ -597,7 +584,7 @@ impl Control {
         self.events
             .send(announcement(
                 self.listener.get_ref().local_addr().unwrap(),
-                &self.data[0].uid,
+                &self.uid,
                 "hub",
                 123,
             ))

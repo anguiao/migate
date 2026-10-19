@@ -171,7 +171,7 @@ fn initial_list_waits_for_baseline_suback_and_preserves_its_timeout() {
     }
 }
 
-pub(super) fn observation(record: &CachedPhysicalDevice, online: bool) -> DeviceEntry {
+pub(super) fn observation(record: &NativeDescription, online: bool) -> DeviceEntry {
     DeviceEntry {
         did: record.device.key().id.clone(),
         access: Ok(DeviceAccess {

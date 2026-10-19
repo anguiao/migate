@@ -1,4 +1,4 @@
-use super::support::{Context, attr, read_bytes, report_dataver, report_value};
+use super::support::{Context, attr, model_handler, read_bytes, report_dataver, report_value};
 use crate::{
     device::{Availability, DeviceRequest, LightDimension, LightPatch},
     matter::{
@@ -34,7 +34,7 @@ macro_rules! setup_light {
         let identity = store.load_identity().unwrap();
         let ($device, mut $receiver) = $source;
         let $registry = crate::matter::tests::support::test_registry(&store, &$device);
-        let $handler = model::handler(&$registry, &store, StoreAdapter::new(store.matter()), rand::rng()).unwrap();
+        let $handler = model_handler(&$registry, &store, StoreAdapter::new(store.matter()), rand::rng()).unwrap();
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
@@ -664,7 +664,7 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
     let identity = store.load_identity().unwrap();
     let (device, mut receiver) = crate::matter::tests::support::light(false);
     let registry = crate::matter::tests::support::test_registry(&store, &device);
-    let handler = model::handler(
+    let handler = model_handler(
         &registry,
         &store,
         StoreAdapter::new(store.matter()),
@@ -704,34 +704,33 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
 
         // Commit a fixed change: narrower CT bounds and a bumped endpoint
         // version. The running frozen instance must not notice it.
-        let stored = store
-            .devices()
-            .load_published(device.key())
-            .unwrap()
-            .unwrap();
-        let mut updated = stored.clone();
-        updated.configuration_version = 2;
-        updated.functions[0].kind =
+        let mut configuration = store.devices().load_configuration().unwrap();
+        let description = device.description();
+        let mut functions = description.functions().to_vec();
+        functions[0].kind =
             crate::device::FunctionKind::Light(crate::device::LightProfile::ColorTemperature(
                 crate::device::TemperatureInterval::new(3000, 4000).unwrap(),
             ));
-        let root_version = store.devices().load_publication(None).unwrap().root_version;
+        let (replacement, _receivers) = crate::device::PhysicalDevice::new(
+            crate::device::PhysicalDeviceDescription::new(
+                description.key().clone(),
+                description.label(),
+                functions,
+            )
+            .unwrap(),
+        );
+        let updated = configuration
+            .devices
+            .iter_mut()
+            .find(|entry| &entry.key == device.key())
+            .unwrap();
+        updated.configuration_version = 2;
+        updated.native = Some(super::support::native_for(&replacement.description()));
+        configuration.root_version += 1;
         store
             .devices()
-            .apply_publication(&crate::storage::PublicationCommit {
-                scope: crate::storage::CachedScope {
-                    uid: "u1".into(),
-                    home_id: "h1".into(),
-                    group_id: crate::xiaomi::cloud::group_id("u1", "h1"),
-                },
-                cached: Vec::new(),
-                records: vec![updated.clone()],
-                relations: Vec::new(),
-                root_version: root_version + 1,
-                clear_revocations: Vec::new(),
-            })
+            .commit_configuration(&configuration, &[])
             .unwrap();
-        let (replacement, _receivers) = crate::device::PhysicalDevice::new(updated.description());
         replacement.set_availability(Availability::Available);
         registry.remove(device.key()).unwrap();
         registry.insert(replacement);
@@ -768,9 +767,9 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
         // The next frozen instance reads the committed bounds and the frozen
         // endpoint version from BDBI and the Descriptor cluster. Its root
         // catches up through the same pre-startup alignment the bridge uses.
-        let settings = model::prepare_basic_info(&kv, root_version + 1).unwrap();
+        let settings = model::prepare_basic_info(&kv, configuration.root_version).unwrap();
         matter.with_state(|state| state.basic_info_settings = settings);
-        let replacement_handler = model::handler(
+        let replacement_handler = model_handler(
             &registry,
             &store,
             StoreAdapter::new(store.matter()),

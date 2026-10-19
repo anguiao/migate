@@ -1,20 +1,20 @@
-//! The confirmed source inputs and the serving device instances have one
-//! synchronous handoff after the complete configuration transaction commits.
+//! The confirmed source facts and the serving device instances have one
+//! synchronous handoff: pure facts go to planning, prepared resources are
+//! consumed once by installation after the complete configuration commits.
+//!
+//! Preparation and installation consume the explicit plan operations; no
+//! second inference of reuse, replacement or removal happens here. The
+//! source-internal immutable-object handoff is completed by a later slice.
 
 use super::{
     model::AdapterError,
-    state::{Context, DeviceRecord, GroupSource, Lifetime},
+    state::{Context, DeviceRecord, DeviceSlot, GroupSource, Lifetime},
 };
 use crate::{
-    device::{
-        Availability, CommandReceiver, DeviceKey, DeviceRegistry, FunctionDescription,
-        FunctionKind, PhysicalDevice, PhysicalDeviceDescription,
+    configuration::{
+        GroupRelation, NativeDescription, OperationKind, Plan, SourceDevice, SourceFacts,
     },
-    storage::{CachedPhysicalDevice, CachedScope, PublicationState, StorageError, StoredRelation},
-    xiaomi::capability::{
-        RepairPlan, effective_temperature_range, narrowed_profile, plan_rgb_repair,
-        repaired_profile,
-    },
+    device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -26,32 +26,38 @@ use std::{
 #[derive(Clone)]
 pub struct SourceHandle(pub(super) Rc<Context>);
 
+/// One serving source device as seen by the terminal and diagnostics. It never
+/// exposes prepared receivers or configuration submission.
 pub(crate) struct SourceEntry {
-    pub(crate) cached: CachedPhysicalDevice,
+    pub(crate) native: NativeDescription,
     pub(crate) physical: PhysicalDevice,
-    pub(crate) fresh: bool,
     pub(crate) problem: Option<String>,
-    /// Committed logical repair inputs; `None` means the native profile serves.
-    pub(crate) repair: Option<Rc<RepairPlan>>,
-    /// Reason the native group stays unrepaired, retained for diagnostics only.
-    pub(crate) repair_reason: Option<String>,
-    record: Rc<DeviceRecord>,
-    receivers: RefCell<Option<Vec<CommandReceiver>>>,
-    group: Option<GroupSource>,
 }
 
-#[derive(Clone)]
+/// The latest pure source facts and the currently serving entries.
 pub(crate) struct SourceSnapshot {
-    pub(crate) scope: Option<CachedScope>,
+    pub(crate) facts: SourceFacts,
     pub(crate) entries: Vec<Rc<SourceEntry>>,
-    pub(crate) relations: Vec<StoredRelation>,
+}
+
+/// One prepared, not yet installed source instance. Its receivers are owned
+/// by the application until installation consumes them.
+pub(crate) struct PreparedSource {
+    key: DeviceKey,
+    kind: OperationKind,
+    native: NativeDescription,
+    record: Rc<DeviceRecord>,
+    physical: PhysicalDevice,
+    receivers: Option<Vec<CommandReceiver>>,
+}
+
+/// Explicit prepared resources for the planned operations.
+pub(crate) struct PreparedSources {
+    installed: Vec<PreparedSource>,
+    removed: Vec<DeviceKey>,
 }
 
 impl SourceHandle {
-    pub fn registry(&self) -> DeviceRegistry {
-        self.0.registry.clone()
-    }
-
     pub(crate) fn listen(&self) -> event_listener::EventListener {
         self.0.configuration_changed.listen()
     }
@@ -69,237 +75,56 @@ impl SourceHandle {
         }
     }
 
-    pub(crate) fn committed(&self) -> Result<(SourceSnapshot, PublicationState), StorageError> {
-        let uid = self
-            .0
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .map(|record| record.uid.clone());
-        let scope = uid
-            .map(|uid| self.0.store.devices().load_scope(&uid))
-            .transpose()?
-            .flatten();
-        let saved = self.0.store.devices().load_publication(scope.as_ref())?;
-        let mut entries = self
-            .0
-            .live
-            .borrow()
-            .devices
-            .values()
-            .filter_map(|slot| {
-                let record = slot.admitted.as_ref()?;
-                Some(Rc::new(SourceEntry {
-                    cached: record.cached.borrow().clone(),
-                    physical: record.physical.clone(),
-                    fresh: false,
-                    problem: slot.blocked.clone(),
-                    repair: slot.effective_repair.clone(),
-                    repair_reason: None,
-                    record: record.clone(),
-                    receivers: RefCell::new(None),
-                    group: slot.effective_group.clone(),
-                }))
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|a, b| a.physical.key().cmp(b.physical.key()));
-        Ok((
-            SourceSnapshot {
-                scope,
-                entries,
-                relations: saved.relations.clone(),
-            },
-            saved,
-        ))
-    }
-
-    /// Prepare resources without changing any serving reference or binding.
-    /// The caller commits and installs synchronously, with no intervening await.
+    /// Collect the latest pure source facts and the serving entries. No
+    /// running device is created here.
     pub(crate) fn snapshot(&self) -> SourceSnapshot {
         #[cfg(test)]
         if let Some(observer) = self.0.snapshot_observer.borrow_mut().as_mut() {
             observer();
         }
         let live = self.0.live.borrow();
-        let descriptions = live
-            .devices
-            .iter()
-            .filter_map(|(did, slot)| {
-                let cached = slot
-                    .native_confirmed
-                    .clone()
-                    .or_else(|| slot.candidate.as_ref().map(|(cached, _)| cached.clone()))
-                    .or_else(|| {
-                        slot.admitted
-                            .as_ref()
-                            .map(|record| record.cached.borrow().clone())
-                    })?;
-                Some((did.clone(), cached))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let scope = live.scope.clone();
+        let mut devices = Vec::new();
         let mut entries = Vec::new();
         for slot in live.devices.values() {
-            // The latest genuine confirmed source input is authoritative for
-            // planning and persistence, even when the static independent-lamp
-            // contract keeps an older served logical description. A pending
-            // candidate still contributes its catalog name.
-            let (cached, name) = match &slot.candidate {
-                Some((candidate, name)) => (
-                    slot.native_confirmed
-                        .clone()
-                        .unwrap_or_else(|| candidate.clone()),
-                    name.clone(),
-                ),
-                None => match &slot.native_confirmed {
-                    Some(native) => (native.clone(), None),
-                    None => match &slot.admitted {
-                        Some(record) => (record.cached.borrow().clone(), None),
-                        None => continue,
-                    },
-                },
-            };
-            let label = slot
-                .admitted
-                .as_ref()
-                .map(|record| record.physical.label())
-                .unwrap_or_else(|| {
-                    name.as_deref()
-                        .map(crate::storage::import_label)
-                        .unwrap_or_else(|| {
-                            crate::runtime::default_device_label(
-                                &cached.model,
-                                &cached.device.key().id,
-                            )
-                        })
-                });
-            let description = cached.physical_description(label);
-            let native_interval = cached
-                .device
-                .functions()
-                .first()
-                .and_then(|function| function.lighting())
-                .and_then(|light| light.temperature())
-                .map(|temperature| temperature.interval());
-            let (repair, repair_reason, description) = match (&slot.group, native_interval) {
-                (None, _) => (None, None, description),
-                (Some(_), None) => (
-                    None,
-                    Some("native group has no color temperature".to_string()),
-                    description,
-                ),
-                (Some(group), Some(native)) => {
-                    let known = group
-                        .members
-                        .iter()
-                        .map(|did| descriptions.get(did))
-                        .collect::<Option<Vec<_>>>();
-                    match known {
-                        Some(members) => {
-                            let logical = members
-                                .iter()
-                                .map(|cached| {
-                                    cached
-                                        .device
-                                        .functions()
-                                        .first()
-                                        .and_then(|function| function.lighting())
-                                        .and_then(|light| light.temperature())
-                                        .map(|temperature| temperature.interval())
-                                })
-                                .collect::<Option<Vec<_>>>()
-                                .map(|intervals| effective_temperature_range(native, &intervals))
-                                .unwrap_or(native);
-                            let function = &cached.device.functions()[0];
-                            let native_profile = function
-                                .kind()
-                                .light_profile()
-                                .expect("a native group is a light");
-                            let (repair, reason, profile) = match plan_rgb_repair(
-                                &cached.device,
-                                members.iter().map(|cached| {
-                                    (
-                                        cached.device.key().id.as_str(),
-                                        cached.model.as_str(),
-                                        cached.instance_type.as_str(),
-                                        &cached.device,
-                                    )
-                                }),
-                            ) {
-                                Ok(Some(plan)) => {
-                                    (Some(Rc::new(plan)), None, repaired_profile(logical))
-                                }
-                                Ok(None) => (None, None, narrowed_profile(native_profile, logical)),
-                                Err(reason) => (
-                                    None,
-                                    Some(reason),
-                                    narrowed_profile(native_profile, logical),
-                                ),
-                            };
-                            (
-                                repair,
-                                reason,
-                                with_light_kind(description, FunctionKind::Light(profile)),
-                            )
-                        }
-                        None => (
-                            None,
-                            Some(
-                                "every effective member needs a description before RGB repair"
-                                    .to_string(),
-                            ),
-                            description,
-                        ),
-                    }
-                }
-            };
-            let existing = slot.admitted.as_ref().filter(|record| {
-                !record.life.is_closed() && same_shape(&record.physical.description(), &description)
-            });
-            // A confirmed native input rejected by the static independent-lamp
-            // contract keeps its committed logical endpoint; the genuine input
-            // is persisted as the source description instead.
-            let existing = existing.or_else(|| {
-                slot.blocked.as_ref().and_then(|_| {
+            let native = slot
+                .native_confirmed
+                .clone()
+                .or_else(|| {
+                    slot.candidate
+                        .as_ref()
+                        .map(|(candidate, _)| candidate.clone())
+                })
+                .or_else(|| {
                     slot.admitted
                         .as_ref()
-                        .filter(|record| !record.life.is_closed())
-                })
-            });
-            let (record, receivers) = match existing {
-                Some(record) => (record.clone(), None),
-                None => {
-                    let (physical, receivers) = PhysicalDevice::new(description);
-                    (
-                        Rc::new(DeviceRecord {
-                            life: Lifetime::default(),
-                            binding_generation: Cell::new(0),
-                            cached: RefCell::new(cached.clone()),
-                            physical,
-                        }),
-                        Some(receivers),
-                    )
-                }
+                        .map(|record| record.cached.borrow().clone())
+                });
+            let Some(native) = native else {
+                continue;
             };
-            entries.push(Rc::new(SourceEntry {
-                cached,
-                physical: record.physical.clone(),
+            let name = slot.candidate.as_ref().and_then(|(_, name)| name.clone());
+            devices.push(SourceDevice {
+                key: native.device.key().clone(),
+                native,
+                name,
                 fresh: slot.confirmed,
-                problem: slot.blocked.clone(),
-                repair,
-                repair_reason,
-                record,
-                receivers: RefCell::new(receivers),
-                group: slot.group.clone(),
-            }));
+            });
+            if let Some(record) = &slot.admitted {
+                entries.push(Rc::new(SourceEntry {
+                    native: record.cached.borrow().clone(),
+                    physical: record.physical.clone(),
+                    problem: slot.blocked.clone(),
+                }));
+            }
         }
+        devices.sort_by(|a, b| a.key.cmp(&b.key));
         entries.sort_by(|a, b| a.physical.key().cmp(b.physical.key()));
         let problems = live
             .devices
             .iter()
             .filter_map(|(did, slot)| slot.blocked.clone().map(|problem| (did.clone(), problem)))
             .collect::<BTreeMap<_, _>>();
-        let scope = live.scope.clone();
         drop(live);
         let relations = self
             .0
@@ -315,88 +140,171 @@ impl SourceHandle {
                     .chain(problems.get(&group.membership.group_did).cloned())
                     .collect::<Vec<_>>();
                 let error = (!errors.is_empty()).then(|| errors.join("; "));
-                StoredRelation {
+                GroupRelation {
                     group_did: group.membership.group_did,
                     record_did: group.record_did,
                     model: group.model,
                     instance_type: group.instance_type,
                     is_physical: group.membership.is_physical,
-                    members: group.membership.members,
                     active: group.active,
                     error,
+                    members: group.membership.members,
                 }
             })
             .collect();
         SourceSnapshot {
-            scope,
+            facts: SourceFacts {
+                scope,
+                devices,
+                relations,
+            },
             entries,
-            relations,
         }
     }
 
-    pub(crate) fn install(&self, snapshot: &SourceSnapshot) {
-        let mut refresh = Vec::new();
-        for entry in &snapshot.entries {
-            let did = &entry.cached.device.key().id;
-            let old = self.0.live.borrow().devices[did].admitted.clone();
-            let replaced = old
-                .as_ref()
-                .is_some_and(|old| !Rc::ptr_eq(old, &entry.record));
-            let bindings_changed = old
-                .as_ref()
-                .is_some_and(|old| !same_bindings(&old.cached.borrow(), &entry.cached));
-            let group_changed = self.0.live.borrow().devices[did].effective_group != entry.group;
-            if replaced || bindings_changed {
-                self.0.light_writes.clear_authority(did);
-                self.0.retire_device_notifications(did);
-                self.0.retire_work(did);
+    /// Prepare resources for the explicit plan operations. Reused instances
+    /// are shared; added and replaced ones own their one-time receivers until
+    /// installation.
+    pub(crate) fn prepare(&self, plan: &Plan) -> PreparedSources {
+        let mut installed = Vec::new();
+        let mut removed = Vec::new();
+        for operation in &plan.operations {
+            let key = operation.key.clone();
+            match operation.kind {
+                OperationKind::Removed => removed.push(key),
+                OperationKind::Reused => {
+                    let record = self.0.live.borrow().devices[&key.id]
+                        .admitted
+                        .clone()
+                        .expect("a reused device keeps its admitted instance");
+                    let native = plan
+                        .configuration
+                        .device(&key)
+                        .and_then(|device| device.native.clone())
+                        .expect("a reused device keeps its native facts");
+                    let physical = record.physical.clone();
+                    installed.push(PreparedSource {
+                        key,
+                        kind: operation.kind,
+                        native,
+                        record,
+                        physical,
+                        receivers: None,
+                    });
+                }
+                OperationKind::Added
+                | OperationKind::ReplacedNative
+                | OperationKind::ReplacedAuthority
+                | OperationKind::ReplacedLogical => {
+                    let native = plan
+                        .configuration
+                        .device(&key)
+                        .and_then(|device| device.native.clone())
+                        .expect("a planned device keeps its native facts");
+                    let served = plan
+                        .derived
+                        .served
+                        .get(&key)
+                        .expect("a planned device has a served description");
+                    let (physical, receivers) = PhysicalDevice::new(served.description.clone());
+                    let record = Rc::new(DeviceRecord {
+                        life: Lifetime::default(),
+                        binding_generation: Cell::new(0),
+                        cached: RefCell::new(native.clone()),
+                        physical: physical.clone(),
+                    });
+                    installed.push(PreparedSource {
+                        key,
+                        kind: operation.kind,
+                        native,
+                        record,
+                        physical,
+                        receivers: Some(receivers),
+                    });
+                }
             }
+        }
+        PreparedSources { installed, removed }
+    }
+
+    /// Install the committed configuration in two phases: first retire removed
+    /// and replaced instances and install every prepared member and group, then
+    /// start consumers, work, refreshes and group recomputation. The caller
+    /// guarantees that no await happens between prepare, commit and install.
+    pub(crate) fn install(&self, plan: &Plan, prepared: PreparedSources) -> Vec<Rc<SourceEntry>> {
+        for key in &prepared.removed {
+            self.retire_instance(key);
+        }
+        let mut started = Vec::new();
+        for source in prepared.installed {
+            let did = source.key.id.clone();
+            let replaced = !matches!(source.kind, OperationKind::Reused);
             if replaced {
-                let old = old.as_ref().unwrap();
-                old.physical
-                    .set_availability(Availability::Unavailable("source replaced".into()));
-                old.life.close();
-                self.0.registry.remove(old.physical.key());
+                self.retire_instance(&source.key);
             }
-            if bindings_changed {
-                entry.physical.reset_actions();
-                entry.physical.clear_light_state();
-                entry
-                    .record
-                    .binding_generation
-                    .set(entry.record.binding_generation.get() + 1);
+            *source.record.cached.borrow_mut() = source.native.clone();
+            if let Some(device) = plan.configuration.device(&source.key) {
+                source.physical.set_label(device.label.clone());
             }
-            *entry.record.cached.borrow_mut() = entry.cached.clone();
+            let group = plan.derived.groups.get(&did).map(group_source);
             {
                 let mut live = self.0.live.borrow_mut();
-                let slot = live.devices.get_mut(did).unwrap();
-                slot.admitted = Some(entry.record.clone());
-                slot.effective_group = entry.group.clone();
-                slot.effective_repair = entry.repair.clone();
+                let slot: &mut DeviceSlot = live.devices.get_mut(&did).unwrap();
+                slot.admitted = Some(source.record.clone());
+                slot.effective_group = group;
+                slot.effective_repair = plan
+                    .derived
+                    .served
+                    .get(&source.key)
+                    .and_then(|served| served.repair.clone())
+                    .map(Rc::new);
                 slot.candidate = None;
             }
-            self.0.registry.insert(entry.physical.clone());
-            if let Some(receivers) = entry.receivers.borrow_mut().take() {
-                self.0.add_consumers(entry.record.clone(), receivers);
+            self.0.registry.insert(source.physical.clone());
+            if replaced {
+                self.0.retire_device_notifications(&did);
+                self.0.retire_work(&did);
+                // Binding feedback history is retired only when the real
+                // control bindings changed; an added or logical-only
+                // replacement keeps the same DID's raw receipts.
+                if matches!(source.kind, OperationKind::ReplacedNative) {
+                    self.0.light_writes.clear_authority(&did);
+                }
             }
-            self.0.install_work(did);
-            self.0.update_availability(did);
-            if let Some(work) = self.0.live.borrow().devices[did].work.as_ref() {
-                work.report(&self.0, did);
+            started.push(source);
+        }
+        // Every member and group is installed and the committed graph is in
+        // place before any work, refresh or aggregation starts.
+        let mut refreshed = Vec::new();
+        for source in started {
+            let did = source.key.id.clone();
+            if let Some(receivers) = source.receivers {
+                self.0.add_consumers(source.record.clone(), receivers);
             }
-            if old.is_none() || replaced || bindings_changed || group_changed {
-                refresh.push(did);
+            self.0.install_work(&did);
+            self.0.update_availability(&did);
+            if let Some(work) = self.0.live.borrow().devices[&did].work.as_ref() {
+                work.report(&self.0, &did);
             }
+            refreshed.push(did);
         }
-        // All members and effective relations must be installed before refresh
-        // and aggregation, regardless of catalog or DID ordering.
-        for did in refresh {
-            self.0.refresh_source(did);
+        for did in refreshed {
+            self.0.refresh_source(&did);
         }
-        for entry in &snapshot.entries {
-            self.0.refresh_group_states(&entry.cached.device.key().id);
+        for did in self
+            .0
+            .live
+            .borrow()
+            .devices
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.0.refresh_group_states(&did);
         }
+        let entries = self.serving_entries();
         self.0.changed.notify(usize::MAX);
+        entries
     }
 
     pub(crate) fn set_label(&self, key: &DeviceKey, label: &str) {
@@ -411,77 +319,56 @@ impl SourceHandle {
             record.physical.set_label(label.into());
         }
     }
+
     pub(crate) fn pending(&self, key: &DeviceKey, reason: String) {
         self.0.problem(&key.id, Some(reason));
     }
-}
 
-fn with_light_kind(
-    description: PhysicalDeviceDescription,
-    kind: FunctionKind,
-) -> PhysicalDeviceDescription {
-    PhysicalDeviceDescription::new(
-        description.key().clone(),
-        description.label(),
-        description
-            .functions()
-            .iter()
-            .map(|function| FunctionDescription {
-                id: function.id.clone(),
-                label: function.label.clone(),
-                kind: if function.kind.is_light() {
-                    kind
-                } else {
-                    function.kind
-                },
-            })
-            .collect(),
-    )
-    .expect("a light replacement keeps the description valid")
-}
-
-/// True when both descriptions publish the same fixed light surface: the
-/// profile kind and the mired span, so equivalent kelvin encodings compare
-/// equal regardless of the native quantization grid.
-fn same_kind(a: FunctionKind, b: FunctionKind) -> bool {
-    match (a.light_profile(), b.light_profile()) {
-        (None, None) => true,
-        (Some(a), Some(b)) => {
-            a.kind() == b.kind()
-                && a.temperature_interval()
-                    .map(crate::matter::units::mired_bounds)
-                    == b.temperature_interval()
-                        .map(crate::matter::units::mired_bounds)
+    /// Retire one serving instance without touching its committed identity.
+    fn retire_instance(&self, key: &DeviceKey) {
+        let admitted = self
+            .0
+            .live
+            .borrow()
+            .devices
+            .get(&key.id)
+            .and_then(|slot| slot.admitted.clone());
+        if let Some(record) = admitted {
+            record
+                .physical
+                .set_availability(Availability::Unavailable("source replaced".into()));
+            record.life.close();
+            self.0.registry.remove(record.physical.key());
         }
-        _ => false,
+    }
+
+    fn serving_entries(&self) -> Vec<Rc<SourceEntry>> {
+        let live = self.0.live.borrow();
+        let mut entries = live
+            .devices
+            .values()
+            .filter_map(|slot| {
+                let record = slot.admitted.as_ref()?;
+                Some(Rc::new(SourceEntry {
+                    native: record.cached.borrow().clone(),
+                    physical: record.physical.clone(),
+                    problem: slot.blocked.clone(),
+                }))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| a.physical.key().cmp(b.physical.key()));
+        entries
     }
 }
 
-pub(super) fn same_shape(a: &PhysicalDeviceDescription, b: &PhysicalDeviceDescription) -> bool {
-    a.key() == b.key()
-        && a.functions().len() == b.functions().len()
-        && a.functions().iter().all(|old| {
-            b.functions()
-                .iter()
-                .any(|new| old.id == new.id && same_kind(old.kind, new.kind))
-        })
-}
-
-fn same_bindings(a: &CachedPhysicalDevice, b: &CachedPhysicalDevice) -> bool {
-    let bindings = |cached: &CachedPhysicalDevice| {
-        cached
-            .device
-            .functions()
-            .iter()
-            .map(|function| {
-                (
-                    function.id().to_owned(),
-                    (function.power(), function.lighting().cloned()),
-                )
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-    a.device.refresh_trigger() == b.device.refresh_trigger() && bindings(a) == bindings(b)
+fn group_source(relation: &GroupRelation) -> GroupSource {
+    GroupSource {
+        record_did: relation.record_did.clone(),
+        model: relation.model.clone(),
+        instance_type: relation.instance_type.clone(),
+        members: relation.members.clone(),
+        is_physical: relation.is_physical,
+    }
 }
 
 impl Context {
@@ -491,7 +378,10 @@ impl Context {
     }
 
     /// The committed repair plan for one group; never a prepared candidate.
-    pub(super) fn group_repair(&self, did: &str) -> Option<Rc<RepairPlan>> {
+    pub(super) fn group_repair(
+        &self,
+        did: &str,
+    ) -> Option<Rc<crate::xiaomi::capability::RepairPlan>> {
         self.live
             .borrow()
             .devices
@@ -518,7 +408,7 @@ impl Context {
         if admitted.is_some() {
             self.store
                 .devices()
-                .record_revocations(&[crate::storage::StoredRevocation {
+                .record_revocations(&[crate::configuration::Revocation {
                     key,
                     reason: reason.into(),
                 }])?;

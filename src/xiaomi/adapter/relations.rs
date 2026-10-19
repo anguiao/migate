@@ -8,7 +8,7 @@
 //! outer record DID used to fetch details.
 
 use crate::{
-    storage::CachedScope,
+    configuration::{GroupRelation, Scope},
     xiaomi::cloud::{
         CloudCatalogDevice, CloudDeviceCatalog, CloudGroupMembership, CloudGroupStatus,
     },
@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ConfirmedGroup {
     pub(super) membership: CloudGroupMembership,
-    pub(super) scope: CachedScope,
+    pub(super) scope: Scope,
     /// Outer catalog record this relation was read from, retained so a later
     /// present-but-failed record is never mistaken for a deleted group.
     pub(super) record_did: String,
@@ -51,10 +51,7 @@ impl Relations {
         self.groups.values().cloned().collect()
     }
 
-    pub(super) fn restored(
-        scope: &CachedScope,
-        relations: &[crate::storage::StoredRelation],
-    ) -> Self {
+    pub(super) fn restored(scope: &Scope, relations: &[GroupRelation]) -> Self {
         Self {
             groups: relations
                 .iter()
@@ -90,7 +87,7 @@ impl Relations {
     pub(super) fn apply(
         &mut self,
         catalog: &CloudDeviceCatalog,
-        scope: &CachedScope,
+        scope: &Scope,
         home: &BTreeSet<String>,
     ) -> RelationUpdate {
         let before: BTreeSet<String> = self.active_keys();

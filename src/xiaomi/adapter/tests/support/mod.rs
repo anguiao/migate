@@ -5,8 +5,9 @@ pub(super) use crate::xiaomi::{
     discovery::SERVICE_TYPE,
 };
 pub(super) use crate::{
+    configuration::{NativeDescription, Scope},
     device::{Availability, DeviceKey, Power},
-    storage::{CachedPhysicalDevice, CachedScope, Store},
+    storage::Store,
     xiaomi::{
         capability::parse_device,
         central::test_support::TlsFixture,
@@ -50,17 +51,14 @@ pub(super) use groups::{
 pub(super) use peer::{Peer, peer_run, response, topic_key};
 pub(super) use rig::{Control, Rig};
 
-pub(super) fn cached(uid: &str, did: &str, multi: bool) -> CachedPhysicalDevice {
+pub(super) fn cached(_uid: &str, did: &str, multi: bool) -> NativeDescription {
     let instance: Value = serde_json::from_str(if multi {
         include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
     } else {
         include_str!("../../../../../tests/fixtures/miot/outlet.json")
     })
     .unwrap();
-    CachedPhysicalDevice {
-        uid: uid.into(),
-        home_id: "local".into(),
-        group_id: group_id(uid, "local"),
+    NativeDescription {
         model: if multi {
             "cuco.plug.cp7pd"
         } else {
@@ -71,12 +69,60 @@ pub(super) fn cached(uid: &str, did: &str, multi: bool) -> CachedPhysicalDevice 
         device: parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap(),
     }
 }
-pub(super) fn scope(uid: &str) -> CachedScope {
-    CachedScope {
+
+pub(super) fn scope(uid: &str) -> Scope {
+    Scope {
         uid: uid.into(),
         home_id: "local".into(),
-        group_id: group_id(uid, "local"),
     }
+}
+/// Commit a current-store configuration with identities and native facts.
+pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescription]) {
+    use crate::configuration::{CommittedConfiguration, CommittedDevice, CommittedFunction};
+    let mut configuration = CommittedConfiguration {
+        scope: Some(scope(uid)),
+        root_version: 1,
+        devices: Vec::new(),
+        groups: Vec::new(),
+    };
+    let mut endpoint = 2u16;
+    for native in natives {
+        let id = native.device.key().id.clone();
+        let single = native.device.functions().len() == 1;
+        let functions = native
+            .device
+            .functions()
+            .iter()
+            .enumerate()
+            .map(|(index, function)| CommittedFunction {
+                id: function.id().to_owned(),
+                endpoint: if single {
+                    endpoint
+                } else {
+                    endpoint + 1 + index as u16
+                },
+            })
+            .collect();
+        configuration.devices.push(CommittedDevice {
+            key: native.device.key().clone(),
+            unique_id: crate::storage::tests::fixtures::unique(&id),
+            endpoint,
+            label: format!("name {id}"),
+            configuration_version: 1,
+            functions,
+            native: Some(native.clone()),
+        });
+        endpoint += if single {
+            1
+        } else {
+            native.device.functions().len() as u16 + 1
+        };
+    }
+    configuration.devices.sort_by(|a, b| a.key.cmp(&b.key));
+    store
+        .devices()
+        .commit_configuration(&configuration, &[])
+        .unwrap();
 }
 pub(super) struct TestClock {
     pub(super) unix_start: i64,

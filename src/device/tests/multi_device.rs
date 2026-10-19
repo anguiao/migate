@@ -1,11 +1,10 @@
-mod support;
-use support::next_power;
+use super::next_power;
 
-use futures_lite::future::{block_on, poll_once};
-use migate::device::{
+use crate::device::{
     Availability, Command, CommandError, DeviceKey, DeviceRegistry, FunctionDescription,
     FunctionKind, PhysicalDevice, PhysicalDeviceDescription, Power,
 };
+use futures_lite::future::{block_on, poll_once};
 
 fn description(id: &str) -> PhysicalDeviceDescription {
     PhysicalDeviceDescription::new(

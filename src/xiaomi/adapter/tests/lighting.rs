@@ -234,17 +234,27 @@ fn stopping_the_source_clears_light_state_but_not_outlet_cache() {
 }
 
 #[test]
-fn incompatible_light_range_change_keeps_identity_and_reports_unavailable() {
+fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() {
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
         let control = &c;
         c.peer(peer, |peer| async move {
+            let key = DeviceKey::new("xiaomi", "one");
             let light = ready_light(control).await;
             assert_eq!(
                 light.description().temperature_interval().unwrap().max(),
                 5700
             );
+            let before = control
+                .store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .device(&key)
+                .cloned()
+                .unwrap();
+            let original_physical = control.context.registry.get(&key).unwrap();
             let original = control.context.live.borrow().devices["one"]
                 .admitted
                 .as_ref()
@@ -252,9 +262,9 @@ fn incompatible_light_range_change_keeps_identity_and_reports_unavailable() {
                 .cached
                 .borrow()
                 .clone();
-            let mut incompatible = original.clone();
-            incompatible.device = super::support::device_with_temperature_grid(
-                &incompatible.device,
+            let mut narrower = original.clone();
+            narrower.device = super::support::device_with_temperature_grid(
+                &narrower.device,
                 crate::device::NumericRange::new(2700, 5600, 1).unwrap(),
             );
             control
@@ -264,73 +274,43 @@ fn incompatible_light_range_change_keeps_identity_and_reports_unavailable() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some((incompatible, None));
+                .candidate = Some((narrower, None));
             control.context.reconcile("one").unwrap();
 
-            let physical = control
-                .context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
-                .unwrap();
+            // Wait for the actual instance replacement, not the still-serving
+            // old available instance.
+            let replaced = ready_replacement_light(control).await;
             assert_eq!(
-                physical.functions()[0]
-                    .description()
-                    .temperature_interval()
+                replaced.description().temperature_interval().unwrap().max(),
+                5600
+            );
+            let physical = control.context.registry.get(&key).unwrap();
+            assert_eq!(physical.availability(), Availability::Available);
+            assert!(!physical.same_instance(&original_physical));
+            let saved = control
+                .store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .device(&key)
+                .cloned()
+                .unwrap();
+            assert_eq!(saved.unique_id, before.unique_id);
+            assert_eq!(saved.endpoint, before.endpoint);
+            assert_eq!(saved.label, before.label);
+            assert_eq!(
+                saved.configuration_version,
+                before.configuration_version + 1
+            );
+            assert_eq!(
+                saved.native.as_ref().unwrap().device.functions()[0]
+                    .lighting()
                     .unwrap()
+                    .temperature()
+                    .unwrap()
+                    .range()
                     .max(),
-                5700
-            );
-            assert!(matches!(
-                physical.availability(),
-                Availability::Unavailable(_)
-            ));
-            assert!(
-                control
-                    .context
-                    .status
-                    .borrow()
-                    .pending
-                    .iter()
-                    .any(|pending| pending.did == "one" && pending.reason.contains("incompatible"))
-            );
-            assert_eq!(
-                control
-                    .store
-                    .devices()
-                    .load_parsed(&original.uid, "local", physical.key())
-                    .unwrap()
-                    .unwrap(),
-                original
-            );
-            assert!(light.execute(Command::On).await.is_err());
-
-            control
-                .context
-                .live
-                .borrow_mut()
-                .devices
-                .get_mut("one")
-                .unwrap()
-                .blocked = None;
-            control
-                .context
-                .live
-                .borrow_mut()
-                .devices
-                .get_mut("one")
-                .unwrap()
-                .candidate = Some((original, None));
-            control.context.reconcile("one").unwrap();
-            let restored = ready_light(control).await;
-            let restored_physical = control
-                .context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
-                .unwrap();
-            assert!(restored_physical.same_instance(&physical));
-            assert_eq!(
-                restored.description().temperature_interval().unwrap().max(),
-                5700
+                5600
             );
             let _ = peer;
         })
@@ -927,6 +907,8 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
                 candidate: Some((cached, None)),
                 access,
                 cloud_access,
+                // A genuine fresh confirmation clears the durable tombstone.
+                confirmed: true,
                 ..Default::default()
             };
             control

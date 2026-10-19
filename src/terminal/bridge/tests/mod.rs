@@ -1,47 +1,18 @@
-mod support;
-use support::next_power;
+pub(crate) mod support;
+use support::{add_device, handle_line, next_power, rename, run_input, saved_description};
 
-use migate::{device, storage, xiaomi};
-#[path = "../src/storage/tests/fixtures.rs"]
-mod publication_support;
-
-fn add_device(store: &Store, description: &PhysicalDeviceDescription) {
-    let mut state = store.devices().load_publication(None).unwrap();
-    assert!(
-        state
-            .records
-            .iter()
-            .all(|record| &record.key != description.key())
-    );
-    state.records.push(publication_support::record(
-        description,
-        store.devices().next_endpoint().unwrap(),
-    ));
-    store
-        .devices()
-        .apply_publication(&publication_support::commit(
-            publication_support::scope(),
-            Vec::new(),
-            state.records,
-        ))
-        .unwrap();
-}
-
-use futures_lite::{
-    future::{self, block_on, poll_once},
-    io::Cursor,
-};
-use migate::{
+use crate::{
     device::{
         Availability, CommandReceiver, DeviceKey, DeviceRegistry, FunctionDescription,
         FunctionKind, PhysicalDevice, PhysicalDeviceDescription, Power,
     },
     storage::Store,
-    terminal::{
-        AuthStatus,
-        bridge::{handle_line, run_input},
-    },
+    terminal::AuthStatus,
     xiaomi::{auth::AuthService, cloud::CloudClient},
+};
+use futures_lite::{
+    future::{self, block_on, poll_once},
+    io::Cursor,
 };
 fn fixture() -> (
     tempfile::TempDir,
@@ -159,12 +130,8 @@ fn list_and_status_read_shared_power_and_persisted_names() {
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
         let key = DeviceKey::new("xiaomi", "multi");
-        store
-            .devices()
-            .set_device_label(&key, "Saved Home name")
-            .unwrap();
-        let stored = store.devices().load_published(&key).unwrap().unwrap();
-        let (physical, _consumers) = PhysicalDevice::new(stored.description());
+        rename(&store, &key, "Saved Home name");
+        let (physical, _consumers) = PhysicalDevice::new(saved_description(&store, &key));
         registry.remove(&key);
         registry.insert(physical.clone());
         physical.function("usb").unwrap().observe(true);
@@ -197,7 +164,7 @@ fn list_and_status_read_shared_power_and_persisted_names() {
 
 #[test]
 fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
-    use migate::{
+    use crate::{
         device::{LightMode, LightPatch, Rgb},
         xiaomi::capability::parse_device_for_model,
     };
@@ -209,12 +176,12 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
             (
                 "rgb",
                 "devcea.light.ls2307",
-                include_str!("fixtures/miot/devcea-light-ls2307.json"),
+                include_str!("../../../../tests/fixtures/miot/devcea-light-ls2307.json"),
             ),
             (
                 "ct",
                 "yeelink.light.light3",
-                include_str!("fixtures/miot/yeelink-light-light3.json"),
+                include_str!("../../../../tests/fixtures/miot/yeelink-light-light3.json"),
             ),
         ] {
             let key = DeviceKey::new("xiaomi", did);
@@ -234,12 +201,8 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                 )
                 .unwrap(),
             );
-            store
-                .devices()
-                .set_device_label(&key, &format!("Saved {did} 名称"))
-                .unwrap();
-            let saved = store.devices().load_published(&key).unwrap().unwrap();
-            let (physical, receivers) = PhysicalDevice::new(saved.description());
+            rename(&store, &key, &format!("Saved {did} 名称"));
+            let (physical, receivers) = PhysicalDevice::new(saved_description(&store, &key));
             physical.set_availability(Availability::Available);
             registry.insert(physical.clone());
             lights.push((physical, receivers));
@@ -334,7 +297,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
 
 #[test]
 fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
-    use migate::device::{DeviceRequest, LightMode, LightPatch, LightProfile, TemperatureInterval};
+    use crate::device::{DeviceRequest, LightMode, LightPatch, LightProfile, TemperatureInterval};
 
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
@@ -471,10 +434,11 @@ fn input_and_output_errors_propagate() {
 fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
-        store
-            .devices()
-            .set_device_label(&DeviceKey::new("xiaomi", "multi"), "Home edited name")
-            .unwrap();
+        rename(
+            &store,
+            &DeviceKey::new("xiaomi", "multi"),
+            "Home edited name",
+        );
         registry
             .get(&DeviceKey::new("xiaomi", "multi"))
             .unwrap()
@@ -482,11 +446,11 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
             .local_status()
             .unwrap();
-        status.update_adapter(migate::xiaomi::adapter::AdapterStatus {
+        status.update_adapter(crate::xiaomi::adapter::AdapterStatus {
             authentication: report,
-            gateway: migate::xiaomi::adapter::GatewayStatus::Connected("hub".into()),
+            gateway: crate::xiaomi::adapter::GatewayStatus::Connected("hub".into()),
             catalog_problem: None,
-            pending: vec![migate::xiaomi::adapter::PendingDevice {
+            pending: vec![crate::xiaomi::adapter::PendingDevice {
                 did: "multi".into(),
                 name: "New cloud name".into(),
                 reason: "subscription rejected".into(),
@@ -513,7 +477,7 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
 
 #[test]
 fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
-    use migate::xiaomi::adapter::*;
+    use crate::xiaomi::adapter::*;
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
@@ -590,92 +554,4 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         assert!(!help.contains("one routing:"));
         assert!(!help.contains("multi routing:"));
     });
-}
-
-#[test]
-fn startup_login_command_is_a_single_prefixed_log_record() {
-    use migate::xiaomi::adapter::*;
-    let capture = tempfile::NamedTempFile::new().unwrap();
-    env_logger::Builder::new()
-        .filter_module("migate::terminal::status", log::LevelFilter::Info)
-        .write_style(env_logger::WriteStyle::Never)
-        .target(env_logger::Target::Pipe(Box::new(
-            capture.reopen().unwrap(),
-        )))
-        .init();
-    let (directory, store, status, _registry, _receivers) = fixture();
-    status.log(0);
-
-    let gateway = format!(
-        "status-log-{}",
-        directory.path().file_name().unwrap().to_string_lossy()
-    );
-    let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
-        .local_status()
-        .unwrap();
-    let mut adapter = AdapterStatus {
-        authentication: report,
-        gateway: GatewayStatus::Connected(gateway.clone()),
-        catalog_problem: None,
-        pending: Vec::new(),
-        routing: Default::default(),
-        devices: Vec::new(),
-    };
-    status.update_adapter(adapter.clone());
-    adapter.devices.push(DeviceStatus {
-        did: "one".into(),
-        usable_control_paths: vec![PathKind::Local],
-        selected_control: Some(PathKind::Local),
-        notification_source: Some(PathKind::Local),
-        unavailable_reason: None,
-        sync_limited_reason: None,
-        last_switch_reason: None,
-        commands: vec![ChannelCommands {
-            light_actions: None,
-            channel: "main".into(),
-            inflight: None,
-            last: None,
-        }],
-    });
-    status.update_adapter(adapter.clone());
-    adapter.devices[0].commands[0].last = Some(CommandStatus {
-        id: 1,
-        binding: migate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-        target: migate::xiaomi::adapter::CommandTarget::Power(true),
-        properties: vec![(
-            migate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-            true.into(),
-        )],
-        actual_path: Some(PathKind::Local),
-        result: Some(Ok(())),
-    });
-    status.update_adapter(adapter);
-
-    let output = std::fs::read_to_string(capture.path()).unwrap();
-    assert_eq!(
-        output
-            .lines()
-            .filter(|line| line.contains(&format!("Gateway: connected ({gateway}).")))
-            .count(),
-        1,
-        "{output}"
-    );
-    let lines: Vec<_> = output
-        .lines()
-        .filter(|line| {
-            line.contains(" migate::terminal::status] ")
-                && line.contains(&directory.path().display().to_string())
-        })
-        .collect();
-    let expected_messages = [format!(
-        "Sign in with: '/bin/migate' --data-dir '{}' auth login",
-        directory.path().display()
-    )];
-    assert_eq!(lines.len(), expected_messages.len(), "{output}");
-    for (line, message) in lines.iter().zip(expected_messages) {
-        let (prefix, body) = line.split_once("] ").unwrap();
-        assert!(prefix.starts_with('['), "{line}");
-        assert!(prefix.contains(" INFO "), "{line}");
-        assert_eq!(body, message);
-    }
 }

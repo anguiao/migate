@@ -1,9 +1,6 @@
-use super::{BridgeOptions, default_device_label, run_prepared_bridge};
-use crate::{
-    matter::tests::support::test_device,
-    xiaomi::{auth::AuthService, cloud::CloudClient},
-};
-use crate::{storage::Store, terminal::AuthStatus};
+use super::super::{BridgeOptions, run_xiaomi_bridge};
+use super::{outlet, status};
+use crate::{storage::Store, xiaomi::adapter::tests::app_source::AppSource};
 use futures_lite::{
     future::{self, block_on, poll_once},
     io::Cursor,
@@ -16,31 +13,6 @@ impl Drop for Dropped {
         self.0.set(true);
     }
 }
-fn status(store: &Store) -> AuthStatus {
-    AuthStatus::new(
-        AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
-            .local_status()
-            .unwrap(),
-        "/bin/migate".into(),
-        "/data".into(),
-    )
-}
-#[test]
-fn default_labels_are_bounded_utf8_and_include_model_and_device_id() {
-    assert_eq!(
-        default_device_label("cuco.plug.v3", "571329355"),
-        "cuco.plug.v3 (571329355)"
-    );
-    for (model, id) in [
-        ("插座设备".repeat(20), "设备标识".repeat(20)),
-        ("x".repeat(100), "1".repeat(128)),
-    ] {
-        let label = default_device_label(&model, &id);
-        assert!(label.len() <= 32);
-        assert!(label.ends_with(')'));
-        assert!(label.contains('('));
-    }
-}
 #[test]
 fn preparation_interrupt_drops_source_and_cancels_queued_commands() {
     block_on(async {
@@ -48,7 +20,15 @@ fn preparation_interrupt_drops_source_and_cancels_queued_commands() {
         let store = Store::open(directory.path()).unwrap();
         let identity = store.load_identity().unwrap();
         let status = status(&store);
-        let (device, receiver) = test_device();
+        let AppSource {
+            adapter,
+            handle,
+            physical,
+            mut receivers,
+        } = AppSource::new(&store, Some(outlet()));
+        let device = physical.unwrap();
+        let receiver = receivers.remove(0);
+        drop(handle);
         device.functions()[0].observe(false);
         device.set_availability(crate::device::Availability::Available);
         let command = device.functions()[0].execute(crate::device::Command::On);
@@ -56,12 +36,13 @@ fn preparation_interrupt_drops_source_and_cancels_queued_commands() {
         assert!(poll_once(command.as_mut()).await.is_none());
         let dropped = Rc::new(Cell::new(false));
         let guard = Dropped(dropped.clone());
+        let resources = (receiver, adapter);
         let source = async move {
             let _guard = guard;
-            let _receiver = receiver;
+            let _resources = resources;
             future::pending().await
         };
-        run_prepared_bridge(
+        run_xiaomi_bridge(
             BridgeOptions {
                 store: &store,
                 identity: &identity,
@@ -88,7 +69,7 @@ fn source_errors_and_unexpected_completion_stop_preparation() {
         let store = Store::open(directory.path()).unwrap();
         let identity = store.load_identity().unwrap();
         let status = status(&store);
-        let error = block_on(run_prepared_bridge(
+        let error = block_on(run_xiaomi_bridge(
             BridgeOptions {
                 store: &store,
                 identity: &identity,
@@ -131,7 +112,14 @@ fn source_completion_after_matter_startup_stops_serving_and_drops_commands() {
                     let store = Store::open(directory.path()).unwrap();
                     let identity = store.load_identity().unwrap();
                     let status = status(&store);
-                    let (device, receiver) = test_device();
+                    let AppSource {
+                        adapter,
+                        handle,
+                        physical,
+                        mut receivers,
+                    } = AppSource::new(&store, Some(outlet()));
+                    let device = physical.unwrap();
+                    let receiver = receivers.remove(0);
                     device.functions()[0].observe(false);
                     device.set_availability(crate::device::Availability::Available);
                     let mut command =
@@ -144,6 +132,7 @@ fn source_completion_after_matter_startup_stops_serving_and_drops_commands() {
                     let guard = Dropped(dropped.clone());
                     let source = async move {
                         let _guard = guard;
+                        let _adapter = adapter;
                         let _receiver = receiver;
                         listening.await;
                         if failure {
@@ -152,18 +141,14 @@ fn source_completion_after_matter_startup_stops_serving_and_drops_commands() {
                             Ok(())
                         }
                     };
-                    let error = run_prepared_bridge(
+                    let error = run_xiaomi_bridge(
                         BridgeOptions {
                             store: &store,
                             identity: &identity,
                             status: &status,
                             port: 0,
                         },
-                        async {
-                            Ok(crate::matter::tests::support::test_registry(
-                                &store, &device,
-                            ))
-                        },
+                        async { Ok(handle) },
                         source,
                         Cursor::new([]),
                         Vec::new(),
@@ -209,7 +194,14 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 let store = Store::open(directory.path()).unwrap();
                 let identity = store.load_identity().unwrap();
                 let status = status(&store);
-                let (device, mut receiver) = test_device();
+                let AppSource {
+                    adapter,
+                    handle,
+                    physical,
+                    mut receivers,
+                } = AppSource::new(&store, Some(outlet()));
+                let device = physical.unwrap();
+                let mut receiver = receivers.remove(0);
                 device.functions()[0].observe(false);
                 device.set_availability(crate::device::Availability::Available);
                 let before = device.functions()[0].snapshot();
@@ -230,6 +222,7 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 let guard = Dropped(dropped.clone());
                 let source = async move {
                     let _guard = guard;
+                    let _adapter = adapter;
                     ready_listening.await;
                     assert!(ready_ref.get());
                     let _active = receiver.next_operation().await.unwrap();
@@ -237,7 +230,7 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                     let _receiver = receiver;
                     future::pending().await
                 };
-                run_prepared_bridge(
+                run_xiaomi_bridge(
                     BridgeOptions {
                         store: &store,
                         identity: &identity,
@@ -247,9 +240,7 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                     async {
                         ready_seen.set(true);
                         ready.notify(usize::MAX);
-                        Ok(crate::matter::tests::support::test_registry(
-                            &store, &device,
-                        ))
+                        Ok(handle)
                     },
                     source,
                     Cursor::new([]),
@@ -265,7 +256,13 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 assert!(dropped.get());
                 assert_eq!(active.await, Err(crate::device::CommandError::Cancelled));
                 assert_eq!(queued.await, Err(crate::device::CommandError::Cancelled));
-                assert_eq!(device.functions()[0].snapshot(), before);
+                let after = device.functions()[0].snapshot();
+                assert_eq!(after.power, before.power);
+                assert_eq!(after.lighting, before.lighting);
+                assert_eq!(
+                    after.availability,
+                    crate::device::Availability::Unavailable("Xiaomi adapter stopped".into())
+                );
             })
         })
         .unwrap()
@@ -284,11 +281,19 @@ fn serving_terminal_io_failure_drops_the_source() {
                     let store = Store::open(directory.path()).unwrap();
                     let identity = store.load_identity().unwrap();
                     let status = status(&store);
-                    let (device, receiver) = test_device();
+                    let AppSource {
+                        adapter,
+                        handle,
+                        physical,
+                        mut receivers,
+                    } = AppSource::new(&store, Some(outlet()));
+                    assert!(physical.is_some());
+                    let receiver = receivers.remove(0);
                     let dropped = Rc::new(Cell::new(false));
                     let guard = Dropped(dropped.clone());
                     let source = async move {
                         let _guard = guard;
+                        let _adapter = adapter;
                         let _receiver = receiver;
                         future::pending().await
                     };
@@ -297,18 +302,14 @@ fn serving_terminal_io_failure_drops_the_source() {
                     } else {
                         b"\xff\n"
                     };
-                    let error = run_prepared_bridge(
+                    let error = run_xiaomi_bridge(
                         BridgeOptions {
                             store: &store,
                             identity: &identity,
                             status: &status,
                             port: 0,
                         },
-                        async {
-                            Ok(crate::matter::tests::support::test_registry(
-                                &store, &device,
-                            ))
-                        },
+                        async { Ok(handle) },
                         source,
                         Cursor::new(input),
                         Cursor::new(&mut [0u8; 0][..]),
@@ -340,15 +341,21 @@ fn empty_registry_starts_the_bridge_and_eof_keeps_the_source_running() {
                 let started = event_listener::Event::new();
                 let listener = started.listen();
                 let paired = Cell::new(false);
-                run_prepared_bridge(
+                let AppSource {
+                    adapter, handle, ..
+                } = AppSource::new(&store, None);
+                run_xiaomi_bridge(
                     BridgeOptions {
                         store: &store,
                         identity: &identity,
                         status: &status,
                         port: 0,
                     },
-                    async { Ok(crate::device::DeviceRegistry::new()) },
-                    future::pending(),
+                    async { Ok(handle) },
+                    async move {
+                        let _adapter = adapter;
+                        future::pending().await
+                    },
                     Cursor::new(b"list\nstatus\n"),
                     Vec::new(),
                     async {

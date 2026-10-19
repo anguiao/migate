@@ -1,3 +1,6 @@
+mod labels;
+pub(crate) mod model_fixture;
+
 use super::{CapabilityError, PropertyBinding, parse_device};
 use crate::device::{DeviceKey, FunctionKind};
 use serde_json::{Value, json};

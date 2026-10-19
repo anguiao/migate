@@ -1,19 +1,27 @@
 use super::*;
 use futures_lite::future::poll_once;
 
-fn save_cache(store: &Store, cached: crate::storage::CachedPhysicalDevice) {
-    let scope = crate::storage::CachedScope {
-        uid: cached.uid.clone(),
-        home_id: cached.home_id.clone(),
-        group_id: cached.group_id.clone(),
+fn save_cache(store: &Store, uid: &str, native: crate::configuration::NativeDescription) {
+    use crate::{
+        configuration::{CommittedConfiguration, Scope},
+        storage::tests::fixtures::identity,
     };
+    let mut device = identity(&native.physical_description("Outlet"), 2);
+    device.native = Some(native);
     store
         .devices()
-        .apply_publication(&crate::storage::tests::fixtures::commit(
-            scope,
-            vec![cached],
-            Vec::new(),
-        ))
+        .commit_configuration(
+            &CommittedConfiguration {
+                scope: Some(Scope {
+                    uid: uid.into(),
+                    home_id: "local-home".into(),
+                }),
+                root_version: 2,
+                devices: vec![device],
+                groups: Vec::new(),
+            },
+            &[],
+        )
         .unwrap();
 }
 
@@ -49,26 +57,21 @@ fn bridge_cloud_or_refresh_failure_preserves_same_account_cache_and_valid_certif
         let store = Store::open(dir.path()).unwrap();
         let original = valid_record("uid", "old-access", refresh_at, NOW + 10 * 24 * 60 * 60);
         store.xiaomi().replace(&original).unwrap();
-        let cached = cached_bridge_device("uid");
-        save_cache(&store, cached.clone());
-        save_cache(&store, cached_bridge_device("other-account"));
+        let cached = cached_bridge_device();
+        save_cache(&store, "uid", cached.clone());
+        let configuration = store.devices().load_configuration().unwrap();
         let (auth, requests) = service(&store, vec![MockResponse::json(status, "cloud failure")]);
         let prepared = block_on(auth.prepare_bridge()).unwrap();
         assert!(!prepared.report.is_success());
         assert!(prepared.report.certificate.unwrap().currently_valid(NOW));
         assert_eq!(prepared.credentials, Some(original));
         assert!(prepared.homes.is_empty());
+        assert_eq!(store.devices().load_configuration().unwrap(), configuration);
         assert_eq!(
-            store
-                .devices()
-                .load_parsed(
-                    &prepared.credentials.as_ref().unwrap().uid,
-                    "local-home",
-                    cached.device.key()
-                )
-                .unwrap(),
-            Some(cached)
+            configuration.scope.as_ref().unwrap().uid,
+            prepared.credentials.as_ref().unwrap().uid
         );
+        assert_eq!(configuration.devices[0].native.as_ref(), Some(&cached));
         assert_eq!(requests.try_iter().count(), 1);
         if status == 401 {
             assert!(matches!(
@@ -92,8 +95,9 @@ fn bridge_account_mismatch_does_not_expose_another_accounts_directory_or_cache()
             NOW + 10 * 24 * 60 * 60,
         ))
         .unwrap();
-    let other = cached_bridge_device("new-account");
-    save_cache(&store, other.clone());
+    let other = cached_bridge_device();
+    save_cache(&store, "new-account", other);
+    let configuration = store.devices().load_configuration().unwrap();
     let homes = json!({"code":0,"result":{"homelist":[{"uid":"new-account","id":"local-home","roomlist":[],"dids":["target"]}]}});
     let (auth, _) = service(&store, vec![MockResponse::json(200, &homes.to_string())]);
     let prepared = block_on(auth.prepare_bridge()).unwrap();
@@ -102,12 +106,10 @@ fn bridge_account_mismatch_does_not_expose_another_accounts_directory_or_cache()
         AuthenticationState::Unavailable(FailureReason::AccountIdentityMismatch)
     ));
     assert!(prepared.homes.is_empty());
-    assert!(
-        store
-            .devices()
-            .load_parsed("old-account", "local-home", other.device.key())
-            .unwrap()
-            .is_none()
+    assert_eq!(store.devices().load_configuration().unwrap(), configuration);
+    assert_ne!(
+        configuration.scope.unwrap().uid,
+        prepared.credentials.as_ref().unwrap().uid
     );
     assert_eq!(prepared.credentials.unwrap().uid, "old-account");
 }
@@ -147,21 +149,15 @@ fn bridge_preparation_renews_with_processed_credentials_without_reading_device_c
     );
     assert_eq!(requests.try_iter().count(), 3);
 
-    let cached = cached_bridge_device("uid");
-    save_cache(&store, cached.clone());
+    save_cache(&store, "uid", cached_bridge_device());
     Connection::open(store.path())
         .unwrap()
-        .execute("UPDATE device_cache SET capabilities = 'broken'", [])
+        .execute("UPDATE bridge_configuration SET json = 'broken'", [])
         .unwrap();
     let (auth, _) = service(&store, vec![MockResponse::json(503, "cloud unavailable")]);
     let prepared = block_on(auth.prepare_bridge()).unwrap();
     assert!(prepared.credentials.is_some());
-    assert!(
-        store
-            .devices()
-            .load_parsed("uid", "local-home", cached.device.key())
-            .is_err()
-    );
+    assert!(store.devices().load_configuration().is_err());
 }
 
 #[test]

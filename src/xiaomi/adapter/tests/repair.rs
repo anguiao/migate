@@ -504,22 +504,19 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         let committed = c
             .store
             .devices()
-            .load_published(&DeviceKey::new("xiaomi", "group-1"))
+            .load_configuration()
             .unwrap()
+            .device(&DeviceKey::new("xiaomi", "group-1"))
+            .cloned()
             .unwrap();
         let identity = committed.unique_id.clone();
         let endpoint = committed.endpoint;
         let version = committed.configuration_version;
-        let scope = c.context.live.borrow().scope.clone().unwrap();
-        let root = c
-            .store
-            .devices()
-            .load_publication(Some(&scope))
-            .unwrap()
-            .root_version;
+        let _scope = c.context.live.borrow().scope.clone().unwrap();
+        let root = c.store.devices().load_configuration().unwrap().root_version;
 
-        // The latest genuine member input drops RGB. The static independent
-        // lamp contract blocks that member while the group keeps serving.
+        // A new genuine member input drops RGB. The existing group keeps
+        // serving until the whole candidate configuration commits.
         let downgraded = confirmed_for(
             &c,
             "member-a",
@@ -536,15 +533,11 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
             .get_mut("member-a")
             .unwrap()
             .native_confirmed = Some(downgraded.clone());
-        c.context.block_device(
-            "member-a",
-            "descriptor changed to an incompatible profile".into(),
-        );
 
         // A failed save keeps the committed repair plan.
         let db = rusqlite::Connection::open(c.store.path()).unwrap();
         db.execute_batch(
-            "CREATE TRIGGER fail_config BEFORE INSERT ON device_cache
+            "CREATE TRIGGER fail_config BEFORE UPDATE ON bridge_configuration
              BEGIN SELECT RAISE(ABORT, 'injected'); END;",
         )
         .unwrap();
@@ -573,14 +566,15 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         )
         .await;
         assert!(c.context.group_repair("group-1").is_none());
-        let saved = c.store.devices().load_publication(Some(&scope)).unwrap();
+        let saved = c.store.devices().load_configuration().unwrap();
         let native_a = saved
-            .cached
+            .devices
             .iter()
-            .find(|cached| cached.device.key().id == "member-a")
+            .filter_map(|device| device.native.as_ref())
+            .find(|native| native.device.key().id == "member-a")
             .expect("member native input restored from the committed configuration");
         let stored_a = saved
-            .records
+            .devices
             .iter()
             .find(|record| record.key.id == "member-a")
             .expect("member logical identity restored");
@@ -593,32 +587,23 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
                 .is_none(),
             "the persisted confirmed input is the genuine new Native description"
         );
-        assert!(
-            stored_a.functions[0]
-                .kind
-                .light_profile()
-                .is_some_and(crate::device::LightProfile::has_rgb),
-            "the stored logical description may intentionally differ and stays static"
-        );
+        assert_eq!(stored_a.functions[0].id, "main");
         assert!(saved.root_version > root);
 
         // A restart rebuild sees the persisted Native input: the committed
         // native profile and range survive without a widening or version bump.
-        let restarted = crate::publication::Publication::open(
+        let restarted = crate::app::App::open(
             crate::xiaomi::adapter::SourceHandle(c.context.clone()),
             c.store.clone(),
         )
         .unwrap();
         assert!(
-            restarted
-                .prepare()
-                .unwrap()
-                .is_none_or(|prepared| !prepared.rebuild),
+            restarted.plan().unwrap().is_none_or(|plan| !plan.rebuild),
             "restart must not widen or rebuild from stale cached inputs"
         );
         assert!(c.context.group_repair("group-1").is_none());
 
-        // A genuinely compatible fresh member description restores repair and
+        // A fresh supported member description restores repair and
         // keeps identity/endpoint while bumping the fixed version.
         let ls = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/miot/devcea-light-ls2307.json"
@@ -642,8 +627,10 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         let again = c
             .store
             .devices()
-            .load_published(&DeviceKey::new("xiaomi", "group-1"))
+            .load_configuration()
             .unwrap()
+            .device(&DeviceKey::new("xiaomi", "group-1"))
+            .cloned()
             .unwrap();
         assert_eq!(again.unique_id, identity);
         assert_eq!(again.endpoint, endpoint);

@@ -110,9 +110,6 @@ impl PhysicalDevice {
         )
         .expect("a live device keeps a valid description")
     }
-    pub(crate) fn same_instance(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner, &other.inner)
-    }
     pub fn functions(&self) -> &[Function] {
         &self.functions
     }
@@ -414,3 +411,7 @@ impl FunctionChanges {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/identity.rs"]
+mod test_identity;

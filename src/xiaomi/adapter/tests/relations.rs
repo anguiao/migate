@@ -1,15 +1,14 @@
 use super::super::relations::Relations;
-use crate::storage::CachedScope;
+use crate::configuration::Scope;
 use crate::xiaomi::cloud::{
     CloudCatalogDevice, CloudDeviceCatalog, CloudGroupMembership, CloudGroupStatus,
 };
 use std::collections::BTreeSet;
 
-fn scope() -> CachedScope {
-    CachedScope {
+fn scope() -> Scope {
+    Scope {
         uid: "account".into(),
         home_id: "home".into(),
-        group_id: crate::xiaomi::cloud::group_id("account", "home"),
     }
 }
 
@@ -235,10 +234,9 @@ fn home_switch_scopes_successful_confirmation_and_drops_old_home_retention() {
         &scope(),
         &home(&["member-2"]),
     );
-    let other = CachedScope {
+    let other = Scope {
         uid: "account".into(),
         home_id: "other".into(),
-        group_id: crate::xiaomi::cloud::group_id("account", "other"),
     };
     // A present record without a confirmable member list cannot keep an
     // old-home relation alive in the new home.

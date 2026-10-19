@@ -1,118 +1,66 @@
 use super::super::AuthStatus;
 use crate::{
-    device::{DeviceKey, DeviceRegistry, PhysicalDevice},
-    publication::{EffectiveConfiguration, Publication},
-    storage::DeviceStore,
+    app::{App, EffectiveConfiguration},
+    device::{DeviceKey, PhysicalDevice},
 };
 use std::{fmt::Write as _, rc::Rc};
 
-enum Source {
-    Registry(DeviceRegistry),
-    Configured(Rc<Publication>),
-}
-
-/// The terminal's explicit device source, persistence and diagnostics.
+/// The terminal's one committed configuration view and persistence handle.
+/// Every command takes the current effective version once; hidden members stay
+/// visible and controllable.
 pub(crate) struct Context<'a> {
-    source: Source,
-    pub(super) store: DeviceStore,
+    app: Rc<App>,
     pub(super) status: &'a AuthStatus,
 }
 
 impl<'a> Context<'a> {
-    pub(crate) fn fixed(
-        registry: &DeviceRegistry,
-        store: &DeviceStore,
-        status: &'a AuthStatus,
-    ) -> Self {
-        Self {
-            source: Source::Registry(registry.clone()),
-            store: store.clone(),
-            status,
-        }
+    pub(crate) fn committed(app: Rc<App>, status: &'a AuthStatus) -> Self {
+        Self { app, status }
     }
 
-    pub(crate) fn configured(
-        publication: Rc<Publication>,
-        store: &DeviceStore,
-        status: &'a AuthStatus,
-    ) -> Self {
-        Self {
-            source: Source::Configured(publication),
-            store: store.clone(),
-            status,
-        }
-    }
-
-    pub(super) fn view(&self) -> View<'_> {
-        match &self.source {
-            Source::Registry(registry) => View::Registry(registry),
-            Source::Configured(publication) => View::Configured {
-                current: publication.current(),
-                pending: publication.pending(),
-                failure: publication.failure(),
-            },
+    pub(super) fn view(&self) -> View {
+        View {
+            current: self.app.current(),
+            pending: self.app.pending(),
+            failure: self.app.failure(),
         }
     }
 }
 
 /// One command observes one committed configuration, including hidden members.
-pub(super) enum View<'a> {
-    Registry(&'a DeviceRegistry),
-    Configured {
-        current: Rc<EffectiveConfiguration>,
-        pending: bool,
-        failure: Option<String>,
-    },
+pub(super) struct View {
+    pub(super) current: Rc<EffectiveConfiguration>,
+    pub(super) pending: bool,
+    pub(super) failure: Option<String>,
 }
 
-impl View<'_> {
-    pub(super) fn configuration(&self) -> Option<&EffectiveConfiguration> {
-        match self {
-            Self::Registry(_) => None,
-            Self::Configured { current, .. } => Some(current),
-        }
-    }
-
+impl View {
     pub(super) fn get(&self, key: &DeviceKey) -> Option<PhysicalDevice> {
-        match self {
-            Self::Registry(registry) => registry.get(key),
-            Self::Configured { current, .. } => current
-                .source
-                .entries
-                .iter()
-                .find(|entry| entry.physical.key() == key)
-                .map(|entry| entry.physical.clone()),
-        }
+        self.current
+            .entries
+            .iter()
+            .find(|entry| entry.physical.key() == key)
+            .map(|entry| entry.physical.clone())
     }
 
     pub(super) fn list(&self) -> Vec<PhysicalDevice> {
-        match self {
-            Self::Registry(registry) => registry.list(),
-            Self::Configured { current, .. } => current.devices(),
-        }
+        self.current.devices()
     }
 
     pub(super) fn render_status(&self, status: &AuthStatus, now: i64) -> String {
         let mut report = status.render(now);
-        if let Self::Configured {
-            current,
-            pending,
-            failure,
-        } = self
-        {
-            let _ = write!(
-                report,
-                "\nConfiguration: root version {}{}.",
-                current.root_version,
-                if *pending {
-                    "; pending application"
-                } else {
-                    ""
-                },
-            );
-            if let Some(failure) = failure {
-                let _ = write!(report, "\nConfiguration apply failed: {failure}.");
-            }
+        let _ = write!(
+            report,
+            "\nConfiguration: root version {}{}.",
+            self.current.configuration.root_version,
+            if self.pending {
+                "; pending application"
+            } else {
+                ""
+            },
+        );
+        if let Some(failure) = &self.failure {
+            let _ = write!(report, "\nConfiguration apply failed: {failure}.");
         }
         report
     }

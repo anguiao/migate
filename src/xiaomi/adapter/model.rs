@@ -1,5 +1,5 @@
 use crate::{
-    device::{CommandError, DeviceRegistry},
+    device::CommandError,
     storage::StorageError,
     xiaomi::{
         auth::{AuthError, AuthReport},
@@ -12,9 +12,6 @@ use crate::{
 };
 use event_listener::Event;
 use std::{cell::RefCell, error::Error, fmt, rc::Rc};
-
-pub(super) const INCOMPATIBLE_FUNCTIONS: &str =
-    "Device function set is incompatible with its stored identity";
 
 #[derive(Clone, Debug)]
 pub enum AdapterError {
@@ -231,11 +228,11 @@ pub struct AdapterStatus {
 }
 #[derive(Default)]
 pub(super) struct Ready {
-    result: RefCell<Option<Result<DeviceRegistry, AdapterError>>>,
+    result: RefCell<Option<Result<(), AdapterError>>>,
     changed: Event,
 }
 impl Ready {
-    pub(super) fn finish(&self, result: Result<DeviceRegistry, AdapterError>) {
+    pub(super) fn finish(&self, result: Result<(), AdapterError>) {
         let mut current = self.result.borrow_mut();
         if current.is_none() {
             *current = Some(result);
@@ -243,10 +240,10 @@ impl Ready {
         }
     }
 }
-/// Poll the adapter alongside this one-shot topology wait; the registry remains shared.
+/// Poll the adapter alongside this one-shot topology wait.
 pub struct TopologyReady(pub(super) Rc<Ready>);
 impl TopologyReady {
-    pub async fn wait(self) -> Result<DeviceRegistry, AdapterError> {
+    pub async fn wait(self) -> Result<(), AdapterError> {
         loop {
             let listener = self.0.changed.listen();
             if let Some(result) = self.0.result.borrow().clone() {

@@ -1,6 +1,6 @@
-use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler, storage::StoreAdapter};
-use crate::device::{DeviceRegistry, Function, LightProfileKind, PhysicalDevice};
-use crate::storage::{Identity, StorageError, Store, StoredDevice};
+use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler};
+use crate::device::{Function, LightProfileKind, PhysicalDevice};
+use crate::storage::{Identity, StorageError, Store};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use rand::RngExt as _;
 use rs_matter::{
@@ -452,36 +452,28 @@ impl desc::PartsMatcher for Entry {
     }
 }
 
-/// One published physical device frozen with its committed identity.
-#[derive(Clone)]
-pub(super) struct FrozenEntry {
-    pub(super) device: PhysicalDevice,
-    pub(super) stored: StoredDevice,
+/// One current published function as Matter publishes it: the stable key and
+/// its reserved endpoint. Retired reservations stay in storage only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PublishedFunction {
+    pub(crate) id: String,
+    pub(crate) endpoint: u16,
 }
 
-/// Capture the committed published set once; the model never rereads topology
-/// or fixed metadata rows afterwards.
-pub(super) fn capture(
-    registry: &DeviceRegistry,
-    store: &Store,
-) -> Result<(Vec<FrozenEntry>, u32), StorageError> {
-    let mut entries = Vec::new();
-    for device in registry.list() {
-        let stored = store
-            .devices()
-            .load_published(device.key())?
-            .ok_or_else(|| {
-                StorageError::new(
-                    store.path(),
-                    "freeze Matter topology",
-                    "Published physical device has no stored identity",
-                )
-            })?;
-        entries.push(FrozenEntry { device, stored });
-    }
-    entries.sort_by_key(|entry| entry.stored.endpoint);
-    let root_version = store.devices().load_publication(None)?.root_version;
-    Ok((entries, root_version))
+/// The explicit Matter publication input of one device.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PublishedIdentity {
+    pub(crate) endpoint: u16,
+    pub(crate) unique_id: String,
+    pub(crate) configuration_version: u32,
+    pub(crate) functions: Vec<PublishedFunction>,
+}
+
+/// One published physical device frozen with its current publication identity.
+#[derive(Clone)]
+pub(crate) struct FrozenEntry {
+    pub(crate) device: PhysicalDevice,
+    pub(crate) identity: PublishedIdentity,
 }
 
 pub(super) struct Model {
@@ -489,23 +481,11 @@ pub(super) struct Model {
     entries: Vec<Rc<Entry>>,
 }
 
-/// Build one frozen instance from the committed published set.
-#[cfg(test)]
-pub(super) fn handler(
-    registry: &DeviceRegistry,
-    store: &Store,
-    protocol: StoreAdapter,
-    random: impl rand::Rng,
-) -> Result<Model, StorageError> {
-    let (entries, _root_version) = capture(registry, store)?;
-    handler_from(entries, store, protocol, random)
-}
-
 pub(super) fn handler_from(
     entries: Vec<FrozenEntry>,
-    store: &Store,
-    protocol: StoreAdapter,
+    _store: &Store,
     mut random: impl rand::Rng,
+    renamer: Rc<dyn super::bridge::LabelWriter>,
 ) -> Result<Model, StorageError> {
     let root = endpoints::EthSysHandlerBuilder::new()
         .netif_diag(&SysNetifs)
@@ -515,11 +495,11 @@ pub(super) fn handler_from(
             Async(desc::DescHandler::new_aggregator(Dataver::new_rand(&mut random)).adapt()),
         );
     let mut built = Vec::new();
-    for FrozenEntry { device, stored } in entries {
+    for FrozenEntry { device, identity } in entries {
         let versions = Versions::new(&mut random);
-        let multiple = stored.functions.len() > 1;
-        let parent = multiple.then_some((stored.endpoint, None));
-        let functions = stored
+        let multiple = identity.functions.len() > 1;
+        let parent = multiple.then_some((identity.endpoint, None));
+        let functions = identity
             .functions
             .iter()
             .enumerate()
@@ -529,14 +509,13 @@ pub(super) fn handler_from(
                 BridgedHandler::new(
                     device.clone(),
                     Dataver::new(versions.bridged),
-                    &stored,
-                    store.devices(),
-                    protocol.clone(),
+                    &identity,
+                    renamer.clone(),
                 )
             };
             let role = match function {
                 None => Role::Parent {
-                    children: stored
+                    children: identity
                         .functions
                         .iter()
                         .map(|function| function.endpoint)
@@ -544,16 +523,14 @@ pub(super) fn handler_from(
                     bridged: bridged(),
                 },
                 Some((index, function)) => {
-                    let control = Control::new(
-                        device.function(&function.key.id).unwrap(),
-                        endpoint,
-                        versions,
-                    );
+                    let function_device = device.function(&function.id).unwrap();
+                    let label = function_device.description().label.clone();
+                    let control = Control::new(function_device, endpoint, versions);
                     if multiple {
                         Role::Child {
                             control,
                             tag: index as u8 + 1,
-                            label: function.label.clone(),
+                            label,
                         }
                     } else {
                         Role::Single {

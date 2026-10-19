@@ -1,7 +1,5 @@
 use super::{
-    model::{
-        AdapterError, AdapterStatus, GatewayStatus, INCOMPATIBLE_FUNCTIONS, Ready, TopologyReady,
-    },
+    model::{AdapterError, AdapterStatus, GatewayStatus, Ready, TopologyReady},
     runner::XiaomiAdapter,
     state::{Backoff, Context, DeviceSlot, GroupSource, Live},
     tasks::TaskSet,
@@ -53,21 +51,20 @@ impl XiaomiAdapter {
     ) -> Result<(Self, TopologyReady), AdapterError> {
         let auth = AuthService::new(store.xiaomi(), cloud.clone());
         let credentials = auth.saved_bridge_credentials()?;
+        let stored = store.devices().load_configuration()?;
         let scope = credentials
             .as_ref()
-            .map(|record| store.devices().load_scope(&record.uid))
-            .transpose()?
-            .flatten();
+            .and_then(|record| stored.scope.clone().filter(|scope| scope.uid == record.uid));
+        let revocations = store.devices().load_revocations()?;
         let registry = DeviceRegistry::new();
         let mut devices = BTreeMap::new();
         let mut consumers = Vec::new();
         let mut restored_relations = Vec::new();
-        if let Some(scope) = &scope {
-            let saved = store.devices().load_publication(Some(scope))?;
-            restored_relations = saved.relations;
+        if scope.is_some() {
+            let derived = stored.derive();
+            restored_relations = stored.groups.clone();
             for relation in &mut restored_relations {
-                if let Some(revocation) = saved
-                    .revocations
+                if let Some(revocation) = revocations
                     .iter()
                     .find(|revocation| revocation.key.id == relation.group_did)
                 {
@@ -75,47 +72,30 @@ impl XiaomiAdapter {
                     relation.error = Some(revocation.reason.clone());
                 }
             }
-            let hidden = restored_relations
-                .iter()
-                .filter(|relation| {
-                    saved
-                        .records
-                        .iter()
-                        .any(|record| record.key.id == relation.group_did && record.published)
-                })
-                .flat_map(|relation| relation.members.iter().cloned())
-                .collect::<std::collections::BTreeSet<_>>();
-            for metadata in saved.cached {
-                let Some(stored) = saved
-                    .records
-                    .iter()
-                    .find(|stored| stored.key == *metadata.device.key())
-                else {
-                    return Err(crate::storage::StorageError::new(
-                        store.path(),
-                        "restore source configuration",
-                        "Cached source has no reserved identity",
-                    )
-                    .into());
+            // Every current non-revoked native entity is restored, including
+            // currently unpublishable native groups; publication is decided by
+            // the derived graph, not by what was serving before the restart.
+            for device in &stored.devices {
+                let Some(native) = &device.native else {
+                    continue;
                 };
-                if saved
-                    .revocations
+                if revocations
                     .iter()
-                    .any(|revocation| revocation.key == stored.key)
-                    || (!stored.published && !hidden.contains(&stored.key.id))
+                    .any(|revocation| revocation.key == device.key)
                 {
                     continue;
                 }
-                let (physical, receivers) = PhysicalDevice::new(stored.description());
+                let served = derived
+                    .served
+                    .get(&device.key)
+                    .expect("a current native device has a served description");
+                let (physical, receivers) = PhysicalDevice::new(served.description.clone());
                 physical
                     .set_availability(Availability::Unavailable("restoring Xiaomi access".into()));
                 registry.insert(physical.clone());
-                let did = metadata.device.key().id.clone();
-                let incompatible_native = !super::publication::same_shape(
-                    &stored.description(),
-                    &metadata.physical_description(stored.label.clone()),
-                );
-                let mut slot = DeviceSlot::restored(metadata, physical);
+                let did = device.key.id.clone();
+                let mut slot = DeviceSlot::restored(native.clone(), physical);
+                slot.effective_repair = served.repair.clone().map(Rc::new);
                 if let Some(group) = restored_relations
                     .iter()
                     .find(|group| group.group_did == did)
@@ -129,14 +109,6 @@ impl XiaomiAdapter {
                     };
                     slot.group = Some(group.clone());
                     slot.effective_group = Some(group);
-                } else if incompatible_native {
-                    let reason = INCOMPATIBLE_FUNCTIONS.to_owned();
-                    slot.blocked = Some(reason.clone());
-                    slot.admitted
-                        .as_ref()
-                        .unwrap()
-                        .physical
-                        .set_availability(Availability::Unavailable(reason));
                 }
                 consumers.push((slot.admitted.as_ref().unwrap().clone(), receivers));
                 devices.insert(did, slot);
@@ -148,7 +120,7 @@ impl XiaomiAdapter {
             .unwrap_or_default();
         let ready = Rc::new(Ready::default());
         if scope.is_some() {
-            ready.finish(Ok(registry.clone()));
+            ready.finish(Ok(()));
         }
         let report = auth.local_status()?;
         let context = Rc::new(Context {

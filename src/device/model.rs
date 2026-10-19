@@ -184,12 +184,6 @@ impl PhysicalDeviceDescription {
             functions,
         })
     }
-    pub fn key(&self) -> &DeviceKey {
-        &self.key
-    }
-    pub fn label(&self) -> &str {
-        &self.label
-    }
     pub fn functions(&self) -> &[FunctionDescription] {
         &self.functions
     }
@@ -479,3 +473,7 @@ pub struct LightPatch {
     pub color: Option<Rgb>,
     pub mode: Option<LightMode>,
 }
+
+#[cfg(test)]
+#[path = "tests/model_access.rs"]
+mod model_access;

@@ -227,7 +227,7 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
         let next_address = next.get_ref().local_addr().unwrap();
         let foreign = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
         let foreign_address = foreign.get_ref().local_addr().unwrap();
-        let before = c.store.devices().load_publication(None).unwrap().records;
+        let before = c.store.devices().load_configuration().unwrap().devices;
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one", "multi"]).await;
@@ -235,7 +235,7 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
                 .events
                 .send(announcement(
                     next_address,
-                    &control.data[0].uid,
+                    &control.context.live.borrow().scope.as_ref().unwrap().uid,
                     "next",
                     456,
                 ))
@@ -283,9 +283,9 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
                 control
                     .store
                     .devices()
-                    .load_publication(None)
+                    .load_configuration()
                     .unwrap()
-                    .records,
+                    .devices,
                 before
             );
             for (did, id, siid) in [
@@ -371,7 +371,7 @@ fn masters_failing_after_connack_cannot_starve_a_later_healthy_master() {
             c.events
                 .send(announcement(
                     listener.get_ref().local_addr().unwrap(),
-                    &c.data[0].uid,
+                    &c.context.live.borrow().scope.as_ref().unwrap().uid,
                     name,
                     did,
                 ))
@@ -414,7 +414,10 @@ fn a_new_master_in_the_current_group_wakes_connection_retry() {
         let previous = c
             .discovery
             .snapshot()
-            .route(&c.data[0].group_id, None)
+            .route(
+                &c.context.live.borrow().scope.as_ref().unwrap().group_id(),
+                None,
+            )
             .unwrap();
         let mut changes = c.discovery.subscribe();
         let mut retry = Box::pin(super::super::local::wait_retry(
@@ -432,7 +435,12 @@ fn a_new_master_in_the_current_group_wakes_connection_retry() {
         until(|| c.discovery.snapshot().gateways.len() == 2).await;
         assert!(poll_once(retry.as_mut()).await.is_none());
         c.events
-            .send(announcement(address, &c.data[0].uid, "next", 456))
+            .send(announcement(
+                address,
+                &c.context.live.borrow().scope.as_ref().unwrap().uid,
+                "next",
+                456,
+            ))
             .unwrap();
         until(|| c.discovery.snapshot().gateways.len() == 3).await;
         assert!(poll_once(retry.as_mut()).await.is_some());
@@ -500,7 +508,14 @@ fn reconnect_keeps_command_consumers_cancels_old_writes_and_rebuilds_only_regist
 #[test]
 fn new_physical_group_discovers_own_local_access_after_member_session() {
     let mut rig = Rig::new(true, &["one"]);
-    let uid = rig.data[0].uid.clone();
+    let uid = rig
+        .store
+        .devices()
+        .load_configuration()
+        .unwrap()
+        .scope
+        .unwrap()
+        .uid;
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/group3-instance.json"
     ))
@@ -618,7 +633,17 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
     .unwrap();
     let urn = instance["type"].as_str().unwrap().to_owned();
     for (did, physical) in [("group-p", true), ("group-v", false)] {
-        let mut record = cached(&rig.data[0].uid, did, false);
+        let mut record = cached(
+            &rig.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .scope
+                .unwrap()
+                .uid,
+            did,
+            false,
+        );
         record.model = "mijia.light.group3".into();
         record.instance_type = urn.clone();
         record.device = crate::xiaomi::capability::parse_group(

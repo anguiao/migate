@@ -1,23 +1,17 @@
 //! Current database schema creation and validation.
 //!
-//! Only the current format is created, read and restored. Older or unknown
-//! formats are rejected without modifying the database file; incompatible
-//! local data is prepared separately and is not part of the runtime flow.
+//! Only the schema version 8 format is created, read and restored. Older or
+//! unknown formats are rejected without modifying the database file; the
+//! previous schema is deliberately not migrated.
 
 use rusqlite::Connection;
 
-/// Current application schema version. Version 6 was an unrelated experiment
-/// and is deliberately not accepted or migrated.
-pub(super) const CURRENT_VERSION: i64 = 7;
+/// Current application schema version.
+pub(super) const CURRENT_VERSION: i64 = 8;
 
-pub(super) const SCHEMA: &str = concat!(
-    include_str!("schema.sql"),
-    include_str!("devices.sql"),
-    include_str!("publication.sql")
-);
+pub(super) const SCHEMA: &str = include_str!("schema.sql");
 
-/// Accept only the current schema version. Everything else is rejected
-/// untouched so a one-time repair can be planned outside the runtime.
+/// Accept only the current schema version; reject other formats untouched.
 pub(super) fn validate(connection: &Connection) -> Result<(), &'static str> {
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))

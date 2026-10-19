@@ -5,8 +5,8 @@ use std::{env, process::ExitCode};
 use futures_lite::{future, io::BufReader};
 use migate::{
     RuntimeError,
+    app::{BridgeOptions, run_xiaomi_bridge, shutdown_signal},
     config::{AuthCommand, Command, Config},
-    runtime::{BridgeOptions, run_xiaomi_bridge, shutdown_signal},
     storage::{InstanceLock, Store, XiaomiStore},
     terminal::{self, AuthStatus},
     xiaomi::{
@@ -143,7 +143,10 @@ fn run_bridge(
                 status: &status,
                 port: matter_port,
             },
-            async { Ok((source_handle, ready.wait().await?)) },
+            async {
+                ready.wait().await?;
+                Ok(source_handle)
+            },
             networking,
             BufReader::new(blocking::Unblock::new(std::io::stdin())),
             blocking::Unblock::new(std::io::stdout()),

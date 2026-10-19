@@ -1,22 +1,19 @@
+mod configuration;
 mod device;
 mod directory;
 mod error;
 mod identity;
 mod lock;
 mod matter;
-mod publication;
-mod registry;
 mod schema;
 mod store;
 mod xiaomi;
 
-pub use device::{CachedPhysicalDevice, CachedScope, DeviceStore};
+pub use device::DeviceStore;
 pub use error::StorageError;
 pub use identity::Identity;
 pub use lock::InstanceLock;
 pub use matter::MatterStore;
-pub use publication::{PublicationCommit, PublicationState, StoredRelation, StoredRevocation};
-pub use registry::{StoredDevice, StoredFunction, import_label};
 pub use store::Store;
 pub use xiaomi::{TokenSet, XiaomiRecord, XiaomiStore};
 

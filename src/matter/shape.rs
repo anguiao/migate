@@ -8,12 +8,10 @@
 //! Equivalent Kelvin encodings of the same mired span compare equal.
 
 use super::units;
-use crate::device::{
-    FunctionDescription, FunctionKind, LightProfileKind, PhysicalDeviceDescription,
-};
+use crate::device::{FunctionDescription, FunctionKind, LightProfileKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct FixedShape {
+pub(crate) struct FixedShape {
     functions: Vec<FixedFunction>,
 }
 
@@ -35,8 +33,9 @@ enum FixedKind {
     },
 }
 
-/// Canonical shape of the functions as they will be published.
-fn fixed_shape(functions: &[FunctionDescription]) -> FixedShape {
+/// Canonical shape of the functions as they will be published. The
+/// application collects this value once and hands it to planning.
+pub(crate) fn fixed_shape(functions: &[FunctionDescription]) -> FixedShape {
     let multiple = functions.len() > 1;
     FixedShape {
         functions: functions
@@ -54,15 +53,6 @@ fn fixed_shape(functions: &[FunctionDescription]) -> FixedShape {
             })
             .collect(),
     }
-}
-
-/// True when two descriptions publish the same fixed Matter surface.
-/// NodeLabel and endpoint numbers are compared separately by publication.
-pub(crate) fn same_fixed_description(
-    first: &PhysicalDeviceDescription,
-    second: &PhysicalDeviceDescription,
-) -> bool {
-    fixed_shape(first.functions()) == fixed_shape(second.functions())
 }
 
 #[cfg(test)]

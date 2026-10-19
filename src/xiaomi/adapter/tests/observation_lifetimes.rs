@@ -148,7 +148,7 @@ fn an_incompatible_device_rejects_a_late_accepted_write_from_the_old_binding() {
 }
 
 #[test]
-fn a_repeated_compatible_description_sync_preserves_a_held_write_and_its_consumer() {
+fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
     block_on(observation_rig(&["multi"]).run(|c| async move {
         c.announce();
         let control = &c;
@@ -162,7 +162,7 @@ fn a_repeated_compatible_description_sync_preserves_a_held_write_and_its_consume
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "multi", 3) == 1).await;
 
-            let same = work.record.cached.borrow().clone();
+            let duplicate = work.record.cached.borrow().clone();
             control
                 .context
                 .live
@@ -170,7 +170,7 @@ fn a_repeated_compatible_description_sync_preserves_a_held_write_and_its_consume
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some((same, None));
+                .candidate = Some((duplicate, None));
             control.context.reconcile("multi").unwrap();
             assert_eq!(work.record.binding_generation.get(), generation);
             assert!(Rc::ptr_eq(&work, &device_work(control, "multi")));
@@ -255,7 +255,6 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
             let old = peer.state.borrow_mut().held_subs.remove(0);
             let work = device_work(control, "two");
             let original = work.record.cached.borrow().clone();
-            let generation = work.record.binding_generation.get();
             let outlet_function = original.device.functions()[0].clone();
             let mut changed = original.clone();
             changed.device = super::support::device_with_functions(
@@ -285,7 +284,7 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
                 })
                 .await;
             }
-            assert_eq!(work.record.binding_generation.get(), generation + 2);
+            assert!(work.life.is_closed());
             assert!(work.subscribed.borrow().is_empty());
             let current_work = device_work(control, "two");
             advance_to(
@@ -328,9 +327,11 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
             until(|| current_work.subscribed.borrow().len() == 1).await;
             assert!(current_work.subscribed.borrow().contains(&(2, 1)));
             assert!(
-                work.record
+                !work
+                    .record
                     .physical
-                    .same_instance(&current_work.record.physical)
+                    .same_instance(&current_work.record.physical),
+                "each binding change replaces the whole serving instance"
             );
         })
         .await;

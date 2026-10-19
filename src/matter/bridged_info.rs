@@ -1,7 +1,4 @@
-use crate::{
-    device::{Availability, PhysicalDevice},
-    storage::{DeviceStore, StoredDevice},
-};
+use crate::device::{Availability, PhysicalDevice};
 use rs_matter::{
     dm::{
         Cluster, Dataver, HandlerContext, InvokeContext, ReadContext, WriteContext,
@@ -11,6 +8,7 @@ use rs_matter::{
     tlv::{TLVBuilderParent, Utf8Str, Utf8StrBuilder},
     with,
 };
+use std::rc::Rc;
 const MAX_LABEL_BYTES: usize = 32;
 
 fn validate_label(label: &str) -> Result<(), Error> {
@@ -23,8 +21,7 @@ fn validate_label(label: &str) -> Result<(), Error> {
 pub(super) struct BridgedHandler {
     device: PhysicalDevice,
     endpoint: u16,
-    store: DeviceStore,
-    protocol: super::storage::StoreAdapter,
+    renamer: Rc<dyn super::bridge::LabelWriter>,
     dataver: Dataver,
     identity: String,
     configuration_version: u32,
@@ -35,19 +32,17 @@ impl BridgedHandler {
     pub(super) fn new(
         device: PhysicalDevice,
         dataver: Dataver,
-        stored: &StoredDevice,
-        store: DeviceStore,
-        protocol: super::storage::StoreAdapter,
+        identity: &super::model::PublishedIdentity,
+        renamer: Rc<dyn super::bridge::LabelWriter>,
     ) -> Self {
         let reported = std::cell::Cell::new(device.availability() == Availability::Available);
         Self {
             device,
-            endpoint: stored.endpoint,
-            store,
-            protocol,
+            endpoint: identity.endpoint,
+            renamer,
             dataver,
-            identity: stored.unique_id.clone(),
-            configuration_version: stored.configuration_version,
+            identity: identity.unique_id.clone(),
+            configuration_version: identity.configuration_version,
             reported,
         }
     }
@@ -116,12 +111,9 @@ impl bridged::ClusterHandler for BridgedHandler {
     fn set_node_label(&self, ctx: impl WriteContext, value: Utf8Str<'_>) -> Result<(), Error> {
         validate_label(value)?;
         if self.device.label() != value {
-            self.protocol
-                .check_failure()
+            self.renamer
+                .write_label(self.device.key(), value)
                 .map_err(|_| ErrorCode::StdIoError)?;
-            self.protocol
-                .record(self.store.set_device_label(self.device.key(), value))?;
-            self.device.set_label(value.to_owned());
             ctx.notify_changed();
         }
         Ok(())

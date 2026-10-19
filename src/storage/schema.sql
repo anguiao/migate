@@ -23,4 +23,26 @@ CREATE TABLE xiaomi_auth (
     certificate_pem TEXT NOT NULL
 ) STRICT;
 
-PRAGMA user_version = 7;
+-- The complete committed bridge configuration in one private JSON record.
+-- Canonical native facts, confirmed group relations, global historical
+-- identities, names, endpoints and versions live here; published and hidden
+-- sets, logical capabilities, group indexes and repair plans are derived.
+CREATE TABLE bridge_configuration (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    json TEXT NOT NULL
+) STRICT;
+
+-- Focused durable deletion/permission revocation tombstones. Written before
+-- the main configuration commit and cleared only by a newer confirmed
+-- authorized re-admission inside that commit. No timestamps or history.
+CREATE TABLE publication_revocation (
+    source TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (source, device_id)
+) STRICT;
+
+INSERT INTO bridge_configuration (id, json)
+VALUES (1, '{"scope":null,"root_version":1,"devices":[],"groups":[]}');
+
+PRAGMA user_version = 8;

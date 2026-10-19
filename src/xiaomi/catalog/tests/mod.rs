@@ -1,7 +1,8 @@
 use super::{CatalogError, current_home, load_device, select_local_home};
 use crate::{
+    configuration::{NativeDescription, Scope},
     device::DeviceKey,
-    storage::{CachedScope, XiaomiRecord},
+    storage::XiaomiRecord,
     xiaomi::{
         cloud::{CloudClient, OwnedHome},
         discovery::DiscoverySnapshot,
@@ -95,11 +96,10 @@ fn local_home_selection_is_stable_and_independent_of_device_membership() {
     ));
 }
 
-fn scope() -> CachedScope {
-    CachedScope {
+fn scope() -> Scope {
+    Scope {
         uid: "account".into(),
         home_id: "local".into(),
-        group_id: group_id("account", "local"),
     }
 }
 
@@ -254,8 +254,12 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
         &cloud,
     ))
     .unwrap();
-    assert_eq!(cached.home_id, "local");
-    assert_eq!(cached.group_id, group_id("account", "local"));
+    assert_eq!(
+        select_local_home(&snapshot(), &homes, "account")
+            .unwrap()
+            .home_id,
+        "local"
+    );
     assert_eq!(cached.device.functions()[0].power().siid, 2);
     assert_eq!(cached.device.functions()[0].power().piid, 1);
     assert_eq!(name.as_deref(), Some("Cloud outlet"));
@@ -411,7 +415,7 @@ async fn load_local(
     credentials: &XiaomiRecord,
     key: &DeviceKey,
     cloud: &CloudClient,
-) -> Result<(crate::storage::CachedPhysicalDevice, Option<String>), CatalogError> {
+) -> Result<(NativeDescription, Option<String>), CatalogError> {
     let home = select_local_home(snapshot, homes, &credentials.uid)?;
     load_device(cloud, credentials, &home, &key.id).await
 }

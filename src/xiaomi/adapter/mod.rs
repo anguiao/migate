@@ -28,4 +28,4 @@ pub use routing::PathPriority;
 pub use runner::XiaomiAdapter;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

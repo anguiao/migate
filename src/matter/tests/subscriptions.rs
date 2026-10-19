@@ -2,7 +2,7 @@ use super::super::{
     model::{self, basic_info},
     storage::StoreAdapter,
 };
-use super::support::next_power;
+use super::support::{model_handler, next_power};
 use crate::{
     device::{Availability, CommandError},
     storage::Store,
@@ -267,7 +267,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let rejection = RefCell::new(None::<CommandError>);
     let accepted = Cell::new(0);
     let registry = super::test_registry(&store, &device);
-    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -475,7 +475,7 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
     device.set_availability(Availability::Available);
     device.functions()[0].observe(false);
     let registry = super::test_registry(&store, &device);
-    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -1010,11 +1010,6 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
     let crypto = test_only_crypto();
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
-    let scope = crate::storage::CachedScope {
-        uid: "u".into(),
-        home_id: "h".into(),
-        group_id: crate::xiaomi::cloud::group_id("u", "h"),
-    };
     let (single, _single_receivers) = super::physical("dynamic-single", false);
     let (multi, _multi_receivers) = super::physical("dynamic-multi", true);
     if boot == 1 {
@@ -1031,11 +1026,14 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
     let mut single_physical = None;
     let mut multi_physical = None;
     let mut multi_stored = None;
-    for stored in store.devices().load_publication(None).unwrap().records {
-        if !stored.published {
+    let configuration = store.devices().load_configuration().unwrap();
+    let derived = configuration.derive();
+    for stored in &configuration.devices {
+        if !derived.published.contains(&stored.key) {
             continue;
         }
-        let (physical, _receivers) = crate::device::PhysicalDevice::new(stored.description());
+        let (physical, _receivers) =
+            crate::device::PhysicalDevice::new(derived.served[&stored.key].description.clone());
         physical.set_availability(Availability::Available);
         for function in physical.functions() {
             function.observe(false);
@@ -1045,13 +1043,13 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
             "dynamic-single" => single_physical = Some(physical),
             "dynamic-multi" => {
                 multi_physical = Some(physical);
-                multi_stored = Some(stored);
+                multi_stored = Some(stored.clone());
             }
             _ => {}
         }
     }
     let single_physical = single_physical.unwrap();
-    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -1124,11 +1122,12 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
                     );
                     assert!(!changed.powers.contains_key(&2));
                     wait_committed(&state).await;
-                    store
-                        .devices()
-                        .set_device_label(&multi_stored.key, "Named multi")
+                    let registry = crate::device::DeviceRegistry::new();
+                    registry.insert(multi_physical.clone());
+                    super::support::renamer(&registry, &store)
+                        .write_label(&multi_stored.key, "Named multi")
                         .unwrap();
-                    commit_visibility(&store, &scope, "dynamic-multi", false, 2, 2);
+                    commit_presence(&store, "dynamic-multi", None, 2, 2);
                     (id, multi_stored.unique_id.clone())
                 }
                 2 => {
@@ -1139,11 +1138,19 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
                     assert_eq!(restored.parts[&1], [2]);
                     assert_eq!(restored.powers.keys().copied().collect::<Vec<_>>(), [2]);
                     wait_committed(&state).await;
-                    commit_visibility(&store, &scope, "dynamic-multi", true, 3, 3);
+                    commit_presence(
+                        &store,
+                        "dynamic-multi",
+                        Some(super::support::native_for(&multi.description())),
+                        3,
+                        3,
+                    );
                     let readded = store
                         .devices()
-                        .load_published(multi.key())
+                        .load_configuration()
                         .unwrap()
+                        .device(multi.key())
+                        .cloned()
                         .unwrap();
                     assert_eq!(readded.unique_id, unique_id);
                     assert_eq!(readded.label, "Named multi");
@@ -1197,31 +1204,25 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
     id
 }
 
-fn commit_visibility(
+fn commit_presence(
     store: &Store,
-    scope: &crate::storage::CachedScope,
     id: &str,
-    published: bool,
+    native: Option<crate::configuration::NativeDescription>,
     version: u32,
     root: u32,
 ) {
-    let mut records = store.devices().load_publication(None).unwrap().records;
-    for record in &mut records {
-        if record.key.id == id {
-            record.published = published;
-            record.configuration_version = version;
-        }
-    }
+    let mut configuration = store.devices().load_configuration().unwrap();
+    let record = configuration
+        .devices
+        .iter_mut()
+        .find(|record| record.key.id == id)
+        .unwrap();
+    record.native = native;
+    record.configuration_version = version;
+    configuration.root_version = root;
     store
         .devices()
-        .apply_publication(&crate::storage::PublicationCommit {
-            scope: scope.clone(),
-            cached: Vec::new(),
-            records,
-            relations: Vec::new(),
-            root_version: root,
-            clear_revocations: Vec::new(),
-        })
+        .commit_configuration(&configuration, &[])
         .unwrap();
 }
 
@@ -1281,7 +1282,7 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
                 })
                 .unwrap();
             let registry = super::test_registry(&store, &device);
-            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -1592,19 +1593,16 @@ fn frozen_light_boot(directory: &Path, boot: u16, previous: Option<u32>) -> (u32
         device.set_availability(Availability::Available);
         super::support::add_device(&store, &device.description());
     }
-    let stored = store
-        .devices()
-        .load_publication(None)
-        .unwrap()
-        .records
-        .into_iter()
-        .find(|record| record.published)
-        .unwrap();
-    let (physical, _receivers) = crate::device::PhysicalDevice::new(stored.description());
+    let configuration = store.devices().load_configuration().unwrap();
+    let derived = configuration.derive();
+    let stored = configuration.device(device.key()).unwrap().clone();
+    assert!(derived.published.contains(&stored.key));
+    let (physical, _receivers) =
+        crate::device::PhysicalDevice::new(derived.served[&stored.key].description.clone());
     physical.set_availability(Availability::Available);
     let registry = crate::device::DeviceRegistry::new();
     registry.insert(physical);
-    let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -1669,28 +1667,27 @@ fn frozen_light_boot(directory: &Path, boot: u16, previous: Option<u32>) -> (u32
     if boot == 1 {
         // Commit the fixed change between instances: narrower CT bounds, a
         // bumped endpoint version and a bumped root version.
-        let mut updated = stored.clone();
-        updated.configuration_version = 2;
-        updated.functions[0].kind =
+        let description = device.description();
+        let mut functions = description.functions().to_vec();
+        functions[0].kind =
             crate::device::FunctionKind::Light(crate::device::LightProfile::ColorTemperature(
                 crate::device::TemperatureInterval::new(3000, 4000).unwrap(),
             ));
-        let scope = crate::storage::CachedScope {
-            uid: "u".into(),
-            home_id: "h".into(),
-            group_id: crate::xiaomi::cloud::group_id("u", "h"),
-        };
-        store
-            .devices()
-            .apply_publication(&crate::storage::PublicationCommit {
-                scope,
-                cached: Vec::new(),
-                records: vec![updated],
-                relations: Vec::new(),
-                root_version: 2,
-                clear_revocations: Vec::new(),
-            })
-            .unwrap();
+        let (replacement, _receivers) = crate::device::PhysicalDevice::new(
+            crate::device::PhysicalDeviceDescription::new(
+                description.key().clone(),
+                description.label(),
+                functions,
+            )
+            .unwrap(),
+        );
+        commit_presence(
+            &store,
+            &stored.key.id,
+            Some(super::support::native_for(&replacement.description())),
+            2,
+            2,
+        );
     }
     protocol.check_failure().unwrap();
     (id, observed)

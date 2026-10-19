@@ -78,11 +78,10 @@ fn replacing_a_binding_clears_its_previous_subscription_failure() {
 #[test]
 fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_command_binding() {
     let rig = Rig::new(true, &["one"]);
-    rig.store
-        .devices()
-        .set_device_label(&DeviceKey::new("xiaomi", "one"), "Controller saved name")
-        .unwrap();
     block_on(rig.run(|c| async move {
+        c.publication
+            .rename(&DeviceKey::new("xiaomi", "one"), "Controller saved name")
+            .unwrap();
         c.announce();
         let peer = Rc::new(Peer::default());
         let miot_name = "米家后来修改的厨房插座名称超过三十二字节";
@@ -111,8 +110,10 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
             let before = control
                 .store
                 .devices()
-                .load_published(&key)
+                .load_configuration()
                 .unwrap()
+                .device(&key)
+                .cloned()
                 .unwrap();
             assert_eq!(before.label, "Controller saved name");
             let mut changed = control.context.live.borrow().devices["one"]
@@ -172,21 +173,29 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                     .power,
                 Power::On
             );
+            let after = control
+                .store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .device(&key)
+                .unwrap()
+                .clone();
+            assert_eq!(after.unique_id, before.unique_id);
+            assert_eq!(after.endpoint, before.endpoint);
+            assert_eq!(after.functions, before.functions);
+            assert_eq!(after.label, before.label);
+            assert_eq!(after.configuration_version, before.configuration_version);
             assert_eq!(
                 control
                     .store
                     .devices()
-                    .load_published(&key)
+                    .load_configuration()
                     .unwrap()
-                    .unwrap(),
-                before
-            );
-            assert_eq!(
-                control
-                    .store
-                    .devices()
-                    .load_parsed(&control.data[0].uid, "local", &key)
+                    .device(&key)
                     .unwrap()
+                    .native
+                    .as_ref()
                     .unwrap()
                     .device
                     .functions()[0]
@@ -200,109 +209,20 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
 }
 
 #[test]
-fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_description_returns() {
-    block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
-        c.announce();
-        let peer = Rc::new(Peer::default());
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            initialized(control, &peer, &["one", "multi"]).await;
-            let original = control.context.live.borrow().devices["multi"]
-                .admitted
-                .as_ref()
-                .unwrap()
-                .cached
-                .borrow()
-                .clone();
-            let mut incompatible = original.clone();
-            // A representable but differently shaped description: the stored
-            // three-channel identity cannot adopt a single-main source.
-            incompatible.device = crate::xiaomi::capability::ParsedDevice::new(
-                incompatible.device.key().clone(),
-                vec![crate::xiaomi::capability::ParsedFunction::outlet(
-                    "main",
-                    "Main power",
-                    crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-                )],
-                None,
-            )
-            .unwrap();
-            control
-                .context
-                .live
-                .borrow_mut()
-                .devices
-                .get_mut("multi")
-                .unwrap()
-                .candidate = Some((incompatible, None));
-            control.context.reconcile("multi").unwrap();
-            let physical = control
-                .context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "multi"))
-                .unwrap();
-            assert_eq!(physical.functions().len(), 3);
-            assert!(matches!(
-                physical.availability(),
-                Availability::Unavailable(_)
-            ));
-            assert!(
-                control
-                    .context
-                    .status
-                    .borrow()
-                    .pending
-                    .iter()
-                    .any(
-                        |pending| pending.did == "multi" && pending.reason.contains("incompatible")
-                    )
-            );
-            assert_eq!(
-                control
-                    .store
-                    .devices()
-                    .load_parsed(&original.uid, "local", physical.key())
-                    .unwrap()
-                    .unwrap(),
-                original
-            );
-            function(&control.context.registry, "one", "main")
-                .execute(Command::On)
-                .await
-                .unwrap();
-            control
-                .context
-                .live
-                .borrow_mut()
-                .devices
-                .get_mut("multi")
-                .unwrap()
-                .blocked = None;
-            control
-                .context
-                .live
-                .borrow_mut()
-                .devices
-                .get_mut("multi")
-                .unwrap()
-                .candidate = Some((original, None));
-            control.context.reconcile("multi").unwrap();
-            initialized(control, &peer, &["one", "multi"]).await;
-        })
-        .await;
-    }));
-}
-
-#[test]
 fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().members = vec!["one".into(), "multi".into()];
-    rusqlite::Connection::open(rig.store.path())
-        .unwrap()
-        .execute(
-            "INSERT INTO endpoint_allocation VALUES (65533,'test','history','main')",
-            [],
-        )
+    let mut configuration = rig.store.devices().load_configuration().unwrap();
+    let historical = super::support::device_with_key(&rig.data[0].device, "history");
+    configuration
+        .devices
+        .push(crate::storage::tests::fixtures::identity(
+            &historical.physical_description("History"),
+            65533,
+        ));
+    rig.store
+        .devices()
+        .commit_configuration(&configuration, &[])
         .unwrap();
     block_on(rig.run(|c| async move {
         c.announce();
@@ -325,8 +245,10 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
                 control
                     .store
                     .devices()
-                    .load_published(&DeviceKey::new("xiaomi", "multi"))
+                    .load_configuration()
                     .unwrap()
+                    .device(&DeviceKey::new("xiaomi", "multi"))
+                    .cloned()
                     .is_none()
             );
             function(&control.context.registry, "one", "main")
@@ -343,7 +265,7 @@ fn publication_database_failure_keeps_the_complete_cached_configuration() {
     let rig = Rig::new(true, &["one"]);
     let store = rig.store.clone();
     rig.cloud.lock().unwrap().members = vec!["one".into(), "multi".into()];
-    rusqlite::Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER fail_multi BEFORE INSERT ON device_function WHEN NEW.device_id='multi' BEGIN SELECT RAISE(ABORT,'publication failed'); END;").unwrap();
+    rusqlite::Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER fail_multi BEFORE UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT,'publication failed'); END;").unwrap();
     block_on(rig.run(|c| async move {
         c.announce();
         let control = &c;
@@ -355,20 +277,20 @@ fn publication_database_failure_keeps_the_complete_cached_configuration() {
                 control
                     .store
                     .devices()
-                    .load_published(&DeviceKey::new("xiaomi", "multi"))
+                    .load_configuration()
                     .unwrap()
+                    .device(&DeviceKey::new("xiaomi", "multi"))
+                    .cloned()
                     .is_none()
             );
             assert!(
                 control
                     .store
                     .devices()
-                    .load_parsed(
-                        &control.data[0].uid,
-                        "local",
-                        &DeviceKey::new("xiaomi", "multi")
-                    )
+                    .load_configuration()
                     .unwrap()
+                    .device(&DeviceKey::new("xiaomi", "multi"))
+                    .and_then(|device| device.native.as_ref())
                     .is_none()
             );
             function(&control.context.registry, "one", "main")

@@ -5,26 +5,25 @@ use context::View;
 use super::{AuthStatus, current_time};
 use crate::{
     RuntimeError,
-    device::{Availability, Capability, Command, DeviceKey, DeviceRegistry, LightMode, Power},
-    storage::{DeviceStore, StorageError, StoredRelation},
+    configuration::GroupRelation,
+    device::{Availability, Capability, Command, DeviceKey, LightMode, Power},
+    storage::StorageError,
 };
 pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID [channel], off DID [channel], help\nUse list to find stable channel keys. A single-channel device may omit channel; channel is required for a multi-channel device.";
-fn invalid(view: &View<'_>, status: &AuthStatus, now: i64, reason: &str) -> String {
+fn invalid(view: &View, status: &AuthStatus, now: i64, reason: &str) -> String {
     format!(
         "{reason}\n{COMMAND_HELP}\n{}",
         view.render_status(status, now)
     )
 }
-fn configuration_lines(view: &View<'_>, did: &str) -> Vec<String> {
-    let Some(view) = view.configuration() else {
-        return Vec::new();
-    };
+fn configuration_lines(view: &View, did: &str) -> Vec<String> {
+    let current = &view.current;
     let key = DeviceKey::new("xiaomi", did);
     let mut lines = Vec::new();
-    if let Some(record) = view.records.iter().find(|record| record.key == key) {
+    if let Some(record) = current.configuration.device(&key) {
         lines.push(format!(
             "  Matter: {}; endpoint {}; configuration version {}.",
-            if record.published {
+            if current.derived.published.contains(&key) {
                 "published"
             } else {
                 "hidden or reserved"
@@ -35,14 +34,14 @@ fn configuration_lines(view: &View<'_>, did: &str) -> Vec<String> {
     }
     // The terminal lists every confirmed membership from the effective
     // relations, including groups that are currently unpublished.
-    for relation in view
-        .source
-        .relations
-        .iter()
+    for relation in current
+        .derived
+        .groups
+        .values()
         .filter(|relation| relation.members.iter().any(|member| member == did))
     {
         let group_key = DeviceKey::new("xiaomi", &relation.group_did);
-        let state = if view.published.get(&group_key).is_some() {
+        let state = if current.derived.published.contains(&group_key) {
             "published".to_string()
         } else {
             format!("not published ({})", unpublished_reason(view, relation))
@@ -57,12 +56,7 @@ fn configuration_lines(view: &View<'_>, did: &str) -> Vec<String> {
             }
         ));
     }
-    if let Some(group) = view
-        .source
-        .relations
-        .iter()
-        .find(|group| group.group_did == did)
-    {
+    if let Some(group) = current.derived.groups.get(did) {
         lines.push(format!(
             "  Native group ({}): members {}.",
             if group.is_physical {
@@ -72,13 +66,12 @@ fn configuration_lines(view: &View<'_>, did: &str) -> Vec<String> {
             },
             group.members.join(", ")
         ));
-        if let Some(entry) = view
-            .source
+        if let Some(entry) = current
             .entries
             .iter()
             .find(|entry| entry.physical.key() == &key)
         {
-            let native = entry.cached.device.functions()[0].description();
+            let native = entry.native.device.functions()[0].description();
             let logical = entry.physical.functions()[0].description();
             let repaired = logical.supports_rgb() && !native.supports_rgb();
             lines.push(format!(
@@ -97,8 +90,9 @@ fn configuration_lines(view: &View<'_>, did: &str) -> Vec<String> {
                     "native group"
                 }
             ));
-            if entry.repair.is_none()
-                && let Some(reason) = &entry.repair_reason
+            if let Some(served) = current.derived.served.get(&key)
+                && served.repair.is_none()
+                && let Some(reason) = &served.repair_reason
             {
                 lines.push(format!("  RGB repair: unavailable ({reason})."));
             }
@@ -138,10 +132,7 @@ fn capabilities(description: &crate::device::FunctionDescription) -> String {
         .join(", ")
 }
 
-fn unpublished_reason(
-    view: &crate::publication::EffectiveConfiguration,
-    relation: &StoredRelation,
-) -> String {
+fn unpublished_reason(view: &View, relation: &GroupRelation) -> String {
     if let Some(error) = &relation.error {
         return error.clone();
     }
@@ -152,7 +143,7 @@ fn unpublished_reason(
         return "native group description has no instance type".into();
     }
     match view
-        .source
+        .current
         .entries
         .iter()
         .find(|entry| entry.physical.key().id == relation.group_did)
@@ -165,25 +156,23 @@ fn unpublished_reason(
     }
 }
 
-fn render(registry: &View<'_>, did: Option<&str>) -> String {
+fn render(view: &View, did: Option<&str>) -> String {
     let mut lines = Vec::new();
-    if let Some(view) = registry.configuration() {
-        for relation in &view.source.relations {
-            if did.is_some_and(|did| did != relation.group_did) {
-                continue;
-            }
-            let key = DeviceKey::new("xiaomi", &relation.group_did);
-            if registry.get(&key).is_some() {
-                continue;
-            }
-            lines.push(format!(
-                "{} (native group): not published ({}).",
-                relation.group_did,
-                unpublished_reason(view, relation)
-            ));
+    for relation in view.current.derived.groups.values() {
+        if did.is_some_and(|did| did != relation.group_did) {
+            continue;
         }
+        let key = DeviceKey::new("xiaomi", &relation.group_did);
+        if view.get(&key).is_some() {
+            continue;
+        }
+        lines.push(format!(
+            "{} (native group): not published ({}).",
+            relation.group_did,
+            unpublished_reason(view, relation)
+        ));
     }
-    for physical in registry
+    for physical in view
         .list()
         .into_iter()
         .filter(|physical| did.is_none_or(|did| physical.key().id == did))
@@ -195,7 +184,7 @@ fn render(registry: &View<'_>, did: Option<&str>) -> String {
             Availability::Unavailable(reason) => format!("unavailable ({reason})"),
         };
         lines.push(format!("{} ({}): {availability}", key.id, physical.label()));
-        lines.extend(configuration_lines(registry, &key.id));
+        lines.extend(configuration_lines(view, &key.id));
         for function in physical.functions() {
             let id = &function.function_key().id;
             let label = &function.description().label;
@@ -261,28 +250,16 @@ fn render(registry: &View<'_>, did: Option<&str>) -> String {
         lines.join("\n")
     }
 }
-pub async fn handle_line(
-    registry: &DeviceRegistry,
-    store: &DeviceStore,
-    status: &AuthStatus,
-    line: &str,
-    now: i64,
-) -> Result<Option<String>, StorageError> {
-    Context::fixed(registry, store, status)
-        .handle_line(line, now)
-        .await
-}
 
-impl Context<'_> {
-    pub(crate) async fn handle_line(
+impl View {
+    async fn handle_line(
         &self,
         line: &str,
         now: i64,
+        status: &AuthStatus,
     ) -> Result<Option<String>, StorageError> {
-        let view = self.view();
-        let registry = &view;
-        let store = &self.store;
-        let status = self.status;
+        let view = self;
+        let registry = self;
         let words = line.split_whitespace().collect::<Vec<_>>();
         let text = match words.as_slice() {
             [] => return Ok(None),
@@ -291,13 +268,10 @@ impl Context<'_> {
                 let mut text = render(registry, None);
                 for pending in status.pending() {
                     let key = DeviceKey::new("xiaomi", &pending.did);
-                    let name = match registry.get(&key) {
-                        Some(physical) => physical.label(),
-                        None => store
-                            .load_published(&key)?
-                            .map(|stored| stored.label)
-                            .unwrap_or_else(|| pending.name.clone()),
-                    };
+                    let name = registry
+                        .get(&key)
+                        .map(|physical| physical.label())
+                        .unwrap_or_else(|| pending.name.clone());
                     text.push_str(&format!(
                         "\n{} ({}): pending ({})",
                         pending.did, name, pending.reason
@@ -375,37 +349,49 @@ impl Context<'_> {
     }
 }
 
-/// EOF ends input while the caller continues polling every bridge service.
-pub async fn run_input(
-    registry: &DeviceRegistry,
-    store: &DeviceStore,
-    status: &AuthStatus,
-    input: impl futures_lite::io::AsyncBufRead + Unpin,
-    output: impl futures_lite::io::AsyncWrite + Unpin,
-) -> Result<(), RuntimeError> {
-    Context::fixed(registry, store, status)
-        .run_input(input, output)
-        .await
+impl Context<'_> {
+    pub(crate) async fn handle_line(
+        &self,
+        line: &str,
+        now: i64,
+    ) -> Result<Option<String>, StorageError> {
+        self.view().handle_line(line, now, self.status).await
+    }
 }
 
 impl Context<'_> {
     pub(crate) async fn run_input(
         &self,
-        mut input: impl futures_lite::io::AsyncBufRead + Unpin,
-        mut output: impl futures_lite::io::AsyncWrite + Unpin,
+        input: impl futures_lite::io::AsyncBufRead + Unpin,
+        output: impl futures_lite::io::AsyncWrite + Unpin,
     ) -> Result<(), RuntimeError> {
-        use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt};
-        let mut line = String::new();
-        loop {
-            line.clear();
-            if input.read_line(&mut line).await? == 0 {
-                return Ok(());
-            }
-            if let Some(result) = self.handle_line(&line, current_time()).await? {
-                output.write_all(result.as_bytes()).await?;
-                output.write_all(b"\n").await?;
-                output.flush().await?;
-            }
+        read_commands(input, output, async |line| {
+            self.handle_line(line, current_time()).await
+        })
+        .await
+    }
+}
+
+/// Own terminal I/O while each command obtains its current committed view.
+async fn read_commands(
+    mut input: impl futures_lite::io::AsyncBufRead + Unpin,
+    mut output: impl futures_lite::io::AsyncWrite + Unpin,
+    mut handle: impl AsyncFnMut(&str) -> Result<Option<String>, StorageError>,
+) -> Result<(), RuntimeError> {
+    use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt};
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if input.read_line(&mut line).await? == 0 {
+            return Ok(());
+        }
+        if let Some(result) = handle(&line).await? {
+            output.write_all(result.as_bytes()).await?;
+            output.write_all(b"\n").await?;
+            output.flush().await?;
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

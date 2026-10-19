@@ -145,12 +145,9 @@ pub(in super::super) fn confirmed_for(
     did: &str,
     model: &str,
     instance: &Value,
-) -> CachedPhysicalDevice {
-    let scope = c.context.live.borrow().scope.clone().unwrap();
-    CachedPhysicalDevice {
-        uid: scope.uid,
-        home_id: scope.home_id,
-        group_id: scope.group_id,
+) -> NativeDescription {
+    let _ = c;
+    NativeDescription {
         model: model.into(),
         instance_type: instance["type"].as_str().unwrap().into(),
         device: crate::xiaomi::capability::parse_device_for_model(

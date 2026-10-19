@@ -7,13 +7,13 @@ use support::*;
 
 use super::{
     Bridge, PairingEvent,
-    model::{self, basic_info, persist_basic_info, prepare_basic_info},
+    model::{basic_info, persist_basic_info, prepare_basic_info},
     pairing,
     storage::StoreAdapter,
 };
 use crate::{
     RuntimeError,
-    device::{CommandReceiver, DeviceKey, FunctionKind, LightProfile, PhysicalDevice},
+    device::{DeviceKey, FunctionKind, LightProfile, PhysicalDevice},
     storage::Store,
 };
 use futures_lite::future::{block_on, or};
@@ -37,7 +37,7 @@ fn topology_and_identity_are_fixed() {
     assert_eq!(info.unique_id, identity.bridge_id);
     assert_eq!(info.product_name, "MiGate");
     assert_eq!(
-        model::handler(
+        model_handler(
             &test_registry(&store, &test_device().0),
             &store,
             StoreAdapter::new(store.matter()),
@@ -53,7 +53,7 @@ fn topology_and_identity_are_fixed() {
 fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let model = model::handler(
+    let model = model_handler(
         &test_registry(&store, &test_device().0),
         &store,
         StoreAdapter::new(store.matter()),
@@ -117,7 +117,7 @@ fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
         let (device, _receiver) = support::light(rgb);
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let model = model::handler(
+        let model = model_handler(
             &test_registry(&store, &device),
             &store,
             StoreAdapter::new(store.matter()),
@@ -216,7 +216,7 @@ fn on_off_and_dimmable_light_metadata_use_their_standard_device_types() {
         let (device, _receiver) = support::light_with(profile);
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let model = model::handler(
+        let model = model_handler(
             &test_registry(&store, &device),
             &store,
             StoreAdapter::new(store.matter()),
@@ -253,7 +253,13 @@ fn unused_legacy_scenes_blob_is_preserved_without_loading() {
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
             let registry = test_registry(&store, &device);
-            let bridge = Bridge::new(&registry, &store, &identity);
+            let bridge = Bridge::new(
+                frozen_entries(&registry, &store).unwrap(),
+                store.devices().load_configuration().unwrap().root_version,
+                &store,
+                &identity,
+                renamer(&registry, &store),
+            );
             let error =
                 block_on(bridge.run(0, |_| Err(std::io::Error::other("startup completed"))))
                     .unwrap_err();
@@ -382,7 +388,13 @@ fn cancelled_run_keeps_a_recorded_storage_failure() {
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
             let registry = test_registry(&store, &device);
-            let bridge = Bridge::new(&registry, &store, &identity);
+            let bridge = Bridge::new(
+                frozen_entries(&registry, &store).unwrap(),
+                store.devices().load_configuration().unwrap().root_version,
+                &store,
+                &identity,
+                renamer(&registry, &store),
+            );
             let running = bridge.run(0, |_| Ok(()));
             let mut callback_store = bridge.store.clone();
             let db = rusqlite::Connection::open(store.path()).unwrap();

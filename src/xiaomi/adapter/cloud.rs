@@ -3,7 +3,7 @@ use super::{
     state::{Backoff, Context, Lifetime},
 };
 use crate::{
-    storage::CachedScope,
+    configuration::Scope,
     xiaomi::{
         auth::{AuthenticationState, FailureReason},
         catalog::{self, CatalogError},
@@ -68,7 +68,7 @@ pub(super) async fn run(
             continue;
         }
         let credentials = context.live.borrow().credentials.as_ref().unwrap().clone();
-        context.ready.finish(Ok(context.registry.clone()));
+        context.ready.finish(Ok(()));
         let token = &credentials.tokens.access_token;
         let Some(homes) = future::or(async { Some(cloud.get_owned_homes(token).await) }, async {
             context.token_retired(token).await;
@@ -179,10 +179,9 @@ pub(super) async fn run(
                 continue;
             }
         };
-        let scope = CachedScope {
+        let scope = Scope {
             uid: home.uid.clone(),
             home_id: home.home_id.clone(),
-            group_id: home.group_id.clone(),
         };
         // The complete publication transaction persists the scope.
         let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();

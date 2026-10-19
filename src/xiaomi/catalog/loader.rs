@@ -1,8 +1,9 @@
 use std::{error::Error, fmt};
 
 use crate::{
+    configuration::{NativeDescription, Scope},
     device::DeviceKey,
-    storage::{CachedPhysicalDevice, CachedScope, XiaomiRecord},
+    storage::XiaomiRecord,
     xiaomi::{
         capability::{CapabilityError, parse_device_for_model},
         cloud::{CloudClient, CloudError, OwnedHome},
@@ -67,7 +68,7 @@ pub fn select_local_home(
 }
 
 /// A missing selected home is a scope failure, never an empty member list.
-pub fn current_home(homes: &[OwnedHome], scope: &CachedScope) -> Result<OwnedHome, CatalogError> {
+pub(crate) fn current_home(homes: &[OwnedHome], scope: &Scope) -> Result<OwnedHome, CatalogError> {
     homes
         .iter()
         .find(|home| home.uid == scope.uid && home.home_id == scope.home_id)
@@ -77,12 +78,12 @@ pub fn current_home(homes: &[OwnedHome], scope: &CachedScope) -> Result<OwnedHom
 
 /// Load a selected home's member description and optional cloud name.
 /// Persistence and availability belong to the adapter.
-pub async fn load_device(
+pub(crate) async fn load_device(
     cloud: &CloudClient,
     credentials: &XiaomiRecord,
     home: &OwnedHome,
     did: &str,
-) -> Result<(CachedPhysicalDevice, Option<String>), CatalogError> {
+) -> Result<(NativeDescription, Option<String>), CatalogError> {
     if home.uid != credentials.uid {
         return Err(CatalogError::InvalidScope);
     }
@@ -101,10 +102,7 @@ pub async fn load_device(
     let device = parse_device_for_model(DeviceKey::new("xiaomi", did), &details.model, &instance)
         .map_err(CatalogError::Capability)?;
     Ok((
-        CachedPhysicalDevice {
-            uid: home.uid.clone(),
-            home_id: home.home_id.clone(),
-            group_id: home.group_id.clone(),
+        NativeDescription {
             model: details.model,
             instance_type: details.instance_type,
             device,

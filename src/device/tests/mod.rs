@@ -408,3 +408,5 @@ mod lighting;
 mod light_commands;
 
 mod validity;
+
+mod multi_device;

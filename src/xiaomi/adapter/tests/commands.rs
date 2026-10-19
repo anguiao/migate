@@ -139,34 +139,31 @@ fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_va
                 .candidate = Some((changed, None));
             control.context.reconcile("one").unwrap();
             until(|| peer.count("get", "one", 7) == 1).await;
+            // The new current instance completes its own read before the
+            // obsolete write receipt returns.
+            let current = function(&control.context.registry, "one", "main");
+            until(|| current.snapshot().power == Power::Off).await;
             peer.release("one", 2, accepted("one", 2, 0)).await;
             assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
             assert_eq!(one.snapshot().power, Power::Off);
-            assert_eq!(one.snapshot().availability, Availability::Available);
+            assert!(matches!(
+                one.snapshot().availability,
+                Availability::Unavailable(_)
+            ));
+            until(|| current.snapshot().availability == Availability::Available).await;
+            assert_eq!(current.snapshot().power, Power::Off);
+            peer.state.borrow_mut().hold_writes = false;
+            current.execute(Command::Off).await.unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 7), 1);
         })
         .await;
     }));
 }
 
 #[test]
-fn restored_and_repeated_description_sync_keep_wire_channel_commands() {
+fn restored_and_duplicate_description_sync_keeps_channel_commands() {
     let mut rig = Rig::new(true, &["multi"]);
-    let stored = rig.data[1].clone();
-    let scope = scope(&stored.uid);
-    let mut state = rig.store.devices().load_publication(Some(&scope)).unwrap();
-    *state
-        .cached
-        .iter_mut()
-        .find(|cached| cached.device.key() == stored.device.key())
-        .unwrap() = stored.clone();
-    rig.store
-        .devices()
-        .apply_publication(&crate::storage::tests::fixtures::commit(
-            scope,
-            state.cached,
-            state.records,
-        ))
-        .unwrap();
+    let stable = rig.data[1].clone();
     let (mut source, ready) = XiaomiAdapter::build(
         rig.store.clone(),
         rig.source.cloud.clone(),
@@ -191,7 +188,7 @@ fn restored_and_repeated_description_sync_keep_wire_channel_commands() {
                 .iter()
                 .map(|function| function.function_key().id.clone())
                 .collect::<Vec<_>>();
-            let cached_order = stored
+            let cached_order = stable
                 .device
                 .functions()
                 .iter()
@@ -207,8 +204,6 @@ fn restored_and_repeated_description_sync_keep_wire_channel_commands() {
                     .unwrap();
                 assert_eq!(peer.count("rpcReq", "multi", siid), 1);
             }
-            // Repeating the same stored description keeps the instance and its
-            // stable function keys; channel commands stay on their own siid.
             control
                 .context
                 .live
@@ -216,8 +211,13 @@ fn restored_and_repeated_description_sync_keep_wire_channel_commands() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some((stored.clone(), None));
+                .candidate = Some((stable.clone(), None));
             control.context.reconcile("multi").unwrap();
+            let current = control.context.registry.get(&key).unwrap();
+            assert!(
+                physical.same_instance(&current),
+                "an identical duplicate description keeps the serving instance"
+            );
             for (id, siid) in [("outlet_1", 3), ("outlet_2", 4), ("usb", 9)] {
                 physical
                     .function(id)

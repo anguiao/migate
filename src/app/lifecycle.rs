@@ -1,10 +1,8 @@
+use super::{App, BridgeOptions};
 use crate::{
     RuntimeError,
-    device::DeviceRegistry,
     matter::{Advertisement, Bridge, PairingEvent},
-    publication::Publication,
-    storage::{Identity, Store},
-    terminal::{self, AuthStatus},
+    terminal,
 };
 use futures_lite::{
     future,
@@ -16,29 +14,44 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub struct BridgeOptions<'a> {
-    pub store: &'a Store,
-    pub identity: &'a Identity,
-    pub status: &'a AuthStatus,
-    pub port: u16,
-}
-
-/// A ready runtime: the served registry plus the optional committed
-/// configuration that production monitors for rebuilds.
-pub(super) struct PreparedRuntime {
-    pub(super) registry: DeviceRegistry,
-    pub(super) publication: Option<Rc<Publication>>,
-}
-
-/// The one bridge lifecycle shared by production and isolated tests.
-///
-/// The startup race here lets ready, source failure and interrupt settle
-/// before serving. Once ready wins, this function races the source, terminal
-/// input, interrupt and the real Matter runner; a committed publication
-/// additionally drives configuration rebuilds and bounded retries.
-pub(super) async fn run_lifecycle(
+/// Wait for the source topology and open the one committed configuration,
+/// then drive it with the shared lifecycle.
+pub async fn run_xiaomi_bridge(
     options: BridgeOptions<'_>,
-    prepare: impl Future<Output = Result<PreparedRuntime, RuntimeError>>,
+    ready: impl Future<Output = Result<crate::xiaomi::adapter::SourceHandle, RuntimeError>>,
+    source: impl Future<Output = Result<(), RuntimeError>>,
+    input: impl AsyncBufRead + Unpin,
+    output: impl AsyncWrite + Unpin,
+    interrupt: impl Future<Output = Result<(), RuntimeError>>,
+    pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
+) -> Result<(), RuntimeError> {
+    let store = options.store.clone();
+    let prepare = async {
+        let handle = ready.await?;
+        loop {
+            let changed = handle.listen();
+            if handle.snapshot().facts.scope.is_some() {
+                break;
+            }
+            changed.await;
+        }
+        let app = Rc::new(App::open(handle, store)?);
+        // Startup recovery applies revocation overlays before any old endpoint
+        // can be served. Failure here leaves every control authority closed.
+        if let Some(plan) = app.plan()? {
+            let prepared = app.prepare(plan);
+            app.apply(prepared)?;
+        }
+        Ok::<_, RuntimeError>(app)
+    };
+    run_lifecycle(options, prepare, source, input, output, interrupt, pairing).await
+}
+
+/// The one bridge lifecycle: one application configuration owner races the
+/// source, terminal input, interrupt and the real Matter runner.
+async fn run_lifecycle(
+    options: BridgeOptions<'_>,
+    prepare: impl Future<Output = Result<Rc<App>, RuntimeError>>,
     source: impl Future<Output = Result<(), RuntimeError>>,
     input: impl AsyncBufRead + Unpin,
     output: impl AsyncWrite + Unpin,
@@ -50,7 +63,7 @@ pub(super) async fn run_lifecycle(
         Err::<(), RuntimeError>("Device source ended unexpectedly".into())
     });
     let mut interrupt = Box::pin(interrupt);
-    let prepared = future::or(
+    let app = future::or(
         async {
             interrupt.as_mut().await?;
             Ok(None)
@@ -64,23 +77,10 @@ pub(super) async fn run_lifecycle(
         ),
     )
     .await?;
-    let Some(prepared) = prepared else {
+    let Some(app) = app else {
         return Ok(());
     };
-    let PreparedRuntime {
-        registry,
-        publication,
-    } = prepared;
-    let terminal = match &publication {
-        Some(publication) => terminal::bridge::Context::configured(
-            publication.clone(),
-            &options.store.devices(),
-            options.status,
-        ),
-        None => {
-            terminal::bridge::Context::fixed(&registry, &options.store.devices(), options.status)
-        }
-    };
+    let terminal = terminal::bridge::Context::committed(app.clone(), options.status);
     log::info!("MiGate bridge_id={}", options.identity.bridge_id);
     let mut input = Box::pin(async {
         terminal
@@ -97,25 +97,17 @@ pub(super) async fn run_lifecycle(
     // the same name can otherwise overlap its previous registration.
     let mut advertisement = Advertisement::new(options.port);
     loop {
-        let effective = publication
-            .as_ref()
-            .map(|publication| publication.current());
+        let renamer: Rc<dyn crate::matter::LabelWriter> = app.clone();
         let bridge = Bridge::new(
-            match &effective {
-                Some(effective) => &effective.published,
-                None => &registry,
-            },
+            app.frozen(),
+            app.root_version(),
             options.store,
             options.identity,
+            renamer,
         );
         let mut runner = Box::pin(bridge.run_with_advertisement(&mut advertisement, &pairing));
         loop {
-            let changed = async {
-                match &publication {
-                    Some(publication) => publication.listen().await,
-                    None => future::pending().await,
-                }
-            };
+            let changed = app.listen();
             let retry = async {
                 if let Some(at) = retry_at {
                     async_io::Timer::at(at).await;
@@ -166,9 +158,7 @@ pub(super) async fn run_lifecycle(
             let wake = match wake {
                 Ok(wake) => wake,
                 Err(error) => {
-                    if let Some(publication) = &publication {
-                        publication.stop_actions();
-                    }
+                    app.stop_actions();
                     drop(runner);
                     drop(source);
                     bridge.check_failure()?;
@@ -176,9 +166,7 @@ pub(super) async fn run_lifecycle(
                 }
             };
             if matches!(wake, Wake::Stop) {
-                if let Some(publication) = &publication {
-                    publication.stop_actions();
-                }
+                app.stop_actions();
                 drop(runner);
                 drop(source);
                 bridge.check_failure()?;
@@ -187,45 +175,43 @@ pub(super) async fn run_lifecycle(
             if matches!(wake, Wake::Configuration) {
                 retry_delay = Duration::from_secs(1);
             }
-            let publication = publication
-                .as_ref()
-                .expect("static runtime cannot wake without a committed publication");
-            let prepared = match publication.prepare() {
-                Ok(prepared) => prepared,
+            let candidate = match app.plan() {
+                Ok(candidate) => candidate,
                 Err(error) => {
                     log::warn!(
                         "Configuration prepare failed; keeping committed configuration: {error}"
                     );
-                    publication.fail(error.to_string());
+                    app.fail(error.to_string());
                     retry_at = Some(Instant::now() + retry_delay);
                     retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                     continue;
                 }
             };
-            let Some(prepared) = prepared else {
+            let Some(candidate) = candidate else {
                 retry_at = None;
                 continue;
             };
-            if prepared.rebuild {
-                publication.stop_actions();
+            if candidate.rebuild {
+                app.stop_actions();
                 drop(runner);
                 bridge.check_failure()?;
                 // Dropping the actual runner releases transport, IM, responder,
                 // handlers and socket. Only now reacquire the latest inputs.
-                let latest = match publication.prepare() {
+                let latest = match app.plan() {
                     Ok(latest) => latest,
                     Err(error) => {
                         log::warn!(
                             "Late configuration prepare failed; restarting the committed configuration: {error}"
                         );
-                        publication.fail(error.to_string());
+                        app.fail(error.to_string());
                         retry_at = Some(Instant::now() + retry_delay);
                         retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                         break;
                     }
                 };
                 if let Some(latest) = latest {
-                    match publication.apply(latest) {
+                    let prepared = app.prepare(latest);
+                    match app.apply(prepared) {
                         Ok(()) => {
                             retry_at = None;
                             retry_delay = Duration::from_secs(1);
@@ -243,7 +229,8 @@ pub(super) async fn run_lifecycle(
                 }
                 break;
             }
-            match publication.apply(prepared) {
+            let prepared = app.prepare(candidate);
+            match app.apply(prepared) {
                 Ok(()) => {
                     retry_at = None;
                     retry_delay = Duration::from_secs(1);
@@ -260,42 +247,6 @@ pub(super) async fn run_lifecycle(
     }
 }
 
-/// Isolated tests assemble a plain registry; it shares the lifecycle above.
-pub async fn run_prepared_bridge(
-    options: BridgeOptions<'_>,
-    ready: impl Future<Output = Result<DeviceRegistry, RuntimeError>>,
-    source: impl Future<Output = Result<(), RuntimeError>>,
-    input: impl AsyncBufRead + Unpin,
-    output: impl AsyncWrite + Unpin,
-    interrupt: impl Future<Output = Result<(), RuntimeError>>,
-    pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
-) -> Result<(), RuntimeError> {
-    run_lifecycle(
-        options,
-        async {
-            ready.await.map(|registry| PreparedRuntime {
-                registry,
-                publication: None,
-            })
-        },
-        source,
-        input,
-        output,
-        interrupt,
-        pairing,
-    )
-    .await
-}
-
-pub fn default_device_label(model: &str, id: &str) -> String {
-    let mut start = id.len().saturating_sub(16);
-    while !id.is_char_boundary(start) {
-        start += 1;
-    }
-    let suffix = &id[start..];
-    let mut end = model.len().min(32 - suffix.len() - 3);
-    while !model.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{} ({suffix})", &model[..end])
-}
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;

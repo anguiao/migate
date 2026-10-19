@@ -9,12 +9,12 @@ mod storage;
 pub(crate) mod units;
 
 pub(crate) use bridge::Advertisement;
-pub use bridge::Bridge;
+pub(crate) use bridge::{Bridge, LabelWriter};
 pub use pairing::PairingEvent;
 pub(crate) use storage::discard_subscriptions;
 
-/// Shared canonical fixed-shape comparison consumed by publication next.
-pub(crate) use shape::same_fixed_description;
+pub(crate) use model::{FrozenEntry, PublishedFunction, PublishedIdentity};
+pub(crate) use shape::{FixedShape, fixed_shape};
 
 #[cfg(test)]
 pub(crate) mod tests;

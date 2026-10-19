@@ -1,3 +1,4 @@
+pub(crate) mod app_source;
 mod bootstrap;
 mod cloud_refresh;
 mod commands;

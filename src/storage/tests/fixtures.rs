@@ -1,56 +1,159 @@
+//! Shared configuration fixtures for module tests. Values use the pure
+//! configuration model and the real storage boundary.
+
+#![allow(dead_code)]
+
 use crate::{
-    device::{FunctionKey, PhysicalDeviceDescription},
-    storage::{
-        CachedPhysicalDevice, CachedScope, PublicationCommit, StoredDevice, StoredFunction,
-        import_label,
+    configuration::{
+        self, CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation,
+        NativeDescription, PlanInput, Scope, SourceDevice, SourceFacts,
     },
+    device::{DeviceKey, PhysicalDeviceDescription},
+    matter,
+    storage::Store,
+    xiaomi::capability::parse_device_for_model,
 };
 
-pub(crate) fn scope() -> CachedScope {
-    CachedScope {
+pub(crate) fn scope() -> Scope {
+    Scope {
         uid: "account".into(),
         home_id: "home".into(),
-        group_id: crate::xiaomi::cloud::group_id("account", "home"),
     }
 }
 
-pub(crate) fn record(description: &PhysicalDeviceDescription, endpoint: u16) -> StoredDevice {
-    StoredDevice {
+pub(crate) fn unique(id: &str) -> String {
+    let value = id.bytes().fold(1_u128, |value, byte| {
+        value.wrapping_mul(31).wrapping_add(byte as u128)
+    });
+    format!("{value:0>32x}")
+}
+
+/// One committed identity with the current functions of a description and no
+/// native facts (a historical reservation).
+pub(crate) fn identity(description: &PhysicalDeviceDescription, endpoint: u16) -> CommittedDevice {
+    let single = description.functions().len() == 1;
+    let functions = description
+        .functions()
+        .iter()
+        .enumerate()
+        .map(|(index, function)| CommittedFunction {
+            id: function.id.clone(),
+            endpoint: if single {
+                endpoint
+            } else {
+                endpoint + 1 + index as u16
+            },
+        })
+        .collect();
+    CommittedDevice {
         key: description.key().clone(),
-        unique_id: uuid::Uuid::new_v4().simple().to_string(),
+        unique_id: unique(&description.key().id),
         endpoint,
-        label: import_label(description.label()),
-        functions: description
-            .functions()
-            .iter()
-            .enumerate()
-            .map(|(index, function)| StoredFunction {
-                key: FunctionKey::new(description.key().clone(), &function.id),
-                endpoint: if description.functions().len() == 1 {
-                    endpoint
-                } else {
-                    endpoint + index as u16 + 1
-                },
-                label: import_label(&function.label),
-                kind: function.kind,
+        label: description.label().to_owned(),
+        configuration_version: 1,
+        functions,
+        native: None,
+    }
+}
+
+pub(crate) fn configuration(scope: Scope, devices: Vec<CommittedDevice>) -> CommittedConfiguration {
+    CommittedConfiguration {
+        scope: Some(scope),
+        root_version: 1,
+        devices,
+        groups: Vec::new(),
+    }
+}
+
+pub(crate) fn relation(
+    group_did: &str,
+    members: &[&str],
+    is_physical: bool,
+    active: bool,
+) -> GroupRelation {
+    GroupRelation {
+        group_did: group_did.into(),
+        record_did: format!("record-{group_did}"),
+        model: "vendor.group".into(),
+        instance_type: None,
+        is_physical,
+        active,
+        error: None,
+        members: members.iter().map(|member| (*member).to_owned()).collect(),
+    }
+}
+
+pub(crate) fn save(store: &Store, configuration: &CommittedConfiguration) {
+    store
+        .devices()
+        .commit_configuration(configuration, &[])
+        .unwrap();
+}
+
+pub(crate) fn native(id: &str, model: &str, instance: serde_json::Value) -> NativeDescription {
+    NativeDescription {
+        instance_type: instance["type"].as_str().unwrap().into(),
+        device: parse_device_for_model(DeviceKey::new("xiaomi", id), model, &instance).unwrap(),
+        model: model.into(),
+    }
+}
+
+/// Plan and commit an empty-to-one configuration for real native facts.
+pub(crate) fn planned(store: &Store, natives: Vec<NativeDescription>) -> CommittedConfiguration {
+    planned_from(store, CommittedConfiguration::empty(), natives)
+}
+
+pub(crate) fn planned_from(
+    store: &Store,
+    current: CommittedConfiguration,
+    natives: Vec<NativeDescription>,
+) -> CommittedConfiguration {
+    let facts = SourceFacts {
+        scope: Some(scope()),
+        devices: natives
+            .into_iter()
+            .map(|native| SourceDevice {
+                key: native.device.key().clone(),
+                name: Some(native.model.clone()),
+                native,
+                fresh: true,
             })
             .collect(),
-        published: true,
-        configuration_version: 1,
-    }
+        relations: Vec::new(),
+    };
+    let shapes = |derived: &configuration::DerivedConfiguration| {
+        derived
+            .served
+            .iter()
+            .map(|(key, served)| {
+                (
+                    key.clone(),
+                    matter::fixed_shape(served.description.functions()),
+                )
+            })
+            .collect()
+    };
+    let current_derived = current.derive();
+    let new_identities = facts
+        .devices
+        .iter()
+        .filter(|device| current.device(&device.key).is_none())
+        .map(|device| (device.key.clone(), unique(&device.key.id)))
+        .collect();
+    let plan = configuration::plan(PlanInput {
+        current: current.clone(),
+        current_shapes: shapes(&current_derived),
+        current_derived,
+        facts_shapes: shapes(&facts.derive()),
+        facts,
+        revocations: Vec::new(),
+        new_identities,
+    })
+    .unwrap();
+    save(store, &plan.configuration);
+    plan.configuration
 }
 
-pub(crate) fn commit(
-    scope: CachedScope,
-    cached: Vec<CachedPhysicalDevice>,
-    records: Vec<StoredDevice>,
-) -> PublicationCommit {
-    PublicationCommit {
-        scope,
-        cached,
-        records,
-        relations: Vec::new(),
-        root_version: 1,
-        clear_revocations: Vec::new(),
-    }
+pub(crate) fn device_key(id: &str) -> DeviceKey {
+    DeviceKey::new("xiaomi", id)
 }

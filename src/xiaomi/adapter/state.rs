@@ -6,8 +6,9 @@ use super::{
     work::DeviceWork,
 };
 use crate::{
+    configuration::{NativeDescription, Scope},
     device::{DeviceRegistry, PhysicalDevice},
-    storage::{CachedPhysicalDevice, CachedScope, Store, XiaomiRecord},
+    storage::{Store, XiaomiRecord},
     xiaomi::{
         auth::{AuthenticationState, CertificateUpdate},
         capability::{PropertyBinding, RepairPlan},
@@ -52,7 +53,7 @@ impl Lifetime {
 pub(super) struct DeviceRecord {
     pub(super) life: Lifetime,
     pub(super) binding_generation: Cell<u64>,
-    pub(super) cached: RefCell<CachedPhysicalDevice>,
+    pub(super) cached: RefCell<NativeDescription>,
     pub(super) physical: PhysicalDevice,
 }
 impl DeviceRecord {
@@ -75,11 +76,11 @@ pub(super) struct DeviceSlot {
     pub(super) effective_repair: Option<Rc<RepairPlan>>,
     /// Latest confirmed description read, including one rejected by the
     /// independent-lamp contract, retained for confirmed group planning.
-    pub(super) native_confirmed: Option<CachedPhysicalDevice>,
+    pub(super) native_confirmed: Option<NativeDescription>,
 
     pub(super) confirmed: bool,
     /// A description awaiting admission; accepted descriptions live only in the record.
-    pub(super) candidate: Option<(CachedPhysicalDevice, Option<String>)>,
+    pub(super) candidate: Option<(NativeDescription, Option<String>)>,
     pub(super) admitted: Option<Rc<DeviceRecord>>,
     pub(super) work: Option<Rc<DeviceWork>>,
     pub(super) cloud_access: Option<CloudDeviceInfo>,
@@ -102,7 +103,7 @@ pub(super) struct GroupSource {
     pub(super) is_physical: bool,
 }
 impl DeviceSlot {
-    pub(super) fn restored(cached: CachedPhysicalDevice, physical: PhysicalDevice) -> Self {
+    pub(super) fn restored(cached: NativeDescription, physical: PhysicalDevice) -> Self {
         Self {
             admitted: Some(Rc::new(DeviceRecord {
                 life: Lifetime::default(),
@@ -117,7 +118,7 @@ impl DeviceSlot {
         if self.loading.is_some() {
             return false;
         }
-        let differs = |cached: &CachedPhysicalDevice| {
+        let differs = |cached: &NativeDescription| {
             self.cloud_access.as_ref().is_some_and(|access| {
                 access.model != cached.model || access.instance_type != cached.instance_type
             })
@@ -263,7 +264,7 @@ impl AccessRefresh {
 }
 pub(super) struct Live {
     pub(super) credentials: Option<XiaomiRecord>,
-    pub(super) scope: Option<CachedScope>,
+    pub(super) scope: Option<Scope>,
     pub(super) devices: BTreeMap<String, DeviceSlot>,
     pub(super) session: Option<Session>,
 }

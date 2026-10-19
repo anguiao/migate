@@ -1,5 +1,5 @@
 use super::{
-    model::{AdapterError, INCOMPATIBLE_FUNCTIONS},
+    model::AdapterError,
     state::{Context, DeviceRecord},
 };
 use crate::{
@@ -91,28 +91,6 @@ impl Context {
     pub(super) fn reconcile(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
         if self.live.borrow().devices[did].group.is_some() {
             return self.reconcile_group(did);
-        }
-        let incompatible = {
-            let live = self.live.borrow();
-            let slot = &live.devices[did];
-            slot.candidate
-                .as_ref()
-                .zip(slot.admitted.as_ref())
-                .is_some_and(|((cached, _), record)| {
-                    !super::publication::same_shape(
-                        &record.physical.description(),
-                        &cached.physical_description(record.physical.label()),
-                    )
-                })
-        };
-        if incompatible {
-            {
-                let mut live = self.live.borrow_mut();
-                let slot = live.devices.get_mut(did).unwrap();
-                slot.candidate = None;
-            }
-            self.block_device(did, INCOMPATIBLE_FUNCTIONS.to_owned());
-            return Ok(());
         }
         if self.live.borrow().devices[did].candidate.is_some() {
             self.problem(did, Some("configuration pending".into()));

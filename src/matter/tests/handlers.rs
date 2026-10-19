@@ -1,9 +1,7 @@
-use super::super::{
-    bridged_info::BridgedHandler,
-    model::{self, basic_info},
-    storage::StoreAdapter,
+use super::super::{bridged_info::BridgedHandler, model::basic_info, storage::StoreAdapter};
+use super::support::{
+    Context, model_handler, next_power, read_bytes, report_dataver, report_value,
 };
-use super::support::{Context, next_power, read_bytes, report_dataver, report_value};
 use crate::{
     device::{Availability, CommandError, Power},
     storage::Store,
@@ -39,7 +37,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
     let registry = super::test_registry(&store, &device);
-    let handler = model::handler(
+    let handler = model_handler(
         &registry,
         &store,
         StoreAdapter::new(store.matter()),
@@ -166,17 +164,18 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let physical = registry.get(device.key()).unwrap();
     let stored = store
         .devices()
-        .load_published(device.key())
+        .load_configuration()
         .unwrap()
+        .device(device.key())
+        .cloned()
         .unwrap();
     let bridged = BridgedHandler::new(
         physical,
         Dataver::new(1),
-        &stored,
-        store.devices(),
-        StoreAdapter::new(store.matter()),
+        &super::support::published_identity(&store, device.key()),
+        super::support::renamer(&registry, &store),
     );
-    let handler = model::handler(
+    let handler = model_handler(
         &registry,
         &store,
         StoreAdapter::new(store.matter()),
@@ -193,8 +192,10 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         Store::open(dir.path())
             .unwrap()
             .devices()
-            .load_published(device.key())
+            .load_configuration()
             .unwrap()
+            .device(device.key())
+            .cloned()
             .unwrap()
             .label,
         "Study Outlet"
@@ -217,8 +218,10 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     );
     let renamed = store
         .devices()
-        .load_published(device.key())
+        .load_configuration()
         .unwrap()
+        .device(device.key())
+        .cloned()
         .unwrap();
     assert_eq!(renamed.unique_id, stored.unique_id);
     assert_eq!(renamed.endpoint, stored.endpoint);
@@ -242,7 +245,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
 
         // An empty committed set serves only the root and aggregator.
         {
-            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -267,7 +270,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         registry.insert(single.clone());
         registry.insert(multi.clone());
         {
-            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -306,7 +309,10 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                 let tag = tag.structure().unwrap();
                 assert_eq!(tag.find_ctx(1).unwrap().u8().unwrap(), 7);
                 assert_eq!(tag.find_ctx(2).unwrap().u8().unwrap(), index as u8 + 1);
-                assert_eq!(tag.find_ctx(3).unwrap().utf8().unwrap(), function.label);
+                assert_eq!(
+                    tag.find_ctx(3).unwrap().utf8().unwrap(),
+                    multi.function(&function.id).unwrap().description().label
+                );
             }
             handler.access(|node| {
                 assert!(node.endpoint(3).unwrap().cluster(6).is_none());
@@ -319,7 +325,14 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                     assert_eq!(endpoint.semantic_tags[0].tag, index as u8 + 1);
                     assert_eq!(
                         endpoint.semantic_tags[0].label,
-                        Some(function.label.as_str())
+                        Some(
+                            multi
+                                .function(&function.id)
+                                .unwrap()
+                                .description()
+                                .label
+                                .as_str()
+                        )
                     );
                     let descriptor = endpoint.cluster(0x1d).unwrap();
                     assert_ne!(
@@ -386,13 +399,44 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
             );
             // The frozen instance keeps serving the old single even though the
             // committed set changes; the rejoin is served by the next one.
+            super::support::renamer(&registry, &store)
+                .write_label(&single_stored.key, "Retained name")
+                .unwrap();
+            let mut configuration = store.devices().load_configuration().unwrap();
+            configuration
+                .devices
+                .iter_mut()
+                .find(|device| device.key == single_stored.key)
+                .unwrap()
+                .native = None;
             store
                 .devices()
-                .set_device_label(&single_stored.key, "Retained name")
+                .commit_configuration(&configuration, &[])
                 .unwrap();
-            super::support::set_published(&store, &single_stored.key, false);
+            assert!(
+                !configuration
+                    .derive()
+                    .published
+                    .contains(&single_stored.key)
+            );
             registry.remove(&single_stored.key);
-            let restored = super::support::set_published(&store, &single_stored.key, true);
+            let restored = configuration
+                .devices
+                .iter_mut()
+                .find(|device| device.key == single_stored.key)
+                .unwrap();
+            restored.native = single_stored.native.clone();
+            let restored = restored.clone();
+            store
+                .devices()
+                .commit_configuration(&configuration, &[])
+                .unwrap();
+            assert!(
+                configuration
+                    .derive()
+                    .published
+                    .contains(&single_stored.key)
+            );
             assert_eq!(restored.unique_id, single_stored.unique_id);
             assert_eq!(restored.endpoint, 2);
             assert_eq!(restored.label, "Retained name");
@@ -403,16 +447,18 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         let (rejoined, mut replacement_receivers) = crate::device::PhysicalDevice::new(
             store
                 .devices()
-                .load_published(&single_stored.key)
+                .load_configuration()
                 .unwrap()
-                .unwrap()
-                .description(),
+                .derive()
+                .served[&single_stored.key]
+                .description
+                .clone(),
         );
         rejoined.set_availability(Availability::Available);
         rejoined.functions()[0].observe(false);
         registry.insert(rejoined.clone());
         {
-            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -456,10 +502,21 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         }
 
         // Removing the multi is only visible in the next frozen instance.
-        super::support::set_published(&store, &stored.key, false);
+        let mut configuration = store.devices().load_configuration().unwrap();
+        configuration
+            .devices
+            .iter_mut()
+            .find(|device| device.key == stored.key)
+            .unwrap()
+            .native = None;
+        store
+            .devices()
+            .commit_configuration(&configuration, &[])
+            .unwrap();
+        assert!(!configuration.derive().published.contains(&stored.key));
         registry.remove(&stored.key);
         {
-            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -488,7 +545,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
             registry.insert(device);
         }
         {
-            let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -513,7 +570,7 @@ async fn write_label(
     handler.write(&ctx).await
 }
 #[test]
-fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
+fn dynamic_device_names_are_isolated_and_write_failure_preserves_names() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -533,7 +590,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         let second_stored = super::support::add_device(&store, &second.description());
         registry.insert(first.clone());
         registry.insert(second.clone());
-        let handler = model::handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         write_label(&handler, &im, first_stored.endpoint, "Renamed first")
             .await
@@ -541,8 +598,10 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         assert_eq!(
             store
                 .devices()
-                .load_published(&first_stored.key)
+                .load_configuration()
                 .unwrap()
+                .device(&first_stored.key)
+                .cloned()
                 .unwrap()
                 .label,
             "Renamed first"
@@ -550,8 +609,10 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         assert_eq!(
             store
                 .devices()
-                .load_published(&second_stored.key)
+                .load_configuration()
                 .unwrap()
+                .device(&second_stored.key)
+                .cloned()
                 .unwrap()
                 .label,
             second_stored.label
@@ -573,8 +634,10 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         assert_eq!(
             store
                 .devices()
-                .load_published(&first_stored.key)
+                .load_configuration()
                 .unwrap()
+                .device(&first_stored.key)
+                .cloned()
                 .unwrap()
                 .label,
             "Renamed first"
@@ -585,8 +648,10 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         assert_eq!(
             store
                 .devices()
-                .load_published(&second_stored.key)
+                .load_configuration()
                 .unwrap()
+                .device(&second_stored.key)
+                .cloned()
                 .unwrap()
                 .label,
             "Renamed multi"
@@ -594,14 +659,16 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         assert_eq!(
             store
                 .devices()
-                .load_published(&first_stored.key)
+                .load_configuration()
                 .unwrap()
+                .device(&first_stored.key)
+                .cloned()
                 .unwrap()
                 .label,
             "Renamed first"
         );
         let db = rusqlite::Connection::open(store.path()).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_name_write BEFORE UPDATE OF label ON device_identity BEGIN SELECT RAISE(ABORT, 'name write rejected'); END;").unwrap();
+        db.execute_batch("CREATE TRIGGER fail_name_write BEFORE UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT, 'name write rejected'); END;").unwrap();
         assert_eq!(
             write_label(&handler, &im, first_stored.endpoint, "Failed name")
                 .await
@@ -612,43 +679,32 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         assert_eq!(first.label(), "Renamed first");
         assert_eq!(first.description().label(), "Renamed first");
         assert_eq!(second.label(), "Renamed multi");
-        let failure = protocol.check_failure().unwrap_err();
-        assert_eq!(failure.operation(), "write device label");
-        assert_eq!(failure.path(), store.path());
-        assert!(
-            std::error::Error::source(&failure)
-                .unwrap()
-                .is::<rusqlite::Error>()
-        );
-        assert_eq!(
-            protocol.wait_failure().await.operation(),
-            "write device label"
-        );
+        // A failed configuration transaction keeps the last complete names and
+        // does not poison the protocol store watcher.
+        protocol.check_failure().unwrap();
         db.execute_batch("DROP TRIGGER fail_name_write;").unwrap();
-        assert_eq!(
-            write_label(
-                &handler,
-                &im,
-                second_stored.endpoint,
-                "Blocked after failure"
-            )
-            .await
-            .unwrap_err()
-            .code(),
-            ErrorCode::StdIoError
-        );
+        write_label(
+            &handler,
+            &im,
+            second_stored.endpoint,
+            "Blocked after failure",
+        )
+        .await
+        .unwrap();
         let bytes = read_bytes(&handler, &Context::at(&im, first_stored.endpoint, 0x39, 5))
             .await
             .unwrap();
         assert_eq!(report_value(&bytes).utf8().unwrap(), "Renamed first");
         assert_eq!(first.label(), "Renamed first");
         assert_eq!(first.description().label(), "Renamed first");
-        assert_eq!(second.label(), "Renamed multi");
+        assert_eq!(second.label(), "Blocked after failure");
         assert_eq!(
             store
                 .devices()
-                .load_published(&first_stored.key)
+                .load_configuration()
                 .unwrap()
+                .device(&first_stored.key)
+                .cloned()
                 .unwrap()
                 .label,
             "Renamed first"
@@ -656,11 +712,13 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
         assert_eq!(
             store
                 .devices()
-                .load_published(&second_stored.key)
+                .load_configuration()
                 .unwrap()
+                .device(&second_stored.key)
+                .cloned()
                 .unwrap()
                 .label,
-            "Renamed multi"
+            "Blocked after failure"
         );
     });
 }

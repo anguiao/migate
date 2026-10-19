@@ -120,4 +120,4 @@ pub fn parse_device_for_model(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

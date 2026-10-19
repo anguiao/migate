@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::tests::fixtures::{commit, record};
+use crate::storage::tests::fixtures::identity;
 
 #[test]
 fn restored_topology_is_the_selected_scope_and_published_intersection() {
@@ -9,45 +9,34 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     store.xiaomi().replace(&tls.credentials).unwrap();
     let kept = cached(&tls.credentials.uid, "kept", true);
     let deleted = cached(&tls.credentials.uid, "deleted", false);
-    let mut other = cached(&tls.credentials.uid, "other-home", false);
-    other.home_id = "other".into();
-    other.group_id = group_id(&other.uid, &other.home_id);
+    let other = cached(&tls.credentials.uid, "other-home", false);
     let foreign = cached("foreign", "foreign", false);
-    let mut deleted_record = record(&deleted.physical_description("deleted"), 6);
-    deleted_record.published = false;
-    let records = vec![
-        record(&kept.physical_description("saved name"), 2),
-        deleted_record,
-        record(&other.physical_description("other"), 7),
-        record(&foreign.physical_description("foreign"), 8),
-    ];
-    for cached in [other, foreign] {
-        let scope = CachedScope {
-            uid: cached.uid.clone(),
-            home_id: cached.home_id.clone(),
-            group_id: cached.group_id.clone(),
-        };
-        store
-            .devices()
-            .apply_publication(&commit(scope, vec![cached], records.clone()))
-            .unwrap();
-    }
+    let mut kept_record = identity(&kept.physical_description("saved name"), 2);
+    kept_record.native = Some(kept);
+    let configuration = crate::configuration::CommittedConfiguration {
+        scope: Some(scope(&tls.credentials.uid)),
+        root_version: 1,
+        devices: vec![
+            kept_record,
+            identity(&deleted.physical_description("deleted"), 6),
+            identity(&other.physical_description("other"), 7),
+            identity(&foreign.physical_description("foreign"), 8),
+        ],
+        groups: Vec::new(),
+    };
     store
         .devices()
-        .apply_publication(&commit(
-            scope(&tls.credentials.uid),
-            vec![kept, deleted],
-            records,
-        ))
+        .commit_configuration(&configuration, &[])
         .unwrap();
     let (base, requests) = dynamic_mock_server(1, |_| MockResponse::json(503, "{}"));
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     let (_events, receiver) = flume::unbounded();
     let (discovery, _driver) = Discovery::with_events(receiver);
     let (source, ready) = XiaomiAdapter::new(store, cloud, discovery).unwrap();
-    let registry = block_on(poll_once(ready.wait()))
+    block_on(poll_once(ready.wait()))
         .expect("cache readiness is synchronous")
         .unwrap();
+    let registry = &source.context.registry;
     assert_eq!(registry.list().len(), 1);
     let physical = registry.get(&DeviceKey::new("xiaomi", "kept")).unwrap();
     assert_eq!(physical.functions().len(), 3);
@@ -66,17 +55,16 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
 #[test]
 fn prepared_accounts_can_deliver_an_empty_registry() {
     block_on(Rig::new(false, &[]).run(|mut c| async move {
-        let registry = c.ready.take().unwrap().wait().await.unwrap();
-        assert!(registry.list().is_empty());
+        c.ready.take().unwrap().wait().await.unwrap();
+        assert!(c.context.registry.list().is_empty());
     }));
 }
 
 #[test]
 fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
     let rig = Rig::light("xiaomi.light.ceil04");
-    let scope = scope(&rig.data[0].uid);
-    let mut state = rig.store.devices().load_publication(Some(&scope)).unwrap();
-    let single = state.records[0].clone();
+    let mut state = rig.store.devices().load_configuration().unwrap();
+    let single = state.devices[0].clone();
     let mut groups = Vec::new();
     for (endpoint, did, model) in [
         (3, "group.42", "xiaomi.light.ceil04"),
@@ -85,15 +73,14 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         let mut group = rig.data[0].clone();
         group.device = super::support::device_with_key(&group.device, did);
         group.model = model.into();
-        state
-            .records
-            .push(record(&group.physical_description("Saved group"), endpoint));
-        state.cached.push(group.clone());
+        let mut device = identity(&group.physical_description("Saved group"), endpoint);
+        device.native = Some(group.clone());
+        state.devices.push(device);
         groups.push(group);
     }
     rig.store
         .devices()
-        .apply_publication(&commit(scope, state.cached, state.records))
+        .commit_configuration(&state, &[])
         .unwrap();
     for _ in 0..2 {
         let (source, ready) = XiaomiAdapter::build(
@@ -103,18 +90,18 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
             rig.clock.clone(),
         )
         .unwrap();
-        let registry = block_on(poll_once(ready.wait())).unwrap().unwrap();
+        block_on(poll_once(ready.wait())).unwrap().unwrap();
+        let registry = &source.context.registry;
         assert_eq!(registry.list().len(), 3);
         assert!(registry.get(&single.key).is_some());
         assert_eq!(
             rig.store
                 .devices()
-                .load_publication(None)
+                .load_configuration()
                 .unwrap()
-                .records
-                .iter()
-                .filter(|record| record.published)
-                .count(),
+                .derive()
+                .published
+                .len(),
             3
         );
         for group in &groups {
@@ -127,8 +114,12 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
             assert_eq!(
                 rig.store
                     .devices()
-                    .load_parsed(&group.uid, &group.home_id, group.device.key())
-                    .unwrap(),
+                    .load_configuration()
+                    .unwrap()
+                    .device(group.device.key())
+                    .unwrap()
+                    .native
+                    .clone(),
                 Some(group.clone())
             );
         }
@@ -225,7 +216,7 @@ fn corrupt_saved_credentials_or_cached_topology_fail_before_network_requests() {
                 .unwrap();
         } else {
             database
-                .execute("UPDATE device_cache SET functions='broken'", [])
+                .execute("UPDATE bridge_configuration SET json=json_set(json, '$.devices[0].native.functions', json('[]'))", [])
                 .unwrap();
         }
         let result = XiaomiAdapter::build(

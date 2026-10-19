@@ -149,8 +149,10 @@ fn supported_descriptions_and_selected_home_membership_remain_required() {
                     control
                         .store
                         .devices()
-                        .load_published(&DeviceKey::new("xiaomi", did))
+                        .load_configuration()
                         .unwrap()
+                        .device(&DeviceKey::new("xiaomi", did))
+                        .cloned()
                         .is_none()
                 );
             }
@@ -280,7 +282,8 @@ fn five_minute_member_sync_does_not_poll_healthy_channel_power() {
 #[test]
 fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
     block_on(Rig::new(false, &[]).run(|mut c| async move {
-        let registry = c.ready.take().unwrap().wait().await.unwrap();
+        c.ready.take().unwrap().wait().await.unwrap();
+        let registry = c.context.registry.clone();
         assert!(registry.list().is_empty());
         c.announce();
         let peer = Rc::new(Peer::default());
@@ -291,16 +294,14 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
             peer.list_changed(&["multi"]);
             initialized(control, &peer, &["multi"]).await;
             let key = DeviceKey::new("xiaomi", "multi");
-            control
-                .store
-                .devices()
-                .set_device_label(&key, "Kitchen saved")
-                .unwrap();
+            control.publication.rename(&key, "Kitchen saved").unwrap();
             let before = control
                 .store
                 .devices()
-                .load_published(&key)
+                .load_configuration()
                 .unwrap()
+                .device(&key)
+                .cloned()
                 .unwrap();
             let old = function(&registry, "multi", "outlet_1");
             control.cloud.lock().unwrap().members.clear();
@@ -311,8 +312,11 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
                 control
                     .store
                     .devices()
-                    .load_published(&key)
+                    .load_configuration()
                     .unwrap()
+                    .device(&key)
+                    .unwrap()
+                    .native
                     .is_none()
             );
             assert_eq!(
@@ -326,8 +330,10 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
             let after = control
                 .store
                 .devices()
-                .load_published(&key)
+                .load_configuration()
                 .unwrap()
+                .device(&key)
+                .cloned()
                 .unwrap();
             assert_eq!(after.unique_id, before.unique_id);
             assert_eq!(after.endpoint, before.endpoint);
@@ -362,9 +368,7 @@ fn incomplete_foreign_or_failed_cloud_sync_cannot_remove_published_devices() {
                     };
                 }
                 if failure == 3 {
-                    let mut scope = control.context.live.borrow().scope.clone().unwrap();
-                    scope.home_id = "missing".into();
-                    control.context.live.borrow_mut().scope = Some(scope);
+                    control.cloud.lock().unwrap().missing_home = true;
                 }
                 peer.list_changed(&["one"]);
                 until(|| {
@@ -391,8 +395,10 @@ fn incomplete_foreign_or_failed_cloud_sync_cannot_remove_published_devices() {
                     control
                         .store
                         .devices()
-                        .load_published(&DeviceKey::new("xiaomi", "one"))
+                        .load_configuration()
                         .unwrap()
+                        .device(&DeviceKey::new("xiaomi", "one"))
+                        .cloned()
                         .is_some()
                 );
                 assert_eq!(

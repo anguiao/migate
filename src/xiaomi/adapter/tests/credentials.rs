@@ -475,9 +475,11 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
         assert!(
             c.store
                 .devices()
-                .load_published(&DeviceKey::new("xiaomi", "two"))
+                .load_configuration()
                 .unwrap()
-                .is_some()
+                .derive()
+                .published
+                .contains(&DeviceKey::new("xiaomi", "two"))
         );
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
         assert_eq!(c.cloud.lock().unwrap().tokens, 1);

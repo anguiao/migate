@@ -254,15 +254,39 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
         until(|| usb.snapshot().availability == Availability::Available).await;
         usb.execute(Command::On).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
-        c.store
-            .devices()
-            .set_device_label(&key, "Controller saved strip")
+        c.publication
+            .rename(&key, "Controller saved strip")
             .unwrap();
-        let before = c.store.devices().load_published(&key).unwrap().unwrap();
+        let before = c
+            .store
+            .devices()
+            .load_configuration()
+            .unwrap()
+            .device(&key)
+            .unwrap()
+            .clone();
         c.cloud.lock().unwrap().members = vec!["one".into()];
         c.context.request_sync();
         until(|| c.context.registry.get(&key).is_none()).await;
-        assert!(c.store.devices().load_published(&key).unwrap().is_none());
+        assert!(
+            !c.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .derive()
+                .published
+                .contains(&key)
+        );
+        assert!(
+            c.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .device(&key)
+                .unwrap()
+                .native
+                .is_none()
+        );
         assert_eq!(
             usb.execute(Command::On).await,
             Err(crate::device::CommandError::Cancelled)
@@ -274,7 +298,14 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
         }
         c.context.request_sync();
         until(|| c.context.registry.get(&key).is_some()).await;
-        let after = c.store.devices().load_published(&key).unwrap().unwrap();
+        let after = c
+            .store
+            .devices()
+            .load_configuration()
+            .unwrap()
+            .device(&key)
+            .unwrap()
+            .clone();
         assert_eq!(after.unique_id, before.unique_id);
         assert_eq!(after.endpoint, before.endpoint);
         assert_eq!(after.functions, before.functions);
@@ -353,9 +384,11 @@ fn runtime_identity_and_home_scope_failures_retire_cloud_eligibility_and_preserv
                     control
                         .store
                         .devices()
-                        .load_published(&DeviceKey::new("xiaomi", "one"))
+                        .load_configuration()
                         .unwrap()
-                        .is_some()
+                        .derive()
+                        .published
+                        .contains(&DeviceKey::new("xiaomi", "one"))
                 );
                 assert!(control.cloud.lock().unwrap().property_writes.is_empty());
             })
@@ -423,8 +456,11 @@ fn published_devices_restore_cloud_control_without_a_local_gateway() {
         let before = c
             .store
             .devices()
-            .load_published(&DeviceKey::new("xiaomi", "one"))
-            .unwrap();
+            .load_configuration()
+            .unwrap()
+            .device(&DeviceKey::new("xiaomi", "one"))
+            .unwrap()
+            .clone();
         until(|| c.cloud.lock().unwrap().homes > 0).await;
         async_io::Timer::after(Duration::from_millis(100)).await;
         let one = function(&c.context.registry, "one", "main");
@@ -439,9 +475,11 @@ fn published_devices_restore_cloud_control_without_a_local_gateway() {
         assert_eq!(
             c.store
                 .devices()
-                .load_published(&DeviceKey::new("xiaomi", "one"))
+                .load_configuration()
+                .unwrap()
+                .device(&DeviceKey::new("xiaomi", "one"))
                 .unwrap(),
-            before
+            &before
         );
     }));
 }
@@ -467,14 +505,18 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
             let mut old = Box::pin(one.execute(Command::On));
             assert!(poll_once(old.as_mut()).await.is_none());
             until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
-            let (mut changed, generation) = {
-                let live = c.context.live.borrow();
-                let record = live.devices["one"].admitted.as_ref().unwrap();
-                (
-                    record.cached.borrow().clone(),
-                    record.binding_generation.get(),
-                )
-            };
+            let old_physical = c
+                .context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "one"))
+                .unwrap();
+            let mut changed = c.context.live.borrow().devices["one"]
+                .admitted
+                .as_ref()
+                .unwrap()
+                .cached
+                .borrow()
+                .clone();
             changed.device = {
                 let function = changed.device.functions()[0].clone();
                 let power = function.power();
@@ -504,15 +546,17 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
             }
             c.context.reconcile("one").unwrap();
             until(|| c.context.live.borrow().devices["one"].candidate.is_none()).await;
-            assert_eq!(
-                c.context.live.borrow().devices["one"]
-                    .admitted
-                    .as_ref()
-                    .unwrap()
-                    .binding_generation
-                    .get(),
-                generation + 1
-            );
+            let current_physical = c
+                .context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "one"))
+                .unwrap();
+            assert!(!old_physical.same_instance(&current_physical));
+            assert!(matches!(
+                one.snapshot().availability,
+                Availability::Unavailable(_)
+            ));
+            let current = current_physical.function("main").unwrap();
             until(|| {
                 c.cloud
                     .lock()
@@ -522,18 +566,27 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
                     .any(|(_, siid, _)| *siid == 7)
             })
             .await;
-            until(|| one.snapshot().power == Power::On).await;
+            until(|| current.snapshot().power == Power::On).await;
             assert!(c.context.cloud_candidate("one", true).is_ok());
             release.send(()).unwrap();
-            assert!(matches!(
-                old.await,
-                Err(crate::device::CommandError::Rejected(_))
-            ));
+            assert_eq!(old.await, Err(crate::device::CommandError::Cancelled));
+            until(|| {
+                let status = c
+                    .context
+                    .commands
+                    .snapshot("one", ["main".to_owned()].into_iter());
+                status[0].inflight.is_none()
+                    && status[0]
+                        .last
+                        .as_ref()
+                        .is_some_and(|last| last.result.is_some())
+            })
+            .await;
             assert!(c.context.cloud_candidate("one", true).is_ok());
-            assert_eq!(one.snapshot().availability, Availability::Available);
-            assert_eq!(one.snapshot().power, Power::On);
+            assert_eq!(current.snapshot().availability, Availability::Available);
+            assert_eq!(current.snapshot().power, Power::On);
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
-            one.execute(Command::Off).await.unwrap();
+            current.execute(Command::Off).await.unwrap();
             let writes = &c.cloud.lock().unwrap().property_writes;
             assert_eq!(writes.len(), 2);
             assert_eq!(writes[1].1, 7);

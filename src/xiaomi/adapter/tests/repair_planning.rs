@@ -26,12 +26,11 @@ fn native_rgb_group_uses_member_temperature_interval_without_repair() {
         assert!(c.context.group_repair("group-1").is_none());
         let native = c.publication.current();
         let cached = &native
-            .source
             .entries
             .iter()
             .find(|entry| entry.physical.key().id == "group-1")
             .unwrap()
-            .cached;
+            .native;
         let bindings = cached.device.functions()[0].lighting().unwrap();
         assert!(bindings.color().is_some(), "RGB must stay genuinely native");
         assert_eq!(bindings.temperature().as_ref().unwrap().range().min(), 2000);
@@ -95,7 +94,14 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
         let key = DeviceKey::new("xiaomi", "group-1");
-        let before = c.store.devices().load_published(&key).unwrap().unwrap();
+        let before = c
+            .store
+            .devices()
+            .load_configuration()
+            .unwrap()
+            .device(&key)
+            .cloned()
+            .unwrap();
         let set_range = |min, max| {
             let mut instance = ls2307_instance();
             instance["services"][1]["properties"][2]["value-range"] = json!([min, max, 1]);
@@ -117,34 +123,52 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
              BEGIN SELECT RAISE(ABORT, 'injected'); END;",
         )
         .unwrap();
-        let prepared = c.publication.prepare().unwrap().unwrap();
+        let prepared = c
+            .publication
+            .prepare(c.publication.plan().unwrap().unwrap());
         assert!(c.publication.apply(prepared).is_err());
         assert!(c.publication.failure().is_some());
         assert!(c.store.matter().contains(subscription_key).unwrap());
         assert_eq!(
-            c.store.devices().load_published(&key).unwrap().unwrap(),
+            c.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .device(&key)
+                .cloned()
+                .unwrap(),
             before
         );
         db.execute_batch("DROP TRIGGER fail_subscription_delete")
             .unwrap();
 
         db.execute_batch(
-            "CREATE TRIGGER fail_config BEFORE INSERT ON device_cache
+            "CREATE TRIGGER fail_config BEFORE UPDATE ON bridge_configuration
              BEGIN SELECT RAISE(ABORT, 'injected'); END;",
         )
         .unwrap();
-        let prepared = c.publication.prepare().unwrap().unwrap();
+        let prepared = c
+            .publication
+            .prepare(c.publication.plan().unwrap().unwrap());
         assert!(c.publication.apply(prepared).is_err());
         assert!(!c.store.matter().contains(subscription_key).unwrap());
         assert_eq!(
-            c.store.devices().load_published(&key).unwrap().unwrap(),
+            c.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .device(&key)
+                .cloned()
+                .unwrap(),
             before,
             "failed complete save must preserve the old configuration"
         );
 
         // A newer genuine member input arrives before retrying the failed save.
         set_range(3200, 6200);
-        let latest = c.publication.prepare().unwrap().unwrap();
+        let latest = c
+            .publication
+            .prepare(c.publication.plan().unwrap().unwrap());
         db.execute_batch("DROP TRIGGER fail_config").unwrap();
         c.publication.stop_actions();
         c.publication.apply(latest).unwrap();
@@ -154,7 +178,14 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
             Some(TemperatureInterval::new(3200, 6200).unwrap()),
             "a prepared group cannot retain an obsolete member interval"
         );
-        let after = c.store.devices().load_published(&key).unwrap().unwrap();
+        let after = c
+            .store
+            .devices()
+            .load_configuration()
+            .unwrap()
+            .device(&key)
+            .cloned()
+            .unwrap();
         assert_eq!(after.endpoint, before.endpoint);
         assert_eq!(after.unique_id, before.unique_id);
         assert_eq!(

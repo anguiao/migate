@@ -22,7 +22,7 @@ pub(super) async fn run(
         let scope = context.live.borrow().scope.clone();
         let mut routes = scope
             .as_ref()
-            .map(|scope| discovery.snapshot().routes(&scope.group_id, None))
+            .map(|scope| discovery.snapshot().routes(&scope.group_id(), None))
             .unwrap_or_default();
         if routes.is_empty() {
             if first_deadline.is_some() {
@@ -319,7 +319,7 @@ pub(super) async fn wait_retry(
         .borrow()
         .scope
         .as_ref()
-        .map(|scope| scope.group_id.clone());
+        .map(|scope| scope.group_id());
     let routes = group
         .as_ref()
         .map(|group| discovery.snapshot().routes(group, previous))

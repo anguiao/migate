@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::terminal::bridge;
+use crate::terminal::bridge::tests::support;
 use crate::xiaomi::auth::AuthReport;
 
 #[test]
@@ -98,7 +98,7 @@ fn bridge_help_reads_the_latest_report() {
     );
     let status = AuthStatus::new(checking, "/bin/migate".into(), "/data".into());
     assert!(
-        futures_lite::future::block_on(bridge::handle_line(
+        futures_lite::future::block_on(support::handle_line(
             &registry,
             &store.devices(),
             &status,
@@ -120,7 +120,7 @@ fn bridge_help_reads_the_latest_report() {
         1_700_000_000,
     );
     assert!(status.replace(authenticated));
-    let help = futures_lite::future::block_on(bridge::handle_line(
+    let help = futures_lite::future::block_on(support::handle_line(
         &registry,
         &store.devices(),
         &status,
