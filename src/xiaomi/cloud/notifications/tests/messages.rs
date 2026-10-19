@@ -131,10 +131,10 @@ fn received_property_invalidation_keeps_ready_subscriptions_and_online_delivery(
                                 did: "target".into(),
                                 online: false
                             },
-                            NotificationEvent::Property {
+                            NotificationEvent::PropertyValue {
                                 did: "target".into(),
                                 binding: POWER,
-                                value: true
+                                value: serde_json::Value::Bool(true)
                             },
                         ],
                         "a received property from the retired source was dispatched"
@@ -207,10 +207,10 @@ fn received_property_invalidation_keeps_a_pending_suback_current() {
                     assert_eq!(
                         observed.borrow().as_slice(),
                         &[
-                            NotificationEvent::Property {
+                            NotificationEvent::PropertyValue {
                                 did: "target".into(),
                                 binding: POWER,
-                                value: true
+                                value: serde_json::Value::Bool(true)
                             },
                             NotificationEvent::Online {
                                 did: "target".into(),
@@ -306,10 +306,10 @@ fn malformed_notification_payloads_are_isolated_from_valid_notifications() {
     assert_eq!(
         *events.borrow(),
         [
-            NotificationEvent::Property {
+            NotificationEvent::PropertyValue {
                 did: "target".into(),
                 binding: POWER,
-                value: false
+                value: serde_json::Value::Bool(false)
             },
             NotificationEvent::Online {
                 did: "target".into(),
@@ -401,20 +401,10 @@ fn qos2_duplicate_and_retired_subscription_messages_do_not_reapply() {
                 result.unwrap();
             },
         ));
-        let event = |value| {
-            if numeric {
-                NotificationEvent::PropertyValue {
-                    did: "target".into(),
-                    binding: POWER,
-                    value,
-                }
-            } else {
-                NotificationEvent::Property {
-                    did: "target".into(),
-                    binding: POWER,
-                    value: value.as_bool().unwrap(),
-                }
-            }
+        let event = |value| NotificationEvent::PropertyValue {
+            did: "target".into(),
+            binding: POWER,
+            value,
         };
         assert_eq!(
             *events.borrow(),

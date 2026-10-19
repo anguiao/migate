@@ -26,7 +26,7 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
             let control = &c;
             c.peer(peer, |peer| async move {
                 initialized(control, &peer, &["one"]).await;
-                until(|| control.context.cloud_candidate("multi", true)).await;
+                until(|| control.context.cloud_candidate("multi", true).is_ok()).await;
                 let strip = control
                     .context
                     .registry
@@ -35,10 +35,10 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
                 assert_eq!(strip.functions().len(), 3);
                 assert_eq!(strip.description().label, "Cloud strip");
                 assert_eq!(
-                    control.context.local_candidate("multi", false).is_some(),
+                    control.context.local_candidate("multi", false).is_ok(),
                     missing_push
                 );
-                assert!(control.context.local_candidate("multi", true).is_none());
+                assert!(control.context.local_candidate("multi", true).is_err());
                 function(&control.context.registry, "multi", "usb")
                     .execute(Command::On)
                     .await
@@ -97,13 +97,13 @@ fn a_stale_local_model_does_not_block_cloud_admission_or_commands() {
         c.peer(Rc::new(Peer::default()), |peer| async move {
             until(|| {
                 peer.lists() > 0
-                    && control.context.cloud_candidate("multi", true)
+                    && control.context.cloud_candidate("multi", true).is_ok()
                     && control.context.live.borrow().devices["multi"]
                         .access
                         .is_some()
             })
             .await;
-            assert!(control.context.local_candidate("multi", false).is_none());
+            assert!(control.context.local_candidate("multi", false).is_err());
             function(&control.context.registry, "multi", "usb")
                 .execute(Command::On)
                 .await

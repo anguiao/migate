@@ -1,10 +1,11 @@
 use super::{StorageError, Store};
+use crate::xiaomi::capability::ls2307;
 use crate::{
     device::{Category, DeviceKey, PhysicalDeviceDescription},
     xiaomi::{
         capability::{
-            NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, is_light_type,
-            is_ls2307_type, is_outlet_type,
+            ParsedDevice, ParsedFunction, PropertyBinding, is_light_type, is_ls2307_type,
+            is_outlet_type,
         },
         cloud::group_id,
     },
@@ -115,7 +116,7 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
     validate_text(&cached.model)?;
     validate_text(&cached.instance_type)?;
     validate_key(&cached.device.key)?;
-    if cached.model == "devcea.light.ls2307" && !is_ls2307_type(&cached.instance_type)
+    if cached.model == ls2307::MODEL && !is_ls2307_type(&cached.instance_type)
         || cached.device.key.source != "xiaomi"
         || !(is_outlet_type(&cached.instance_type) || is_light_type(&cached.instance_type))
         || cached.device.functions.is_empty()
@@ -151,7 +152,7 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
         if function.description.category != Category::Light || !lighting.valid() {
             return Err("Stored Xiaomi light bindings are invalid");
         }
-        if cached.model == "devcea.light.ls2307" {
+        if cached.model == ls2307::MODEL {
             let (Some(brightness), Some(temperature), Some(color), Some(mode)) = (
                 &lighting.brightness,
                 &lighting.temperature,
@@ -161,15 +162,9 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
                 return Err("Stored Xiaomi ls2307 adapter is incompatible");
             };
             if !is_ls2307_type(&cached.instance_type)
-                || function.power != (PropertyBinding { siid: 2, piid: 1 })
-                || brightness.property != (PropertyBinding { siid: 2, piid: 2 })
-                || temperature.property != (PropertyBinding { siid: 2, piid: 3 })
-                || color.property != (PropertyBinding { siid: 4, piid: 1 })
-                || color.format != NumericFormat::Uint32
-                || mode.property != (PropertyBinding { siid: 4, piid: 2 })
-                || mode.format != NumericFormat::Uint8
-                || mode.temperature_value != 0
-                || mode.rgb_value != 1
+                || !ls2307::main_bindings(function.power, *brightness, *temperature)
+                || *color != ls2307::COLOR
+                || *mode != ls2307::MODE
             {
                 return Err("Stored Xiaomi ls2307 adapter is incompatible");
             }

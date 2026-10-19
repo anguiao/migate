@@ -7,7 +7,7 @@
 //! shared with the native group. No group RGB MIoT binding is invented and the
 //! genuine native binding grid stays untouched.
 
-use super::{NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, light::is_ls2307_type};
+use super::{ParsedDevice, ParsedFunction, ls2307};
 
 use crate::device::{DeviceKey, LightProfile, NumericRange, standard_light_profile};
 
@@ -87,7 +87,7 @@ pub(crate) fn plan_rgb_repair<'a>(
             .lighting
             .as_ref()
             .ok_or_else(|| format!("member {did} is not a supported light"))?;
-        if model != "devcea.light.ls2307" || !is_ls2307_type(instance_type) {
+        if model != ls2307::MODEL || !ls2307::is_type(instance_type) {
             return Err(format!("member {did} is not the ls2307 adapter"));
         }
         if member_function.light_profile() != Ok(LightProfile::ExtendedColor) {
@@ -98,22 +98,10 @@ pub(crate) fn plan_rgb_repair<'a>(
                 "member {did} lacks genuine RGB and color-mode bindings"
             ));
         };
-        if color.property != (PropertyBinding { siid: 4, piid: 1 })
-            || color.format != NumericFormat::Uint32
-            || color.range
-                != (NumericRange {
-                    min: 0,
-                    max: 0xffffff,
-                    step: 1,
-                })
-        {
+        if *color != ls2307::COLOR {
             return Err(format!("member {did} has an incompatible RGB binding"));
         }
-        if mode.property != (PropertyBinding { siid: 4, piid: 2 })
-            || mode.format != NumericFormat::Uint8
-            || mode.temperature_value != 0
-            || mode.rgb_value != 1
-        {
+        if *mode != ls2307::MODE {
             return Err(format!(
                 "member {did} has an incompatible color mode binding"
             ));

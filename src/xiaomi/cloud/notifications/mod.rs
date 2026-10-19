@@ -15,11 +15,6 @@ const LIMIT: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NotificationEvent {
-    Property {
-        did: String,
-        binding: PropertyBinding,
-        value: bool,
-    },
     PropertySnapshot {
         did: String,
         binding: PropertyBinding,

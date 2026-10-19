@@ -124,6 +124,22 @@ fn cloud_control_without_ready_notifications_is_sync_limited() {
                 .unwrap()
                 .contains("notification")
         );
+        c.context
+            .live
+            .borrow_mut()
+            .credentials
+            .as_mut()
+            .unwrap()
+            .uid = "foreign".into();
+        let status = c.context.diagnostics();
+        assert_eq!(status.devices[0].selected_control, None);
+        assert!(
+            status.devices[0]
+                .unavailable_reason
+                .as_ref()
+                .unwrap()
+                .contains("account/home identity mismatch")
+        );
     }));
 }
 

@@ -172,8 +172,8 @@ fn cancel_and_unsubscribe_end_target_requests_ignore_late_results_and_keep_other
             };
             let (result, ()) = future::zip(
                 driver.run(move |event| {
-                    if let CentralEvent::Property { did, value, .. } = event {
-                        observed.borrow_mut().push((did, value));
+                    if let CentralEvent::PropertyValue { did, value, .. } = event {
+                        observed.borrow_mut().push((did, value.as_bool().unwrap()));
                     }
                 }),
                 work,

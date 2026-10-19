@@ -224,7 +224,7 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
                 )
             })
             .await;
-            assert!(control.context.cloud_candidate("one", true));
+            assert!(control.context.cloud_candidate("one", true).is_ok());
             assert!(!control.context.http_paused.get());
             control.clock.advance(Duration::from_secs(5));
             until(|| !control.context.token_usable()).await;
@@ -267,8 +267,8 @@ fn expired_local_certificate_revokes_only_the_local_candidate() {
             let by = Duration::from_secs((expiry - control.clock.wall()) as u64);
             control.cloud.lock().unwrap().cert_status = 503;
             control.clock.advance(by);
-            until(|| control.context.local_candidate("one", false).is_none()).await;
-            assert!(control.context.cloud_candidate("one", true));
+            until(|| control.context.local_candidate("one", false).is_err()).await;
+            assert!(control.context.cloud_candidate("one", true).is_ok());
             function(&control.context.registry, "one", "main")
                 .execute(Command::On)
                 .await
@@ -286,7 +286,7 @@ fn home_and_info_rejection_of_the_fresh_token_keep_the_login_prompt() {
         let rig = Rig::new(true, &["one"]);
         rig.cloud.lock().unwrap().online.insert("one".into());
         block_on(rig.run(|c| async move {
-            until(|| c.context.cloud_candidate("one", true)).await;
+            until(|| c.context.cloud_candidate("one", true).is_ok()).await;
             c.clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -335,8 +335,10 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
         cloud.cert_gate = Some(gate);
     }
     block_on(rig.run(|c| async move {
-        until(|| c.cloud.lock().unwrap().certs == 1 && c.context.cloud_candidate("one", true))
-            .await;
+        until(|| {
+            c.cloud.lock().unwrap().certs == 1 && c.context.cloud_candidate("one", true).is_ok()
+        })
+        .await;
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -405,8 +407,11 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
     let (old_release, old_gate) = flume::bounded(1);
     let (_new_release, new_gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
-        until(|| c.context.cloud_candidate("one", true) && c.context.cloud_candidate("two", true))
-            .await;
+        until(|| {
+            c.context.cloud_candidate("one", true).is_ok()
+                && c.context.cloud_candidate("two", true).is_ok()
+        })
+        .await;
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);

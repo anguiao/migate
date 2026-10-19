@@ -109,7 +109,7 @@ fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_
                     one.snapshot().availability,
                     Availability::Unavailable(_)
                 ));
-                assert!(!c.context.cloud_candidate("one", true));
+                assert!(c.context.cloud_candidate("one", true).is_err());
                 assert!(matches!(
                     one.execute(Command::Off).await,
                     Err(crate::device::CommandError::Unavailable(_))
@@ -470,13 +470,13 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
             })
             .await;
             until(|| one.snapshot().power == Power::On).await;
-            assert!(c.context.cloud_candidate("one", true));
+            assert!(c.context.cloud_candidate("one", true).is_ok());
             release.send(()).unwrap();
             assert!(matches!(
                 old.await,
                 Err(crate::device::CommandError::Rejected(_))
             ));
-            assert!(c.context.cloud_candidate("one", true));
+            assert!(c.context.cloud_candidate("one", true).is_ok());
             assert_eq!(one.snapshot().availability, Availability::Available);
             assert_eq!(one.snapshot().power, Power::On);
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);

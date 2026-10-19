@@ -182,8 +182,9 @@ impl Context {
         }
         let local = self
             .local_candidate(did, true)
+            .ok()
             .map(NotificationSource::Local);
-        let cloud = if self.cloud_candidate(did, false) {
+        let cloud = if self.cloud_candidate(did, false).is_ok() {
             self.notifications
                 .borrow()
                 .as_ref()
@@ -214,20 +215,11 @@ impl Context {
         match source {
             NotificationSource::Local(handle) => self
                 .local_candidate(did, true)
-                .is_some_and(|candidate| candidate.same_connection(handle)),
+                .is_ok_and(|candidate| candidate.same_connection(handle)),
             NotificationSource::Cloud(handle) => {
-                self.cloud_candidate(did, false) && self.current_notifications(handle)
+                self.cloud_candidate(did, false).is_ok() && self.current_notifications(handle)
             }
         }
-    }
-    pub(super) fn property_event(
-        &self,
-        source: &NotificationSource,
-        did: &str,
-        binding: crate::xiaomi::capability::PropertyBinding,
-        value: bool,
-    ) {
-        self.property_value_event(source, did, binding, &serde_json::Value::Bool(value), false);
     }
     pub(super) fn property_value_event(
         &self,
@@ -582,7 +574,7 @@ async fn prepare_properties(
         !work.life.is_closed()
             && work.cloud_generation.get() == preparation
             && context.current_notifications(&handle)
-            && context.cloud_candidate(&did, false)
+            && context.cloud_candidate(&did, false).is_ok()
     };
     let mut pending = work
         .bindings()
@@ -747,16 +739,6 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                 let driving = async {
                     let result = driver
                         .run(move |event| match event {
-                            NotificationEvent::Property {
-                                did,
-                                binding,
-                                value,
-                            } => events.property_event(
-                                &NotificationSource::Cloud(event_handle.clone()),
-                                &did,
-                                binding,
-                                value,
-                            ),
                             NotificationEvent::Online { did, online } => {
                                 events.online_event(&event_handle, &did, online)
                             }

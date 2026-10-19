@@ -15,7 +15,7 @@ fn local_offline_or_missing_writes_revoke_only_the_target_until_a_new_list_obser
             let control = &c;
             c.peer(Rc::new(Peer::default()), |peer| async move {
                 initialized(control, &peer, &["one", "two"]).await;
-                until(|| control.context.cloud_candidate("one", true)).await;
+                until(|| control.context.cloud_candidate("one", true).is_ok()).await;
                 control
                     .clock
                     .automatic
@@ -71,7 +71,7 @@ fn local_business_rejections_and_device_operation_timeouts_keep_the_local_candid
             let control = &c;
             c.peer(Rc::new(Peer::default()), |peer| async move {
                 initialized(control, &peer, &["one"]).await;
-                until(|| control.context.cloud_candidate("one", true)).await;
+                until(|| control.context.cloud_candidate("one", true).is_ok()).await;
                 peer.state.borrow_mut().hold_writes = true;
                 let one = function(&control.context.registry, "one", "main");
                 let mut failed = Box::pin(one.execute(Command::On));
@@ -109,7 +109,7 @@ fn local_device_offline_reads_continue_over_cloud_without_degrading_other_device
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one", "two"]).await;
-            until(|| control.context.cloud_candidate("one", true)).await;
+            until(|| control.context.cloud_candidate("one", true).is_ok()).await;
             until(|| {
                 control.context.live.borrow().devices.values().all(|slot| {
                     slot.work.as_ref().is_none_or(|work| {

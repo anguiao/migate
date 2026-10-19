@@ -126,7 +126,6 @@ impl XiaomiAdapter {
                         instance_type: group.instance_type.clone(),
                         members: group.members.clone(),
                         is_physical: group.is_physical,
-                        online: false,
                     };
                     slot.group = Some(group.clone());
                     slot.effective_group = Some(group);

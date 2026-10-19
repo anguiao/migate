@@ -661,12 +661,6 @@ impl NotificationDriver {
                         binding,
                         value: value.clone(),
                     }
-                } else if let Some(value) = value.as_bool() {
-                    NotificationEvent::Property {
-                        did,
-                        binding,
-                        value,
-                    }
                 } else {
                     NotificationEvent::PropertyValue {
                         did,

@@ -1,3 +1,4 @@
+use super::ls2307;
 use super::{
     BrightnessConversion, CapabilityError, LightBindings, ModeBinding, NumericBinding,
     NumericFormat, NumericUnit, ParsedDevice, ParsedFunction, PropertyBinding,
@@ -6,14 +7,6 @@ use super::{
 };
 use crate::device::{Capability, Category, DeviceKey, FunctionDescription, NumericRange};
 
-pub(crate) fn is_ls2307_type(value: &str) -> bool {
-    Urn::parse(value).is_ok_and(|urn| {
-        urn.standard("device", "light", 0x0000a001)
-            && urn.vendor == "devcea-ls2307"
-            && urn.version == 1
-            && urn.suffix.is_none()
-    })
-}
 pub(crate) fn is_light_type(value: &str) -> bool {
     Urn::parse(value).is_ok_and(|urn| urn.standard("device", "light", 0x0000a001))
 }
@@ -53,11 +46,11 @@ pub(super) fn parse_light(
     let color = optional_standard_property(service, "color", 0x0e)?
         .map(|property| numeric_binding(service.iid, property, NumericUnit::Rgb))
         .transpose()?;
-    let (color, mode) = if model == "devcea.light.ls2307" {
+    let (color, mode) = if model == ls2307::MODEL {
         let (Some(brightness), Some(temperature)) = (brightness, temperature) else {
-            return Err(CapabilityError::IncompatibleModel("devcea.light.ls2307"));
+            return Err(CapabilityError::IncompatibleModel(ls2307::MODEL));
         };
-        ls2307(instance, service, power, brightness, temperature)?
+        parse_ls2307(instance, service, power, brightness, temperature)?
     } else {
         (color, None)
     };
@@ -206,22 +199,19 @@ fn numeric_binding(
     }
     Ok(binding)
 }
-fn ls2307(
+fn parse_ls2307(
     instance: &Description<'_>,
     main: &Service<'_>,
     power: PropertyBinding,
     brightness: NumericBinding,
     temperature: NumericBinding,
 ) -> Result<(Option<NumericBinding>, Option<ModeBinding>), CapabilityError> {
-    let incompatible = || CapabilityError::IncompatibleModel("devcea.light.ls2307");
-    let exact =
-        |urn: &Urn<'_>| urn.vendor == "devcea-ls2307" && urn.version == 1 && urn.suffix.is_none();
+    let incompatible = || CapabilityError::IncompatibleModel(ls2307::MODEL);
+    let exact = ls2307::exact_urn;
     if !exact(&instance.urn)
         || main.iid != 2
         || !exact(&main.urn)
-        || power != (PropertyBinding { siid: 2, piid: 1 })
-        || brightness.property != (PropertyBinding { siid: 2, piid: 2 })
-        || temperature.property != (PropertyBinding { siid: 2, piid: 3 })
+        || !ls2307::main_bindings(power, brightness, temperature)
     {
         return Err(incompatible());
     }
@@ -243,38 +233,25 @@ fn ls2307(
         return Err(incompatible());
     }
     let color = numeric_binding(4, color_property, NumericUnit::Rgb)?;
-    if color.format != NumericFormat::Uint32
-        || color.range
-            != (NumericRange {
-                min: 0,
-                max: 0xffffff,
-                step: 1,
-            })
-    {
+    if color != ls2307::COLOR {
         return Err(incompatible());
     }
     access(mode_property)?;
-    if format(mode_property)? != NumericFormat::Uint8 {
+    if format(mode_property)? != ls2307::MODE.format {
         return Err(incompatible());
     }
     let values = array(mode_property.value, "value-list")?;
     if values.len() != 2
         || !values.iter().any(|value| {
-            value["value"].as_u64() == Some(0) && value["description"].as_str() == Some("Warm")
+            value["value"].as_u64() == Some(ls2307::MODE.temperature_value as u64)
+                && value["description"].as_str() == Some("Warm")
         })
         || !values.iter().any(|value| {
-            value["value"].as_u64() == Some(1) && value["description"].as_str() == Some("Color")
+            value["value"].as_u64() == Some(ls2307::MODE.rgb_value as u64)
+                && value["description"].as_str() == Some("Color")
         })
     {
         return Err(incompatible());
     }
-    Ok((
-        Some(color),
-        Some(ModeBinding {
-            property: PropertyBinding { siid: 4, piid: 2 },
-            format: NumericFormat::Uint8,
-            temperature_value: 0,
-            rgb_value: 1,
-        }),
-    ))
+    Ok((Some(color), Some(ls2307::MODE)))
 }

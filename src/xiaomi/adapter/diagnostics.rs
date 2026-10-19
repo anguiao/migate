@@ -3,7 +3,7 @@ use super::{
         AdapterStatus, DeviceStatus, GatewayStatus, PathKind, PendingDevice, RecoveryStatus,
         RoutingStatus,
     },
-    routing::PathPriority,
+    routing::ControlPath,
     state::Context,
 };
 impl Context {
@@ -66,16 +66,16 @@ impl Context {
         let mut devices = Vec::new();
         for did in dids {
             let mut usable = Vec::new();
-            if self.local_candidate(&did, false).is_some() {
+            if self.local_candidate(&did, false).is_ok() {
                 usable.push(PathKind::Local);
             }
-            if self.cloud_candidate(&did, true) {
+            if self.cloud_candidate(&did, true).is_ok() {
                 usable.push(PathKind::Cloud);
             }
-            let selected = match self.priority() {
-                PathPriority::LocalFirst => usable.first().copied(),
-                PathPriority::CloudFirst => usable.last().copied(),
-            };
+            let selected = self.control_path(&did).map(|path| match path {
+                ControlPath::Local(_) => PathKind::Local,
+                ControlPath::Cloud(_) => PathKind::Cloud,
+            });
             let notification = self.active_notification(&did);
             let old = previous.devices.iter().find(|device| device.did == did);
             let switched = old.is_some_and(|old| {
@@ -92,8 +92,11 @@ impl Context {
             let unavailable_reason = selected.is_none().then(|| {
                 format!(
                     "local: {}; cloud: {}",
-                    self.local_reason(&did, false),
-                    self.cloud_reason(&did, true)
+                    self.local_candidate(&did, false)
+                        .err()
+                        .expect("no local control path"),
+                    self.cloud_candidate(&did, true)
+                        .expect_err("no cloud control path")
                 )
             });
             let sync_limited_reason = notification
@@ -150,59 +153,6 @@ impl Context {
             .last_switch_reason = Some(reason.into());
         self.update_routing(reason);
     }
-    fn local_reason(&self, did: &str, push: bool) -> String {
-        let live = self.live.borrow();
-        let slot = &live.devices[did];
-        if let Some(reason) = &slot.blocked {
-            return reason.clone();
-        }
-        if live.session.is_none() {
-            return "gateway disconnected".into();
-        }
-        if !self
-            .status
-            .borrow()
-            .authentication
-            .certificate
-            .is_some_and(|v| v.currently_valid(self.clock.unix_now()))
-        {
-            return "gateway certificate not currently valid".into();
-        }
-        match &slot.access {
-            None => "device access not available".into(),
-            Some(Err(error)) => error.to_string(),
-            Some(Ok(access)) if !access.online => "device offline".into(),
-            Some(Ok(access)) if !access.spec_v2_access => "property access unavailable".into(),
-            Some(Ok(access)) if push && !access.push_available => {
-                "notification access unavailable".into()
-            }
-            Some(Ok(_)) => "device description or binding unavailable".into(),
-        }
-    }
-    fn cloud_reason(&self, did: &str, http: bool) -> String {
-        if !self.cloud_scope_valid.get() {
-            return "account/home scope not validated".into();
-        }
-        if !self.token_usable() {
-            return "credentials unavailable, expired or rejected".into();
-        }
-        if http && self.http_paused.get() {
-            return "HTTP temporarily paused".into();
-        }
-        let live = self.live.borrow();
-        let slot = &live.devices[did];
-        if let Some(reason) = &slot.blocked {
-            return reason.clone();
-        }
-        if slot.cloud_forbidden {
-            return "device access forbidden".into();
-        }
-        match &slot.cloud_access {
-            None => "device information not available".into(),
-            Some(access) if !access.online => "device offline".into(),
-            Some(_) => "device description or binding unavailable".into(),
-        }
-    }
     fn notification_reason(&self, did: &str) -> String {
         if self.is_virtual_group(did) {
             return "member feedback unavailable or subscriptions not ready".into();
@@ -216,15 +166,13 @@ impl Context {
                 return reason;
             }
         }
-        let local = if self.local_candidate(did, true).is_some() {
-            "notification subscriptions not ready".into()
-        } else {
-            self.local_reason(did, true)
+        let local = match self.local_candidate(did, true) {
+            Ok(_) => "notification subscriptions not ready".into(),
+            Err(reason) => reason,
         };
-        let cloud = if self.cloud_candidate(did, false) {
-            "notifications disconnected or subscriptions not ready".into()
-        } else {
-            self.cloud_reason(did, false)
+        let cloud = match self.cloud_candidate(did, false) {
+            Ok(()) => "notifications disconnected or subscriptions not ready".into(),
+            Err(reason) => reason,
         };
         format!("local notifications: {local}; cloud notifications: {cloud}")
     }

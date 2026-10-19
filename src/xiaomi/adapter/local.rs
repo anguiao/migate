@@ -118,20 +118,6 @@ pub(super) async fn run(
             let driving = async {
                 driver
                     .run(move |event| match event {
-                        CentralEvent::Property {
-                            did,
-                            binding,
-                            value,
-                        } => {
-                            events.property_event(
-                                &super::notifications::NotificationSource::Local(
-                                    event_handle.clone(),
-                                ),
-                                &did,
-                                binding,
-                                value,
-                            );
-                        }
                         CentralEvent::DeviceListChanged { dids } => {
                             events
                                 .live

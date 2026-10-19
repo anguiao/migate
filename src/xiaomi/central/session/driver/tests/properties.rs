@@ -49,10 +49,10 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
         assert!(poll_once(driver.drive(&mut on_event)).await.is_none());
         assert_eq!(
             events.borrow().as_slice(),
-            &[CentralEvent::Property {
+            &[CentralEvent::PropertyValue {
                 did: "target".into(),
                 binding: BINDING,
-                value: false
+                value: serde_json::Value::Bool(false)
             }],
             "a received property from the retired source was dispatched"
         );
@@ -122,7 +122,7 @@ fn received_property_invalidation_takes_effect_between_buffered_frames_in_one_po
         }
         let events = Rc::new(RefCell::new(Vec::new()));
         let mut on_event = |event| {
-            if matches!(&event, CentralEvent::Property { did, .. } if did == "other") {
+            if matches!(&event, CentralEvent::PropertyValue { did, .. } if did == "other") {
                 handle.invalidate_received_properties("target");
             }
             events.borrow_mut().push(event);
@@ -130,10 +130,10 @@ fn received_property_invalidation_takes_effect_between_buffered_frames_in_one_po
         assert!(poll_once(driver.drive(&mut on_event)).await.is_none());
         assert_eq!(
             events.borrow().as_slice(),
-            &[CentralEvent::Property {
+            &[CentralEvent::PropertyValue {
                 did: "other".into(),
                 binding: BINDING,
-                value: true
+                value: serde_json::Value::Bool(true)
             }]
         );
         assert!(driver.ready);
@@ -292,10 +292,10 @@ fn a_qos2_property_received_before_unsubscription_cannot_reappear_after_resubscr
             .unwrap();
         assert_eq!(
             events.borrow().as_slice(),
-            &[CentralEvent::Property {
+            &[CentralEvent::PropertyValue {
                 did: "target".into(),
                 binding: BINDING,
-                value: false
+                value: serde_json::Value::Bool(false)
             }]
         );
     });

@@ -323,12 +323,6 @@ impl SessionDriver {
                     binding,
                     value: value.clone(),
                 }
-            } else if let Some(value) = value.as_bool() {
-                CentralEvent::Property {
-                    did,
-                    binding,
-                    value,
-                }
             } else {
                 CentralEvent::PropertyValue {
                     did,

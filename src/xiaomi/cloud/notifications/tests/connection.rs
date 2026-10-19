@@ -75,10 +75,10 @@ fn notification_connect_suback_and_messages_follow_wire_order() {
     assert_eq!(
         *events.borrow(),
         [
-            NotificationEvent::Property {
+            NotificationEvent::PropertyValue {
                 did: "target".into(),
                 binding: POWER,
-                value: true
+                value: serde_json::Value::Bool(true)
             },
             NotificationEvent::Online {
                 did: "target".into(),

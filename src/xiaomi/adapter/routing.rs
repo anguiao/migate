@@ -198,7 +198,16 @@ impl Context {
             .tasks
             .spawn(super::work::run(work, handle, self.clone()));
     }
-    pub(super) fn local_candidate(&self, did: &str, push: bool) -> Option<SessionHandle> {
+    pub(super) fn local_candidate(&self, did: &str, push: bool) -> Result<SessionHandle, String> {
+        let live = self.live.borrow();
+        let slot = live
+            .devices
+            .get(did)
+            .ok_or("device description unavailable")?;
+        if let Some(reason) = &slot.blocked {
+            return Err(reason.clone());
+        }
+        let session = live.session.as_ref().ok_or("gateway disconnected")?;
         if !self
             .status
             .borrow()
@@ -206,34 +215,42 @@ impl Context {
             .certificate
             .is_some_and(|validity| validity.currently_valid(self.clock.unix_now()))
         {
-            return None;
+            return Err("gateway certificate not currently valid".into());
         }
-        let live = self.live.borrow();
-        let slot = live.devices.get(did)?;
-        // Virtual groups are cloud-only even when a member advertises a local
-        // gateway. A physical group uses its own DID's real local route.
         if slot
             .effective_group
             .as_ref()
             .is_some_and(|group| !group.is_physical)
         {
-            return None;
+            return Err("virtual group has no local route".into());
         }
-        let record = slot.admitted.as_ref()?;
-        if slot.blocked.is_some() || record.life.is_closed() {
-            return None;
+        let record = slot
+            .admitted
+            .as_ref()
+            .ok_or("device description or binding unavailable")?;
+        if record.life.is_closed() {
+            return Err("device source retired".into());
+        }
+        let access = slot
+            .access
+            .as_ref()
+            .ok_or("device access not available")?
+            .as_ref()
+            .map_err(ToString::to_string)?;
+        if !access.online {
+            return Err("device offline".into());
+        }
+        if !access.spec_v2_access {
+            return Err("property access unavailable".into());
+        }
+        if push && !access.push_available {
+            return Err("notification access unavailable".into());
         }
         let cached = record.cached.borrow();
-        let access = slot.access.as_ref()?.as_ref().ok()?;
-        if !access.online
-            || !access.spec_v2_access
-            || (push && !access.push_available)
-            || access.model != cached.model
-            || access.instance_type != cached.instance_type
-        {
-            return None;
+        if access.model != cached.model || access.instance_type != cached.instance_type {
+            return Err("device description or binding unavailable".into());
         }
-        live.session.as_ref().map(|session| session.handle.clone())
+        Ok(session.handle.clone())
     }
     pub(super) fn is_group(&self, did: &str) -> bool {
         self.live
@@ -243,14 +260,24 @@ impl Context {
             .is_some_and(|slot| slot.effective_group.is_some())
     }
     pub(super) fn cloud_authenticated(&self) -> bool {
-        self.cloud_scope_valid.get() && self.token_usable() && {
-            let live = self.live.borrow();
-            live.credentials.as_ref().is_some_and(|credentials| {
-                live.scope
-                    .as_ref()
-                    .is_some_and(|scope| scope.uid == credentials.uid)
-            })
+        self.cloud_authentication().is_ok()
+    }
+    fn cloud_authentication(&self) -> Result<(), String> {
+        if !self.cloud_scope_valid.get() {
+            return Err("account/home scope not validated".into());
         }
+        if !self.token_usable() {
+            return Err("credentials unavailable, expired or rejected".into());
+        }
+        let live = self.live.borrow();
+        if !live.credentials.as_ref().is_some_and(|credentials| {
+            live.scope
+                .as_ref()
+                .is_some_and(|scope| scope.uid == credentials.uid)
+        }) {
+            return Err("account/home identity mismatch".into());
+        }
+        Ok(())
     }
     pub(super) fn token_usable(&self) -> bool {
         !matches!(
@@ -281,32 +308,47 @@ impl Context {
             listener.await;
         }
     }
-    pub(super) fn cloud_candidate(&self, did: &str, http: bool) -> bool {
-        if !self.cloud_authenticated() || (http && self.http_paused.get()) {
-            return false;
+    pub(super) fn cloud_candidate(&self, did: &str, http: bool) -> Result<(), String> {
+        self.cloud_authentication()?;
+        if http && self.http_paused.get() {
+            return Err("HTTP temporarily paused".into());
         }
         let live = self.live.borrow();
-        let Some(slot) = live.devices.get(did) else {
-            return false;
-        };
-        let Some(record) = &slot.admitted else {
-            return false;
-        };
-        if slot.blocked.is_some() || record.life.is_closed() || slot.cloud_forbidden {
-            return false;
+        let slot = live
+            .devices
+            .get(did)
+            .ok_or("device description unavailable")?;
+        let record = slot
+            .admitted
+            .as_ref()
+            .ok_or("device description or binding unavailable")?;
+        if let Some(reason) = &slot.blocked {
+            return Err(reason.clone());
+        }
+        if record.life.is_closed() {
+            return Err("device source retired".into());
+        }
+        if slot.cloud_forbidden {
+            return Err("device access forbidden".into());
+        }
+        let access = slot
+            .cloud_access
+            .as_ref()
+            .ok_or("device information not available")?;
+        if !access.online {
+            return Err("device offline".into());
         }
         let cached = record.cached.borrow();
-        slot.cloud_access.as_ref().is_some_and(|access| {
-            access.online
-                && access.model == cached.model
-                && access.instance_type == cached.instance_type
-        })
+        if access.model != cached.model || access.instance_type != cached.instance_type {
+            return Err("device description or binding unavailable".into());
+        }
+        Ok(())
     }
     pub(super) fn control_path(&self, did: &str) -> Option<ControlPath> {
-        let local = self.local_candidate(did, false);
+        let local = self.local_candidate(did, false).ok();
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
-            _ if self.cloud_candidate(did, true) => {
+            _ if self.cloud_candidate(did, true).is_ok() => {
                 self.live.borrow().credentials.as_ref().map(|credentials| {
                     ControlPath::Cloud(CloudPath {
                         uid: credentials.uid.clone(),

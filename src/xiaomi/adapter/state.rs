@@ -100,7 +100,6 @@ pub(super) struct GroupSource {
     pub(super) instance_type: Option<String>,
     pub(super) members: Vec<String>,
     pub(super) is_physical: bool,
-    pub(super) online: bool,
 }
 impl DeviceSlot {
     pub(super) fn restored(cached: CachedPhysicalDevice, physical: PhysicalDevice) -> Self {

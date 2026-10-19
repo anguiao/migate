@@ -52,8 +52,8 @@ fn business_acceptance_precedes_pubcomp_and_callbacks_preserve_notification_orde
         },
         |handle, driver| async move {
             let drive = driver.run(move |event| {
-                if let CentralEvent::Property { value, .. } = event {
-                    events.borrow_mut().push(value);
+                if let CentralEvent::PropertyValue { value, .. } = event {
+                    events.borrow_mut().push(value.as_bool().unwrap());
                 }
             });
             let work = async {
@@ -182,7 +182,10 @@ fn coalesced_read_and_access_callbacks_run_before_later_notifications() {
             let (result, ()) = future::zip(
                 driver.run(move |event| {
                     events.borrow_mut().push(match event {
-                        CentralEvent::Property { value: true, .. } => "notify true",
+                        CentralEvent::PropertyValue {
+                            value: serde_json::Value::Bool(true),
+                            ..
+                        } => "notify true",
                         CentralEvent::DeviceListChanged { dids } => {
                             assert_eq!(dids, ["target"]);
                             "list changed"

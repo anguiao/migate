@@ -119,7 +119,6 @@ impl Context {
                     instance_type: group.instance_type.clone(),
                     members: group.membership.members.clone(),
                     is_physical: group.membership.is_physical,
-                    online: group.online,
                 });
                 slot.cloud_access =
                     group

@@ -143,8 +143,8 @@ fn duplicate_inflight_qos2_publication_is_delivered_once() {
             };
             let (result, ()) = future::zip(
                 driver.run(move |event| {
-                    if let CentralEvent::Property { value, .. } = event {
-                        observed.borrow_mut().push(value)
+                    if let CentralEvent::PropertyValue { value, .. } = event {
+                        observed.borrow_mut().push(value.as_bool().unwrap())
                     }
                 }),
                 work,
@@ -371,10 +371,10 @@ fn invalid_device_messages_do_not_disconnect_the_shared_session() {
         assert_eq!(
             *events.borrow(),
             [
-                CentralEvent::Property {
+                CentralEvent::PropertyValue {
                     did: "other".into(),
                     binding: PropertyBinding { siid: 2, piid: 1 },
-                    value: true,
+                    value: serde_json::Value::Bool(true),
                 },
                 CentralEvent::DeviceListChanged {
                     dids: vec!["other".into()],

@@ -636,7 +636,7 @@ fn new_and_restored_pushless_devices_read_and_control_without_local_notification
                     .await
                     .unwrap();
                 assert_eq!(local.count("rpcReq", "one", 2), 1);
-                assert!(control.context.local_candidate("one", true).is_none());
+                assert!(control.context.local_candidate("one", true).is_err());
                 assert!(
                     !control
                         .context
@@ -707,11 +707,12 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
             until(|| cloud_active(&c, "one")).await;
             let one = function(&c.context.registry, "one", "main");
             until(|| one.snapshot().power == Power::Off).await;
-            c.context.property_event(
+            c.context.property_value_event(
                 &super::super::notifications::NotificationSource::Cloud(old),
                 "one",
                 crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-                true,
+                &json!(true),
+                false,
             );
             assert_eq!(one.snapshot().power, Power::Off);
             assert_eq!(c.cloud.lock().unwrap().tokens, 0);

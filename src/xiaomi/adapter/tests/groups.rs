@@ -578,7 +578,11 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
                 .borrow()
                 .devices
                 .get("group-1")
-                .is_none_or(|slot| slot.group.as_ref().is_some_and(|group| !group.online))
+                .is_none_or(|slot| {
+                    slot.cloud_access
+                        .as_ref()
+                        .is_some_and(|access| !access.online)
+                })
         })
         .await;
         {
