@@ -16,12 +16,8 @@ use super::{
 };
 use crate::xiaomi::{
     capability::PropertyBinding,
-    central::{
-        CentralError,
-        test_support::TlsFixture,
-        tls,
-        wire::{self, encode_packet},
-    },
+    central::{CentralError, test_support::TlsFixture, tls, wire},
+    mqtt::{Frames, encode_packet},
 };
 use async_io::Async;
 use futures_lite::{

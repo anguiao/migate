@@ -80,8 +80,10 @@ fn guarded_batch_write_sends_once_and_callback_retains_partial_results_after_dro
         drop(write);
         driver.drain_requests().unwrap();
         let mid = *driver.pending.keys().next().unwrap();
-        let mut frames = wire::Frames::default();
-        frames.push(&driver.output.front().unwrap().bytes).unwrap();
+        let mut frames = Frames::default();
+        frames
+            .push(driver.output.front().unwrap().frame.bytes())
+            .unwrap();
         let Some(Packet::Publish(publish)) = frames.next_packet().unwrap() else {
             panic!("batch publication expected")
         };

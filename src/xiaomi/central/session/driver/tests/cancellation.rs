@@ -71,7 +71,7 @@ fn cancelling_unsent_business_preserves_partial_reads_and_qos2_frames() {
         handle.cancel_unsent_business();
         driver.drain_cancellations();
         assert_eq!(list.await, unsent(CentralError::Cancelled));
-        assert_eq!(driver.output.front().unwrap().offset, 3);
+        assert_eq!(driver.output.front().unwrap().frame.offset(), 3);
         assert!(driver.pending.contains_key(&mid));
         assert!(driver.publications.contains_key(&pkid));
         write_ready(&mut driver, &budget, usize::MAX).await;
@@ -168,7 +168,7 @@ fn a_response_timeout_callback_cancels_unsent_lists_before_the_same_socket_poll(
         let list = handle.get_devices(count_result(&list_callbacks));
         driver.drain_requests().unwrap();
         assert_eq!(driver.output.len(), 1);
-        assert_eq!(driver.output.front().unwrap().offset, 0);
+        assert_eq!(driver.output.front().unwrap().frame.offset(), 0);
         driver.pending.get_mut(&write_id).unwrap().deadline =
             Instant::now() - Duration::from_secs(1);
         driver

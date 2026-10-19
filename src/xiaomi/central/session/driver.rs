@@ -1,15 +1,13 @@
-use super::super::{CentralError, wire};
+use super::super::CentralError;
 use super::{
     CentralEvent, LIMIT, SessionHandle, Timing, Transport,
     request::{Request, RequestStage, RequestTimeout, Shared},
 };
 use crate::xiaomi::capability::PropertyBinding;
+use crate::xiaomi::mqtt;
 use event_listener::Event;
-use futures_lite::{
-    future,
-    io::{AsyncRead, AsyncWrite},
-};
-use mqttbytes::v5::{Packet, Publish};
+use futures_lite::{future, io::AsyncRead};
+use mqttbytes::v5::Packet;
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     pin::Pin,
@@ -20,8 +18,7 @@ use std::{
 
 struct Output {
     kind: &'static str,
-    bytes: Vec<u8>,
-    offset: usize,
+    frame: mqtt::SendFrame,
     deadline: Instant,
     request: Option<u32>,
     pkid: Option<u16>,
@@ -50,11 +47,6 @@ pub(super) struct PropertySubscription {
     pub(super) generation: u64,
 }
 
-pub(super) struct ReceivedPublish {
-    pub(super) publication: Publish,
-    pub(super) property_generation: Option<u64>,
-}
-
 #[derive(Clone, Eq, PartialEq)]
 pub(super) enum SubscriptionKind {
     Baseline,
@@ -69,7 +61,7 @@ pub(super) enum SubscriptionKind {
 /// handle requests; callbacks and events execute in wire order on this driver.
 pub struct SessionDriver {
     stream: Box<dyn Transport>,
-    frames: wire::Frames,
+    frames: mqtt::Frames,
     pub(super) shared: Rc<Shared>,
     pub(super) timing: Timing,
     pub(super) client_id: String,
@@ -79,14 +71,13 @@ pub struct SessionDriver {
     pub(super) pending: HashMap<u32, Request>,
     pub(super) publications: HashMap<u16, Publication>,
     pub(super) subscriptions: HashMap<u16, Subscription>,
-    pub(super) incoming: HashMap<u16, ReceivedPublish>,
+    pub(super) incoming: mqtt::QoS2<Option<u64>>,
     pub(super) property_topics: HashMap<String, PropertySubscription>,
     pub(super) property_generation: u64,
     pub(super) retired_topics: HashMap<String, BTreeSet<String>>,
     pub(super) ready: bool,
     pkid: u16,
-    last_sent: Instant,
-    pub(super) ping_deadline: Option<Instant>,
+    pub(super) keepalive: mqtt::Keepalive,
     max_packet: usize,
     pub(super) receive_max: usize,
 }
@@ -94,7 +85,7 @@ pub struct SessionDriver {
 impl SessionDriver {
     pub(super) fn new(
         stream: Box<dyn Transport>,
-        frames: wire::Frames,
+        frames: mqtt::Frames,
         client_id: &str,
         timing: Timing,
         max_packet: usize,
@@ -122,14 +113,13 @@ impl SessionDriver {
             pending: HashMap::new(),
             publications: HashMap::new(),
             subscriptions: HashMap::new(),
-            incoming: HashMap::new(),
+            incoming: mqtt::QoS2::new(LIMIT),
             property_topics: HashMap::new(),
             property_generation: 0,
             retired_topics: HashMap::new(),
             ready: false,
             pkid: 0,
-            last_sent: now,
-            ping_deadline: None,
+            keepalive: mqtt::Keepalive::new(now),
             max_packet,
             receive_max,
         };
@@ -166,8 +156,12 @@ impl SessionDriver {
             self.drain_property_invalidations();
             // Process one complete frame at a time; callback completion never
             // depends on scheduling a separate request future.
-            if let Some(packet) = self.frames.next_packet()? {
-                let (kind, pkid) = wire::packet_context(&packet);
+            if let Some(packet) = self
+                .frames
+                .next_packet()
+                .map_err(|_| CentralError::Protocol)?
+            {
+                let (kind, pkid) = mqtt::packet_context(&packet);
                 self.packet(packet, on_event).inspect_err(|error| {
                     log::debug!(
                         "Gateway packet failed: packet={kind}, packet_id={pkid:?}, error={error}"
@@ -218,7 +212,7 @@ impl SessionDriver {
         request: Option<u32>,
         pkid: Option<u16>,
     ) -> Result<(), CentralError> {
-        let bytes = wire::encode_packet(&packet)?;
+        let bytes = mqtt::encode_packet(&packet).map_err(|_| CentralError::Protocol)?;
         if bytes.len() > self.max_packet {
             return Err(CentralError::Protocol);
         }
@@ -226,9 +220,8 @@ impl SessionDriver {
             return Err(CentralError::Protocol);
         }
         self.output.push_back(Output {
-            kind: wire::packet_context(&packet).0,
-            bytes,
-            offset: 0,
+            kind: mqtt::packet_context(&packet).0,
+            frame: mqtt::SendFrame::new(bytes),
             deadline,
             request,
             pkid,
@@ -257,7 +250,7 @@ impl SessionDriver {
                     && self
                         .output
                         .iter()
-                        .any(|output| output.request == Some(*mid) && output.offset == 0))
+                        .any(|output| output.request == Some(*mid) && !output.frame.started()))
                 .then_some(*mid)
             })
             .collect::<Vec<_>>();
@@ -272,7 +265,7 @@ impl SessionDriver {
     pub(super) fn cancel_unsent_outputs(&mut self, requests: &[u32], subscriptions: &[u16]) {
         let mut removed = Vec::new();
         self.output.retain(|output| {
-            let cancel = output.offset == 0
+            let cancel = !output.frame.started()
                 && (output.request.is_some_and(|mid| requests.contains(&mid))
                     || output
                         .pkid
@@ -289,7 +282,7 @@ impl SessionDriver {
     }
     fn expire(&mut self) -> Result<(), CentralError> {
         let now = Instant::now();
-        if self.ping_deadline.is_some_and(|deadline| now >= deadline) {
+        if self.keepalive.ping_expired(now) {
             log::debug!("Gateway timed out awaiting PINGRESP");
             return Err(CentralError::Timeout);
         }
@@ -307,14 +300,14 @@ impl SessionDriver {
         }
         if let Some(output) = self.output.iter().find(|output| {
             now >= output.deadline
-                && (output.offset > 0 || output.request.is_none() && output.pkid.is_none())
+                && (output.frame.started() || output.request.is_none() && output.pkid.is_none())
         }) {
             log::debug!(
                 "Gateway output timed out: packet={}, packet_id={:?}, bytes_written={}, bytes_total={}",
                 output.kind,
                 output.pkid,
-                output.offset,
-                output.bytes.len()
+                output.frame.offset(),
+                output.frame.bytes().len()
             );
             return Err(CentralError::Timeout);
         }
@@ -361,13 +354,13 @@ impl SessionDriver {
             .output
             .iter()
             .filter_map(|output| {
-                (now >= output.deadline && output.offset == 0)
+                (now >= output.deadline && !output.frame.started())
                     .then_some(output.pkid)
                     .flatten()
             })
             .collect();
         self.output
-            .retain(|output| !(now >= output.deadline && output.offset == 0));
+            .retain(|output| now < output.deadline || output.frame.started());
         for pkid in expired {
             self.publications.remove(&pkid);
             self.subscriptions.remove(&pkid);
@@ -385,24 +378,18 @@ impl SessionDriver {
         Ok(())
     }
     fn keepalive(&mut self) -> Result<(), CentralError> {
-        if self.ping_deadline.is_none()
-            && self
-                .timing
-                .keepalive
-                .is_some_and(|interval| Instant::now() >= self.last_sent + interval)
+        if let Some(deadline) =
+            self.keepalive
+                .begin_ping(Instant::now(), self.timing.keepalive, self.timing.request)
         {
-            let deadline = Instant::now() + self.timing.request;
-            self.ping_deadline = Some(deadline);
             self.enqueue(Packet::PingReq, deadline, None, None)?;
         }
         Ok(())
     }
     fn next_deadline(&self) -> Instant {
         let mut deadline = Instant::now() + self.timing.request;
-        if let Some(ping) = self.ping_deadline {
-            deadline = deadline.min(ping)
-        } else if let Some(interval) = self.timing.keepalive {
-            deadline = deadline.min(self.last_sent + interval)
+        if let Some(protocol) = self.keepalive.next_deadline(self.timing.keepalive) {
+            deadline = deadline.min(protocol);
         }
         for request in self.pending.values() {
             deadline = deadline.min(request.deadline)
@@ -433,10 +420,11 @@ impl SessionDriver {
         // A response timeout callback may retire queued business in this poll.
         self.drain_cancellations();
         // Pending socket writes have made no progress: recheck on every poll.
-        let guarded = self
-            .output
-            .front()
-            .and_then(|output| (output.offset == 0).then_some(output.request).flatten());
+        let guarded = self.output.front().and_then(|output| {
+            (!output.frame.started())
+                .then_some(output.request)
+                .flatten()
+        });
         if let Some(mid) = guarded {
             let decision = self
                 .pending
@@ -456,51 +444,37 @@ impl SessionDriver {
             }
         }
         let mut progressed = false;
-        if let Some(output) = self.output.front_mut() {
-            if output.offset < output.bytes.len() {
-                match Pin::new(&mut self.stream).poll_write(cx, &output.bytes[output.offset..]) {
-                    Poll::Ready(Ok(0)) => return Poll::Ready(Err(CentralError::Io)),
-                    Poll::Ready(Ok(count)) => {
-                        output.offset += count;
-                        if let Some(mid) = output.request
-                            && let Some(request) = self.pending.get_mut(&mid)
-                        {
-                            request.stage = RequestStage::MayHaveBeenSent;
-                            if let Some(hooks) = request.hooks.take() {
-                                (hooks.first_send)();
-                            }
-                        } else if let Some(pkid) = output.pkid
-                            && let Some(request) = self
-                                .subscriptions
-                                .get_mut(&pkid)
-                                .and_then(|subscription| subscription.request.as_mut())
-                        {
-                            request.stage = RequestStage::MayHaveBeenSent;
-                        }
-                        progressed = true;
-                    }
-                    Poll::Ready(Err(_)) => return Poll::Ready(Err(CentralError::Io)),
-                    Poll::Pending => {}
+        let status = match self.output.front_mut() {
+            Some(output) => Some((
+                output.frame.poll_io(cx, &mut self.stream),
+                output.request,
+                output.pkid,
+            )),
+            None => None,
+        };
+        match status {
+            None => {}
+            Some((Err(_), _, _)) => return Poll::Ready(Err(CentralError::Io)),
+            Some((Ok(mqtt::SendStatus::Pending), _, _)) => {}
+            Some((Ok(mqtt::SendStatus::Wrote { complete, .. }), request, pkid)) => {
+                self.mark_sent(request, pkid);
+                progressed = true;
+                if complete && let Err(error) = self.flush_front(cx) {
+                    return Poll::Ready(Err(error));
                 }
             }
-            if output.offset == output.bytes.len() {
-                match Pin::new(&mut self.stream).poll_flush(cx) {
-                    Poll::Ready(Ok(())) => {
-                        self.output.pop_front();
-                        self.last_sent = Instant::now();
-                        progressed = true;
-                    }
-                    Poll::Ready(Err(_)) => return Poll::Ready(Err(CentralError::Io)),
-                    Poll::Pending => {}
-                }
+            Some((Ok(mqtt::SendStatus::Flushed), _, _)) => {
+                self.output.pop_front();
+                self.keepalive.sent(Instant::now());
+                progressed = true;
             }
         }
         let mut bytes = [0; 4096];
         match Pin::new(&mut self.stream).poll_read(cx, &mut bytes) {
             Poll::Ready(Ok(0)) => return Poll::Ready(Err(CentralError::Disconnected)),
             Poll::Ready(Ok(len)) => {
-                if let Err(error) = self.frames.push(&bytes[..len]) {
-                    return Poll::Ready(Err(error));
+                if self.frames.push(&bytes[..len]).is_err() {
+                    return Poll::Ready(Err(CentralError::Protocol));
                 }
                 progressed = true;
             }
@@ -511,6 +485,43 @@ impl SessionDriver {
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
+        }
+    }
+    /// Continue a fully written frame with its flush in the same poll, after
+    /// the send progress was recorded.
+    fn flush_front(&mut self, cx: &mut std::task::Context<'_>) -> Result<(), CentralError> {
+        let flushed = match self.output.front_mut() {
+            Some(output) => output.frame.poll_flush(cx, &mut self.stream),
+            None => return Ok(()),
+        };
+        match flushed {
+            Ok(true) => {
+                self.output.pop_front();
+                self.keepalive.sent(Instant::now());
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(_) => Err(CentralError::Io),
+        }
+    }
+
+    /// Record that request bytes reached the socket. Called in the same poll as
+    /// the accepted write so hooks observe the first byte immediately.
+    fn mark_sent(&mut self, request: Option<u32>, pkid: Option<u16>) {
+        if let Some(mid) = request
+            && let Some(request) = self.pending.get_mut(&mid)
+        {
+            request.stage = RequestStage::MayHaveBeenSent;
+            if let Some(hooks) = request.hooks.take() {
+                (hooks.first_send)();
+            }
+        } else if let Some(pkid) = pkid
+            && let Some(request) = self
+                .subscriptions
+                .get_mut(&pkid)
+                .and_then(|subscription| subscription.request.as_mut())
+        {
+            request.stage = RequestStage::MayHaveBeenSent;
         }
     }
 }

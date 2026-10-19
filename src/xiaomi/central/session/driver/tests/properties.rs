@@ -43,7 +43,7 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
         ] {
             driver
                 .frames
-                .push(&wire::encode_packet(&packet).unwrap())
+                .push(&encode_packet(&packet).unwrap())
                 .unwrap();
         }
         assert!(poll_once(driver.drive(&mut on_event)).await.is_none());
@@ -62,9 +62,9 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
         assert!(driver.subscriptions[&subscription_id].request.is_some());
         assert_eq!(driver.pending.len(), 2);
         assert_eq!(driver.output.len(), outputs_before + 3);
-        let mut outputs = wire::Frames::default();
+        let mut outputs = Frames::default();
         for output in driver.output.iter().skip(outputs_before) {
-            outputs.push(&output.bytes).unwrap();
+            outputs.push(output.frame.bytes()).unwrap();
         }
         assert!(
             matches!(outputs.next_packet().unwrap(), Some(Packet::PubComp(ack)) if ack.pkid == 55)
@@ -117,7 +117,7 @@ fn received_property_invalidation_takes_effect_between_buffered_frames_in_one_po
         ] {
             driver
                 .frames
-                .push(&wire::encode_packet(&packet).unwrap())
+                .push(&encode_packet(&packet).unwrap())
                 .unwrap();
         }
         let events = Rc::new(RefCell::new(Vec::new()));

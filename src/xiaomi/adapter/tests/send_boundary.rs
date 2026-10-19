@@ -34,7 +34,7 @@ impl Wire {
         self.reply(accepted("one", 2, 0));
     }
     fn reply(&self, value: Value) {
-        let mut frames = crate::xiaomi::central::MqttFrames::default();
+        let mut frames = crate::xiaomi::mqtt::Frames::default();
         frames.push(&self.written.borrow()).unwrap();
         let Packet::Publish(publish) = frames.next_packet().unwrap().unwrap() else {
             panic!("business publication expected")
@@ -257,7 +257,7 @@ fn write_observation_capture_occurs_at_first_socket_bytes() {
                     }
                     wire.allow(usize::MAX);
                     until(|| {
-                        let mut frames = crate::xiaomi::central::MqttFrames::default();
+                        let mut frames = crate::xiaomi::mqtt::Frames::default();
                         frames.push(&wire.written.borrow()).unwrap();
                         frames.next_packet().unwrap().is_some()
                     })
@@ -372,7 +372,7 @@ fn a_cancelled_zero_byte_refresh_keeps_one_demand_until_shared_recovery() {
                     }
                     c.clock.advance(Duration::from_millis(200));
                     until(|| {
-                        let mut frames = crate::xiaomi::central::MqttFrames::default();
+                        let mut frames = crate::xiaomi::mqtt::Frames::default();
                         frames.push(&wire.written.borrow()).unwrap();
                         frames.next_packet().unwrap().is_some()
                     })
@@ -383,7 +383,7 @@ fn a_cancelled_zero_byte_refresh_keeps_one_demand_until_shared_recovery() {
                     for _ in 0..20 {
                         future::yield_now().await;
                     }
-                    let mut frames = crate::xiaomi::central::MqttFrames::default();
+                    let mut frames = crate::xiaomi::mqtt::Frames::default();
                     frames.push(&wire.written.borrow()).unwrap();
                     let Packet::Publish(publish) = frames.next_packet().unwrap().unwrap() else {
                         panic!("read publication expected")
@@ -483,7 +483,7 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
                 assert!(light.light_action_current(action.token()));
                 wire.allow(usize::MAX);
                 until(|| !wire.written.borrow().is_empty()).await;
-                let mut frames = crate::xiaomi::central::MqttFrames::default();
+                let mut frames = crate::xiaomi::mqtt::Frames::default();
                 frames.push(&wire.written.borrow()).unwrap();
                 let Packet::Publish(publish) = frames.next_packet().unwrap().unwrap() else {
                     panic!()
@@ -556,7 +556,7 @@ fn latest_tick_withdraws_unsent_transport_frame_and_preserves_linked_power() {
                 assert!(futures_lite::future::poll_once(action.accepted()).await.is_none());
                 wire.allow(usize::MAX);
                 until(|| !wire.written.borrow().is_empty()).await;
-                let mut frames = crate::xiaomi::central::MqttFrames::default();
+                let mut frames = crate::xiaomi::mqtt::Frames::default();
                 frames.push(&wire.written.borrow()).unwrap();
                 let Packet::Publish(publish) = frames.next_packet().unwrap().unwrap() else {
                     panic!()

@@ -9,11 +9,7 @@ use crate::{
         mqtt,
     },
 };
-use futures_lite::{
-    future,
-    io::{AsyncReadExt, AsyncWriteExt},
-};
-use mqttbytes::v5::{Connect, ConnectProperties, ConnectReturnCode, Packet};
+use mqttbytes::v5::{Connect, ConnectProperties, ConnectReturnCode};
 use std::time::Duration;
 
 const HOST: &str = "cn-ha.mqtt.io.mi.com";
@@ -71,79 +67,36 @@ pub(super) async fn start(
         authentication_data: None,
     });
     let mut frames = mqtt::Frames::default();
-    let handshake = async {
-        stream
-            .write_all(
-                &mqtt::encode_packet(&Packet::Connect(connect))
-                    .map_err(|_| NotificationError::Protocol)?,
-            )
-            .await
-            .map_err(|_| NotificationError::Io)?;
-        stream.flush().await.map_err(|_| NotificationError::Io)?;
-        loop {
-            if let Some(packet) = frames
-                .next_packet()
-                .map_err(|_| NotificationError::Protocol)?
-            {
-                return match packet {
-                    Packet::ConnAck(ack) => Ok(ack),
-                    _ => Err(NotificationError::Protocol),
-                };
-            }
-            let mut bytes = [0; 4096];
-            let len = stream
-                .read(&mut bytes)
-                .await
-                .map_err(|_| NotificationError::Io)?;
-            if len == 0 {
-                return Err(NotificationError::Disconnected);
-            }
-            frames
-                .push(&bytes[..len])
-                .map_err(|_| NotificationError::Protocol)?;
-        }
-    };
-    let ack = future::race(handshake, async {
-        async_io::Timer::after(timing.request).await;
-        Err(NotificationError::Timeout)
-    })
-    .await?;
-    if ack.code != ConnectReturnCode::Success {
-        return Err(
-            if matches!(
-                ack.code,
-                ConnectReturnCode::BadUserNamePassword | ConnectReturnCode::NotAuthorized
-            ) {
-                NotificationError::Unauthorized
-            } else {
-                NotificationError::Rejected(ack.code as u8)
-            },
-        );
-    }
-    if ack.session_present {
-        return Err(NotificationError::Protocol);
-    }
-    let mut max_packet = mqtt::MAX_FRAME_SIZE;
-    if let Some(properties) = ack.properties {
-        if properties.receive_max == Some(0)
-            || properties.max_packet_size == Some(0)
-            || properties.authentication_method.is_some()
-            || properties.authentication_data.is_some()
-        {
-            return Err(NotificationError::Protocol);
-        }
-        max_packet = properties
-            .max_packet_size
-            .map_or(max_packet, |size| (size as usize).min(max_packet));
-        if let Some(seconds) = properties.server_keep_alive {
-            timing.keepalive = (seconds > 0).then(|| Duration::from_secs(u64::from(seconds)));
-        }
+    let handshake = mqtt::handshake(&mut stream, &mut frames, connect, timing.request)
+        .await
+        .map_err(handshake_error)?;
+    if let Some(seconds) = handshake.server_keep_alive {
+        timing.keepalive = (seconds > 0).then(|| Duration::from_secs(u64::from(seconds)));
     }
     Ok(NotificationDriver::new(
         stream,
         frames,
         credentials.uid.clone(),
         timing,
-        max_packet,
+        handshake.max_packet,
     ))
+}
+
+fn handshake_error(error: mqtt::HandshakeError) -> NotificationError {
+    match error {
+        mqtt::HandshakeError::Io => NotificationError::Io,
+        mqtt::HandshakeError::Protocol => NotificationError::Protocol,
+        mqtt::HandshakeError::Timeout => NotificationError::Timeout,
+        mqtt::HandshakeError::Disconnected => NotificationError::Disconnected,
+        mqtt::HandshakeError::Rejected(code) => {
+            if matches!(
+                code,
+                ConnectReturnCode::BadUserNamePassword | ConnectReturnCode::NotAuthorized
+            ) {
+                NotificationError::Unauthorized
+            } else {
+                NotificationError::Rejected(code as u8)
+            }
+        }
+    }
 }

@@ -3,10 +3,7 @@ use super::{
     request::{Request, RequestKind, Shared, Target},
 };
 use crate::xiaomi::{cloud::response::Identifier, mqtt};
-use futures_lite::{
-    future,
-    io::{AsyncRead, AsyncWrite},
-};
+use futures_lite::{future, io::AsyncRead};
 use mqttbytes::{QoS, v5::*};
 use serde_json::Value;
 use std::{
@@ -18,8 +15,7 @@ use std::{
 };
 
 struct Output {
-    bytes: Vec<u8>,
-    offset: usize,
+    frame: mqtt::SendFrame,
     deadline: Instant,
     pkid: Option<u16>,
 }
@@ -36,11 +32,6 @@ struct Delivery {
     delivery_generation: u64,
     target: Target,
 }
-struct Received {
-    publish: Publish,
-    delivery: Option<Delivery>,
-}
-
 /// Owns MQTT I/O. Subscription completions and notifications run on this driver
 /// in wire order while handle operations are polled alongside it.
 pub struct NotificationDriver {
@@ -51,11 +42,10 @@ pub struct NotificationDriver {
     timing: Timing,
     output: VecDeque<Output>,
     pending: HashMap<u16, Pending>,
-    incoming: HashMap<u16, Received>,
+    incoming: mqtt::QoS2<Option<Delivery>>,
     pkid: u16,
     max_packet: usize,
-    last_sent: Instant,
-    ping_deadline: Option<Instant>,
+    keepalive: mqtt::Keepalive,
 }
 
 impl NotificationDriver {
@@ -80,11 +70,10 @@ impl NotificationDriver {
                 timing,
                 output: VecDeque::new(),
                 pending: HashMap::new(),
-                incoming: HashMap::new(),
+                incoming: mqtt::QoS2::new(LIMIT),
                 pkid: 0,
                 max_packet,
-                last_sent: Instant::now(),
-                ping_deadline: None,
+                keepalive: mqtt::Keepalive::new(Instant::now()),
             },
         )
     }
@@ -178,7 +167,7 @@ impl NotificationDriver {
             .iter()
             .filter_map(|output| {
                 output.pkid.filter(|pkid| {
-                    output.offset == 0
+                    !output.frame.started()
                         && self
                             .pending
                             .get(pkid)
@@ -273,8 +262,7 @@ impl NotificationDriver {
             return Err(NotificationError::Protocol);
         }
         self.output.push_back(Output {
-            bytes,
-            offset: 0,
+            frame: mqtt::SendFrame::new(bytes),
             deadline,
             pkid,
         });
@@ -283,9 +271,9 @@ impl NotificationDriver {
 
     fn expire(&mut self) -> Result<(), NotificationError> {
         let now = Instant::now();
-        if self.ping_deadline.is_some_and(|deadline| now >= deadline)
+        if self.keepalive.ping_expired(now)
             || self.output.iter().any(|output| {
-                now >= output.deadline && (output.offset > 0 || output.pkid.is_none())
+                now >= output.deadline && (output.frame.started() || output.pkid.is_none())
             })
         {
             return Err(NotificationError::Timeout);
@@ -305,13 +293,13 @@ impl NotificationDriver {
             .output
             .iter()
             .filter_map(|output| {
-                (output.offset == 0 && now >= output.deadline)
+                (!output.frame.started() && now >= output.deadline)
                     .then_some(output.pkid)
                     .flatten()
             })
             .collect();
         self.output
-            .retain(|output| !(output.offset == 0 && now >= output.deadline));
+            .retain(|output| output.frame.started() || now < output.deadline);
         for pkid in unsent {
             self.pending.remove(&pkid);
         }
@@ -330,14 +318,10 @@ impl NotificationDriver {
     }
 
     fn keepalive(&mut self) -> Result<(), NotificationError> {
-        if self.ping_deadline.is_none()
-            && self
-                .timing
-                .keepalive
-                .is_some_and(|interval| Instant::now() >= self.last_sent + interval)
+        if let Some(deadline) =
+            self.keepalive
+                .begin_ping(Instant::now(), self.timing.keepalive, self.timing.request)
         {
-            let deadline = Instant::now() + self.timing.request;
-            self.ping_deadline = Some(deadline);
             self.enqueue(Packet::PingReq, deadline, None)?;
         }
         Ok(())
@@ -345,10 +329,8 @@ impl NotificationDriver {
 
     fn next_deadline(&self) -> Instant {
         let mut deadline = Instant::now() + self.timing.request;
-        if let Some(ping) = self.ping_deadline {
-            deadline = deadline.min(ping);
-        } else if let Some(interval) = self.timing.keepalive {
-            deadline = deadline.min(self.last_sent + interval);
+        if let Some(protocol) = self.keepalive.next_deadline(self.timing.keepalive) {
+            deadline = deadline.min(protocol);
         }
         for pending in self.pending.values() {
             if let Some(request) = &pending.request {
@@ -369,28 +351,24 @@ impl NotificationDriver {
             return Poll::Ready(Err(error));
         }
         let mut progressed = false;
-        if let Some(output) = self.output.front_mut() {
-            if output.offset < output.bytes.len() {
-                match Pin::new(&mut self.stream).poll_write(cx, &output.bytes[output.offset..]) {
-                    Poll::Ready(Ok(0)) => return Poll::Ready(Err(NotificationError::Io)),
-                    Poll::Ready(Ok(count)) => {
-                        output.offset += count;
-                        progressed = true;
-                    }
-                    Poll::Ready(Err(_)) => return Poll::Ready(Err(NotificationError::Io)),
-                    Poll::Pending => {}
+        let status = match self.output.front_mut() {
+            Some(output) => Some(output.frame.poll_io(cx, &mut self.stream)),
+            None => None,
+        };
+        match status {
+            None => {}
+            Some(Err(_)) => return Poll::Ready(Err(NotificationError::Io)),
+            Some(Ok(mqtt::SendStatus::Pending)) => {}
+            Some(Ok(mqtt::SendStatus::Wrote { complete, .. })) => {
+                progressed = true;
+                if complete && let Err(error) = self.flush_front(cx) {
+                    return Poll::Ready(Err(error));
                 }
             }
-            if output.offset == output.bytes.len() {
-                match Pin::new(&mut self.stream).poll_flush(cx) {
-                    Poll::Ready(Ok(())) => {
-                        self.output.pop_front();
-                        self.last_sent = Instant::now();
-                        progressed = true;
-                    }
-                    Poll::Ready(Err(_)) => return Poll::Ready(Err(NotificationError::Io)),
-                    Poll::Pending => {}
-                }
+            Some(Ok(mqtt::SendStatus::Flushed)) => {
+                self.output.pop_front();
+                self.keepalive.sent(Instant::now());
+                progressed = true;
             }
         }
         let mut bytes = [0; 4096];
@@ -409,6 +387,23 @@ impl NotificationDriver {
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
+        }
+    }
+
+    /// Continue a fully written frame with its flush in the same poll.
+    fn flush_front(&mut self, cx: &mut std::task::Context<'_>) -> Result<(), NotificationError> {
+        let flushed = match self.output.front_mut() {
+            Some(output) => output.frame.poll_flush(cx, &mut self.stream),
+            None => return Ok(()),
+        };
+        match flushed {
+            Ok(true) => {
+                self.output.pop_front();
+                self.keepalive.sent(Instant::now());
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(_) => Err(NotificationError::Io),
         }
     }
 
@@ -486,12 +481,7 @@ impl NotificationDriver {
                 }
             }
             Packet::Publish(publish) => {
-                if publish.topic.is_empty()
-                    || publish
-                        .properties
-                        .as_ref()
-                        .is_some_and(|properties| properties.topic_alias.is_some())
-                {
+                if !mqtt::valid_publish(&publish) {
                     return Err(NotificationError::Protocol);
                 }
                 match publish.qos {
@@ -508,29 +498,10 @@ impl NotificationDriver {
                         self.message(publish, on_event);
                     }
                     QoS::ExactlyOnce => {
-                        if publish.pkid == 0 {
-                            return Err(NotificationError::Protocol);
-                        }
-                        if let Some(previous) = self.incoming.get(&publish.pkid) {
-                            if !publish.dup
-                                || previous.publish.topic != publish.topic
-                                || previous.publish.payload != publish.payload
-                            {
-                                return Err(NotificationError::Protocol);
-                            }
-                        } else {
-                            if self.incoming.len() >= LIMIT {
-                                return Err(NotificationError::Protocol);
-                            }
-                            let delivery = self.delivery(&publish.topic);
-                            self.incoming.insert(
-                                publish.pkid,
-                                Received {
-                                    publish: publish.clone(),
-                                    delivery,
-                                },
-                            );
-                        }
+                        let shared = &self.shared;
+                        self.incoming
+                            .receive(&publish, || delivery(shared, &publish.topic))
+                            .map_err(|_| NotificationError::Protocol)?;
                         self.enqueue(
                             Packet::PubRec(PubRec::new(publish.pkid)),
                             Instant::now() + self.timing.request,
@@ -540,14 +511,15 @@ impl NotificationDriver {
                 }
             }
             Packet::PubRel(ack) => {
-                if ack.pkid == 0 || ack.reason != PubRelReason::Success {
-                    return Err(NotificationError::Protocol);
-                }
-                if let Some(received) = self.incoming.remove(&ack.pkid) {
+                let received = self
+                    .incoming
+                    .release(ack.pkid, ack.reason)
+                    .map_err(|_| NotificationError::Protocol)?;
+                if let Some(received) = received {
                     // Dispatch only the registration captured at PUBLISH, and
                     // only while it is still current; otherwise drop. Never
                     // resolve a later registration for this receipt.
-                    if let Some(delivery) = received.delivery.filter(|delivery| {
+                    if let Some(delivery) = received.context.filter(|delivery| {
                         self.shared.current_delivery(
                             &delivery.filter,
                             delivery.generation,
@@ -563,7 +535,7 @@ impl NotificationDriver {
                     None,
                 )?;
             }
-            Packet::PingResp => self.ping_deadline = None,
+            Packet::PingResp => self.keepalive.pong(),
             Packet::Disconnect(packet) => {
                 return Err(
                     if packet.reason_code == DisconnectReasonCode::NormalDisconnection {
@@ -578,36 +550,9 @@ impl NotificationDriver {
         Ok(())
     }
 
-    /// Capture the ready exact property or wildcard online registration.
-    fn delivery(&self, topic: &str) -> Option<Delivery> {
-        let registrations = self.shared.registrations.borrow();
-        let ready = |filter: &str| {
-            registrations
-                .get(filter)
-                .filter(|registration| registration.ready)
-                .map(|registration| Delivery {
-                    filter: filter.to_string(),
-                    generation: registration.generation,
-                    delivery_generation: registration.delivery_generation,
-                    target: registration.target.clone(),
-                })
-        };
-        if let Some(exact) = ready(topic) {
-            return Some(exact);
-        }
-        if let Some((did, suffix)) = topic
-            .strip_prefix("device/")
-            .and_then(|rest| rest.split_once('/'))
-            && (suffix == "state" || suffix.starts_with("state/"))
-        {
-            return ready(&format!("device/{did}/state/#"));
-        }
-        None
-    }
-
     fn message(&self, publish: Publish, on_event: &mut impl FnMut(NotificationEvent)) {
         // QoS0/1 dispatch through the current ready registration.
-        let Some(delivery) = self.delivery(&publish.topic) else {
+        let Some(delivery) = delivery(&self.shared, &publish.topic) else {
             return;
         };
         self.message_target(publish, delivery.target, on_event);
@@ -695,6 +640,33 @@ impl NotificationDriver {
         }
         Ok(())
     }
+}
+
+/// Capture the ready exact property or wildcard online registration.
+fn delivery(shared: &Shared, topic: &str) -> Option<Delivery> {
+    let registrations = shared.registrations.borrow();
+    let ready = |filter: &str| {
+        registrations
+            .get(filter)
+            .filter(|registration| registration.ready)
+            .map(|registration| Delivery {
+                filter: filter.to_string(),
+                generation: registration.generation,
+                delivery_generation: registration.delivery_generation,
+                target: registration.target.clone(),
+            })
+    };
+    if let Some(exact) = ready(topic) {
+        return Some(exact);
+    }
+    if let Some((did, suffix)) = topic
+        .strip_prefix("device/")
+        .and_then(|rest| rest.split_once('/'))
+        && (suffix == "state" || suffix.starts_with("state/"))
+    {
+        return ready(&format!("device/{did}/state/#"));
+    }
+    None
 }
 
 fn reject(code: u8) -> NotificationError {

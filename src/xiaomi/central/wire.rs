@@ -1,9 +1,5 @@
 use super::CentralError;
-use crate::xiaomi::mqtt;
-use mqttbytes::v5::Packet;
 use serde_json::Value;
-
-pub(super) const MAX_FRAME_SIZE: usize = mqtt::MAX_FRAME_SIZE;
 
 #[derive(Debug)]
 pub struct MipsMessage {
@@ -89,27 +85,4 @@ fn malformed(layer: &'static str, reason: &'static str) -> CentralError {
     // Never include untrusted topics, properties or payloads in diagnostics.
     log::debug!("Invalid gateway message: layer={layer}, reason={reason}");
     CentralError::Protocol
-}
-
-#[derive(Default)]
-pub struct Frames {
-    inner: mqtt::Frames,
-}
-
-impl Frames {
-    pub fn push(&mut self, bytes: &[u8]) -> Result<(), CentralError> {
-        self.inner.push(bytes).map_err(|_| CentralError::Protocol)
-    }
-
-    pub fn next_packet(&mut self) -> Result<Option<Packet>, CentralError> {
-        self.inner.next_packet().map_err(|_| CentralError::Protocol)
-    }
-}
-
-pub(super) fn packet_context(packet: &Packet) -> (&'static str, Option<u16>) {
-    mqtt::packet_context(packet)
-}
-
-pub(super) fn encode_packet(packet: &Packet) -> Result<Vec<u8>, CentralError> {
-    mqtt::encode_packet(packet).map_err(|_| CentralError::Protocol)
 }

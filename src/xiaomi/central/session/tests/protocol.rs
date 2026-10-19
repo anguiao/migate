@@ -1,21 +1,6 @@
 use super::*;
 
 #[test]
-fn generated_connack_roundtrips() {
-    let bytes = encode_packet(&Packet::ConnAck(ConnAck::new(
-        ConnectReturnCode::Success,
-        false,
-    )))
-    .unwrap();
-    let mut frames = wire::Frames::default();
-    frames.push(&bytes).unwrap();
-    assert!(matches!(
-        frames.next_packet().unwrap(),
-        Some(Packet::ConnAck(_))
-    ));
-}
-
-#[test]
 fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
     let values = Rc::new(RefCell::new(Vec::new()));
     let events = values.clone();

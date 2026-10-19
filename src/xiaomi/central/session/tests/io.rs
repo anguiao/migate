@@ -88,7 +88,7 @@ fn short_writes_preserve_offsets_and_partial_timeout_closes_without_replay() {
                 [Err(CentralError::Timeout), Err(CentralError::Timeout)]
             );
         } else {
-            let mut frames = wire::Frames::default();
+            let mut frames = Frames::default();
             frames.push(&written.borrow()).unwrap();
             let mut publishes = 0;
             while let Some(packet) = frames.next_packet().unwrap() {

@@ -1,15 +1,15 @@
 use super::super::{CentralError, wire};
 use super::{
-    CentralEvent, LIMIT,
+    CentralEvent,
     driver::{
-        PropertySubscription, PublicationStage, ReceivedPublish, SessionDriver, Subscription,
-        SubscriptionKind,
+        PropertySubscription, PublicationStage, SessionDriver, Subscription, SubscriptionKind,
     },
     request::{
         RequestKind, RequestStage, RequestTimeout, Response, parse_response, property_topic,
         valid_identifier, validate_identity,
     },
 };
+use crate::xiaomi::mqtt;
 use mqttbytes::{QoS, v5::*};
 use serde_json::Value;
 use std::{collections::hash_map::Entry, time::Instant};
@@ -144,12 +144,7 @@ impl SessionDriver {
                 }
             }
             Packet::Publish(publish) => {
-                if publish.topic.is_empty()
-                    || publish
-                        .properties
-                        .as_ref()
-                        .is_some_and(|properties| properties.topic_alias.is_some())
-                {
+                if !mqtt::valid_publish(&publish) {
                     return Err(CentralError::Protocol);
                 }
                 match publish.qos {
@@ -167,32 +162,14 @@ impl SessionDriver {
                         self.message(publish, on_event);
                     }
                     QoS::ExactlyOnce => {
-                        if publish.pkid == 0 {
-                            return Err(CentralError::Protocol);
-                        }
-                        if let Some(previous) = self.incoming.get(&publish.pkid) {
-                            if !publish.dup
-                                || previous.publication.topic != publish.topic
-                                || previous.publication.payload != publish.payload
-                            {
-                                return Err(CentralError::Protocol);
-                            }
-                        } else {
-                            if self.incoming.len() >= LIMIT {
-                                return Err(CentralError::Protocol);
-                            }
-                            let property_generation = self
-                                .property_topics
-                                .get(&publish.topic)
-                                .map(|property| property.generation);
-                            self.incoming.insert(
-                                publish.pkid,
-                                ReceivedPublish {
-                                    publication: publish.clone(),
-                                    property_generation,
-                                },
-                            );
-                        }
+                        let property_topics = &self.property_topics;
+                        self.incoming
+                            .receive(&publish, || {
+                                property_topics
+                                    .get(&publish.topic)
+                                    .map(|property| property.generation)
+                            })
+                            .map_err(|_| CentralError::Protocol)?;
                         self.enqueue(
                             Packet::PubRec(PubRec::new(publish.pkid)),
                             Instant::now() + self.timing.request,
@@ -203,20 +180,21 @@ impl SessionDriver {
                 }
             }
             Packet::PubRel(ack) => {
-                if ack.pkid == 0 || ack.reason != PubRelReason::Success {
-                    return Err(CentralError::Protocol);
-                }
-                if let Some(received) = self.incoming.remove(&ack.pkid) {
-                    let topic = &received.publication.topic;
+                let received = self
+                    .incoming
+                    .release(ack.pkid, ack.reason)
+                    .map_err(|_| CentralError::Protocol)?;
+                if let Some(received) = received {
+                    let topic = &received.publish.topic;
                     let current = topic == &self.reply_topic
                         || topic == &self.list_topic
-                        || received.property_generation.is_some_and(|generation| {
+                        || received.context.is_some_and(|generation| {
                             self.property_topics
                                 .get(topic)
                                 .is_some_and(|property| property.generation == generation)
                         });
                     if current {
-                        self.message(received.publication, on_event);
+                        self.message(received.publish, on_event);
                     }
                 }
                 self.enqueue(
@@ -227,7 +205,7 @@ impl SessionDriver {
                 )?;
             }
             Packet::PingResp => {
-                self.ping_deadline = None;
+                self.keepalive.pong();
             }
             Packet::Disconnect(packet) => {
                 return Err(

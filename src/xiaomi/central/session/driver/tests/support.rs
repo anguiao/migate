@@ -53,10 +53,10 @@ pub(super) fn rig() -> (
             budget: budget.clone(),
             written: written.clone(),
         }),
-        wire::Frames::default(),
+        Frames::default(),
         "client",
         Timing::default(),
-        wire::MAX_FRAME_SIZE,
+        MAX_FRAME_SIZE,
         LIMIT,
     )
     .unwrap();
@@ -177,13 +177,13 @@ impl SessionDriver {
     ) -> (SessionHandle, Self) {
         let (handle, mut driver) = Self::new(
             Box::new(stream),
-            wire::Frames::default(),
+            Frames::default(),
             "controlled",
             Timing {
                 request,
                 keepalive: None,
             },
-            wire::MAX_FRAME_SIZE,
+            MAX_FRAME_SIZE,
             LIMIT,
         )
         .unwrap();

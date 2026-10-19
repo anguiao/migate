@@ -17,7 +17,7 @@ pub(super) fn queued_handle(timing: Timing) -> SessionHandle {
 
 pub(crate) struct Broker {
     pub(super) stream: TlsStream<Async<TcpStream>>,
-    pub(super) frames: wire::Frames,
+    pub(super) frames: Frames,
     pub(crate) client_id: String,
     pub(super) deferred: VecDeque<Packet>,
 }
@@ -26,7 +26,7 @@ impl Broker {
     pub(crate) fn new(stream: TlsStream<Async<TcpStream>>) -> Self {
         Self {
             stream,
-            frames: wire::Frames::default(),
+            frames: Frames::default(),
             client_id: String::new(),
             deferred: VecDeque::new(),
         }
@@ -201,7 +201,7 @@ pub(super) async fn pair_fixture<S, C, SF, CF, W>(
         let stream = acceptor.accept(socket).await.unwrap();
         server(Broker {
             stream,
-            frames: wire::Frames::default(),
+            frames: Frames::default(),
             client_id: String::new(),
             deferred: VecDeque::new(),
         })

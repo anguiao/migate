@@ -6,7 +6,7 @@ pub use session::{
     SendDecision, SendHooks, SessionDriver, SessionHandle, connect,
 };
 pub use tls::connect_tls;
-pub use wire::{Frames as MqttFrames, MipsMessage, decode_mips, encode_mips};
+pub use wire::{MipsMessage, decode_mips, encode_mips};
 
 use std::{error::Error, fmt};
 

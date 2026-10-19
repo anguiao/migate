@@ -6,10 +6,10 @@ fn cancelled_and_expired_subscriptions_reserve_packet_ids_until_their_late_ack()
         for case in ["cancelled", "expired", "unsubscribe"] {
             let (handle, mut driver) = SessionDriver::new(
                 Box::new(PendingIo),
-                wire::Frames::default(),
+                Frames::default(),
                 "client",
                 Timing::default(),
-                wire::MAX_FRAME_SIZE,
+                MAX_FRAME_SIZE,
                 LIMIT,
             )
             .unwrap();
@@ -103,10 +103,10 @@ fn refresh_timeout_keeps_the_ten_second_qos2_handshake_deadline() {
     block_on(async {
         let (handle, mut driver) = SessionDriver::new(
             Box::new(PendingIo),
-            wire::Frames::default(),
+            Frames::default(),
             "client",
             Timing::default(),
-            wire::MAX_FRAME_SIZE,
+            MAX_FRAME_SIZE,
             LIMIT,
         )
         .unwrap();

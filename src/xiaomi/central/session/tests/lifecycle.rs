@@ -167,7 +167,7 @@ fn connack_rejection_and_persisted_session_are_rejected_over_tls() {
                 let stream = acceptor.accept(socket).await.unwrap();
                 let mut broker = Broker {
                     stream,
-                    frames: wire::Frames::default(),
+                    frames: Frames::default(),
                     client_id: String::new(),
                     deferred: VecDeque::new(),
                 };

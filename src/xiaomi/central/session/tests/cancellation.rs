@@ -13,9 +13,9 @@ fn cancellation_precedes_a_late_suback_in_the_same_received_buffer() {
                 QoS::AtMostOnce,
                 wire::encode_mips(1, None, &json!({"devList":["target"]})),
             );
-            let mut bytes = wire::encode_packet(&Packet::Publish(list)).unwrap();
+            let mut bytes = encode_packet(&Packet::Publish(list)).unwrap();
             bytes.extend(
-                wire::encode_packet(&Packet::SubAck(SubAck::new(
+                encode_packet(&Packet::SubAck(SubAck::new(
                     subscribe.pkid,
                     vec![SubscribeReasonCode::QoS2],
                 )))

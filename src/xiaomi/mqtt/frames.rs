@@ -1,23 +1,20 @@
+use super::ProtocolError;
 use bytes::BytesMut;
 use mqttbytes::v5::{self, *};
 
-pub(super) const MAX_FRAME_SIZE: usize = 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ProtocolError;
+pub(in crate::xiaomi) const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
 fn invalid(reason: &'static str) -> ProtocolError {
-    log::debug!("Invalid MQTT message: reason={reason}");
-    ProtocolError
+    super::invalid(reason)
 }
 
 #[derive(Default)]
-pub(super) struct Frames {
+pub(in crate::xiaomi) struct Frames {
     bytes: BytesMut,
 }
 
 impl Frames {
-    pub fn push(&mut self, bytes: &[u8]) -> Result<(), ProtocolError> {
+    pub(in crate::xiaomi) fn push(&mut self, bytes: &[u8]) -> Result<(), ProtocolError> {
         if self.bytes.len() + bytes.len() > MAX_FRAME_SIZE + 4096 {
             return Err(invalid("receive buffer limit"));
         }
@@ -25,7 +22,7 @@ impl Frames {
         Ok(())
     }
 
-    pub fn next_packet(&mut self) -> Result<Option<Packet>, ProtocolError> {
+    pub(in crate::xiaomi) fn next_packet(&mut self) -> Result<Option<Packet>, ProtocolError> {
         if let Some(first) = self.bytes.first() {
             let packet_type = first >> 4;
             let flags = first & 0x0f;
@@ -75,7 +72,7 @@ impl Frames {
     }
 }
 
-pub(super) fn packet_context(packet: &Packet) -> (&'static str, Option<u16>) {
+pub(in crate::xiaomi) fn packet_context(packet: &Packet) -> (&'static str, Option<u16>) {
     match packet {
         Packet::Connect(_) => ("CONNECT", None),
         Packet::ConnAck(_) => ("CONNACK", None),
@@ -94,7 +91,7 @@ pub(super) fn packet_context(packet: &Packet) -> (&'static str, Option<u16>) {
     }
 }
 
-pub(super) fn encode_packet(packet: &Packet) -> Result<Vec<u8>, ProtocolError> {
+pub(in crate::xiaomi) fn encode_packet(packet: &Packet) -> Result<Vec<u8>, ProtocolError> {
     let mut bytes = BytesMut::new();
     let result = match packet {
         Packet::Connect(packet) => packet.write(&mut bytes),
