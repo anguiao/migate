@@ -614,7 +614,7 @@ fn external_off_withdraws_dequeued_unsent_power_but_owns_sent_power_receipt() {
         request.mark_sent().unwrap();
         function.take_over_light_all().unwrap();
         assert!(poll_once(on.as_mut()).await.is_none());
-        request.accept_preserving_state().unwrap();
+        request.accept().unwrap();
         assert!(on.await.is_ok());
     });
 }

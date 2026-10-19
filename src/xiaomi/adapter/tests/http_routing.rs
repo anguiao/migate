@@ -13,6 +13,46 @@ async fn cloud_ready(c: &Control, dids: &[&str]) {
 }
 
 #[test]
+fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().online.insert("one".into());
+    let (release, gate) = flume::bounded(1);
+    block_on(rig.run(|c| async move {
+        cloud_ready(&c, &["one"]).await;
+        let one = function(&c.context.registry, "one", "main");
+        until(|| one.snapshot().power == Power::Off).await;
+        c.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        c.cloud.lock().unwrap().property_gate = Some(gate);
+        let mut command = Box::pin(one.execute(Command::On));
+        assert!(poll_once(command.as_mut()).await.is_none());
+        until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
+        let record = c.context.live.borrow().devices["one"]
+            .admitted
+            .clone()
+            .unwrap();
+        record.physical.close();
+        release.send(()).unwrap();
+        assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
+        // The closed future settles first; wait for the late HTTP receipt to
+        // pass through Observations::accept_write before checking the state.
+        until(|| {
+            let status = c
+                .context
+                .commands
+                .snapshot("one", ["main".to_owned()].into_iter());
+            status[0].inflight.is_none()
+                && status[0].last.as_ref().is_some_and(|last| {
+                    last.result == Some(Err(crate::device::CommandError::Cancelled))
+                })
+        })
+        .await;
+        assert_eq!(one.snapshot().power, Power::Off);
+    }));
+}
+
+#[test]
 fn http_temporary_failure_pauses_the_account_until_a_complete_scoped_sync() {
     let rig = Rig::new(true, &["one", "two"]);
     rig.cloud

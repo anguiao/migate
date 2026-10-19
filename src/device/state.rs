@@ -1,5 +1,5 @@
 use super::{
-    command::{CommandReceiver, Queue},
+    command::{CommandCoordinator, CommandReceiver},
     model::{
         Availability, FunctionDescription, FunctionKey, FunctionSnapshot,
         PhysicalDeviceDescription, Power,
@@ -11,22 +11,7 @@ pub(super) struct RuntimeState {
     pub(super) power: Power,
     pub(super) lighting: Option<super::LightSnapshot>,
     pub(super) revision: u64,
-    pub(super) queue: Queue,
-    pub(super) light_commands: Option<super::light_command::LightCoordinator>,
-}
-
-impl RuntimeState {
-    /// Cancel queued light work while the original receipt retains every sent gate.
-    pub(super) fn cancel_pending_light(&mut self, error: super::CommandError) {
-        self.light_commands
-            .as_mut()
-            .expect("light function has a coordinator")
-            .cancel_all(error.clone());
-        self.queue.invalidate_light_power(error.clone());
-        for completion in self.queue.drain_pending() {
-            completion.finish(Err(error.clone()));
-        }
-    }
+    pub(super) commands: CommandCoordinator,
 }
 struct PhysicalState {
     availability: Availability,
@@ -155,13 +140,10 @@ impl PhysicalDevice {
             for function in self.functions.iter() {
                 let changed = {
                     let mut state = function.0.state.lock().unwrap();
-                    if state.light_commands.is_some() {
-                        state.cancel_pending_light(error.clone());
+                    let light = function.description().kind.is_light();
+                    state.commands.unavailable(light, error.clone());
+                    if light {
                         function.notify_light_actions();
-                    } else {
-                        for completion in state.queue.drain_pending() {
-                            completion.finish(Err(error.clone()));
-                        }
                     }
                     clear_light_state(function.description(), &mut state)
                 };
@@ -194,8 +176,10 @@ impl PhysicalDevice {
     pub(crate) fn reset_actions(&self) {
         for function in self.functions.iter() {
             let mut state = function.0.state.lock().unwrap();
-            if state.light_commands.is_some() {
-                state.cancel_pending_light(super::CommandError::Cancelled);
+            if function.description().kind.is_light() {
+                state
+                    .commands
+                    .cancel_pending_light(super::CommandError::Cancelled);
                 function.notify_light_actions();
             }
         }
@@ -228,8 +212,7 @@ impl Function {
                 power: Power::Unknown,
                 lighting,
                 revision: 0,
-                queue: Queue::default(),
-                light_commands: lighting.map(|_| super::light_command::LightCoordinator::new()),
+                commands: CommandCoordinator::new(),
             }),
             changed: Event::new(),
             submitted: Event::new(),
@@ -377,14 +360,10 @@ impl Function {
     }
     pub(super) fn close(&self) {
         let mut state = self.0.state.lock().unwrap();
-        state.queue.closed = true;
-        if state.light_commands.is_some() {
-            state.cancel_pending_light(super::CommandError::Cancelled);
+        let light = self.description().kind.is_light();
+        state.commands.close(light, super::CommandError::Cancelled);
+        if light {
             self.notify_light_actions();
-        } else {
-            for completion in state.queue.drain_completions() {
-                completion.finish(Err(super::CommandError::Cancelled));
-            }
         }
         self.0.submitted.notify(usize::MAX);
     }

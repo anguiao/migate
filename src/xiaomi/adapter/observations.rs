@@ -141,14 +141,20 @@ impl Observations {
             request.reject(CommandError::Cancelled);
             return Err(CommandError::Cancelled);
         }
+        // A closed or already settled request must never observe: acceptance
+        // itself only settles, the source observation owns the target state.
+        if let Err(error) = request.current_result() {
+            request.reject(error.clone());
+            return Err(error);
+        }
+        let target = request.target;
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         counts.observed += 1;
         if counts.notified == stamp.notified {
-            request.accept().map(|_| ())
-        } else {
-            request.accept_preserving_state().map(|_| ())
+            record.physical.function(id).unwrap().observe(target);
         }
+        request.accept().map(|_| ())
     }
 
     pub(super) fn observed(

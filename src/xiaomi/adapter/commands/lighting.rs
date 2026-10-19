@@ -45,13 +45,13 @@ fn reject(request: DeviceRequest, error: CommandError) {
 }
 fn accept(request: DeviceRequest) -> Result<(), CommandError> {
     match request {
-        DeviceRequest::Power(request) => request.accept_preserving_state().map(|_| ()),
+        DeviceRequest::Power(request) => request.accept().map(|_| ()),
         DeviceRequest::Light(request) => request.accept().map(|_| ()),
     }
 }
 fn skip(request: DeviceRequest) -> Result<(), CommandError> {
     match request {
-        DeviceRequest::Power(request) => request.accept_preserving_state().map(|_| ()),
+        DeviceRequest::Power(request) => request.accept().map(|_| ()),
         DeviceRequest::Light(request) => request.accept_unchanged().map(|_| ()),
     }
 }

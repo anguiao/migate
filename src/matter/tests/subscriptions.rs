@@ -262,6 +262,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
     let (device, mut receiver) = super::test_device();
+    let command_function = device.functions()[0].clone();
     let initial = boot == 3;
     let rejection = RefCell::new(None::<CommandError>);
     let accepted = Cell::new(0);
@@ -281,6 +282,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
                     if let Some(error) = rejection.borrow_mut().take() {
                         request.reject(error);
                     } else {
+                        command_function.observe(request.target);
                         request.accept().unwrap();
                         accepted.set(accepted.get() + 1);
                     }

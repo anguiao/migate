@@ -40,6 +40,7 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
         assert!(poll_once(first_command.as_mut()).await.is_none());
         assert!(poll_once(second_command.as_mut()).await.is_none());
         let pending = next_power(&mut receivers[0]).await.unwrap();
+        second.observe(false);
         next_power(&mut receivers[1])
             .await
             .unwrap()
@@ -48,6 +49,7 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
         assert_eq!(second_command.await.unwrap().power, Power::Off);
         assert_eq!(second.snapshot().revision, revision + 1);
         assert_eq!(first.snapshot().power, Power::Off);
+        first.observe(true);
         pending.accept().unwrap();
         first_command.await.unwrap();
         assert_eq!(second.snapshot().power, Power::Off);
@@ -94,6 +96,7 @@ fn registry_publishes_whole_devices_and_removal_cancels_only_their_commands() {
         );
         assert!(registry.get(first.key()).is_none());
         assert_eq!(changes.changed().await.devices.len(), 1);
+        second.function("usb").unwrap().observe(false);
         next_power(&mut second_receivers[2])
             .await
             .unwrap()
@@ -116,6 +119,7 @@ fn cancelling_one_channel_does_not_withdraw_another_channel() {
         poll_once(surviving.as_mut()).await;
         drop(cancelled);
         assert!(poll_once(next_power(&mut receivers[0])).await.is_none());
+        second.observe(false);
         next_power(&mut receivers[1])
             .await
             .unwrap()

@@ -4,11 +4,11 @@ mod model;
 mod registry;
 mod state;
 
-pub use command::{CommandReceiver, CommandRequest};
-pub use light_command::{
-    ActionToken, DeviceRequest, LightAction, LightActionChanges, LightActionDiagnostics,
-    LightActionResult, LightColorTarget, LightDimension, LightRequest, LightTarget,
+pub use command::{
+    ActionToken, CommandReceiver, CommandRequest, DeviceRequest, LightAction,
+    LightActionDiagnostics, LightActionResult, LightDimension, LightRequest,
 };
+pub use light_command::{LightActionChanges, LightColorTarget, LightTarget};
 pub use model::{
     Availability, Capability, Command, CommandError, DescriptionError, DeviceKey,
     FunctionDescription, FunctionKey, FunctionKind, FunctionSnapshot, LightMode, LightPatch,

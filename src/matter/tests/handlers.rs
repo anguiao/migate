@@ -71,6 +71,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
             assert_eq!(device.functions()[0].snapshot(), before);
+            device.functions()[0].observe(power);
             next_power(&mut receiver).await.unwrap().accept().unwrap();
             invoke.await.unwrap();
             assert_eq!(device.functions()[0].snapshot().power.value(), Some(power));
@@ -354,6 +355,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                     InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
                 ));
                 assert!(poll_once(invoke.as_mut()).await.is_none());
+                multi.functions()[index].observe(true);
                 next_power(&mut receivers[index])
                     .await
                     .unwrap()
@@ -438,6 +440,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                 InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
+            rejoined.functions()[0].observe(true);
             next_power(&mut replacement_receivers[0])
                 .await
                 .unwrap()

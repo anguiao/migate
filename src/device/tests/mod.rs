@@ -85,6 +85,7 @@ fn commands_change_state_only_after_acceptance_and_repeat_targets_are_allowed() 
         let request = next_power(&mut receiver).await.unwrap();
         assert!(request.target);
         assert_eq!(device.snapshot().power, Power::Off);
+        device.observe(true);
         request.accept().unwrap();
         assert_eq!(command.await.unwrap().power, Power::On);
         assert_eq!(changes.changed().await.power, Power::On);
@@ -92,9 +93,31 @@ fn commands_change_state_only_after_acceptance_and_repeat_targets_are_allowed() 
         let command = device.execute(Command::On);
         futures_lite::pin!(command);
         assert!(poll_once(command.as_mut()).await.is_none());
+        device.observe(true);
         next_power(&mut receiver).await.unwrap().accept().unwrap();
         command.await.unwrap();
         assert!(poll_once(changes.changed()).await.is_none());
+    });
+}
+
+#[test]
+fn request_acceptance_does_not_infer_or_publish_power_state() {
+    block_on(async {
+        let (physical, mut receiver) = ready_device();
+        let device = &physical.functions()[0];
+        let mut changes = device.subscribe();
+        let mut command = Box::pin(device.execute(Command::On));
+        assert!(poll_once(command.as_mut()).await.is_none());
+        let request = next_power(&mut receiver).await.unwrap();
+        assert!(request.target);
+        assert_eq!(device.snapshot().power, Power::Off);
+        request.accept().unwrap();
+        assert_eq!(command.await.unwrap().power, Power::Off);
+        assert_eq!(device.snapshot().power, Power::Off);
+        assert!(poll_once(changes.changed()).await.is_none());
+        device.observe(true);
+        assert_eq!(device.snapshot().power, Power::On);
+        assert_eq!(changes.changed().await.power, Power::On);
     });
 }
 
@@ -135,6 +158,7 @@ fn commands_are_fifo_and_toggle_uses_snapshot_at_execution_time() {
         let first_request = next_power(&mut receiver).await.unwrap();
         assert!((before_queue..=after_queue).contains(&first_request.queued_at()));
         assert!(poll_once(next_power(&mut receiver)).await.is_none());
+        device.observe(true);
         first_request.accept().unwrap();
         first.await.unwrap();
         // A current observation affects Toggle when its turn arrives.
@@ -142,6 +166,7 @@ fn commands_are_fifo_and_toggle_uses_snapshot_at_execution_time() {
         let second_request = next_power(&mut receiver).await.unwrap();
         assert!((before_queue..=after_queue).contains(&second_request.queued_at()));
         assert!(second_request.target);
+        device.observe(true);
         second_request.accept().unwrap();
         assert_eq!(second.await.unwrap().power, Power::On);
     });
@@ -185,10 +210,12 @@ fn queued_commands_wait_for_the_active_adapter_request() {
         poll_once(second.as_mut()).await;
         assert!(poll_once(first.as_mut()).await.is_none());
         assert!(poll_once(second.as_mut()).await.is_none());
+        device.observe(true);
         request.accept().unwrap();
         assert_eq!(first.await.unwrap().power, Power::On);
         let request = next_power(&mut receiver).await.unwrap();
         assert!(!request.target);
+        device.observe(false);
         request.accept().unwrap();
         assert_eq!(second.await.unwrap().power, Power::Off);
         assert_eq!(device.snapshot().power, Power::Off);
@@ -222,6 +249,7 @@ fn receiver_shutdown_cancels_active_commands_without_accepting_stale_results() {
         poll_once(command.as_mut()).await;
         let request = next_power(&mut receiver).await.unwrap();
         drop(receiver);
+        assert_eq!(request.mark_sent(), Err(CommandError::Cancelled));
         assert_eq!(request.accept(), Err(CommandError::Cancelled));
         assert_eq!(command.await, Err(CommandError::Cancelled));
         assert_eq!(device.snapshot().power, Power::Off);
@@ -258,6 +286,7 @@ fn active_acceptance_survives_an_offline_observation() {
         let request = next_power(&mut receiver).await.unwrap();
         physical.set_availability(Availability::Unavailable("offline".into()));
         assert!(poll_once(command.as_mut()).await.is_none());
+        device.observe(true);
         let accepted = request.accept().unwrap();
         assert_eq!(accepted.power, Power::On);
         assert_eq!(
@@ -289,6 +318,7 @@ fn becoming_unavailable_ends_queued_requests_but_preserves_active_acceptance() {
         assert_eq!(poll_once(second.as_mut()).await, Some(Err(error.clone())));
         device.observe(false);
         physical.set_availability(Availability::Available);
+        device.observe(true);
         assert_eq!(stale.accept().unwrap().power, Power::On);
         assert_eq!(first.await.unwrap().power, Power::On);
         assert!(poll_once(next_power(&mut receiver)).await.is_none());
@@ -309,6 +339,7 @@ fn dropping_a_queued_command_withdraws_it_before_the_adapter_can_send() {
         assert!(poll_once(next.as_mut()).await.is_none());
         let request = next_power(&mut receiver).await.unwrap();
         assert!(!request.target);
+        device.observe(false);
         request.accept().unwrap();
         assert_eq!(next.await.unwrap().power, Power::Off);
         assert!(poll_once(next_power(&mut receiver)).await.is_none());
@@ -325,6 +356,7 @@ fn dropping_a_caller_does_not_discard_an_inflight_adapter_result() {
         let request = next_power(&mut receiver).await.unwrap();
         drop(command);
 
+        device.observe(true);
         assert_eq!(request.accept().unwrap().power, Power::On);
         assert_eq!(device.snapshot().power, Power::On);
         assert!(poll_once(next_power(&mut receiver)).await.is_none());
@@ -332,7 +364,7 @@ fn dropping_a_caller_does_not_discard_an_inflight_adapter_result() {
 }
 
 #[test]
-fn acceptance_can_preserve_a_newer_observation_and_continue_the_fifo() {
+fn acceptance_settles_the_current_snapshot_and_never_infers_a_target() {
     block_on(async {
         let (physical, mut receiver) = ready_device();
         let device = &physical.functions()[0];
@@ -344,17 +376,18 @@ fn acceptance_can_preserve_a_newer_observation_and_continue_the_fifo() {
         assert!(request.target);
         device.observe(false);
         let observed = device.snapshot();
-        assert_eq!(request.accept_preserving_state().unwrap(), observed);
+        assert_eq!(request.accept().unwrap(), observed);
         assert_eq!(first.await.unwrap(), observed);
         let following = next_power(&mut receiver).await.unwrap();
         assert!(following.target);
+        device.observe(true);
         following.accept().unwrap();
         assert_eq!(next.await.unwrap().power, Power::On);
     });
 }
 
 #[test]
-fn preserving_acceptance_does_not_restore_a_closed_function() {
+fn acceptance_does_not_restore_a_closed_function() {
     block_on(async {
         let (physical, mut receiver) = ready_device();
         let device = &physical.functions()[0];
@@ -364,10 +397,7 @@ fn preserving_acceptance_does_not_restore_a_closed_function() {
         device.observe(false);
         let observed = device.snapshot();
         drop(receiver);
-        assert_eq!(
-            request.accept_preserving_state(),
-            Err(CommandError::Cancelled)
-        );
+        assert_eq!(request.accept(), Err(CommandError::Cancelled));
         assert_eq!(command.await, Err(CommandError::Cancelled));
         assert_eq!(device.snapshot(), observed);
     });

@@ -116,11 +116,13 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
         let (result, ()) = future::zip(
             handle_line(&registry, &store.devices(), &status, "on one", 0),
             async {
-                next_power(&mut receivers[0])
-                    .await
+                let request = next_power(&mut receivers[0]).await.unwrap();
+                registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
                     .unwrap()
-                    .accept()
-                    .unwrap();
+                    .functions()[0]
+                    .observe(true);
+                request.accept().unwrap();
             },
         )
         .await;
@@ -130,6 +132,12 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
             async {
                 let request = next_power(&mut receivers[4]).await.unwrap();
                 assert!(!request.target);
+                registry
+                    .get(&DeviceKey::new("xiaomi", "multi"))
+                    .unwrap()
+                    .function("usb")
+                    .unwrap()
+                    .observe(false);
                 request.accept().unwrap();
             },
         )
@@ -403,11 +411,13 @@ fn input_recovers_and_returns_at_eof() {
             ),
             async {
                 loop {
-                    next_power(&mut receivers[0])
-                        .await
+                    let request = next_power(&mut receivers[0]).await.unwrap();
+                    registry
+                        .get(&DeviceKey::new("xiaomi", "one"))
                         .unwrap()
-                        .accept()
-                        .unwrap();
+                        .functions()[0]
+                        .observe(request.target);
+                    request.accept().unwrap();
                 }
             },
         )

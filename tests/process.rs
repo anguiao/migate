@@ -694,6 +694,7 @@ fn bridge_helper_child() {
                     if initial { "on" } else { "off" }
                 );
                 while let Some(request) = next_power(&mut receiver).await {
+                    source_device.functions()[0].observe(request.target);
                     request.accept()?;
                 }
                 Ok::<(), migate::RuntimeError>(())
