@@ -133,8 +133,7 @@ fn waiting_cloud_startup_subscriptions_are_revoked_and_replaced_before_sending()
         future::or(peer.run(&listener), async {
             until(|| peer.state.borrow().held.len() == 16).await;
             assert_eq!(peer.count("device/device79/up/properties_changed/2/1"), 0);
-            c.context
-                .block_device("device79", "test removal while queued".into());
+            force_unavailable(&c.context, "device79", "test removal while queued");
             let replaced = c.context.live.borrow().devices["device78"]
                 .admitted
                 .clone()

@@ -27,7 +27,8 @@ fn native_group_description_restarts_after_its_loading_token_is_retired() {
         let loading = c.context.live.borrow().devices["group-1"]
             .loading
             .clone()
-            .unwrap();
+            .unwrap()
+            .life;
         c.cloud.lock().unwrap().instance_gates.remove(&urn);
         let mut credentials = c.context.live.borrow().credentials.clone().unwrap();
         credentials.tokens.access_token = "replacement-access".into();
@@ -39,7 +40,7 @@ fn native_group_description_restarts_after_its_loading_token_is_retired() {
                     c.context.live.borrow().devices["group-1"]
                         .loading
                         .as_ref()
-                        .is_none_or(|current| !Rc::ptr_eq(current, &loading))
+                        .is_none_or(|current| !Rc::ptr_eq(&current.life, &loading))
                 })
                 .await;
             },
@@ -1003,17 +1004,14 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                         let mut live = context.live.borrow_mut();
                         if let Some(slot) = live.devices.get_mut("group-1") {
                             let mut cached = slot
-                                .candidate
+                                .latest
                                 .clone()
-                                .map(|(cached, _)| cached)
-                                .or_else(|| {
-                                    slot.admitted.as_ref().map(|record| record.native.clone())
-                                })
+                                .or_else(|| slot.admitted.as_ref().map(|work| work.native.clone()))
                                 .unwrap();
                             let grid = crate::device::NumericRange::new(2700, 6500, 1).unwrap();
                             cached.device =
                                 super::support::device_with_temperature_grid(&cached.device, grid);
-                            slot.candidate = Some((cached, None));
+                            slot.latest = Some(cached);
                             slot.confirmed = true;
                         }
                     }
@@ -1294,7 +1292,7 @@ fn failed_source_wins_before_configured_startup_commits() {
                 && live
                     .devices
                     .get("one")
-                    .is_some_and(|slot| slot.candidate.is_some())
+                    .is_some_and(|slot| slot.latest.is_some())
         })
         .await;
         let port = free_udp_port();

@@ -146,12 +146,9 @@ impl Context {
             return;
         };
         if !slot.access.as_ref().is_some_and(|access| {
-            access.as_ref().is_ok_and(|access| {
-                access.model == work.native.model
-                    && access.instance_type == work.native.instance_type
-                    && access.spec_v2_access
-                    && access.push_available
-            })
+            access
+                .as_ref()
+                .is_ok_and(|access| access.spec_v2_access && access.push_available)
         }) {
             return;
         }
@@ -174,9 +171,6 @@ impl Context {
             .devices
             .get(did)
             .ok_or("device description unavailable")?;
-        if let Some(reason) = &slot.blocked {
-            return Err(reason.clone());
-        }
         let session = live.session.as_ref().ok_or("gateway disconnected")?;
         if !self
             .status
@@ -215,9 +209,6 @@ impl Context {
         }
         if push && !access.push_available {
             return Err("notification access unavailable".into());
-        }
-        if access.model != work.native.model || access.instance_type != work.native.instance_type {
-            return Err("device description or binding unavailable".into());
         }
         Ok(session.handle.clone())
     }
@@ -291,9 +282,6 @@ impl Context {
             .admitted
             .as_ref()
             .ok_or("device description or binding unavailable")?;
-        if let Some(reason) = &slot.blocked {
-            return Err(reason.clone());
-        }
         if work.life.is_closed() {
             return Err("device source retired".into());
         }
@@ -306,9 +294,6 @@ impl Context {
             .ok_or("device information not available")?;
         if !access.online {
             return Err("device offline".into());
-        }
-        if access.model != work.native.model || access.instance_type != work.native.instance_type {
-            return Err("device description or binding unavailable".into());
         }
         Ok(())
     }

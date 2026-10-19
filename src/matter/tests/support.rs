@@ -24,9 +24,11 @@ pub(super) async fn next_power(
 
 mod context;
 mod reports;
+mod source;
 pub(in crate::matter) use context::Context;
 pub(super) use context::attr;
 pub(super) use reports::{read_bytes, report_dataver, report_value};
+pub(crate) use source::PublishedLightModel;
 
 use super::*;
 use crate::{

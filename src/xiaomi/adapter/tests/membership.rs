@@ -83,7 +83,7 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
 }
 
 #[test]
-fn a_stale_local_model_does_not_block_cloud_admission_or_commands() {
+fn stale_local_metadata_does_not_block_local_control_after_cloud_admission() {
     let rig = Rig::new(false, &["multi"]);
     rig.cloud.lock().unwrap().online.insert("multi".into());
     block_on(rig.run(|mut c| async move {
@@ -103,14 +103,15 @@ fn a_stale_local_model_does_not_block_cloud_admission_or_commands() {
                         .is_some()
             })
             .await;
-            assert!(control.context.local_candidate("multi", false).is_err());
-            function(&control.context.registry, "multi", "usb")
-                .execute(Command::On)
-                .await
-                .unwrap();
-            assert_eq!(control.cloud.lock().unwrap().property_writes.len(), 1);
-            assert_eq!(peer.count("rpcReq", "multi", 0), 0);
-            assert_eq!(peer.count("subscribe", "multi", 0), 0);
+            // Directory metadata disagreement is not an access qualification.
+            assert!(control.context.local_candidate("multi", false).is_ok());
+            let usb = function(&control.context.registry, "multi", "usb");
+            usb.execute(Command::On).await.unwrap();
+            assert_eq!(peer.count("rpcReq", "multi", 9), 1);
+            assert!(control.cloud.lock().unwrap().property_writes.is_empty());
+            usb.execute(Command::Off).await.unwrap();
+            assert_eq!(peer.count("rpcReq", "multi", 9), 2);
+            assert!(control.context.cloud_candidate("multi", true).is_ok());
         })
         .await;
     }));

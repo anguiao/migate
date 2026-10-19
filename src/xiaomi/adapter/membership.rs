@@ -95,9 +95,6 @@ impl Context {
         if self.live.borrow().devices[did].group.is_some() {
             return self.reconcile_group(did);
         }
-        if self.live.borrow().devices[did].candidate.is_some() {
-            self.problem(did, Some("configuration pending".into()));
-        }
         if self.live.borrow().devices[did].admitted.is_some() {
             self.install_work(did);
             self.update_availability(did);
@@ -108,12 +105,16 @@ impl Context {
         self.stage();
         Ok(())
     }
-    pub(super) fn unavailable_device(&self, did: &str, reason: String) {
-        if let Some(work) = &self.live.borrow().devices[did].admitted {
-            work.physical()
-                .set_availability(Availability::Unavailable(reason));
+    /// A failed directory description is diagnostic only: the committed
+    /// runtime keeps serving and the latest pending fact is retained.
+    pub(super) fn pending_description(&self, did: &str, reason: String) {
+        if let Some(slot) = self.live.borrow_mut().devices.get_mut(did) {
+            slot.blocked = Some(reason.clone());
         }
+        self.problem(did, Some(reason));
+        self.changed.notify(usize::MAX);
     }
+    /// Retire one native runtime and its current logical sink.
     pub(super) fn retire_work(&self, did: &str) {
         let mut live = self.live.borrow_mut();
         if let Some(work) = live
@@ -144,8 +145,8 @@ impl Context {
         self.registry.remove(&DeviceKey::new("xiaomi", did));
         self.retire_work(did);
         if let Some(slot) = self.live.borrow_mut().devices.remove(did) {
-            if let Some(life) = slot.loading {
-                life.close();
+            if let Some(loading) = slot.loading {
+                loading.life.close();
             }
             if let Some(work) = slot.admitted {
                 work.life.close();
@@ -155,24 +156,6 @@ impl Context {
         self.problem(did, None);
         self.commands.remove(did);
         self.changed.notify(usize::MAX);
-    }
-    pub(super) fn block_device(&self, did: &str, reason: String) {
-        {
-            let mut live = self.live.borrow_mut();
-            let slot = live.devices.get_mut(did).unwrap();
-            slot.blocked = Some(reason.clone());
-        }
-        self.retire_work(did);
-        if let Some(session) = self.live.borrow().session.as_ref() {
-            drop(session.handle.unsubscribe_properties(did));
-        }
-        if let Some(session) = self.notifications.borrow().as_ref() {
-            drop(session.handle.unsubscribe_properties(did));
-        }
-        self.changed.notify(usize::MAX);
-        self.unavailable_device(did, reason.clone());
-        self.refresh_group_states(did);
-        self.problem(did, Some(reason));
     }
     pub(super) fn remove(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
         if self

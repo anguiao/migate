@@ -440,11 +440,7 @@ fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
         return None;
     }
     let work = slot.admitted.as_ref()?;
-    if work.life.is_closed()
-        || slot.blocked.is_some()
-        || slot.cloud_forbidden
-        || slot.cloud_access.is_none()
-    {
+    if work.life.is_closed() || slot.cloud_forbidden || slot.cloud_access.is_none() {
         return None;
     }
     Some(work.clone())

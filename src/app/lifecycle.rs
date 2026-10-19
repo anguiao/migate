@@ -30,7 +30,7 @@ pub async fn run_xiaomi_bridge(
         let handle = ready.await?;
         loop {
             let changed = handle.listen();
-            if handle.snapshot().facts.scope.is_some() {
+            if handle.snapshot().scope.is_some() {
                 break;
             }
             changed.await;

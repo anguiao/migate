@@ -112,7 +112,7 @@ fn repaired_group_native_controls_do_not_depend_on_member_writes() {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "main");
         for did in ["member-a", "member-b"] {
-            c.context.block_device(did, "member unavailable".into());
+            force_unavailable(&c.context, did, "member unavailable");
         }
         let before = light.snapshot();
         light.execute(Command::On).await.unwrap();
@@ -185,8 +185,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
         .await;
         // Losing the representative selects the other readable member and
         // carries that member's own confirmed mode and cached RGB together.
-        c.context
-            .block_device("member-a", "test member outage".into());
+        force_unavailable(&c.context, "member-a", "test member outage");
         wait_for(
             || {
                 let lighting = light.snapshot().lighting.unwrap();
@@ -202,8 +201,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
         )
         .await;
         // Losing every readable member clears the repaired mode too.
-        c.context
-            .block_device("member-b", "test member outage".into());
+        force_unavailable(&c.context, "member-b", "test member outage");
         wait_for(
             || light.snapshot().lighting.unwrap().mode.is_none(),
             "group repaired mode was not cleared on all-member loss",
@@ -532,7 +530,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
             .devices
             .get_mut("member-a")
             .unwrap()
-            .native_confirmed = Some(downgraded.clone());
+            .latest = Some(downgraded.clone());
 
         // A failed save keeps the committed repair plan.
         let db = rusqlite::Connection::open(c.store.path()).unwrap();
@@ -613,8 +611,8 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         {
             let mut live = c.context.live.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
-            slot.native_confirmed = Some(recovered.clone());
-            slot.candidate = Some((recovered, None));
+            slot.latest = Some(recovered.clone());
+            slot.latest = Some(recovered);
         }
         c.context.reconcile("member-a").unwrap();
         wait_for(

@@ -1,4 +1,7 @@
 use super::*;
+use crate::xiaomi::capability::PropertyBinding;
+
+const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
 
 fn observation_rig(members: &[&str]) -> Rig {
     let mut rig = Rig::new(true, members);
@@ -116,32 +119,59 @@ fn a_source_change_and_new_read_do_not_invalidate_a_held_write_without_notificat
 }
 
 #[test]
-fn an_incompatible_device_rejects_a_late_accepted_write_from_the_old_binding() {
-    block_on(observation_rig(&["one"]).run(|c| async move {
+fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
+    block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.value("one", POWER, json!(false));
         let control = &c;
-        c.peer(Rc::new(Peer::default()), |peer| async move {
-            freeze_initialized(control, &peer, &["one"]).await;
+        c.peer(peer, |peer| async move {
             let one = function(&control.context.registry, "one", "main");
+            initialized(control, &peer, &["one"]).await;
+            let before = control
+                .context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "one"))
+                .unwrap();
             peer.state.borrow_mut().hold_writes = true;
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
             let old_work = device_work(control, "one");
 
+            let mut changed = old_work.native.clone();
+            changed.device = super::support::device_with_temperature_grid(
+                &changed.device,
+                crate::device::NumericRange::new(3000, 5500, 1).unwrap(),
+            );
             control
                 .context
-                .block_device("one", "incompatible function description".into());
-            assert!(old_work.life.is_closed());
-            assert_eq!(one.snapshot().power, Power::Off);
-            release_operation(&peer, "rpcReq", "one", 2, accepted("one", 2, 0)).await;
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut("one")
+                .unwrap()
+                .latest = Some(changed);
+            control.context.reconcile("one").unwrap();
+            until(|| {
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .is_some_and(|now| !before.same_instance(&now))
+            })
+            .await;
 
-            assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
-            assert_eq!(one.snapshot().power, Power::Off);
+            assert!(old_work.life.is_closed());
             assert!(matches!(
                 one.snapshot().availability,
                 Availability::Unavailable(_)
             ));
+            release_operation(&peer, "rpcReq", "one", 2, accepted("one", 2, 0)).await;
+            // The sent light receipt keeps its ownership and settles the
+            // original request; it does not project into the new sink.
+            assert!(command.await.is_ok());
+            assert_ne!(one.snapshot().power, Power::On);
         })
         .await;
     }));
@@ -169,7 +199,7 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some((duplicate, None));
+                .latest = Some(duplicate);
             control.context.reconcile("multi").unwrap();
             assert!(Rc::ptr_eq(&work, &device_work(control, "multi")));
             release_operation(&peer, "rpcReq", "multi", 3, accepted("multi", 3, 0)).await;
@@ -237,97 +267,106 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
 }
 
 #[test]
-fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readiness() {
-    block_on(observation_rig(&["one", "two"]).run(|c| async move {
-        c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.state
-            .borrow_mut()
-            .sub_timeout
-            .insert(("two".into(), 2, 1));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            freeze_initialized(control, &peer, &["one"]).await;
-            until(|| !peer.state.borrow().held_subs.is_empty()).await;
-            let old = peer.state.borrow_mut().held_subs.remove(0);
-            let work = device_work(control, "two");
-            let original = work.native.clone();
-            let outlet_function = original.device.functions()[0].clone();
-            let mut changed = original.clone();
-            changed.device = super::support::device_with_functions(
-                &changed.device,
-                vec![super::support::function_with_power(
-                    &outlet_function,
-                    crate::xiaomi::capability::PropertyBinding {
-                        siid: 7,
-                        piid: outlet_function.power().piid,
-                    },
-                )],
-            );
-            for candidate in [changed, original] {
+fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readiness() {
+    block_on(
+        Rig::lights(&[
+            ("one", "xiaomi.light.ceil04"),
+            ("two", "xiaomi.light.ceil04"),
+        ])
+        .run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            for did in ["one", "two"] {
+                for (siid, piid, value) in
+                    [(2, 1, json!(false)), (2, 2, json!(50)), (2, 3, json!(2700))]
+                {
+                    peer.value(did, PropertyBinding { siid, piid }, value);
+                }
+            }
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                initialized(control, &peer, &["one", "two"]).await;
+                peer.state
+                    .borrow_mut()
+                    .sub_timeout
+                    .insert(("one".into(), 2, 3));
+                let first = device_work(control, "one");
+                let original = first.native.clone();
+                let mut narrowed = original.clone();
+                narrowed.device = super::support::device_with_temperature_grid(
+                    &narrowed.device,
+                    crate::device::NumericRange::new(3000, 5500, 1).unwrap(),
+                );
                 control
                     .context
                     .live
                     .borrow_mut()
                     .devices
-                    .get_mut("two")
+                    .get_mut("one")
                     .unwrap()
-                    .candidate = Some((candidate, None));
-                control.context.reconcile("two").unwrap();
+                    .latest = Some(narrowed);
+                control.context.reconcile("one").unwrap();
                 until(|| {
-                    control.context.live.borrow().devices["two"]
-                        .candidate
-                        .is_none()
+                    let current = device_work(control, "one");
+                    !Rc::ptr_eq(&first, &current)
                 })
                 .await;
-            }
-            assert!(work.life.is_closed());
-            assert!(work.subscribed.borrow().is_empty());
-            let current_work = device_work(control, "two");
-            advance_to(
-                &control.clock,
-                control.clock.now() + Duration::from_millis(10),
-            )
-            .await;
-            until(|| {
-                peer.state
-                    .borrow()
-                    .held_subs
-                    .iter()
-                    .any(|sub| sub.pkid != old.pkid && topic_key(&sub.filters[0].path).1 == 2)
+                until(|| !peer.state.borrow().held_subs.is_empty()).await;
+                let old = peer.state.borrow_mut().held_subs.remove(0);
+
+                let second = device_work(control, "one");
+                control
+                    .context
+                    .live
+                    .borrow_mut()
+                    .devices
+                    .get_mut("one")
+                    .unwrap()
+                    .latest = Some(original);
+                control.context.reconcile("one").unwrap();
+                until(|| {
+                    let current = device_work(control, "one");
+                    !Rc::ptr_eq(&second, &current)
+                })
+                .await;
+                assert!(second.life.is_closed());
+
+                // The stale SUBACK belongs to the retired instance. Use the
+                // already prepared second light as the shared-wire barrier; the
+                // not-yet-ready current instance cannot deliver its own notify.
+                peer.send(Packet::SubAck(SubAck::new(
+                    old.pkid,
+                    vec![SubscribeReasonCode::QoS2],
+                )));
+                peer.notify_value("two", POWER, json!(true), false);
+                until(|| {
+                    function(&control.context.registry, "two", "main")
+                        .snapshot()
+                        .power
+                        == Power::On
+                })
+                .await;
+                let current = device_work(control, "one");
+                assert!(!current.subscribed.borrow().contains(&(2, 3)));
+
+                until(|| {
+                    peer.state
+                        .borrow()
+                        .held_subs
+                        .iter()
+                        .any(|sub| sub.pkid != old.pkid && topic_key(&sub.filters[0].path).1 == 2)
+                })
+                .await;
+                let held = std::mem::take(&mut peer.state.borrow_mut().held_subs);
+                for sub in held {
+                    peer.send(Packet::SubAck(SubAck::new(
+                        sub.pkid,
+                        vec![SubscribeReasonCode::QoS2],
+                    )));
+                }
+                until(|| current.subscribed.borrow().len() == current.bindings().len()).await;
             })
             .await;
-
-            peer.send(Packet::SubAck(SubAck::new(
-                old.pkid,
-                vec![SubscribeReasonCode::QoS2],
-            )));
-            // A later notification on another device proves the stale SUBACK
-            // was already processed on the shared wire.
-            let one = function(&control.context.registry, "one", "main");
-            peer.notify("one", 2, true);
-            until(|| one.snapshot().power == Power::On).await;
-            assert!(!current_work.subscribed.borrow().contains(&(2, 1)));
-
-            let index = peer
-                .state
-                .borrow()
-                .held_subs
-                .iter()
-                .position(|sub| sub.pkid != old.pkid && topic_key(&sub.filters[0].path).1 == 2)
-                .unwrap();
-            let current = peer.state.borrow_mut().held_subs.remove(index);
-            peer.send(Packet::SubAck(SubAck::new(
-                current.pkid,
-                vec![SubscribeReasonCode::QoS2],
-            )));
-            until(|| current_work.subscribed.borrow().len() == 1).await;
-            assert!(current_work.subscribed.borrow().contains(&(2, 1)));
-            assert!(
-                !work.physical().same_instance(&current_work.physical()),
-                "each binding change replaces the whole serving instance"
-            );
-        })
-        .await;
-    }));
+        }),
+    );
 }

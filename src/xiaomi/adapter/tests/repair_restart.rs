@@ -147,8 +147,8 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
         {
             let mut live = c.context.live.borrow_mut();
             let member = live.devices.get_mut("member-a").unwrap();
-            member.native_confirmed = Some(native.clone());
-            member.candidate = Some((native, None));
+            member.latest = Some(native.clone());
+            member.latest = Some(native);
         }
         c.context.reconcile("member-a").unwrap();
         c.context.stage();

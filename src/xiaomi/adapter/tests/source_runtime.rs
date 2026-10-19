@@ -30,8 +30,8 @@ fn logical_only_group_change_reuses_the_native_runtime() {
         {
             let mut live = c.context.live.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
-            slot.native_confirmed = Some(confirmed.clone());
-            slot.candidate = Some((confirmed, None));
+            slot.latest = Some(confirmed.clone());
+            slot.latest = Some(confirmed);
         }
         c.context.reconcile("member-a").unwrap();
         until(|| {
@@ -142,8 +142,8 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             {
                 let mut live = control.context.live.borrow_mut();
                 let slot = live.devices.get_mut("member-a").unwrap();
-                slot.native_confirmed = Some(confirmed.clone());
-                slot.candidate = Some((confirmed, None));
+                slot.latest = Some(confirmed.clone());
+                slot.latest = Some(confirmed);
             }
             control.context.reconcile("member-a").unwrap();
             until(|| {
@@ -222,18 +222,29 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
             .clone();
         let access = c.context.live.borrow().devices["one"].access.clone();
         let cloud_access = c.context.live.borrow().devices["one"].cloud_access.clone();
+        let before = c
+            .context
+            .registry
+            .get(&DeviceKey::new("xiaomi", "one"))
+            .expect("the committed outlet is served");
         c.context.revoke("one", "test removal").unwrap();
         assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
         {
             let mut live = c.context.live.borrow_mut();
             let slot = live.devices.get_mut("one").unwrap();
-            slot.candidate = Some((native, None));
+            slot.latest = Some(native);
             slot.confirmed = true;
             slot.access = access;
             slot.cloud_access = cloud_access;
         }
         c.context.reconcile("one").unwrap();
-        until(|| c.context.live.borrow().devices["one"].candidate.is_none()).await;
+        until(|| {
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "one"))
+                .is_some_and(|now| !before.same_instance(&now))
+        })
+        .await;
         let new = function(&c.context.registry, "one", "main");
         assert!(new.snapshot().power != Power::On);
 

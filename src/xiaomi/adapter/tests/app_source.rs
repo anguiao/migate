@@ -21,11 +21,7 @@ impl SourceEntry {
     /// Build a source view for terminal tests; group views come from the real
     /// source install path, never from this helper.
     pub(crate) fn for_test(native: NativeDescription, physical: PhysicalDevice) -> Self {
-        Self {
-            native,
-            physical,
-            problem: None,
-        }
+        Self { native, physical }
     }
 }
 
@@ -111,6 +107,7 @@ impl AppSource {
         let mut live = self.handle.0.live.borrow_mut();
         let slot = live.devices.get_mut(&key.id).unwrap();
         let native = slot.admitted.as_ref().unwrap().native.clone();
-        slot.candidate = Some((native, Some(name.to_owned())));
+        slot.latest = Some(native);
+        slot.latest_name = Some(name.to_owned());
     }
 }

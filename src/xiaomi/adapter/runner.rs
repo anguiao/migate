@@ -99,8 +99,8 @@ impl Drop for XiaomiAdapter {
             self.context.registry.remove(physical.key());
         }
         for slot in self.context.live.borrow().devices.values() {
-            if let Some(life) = &slot.loading {
-                life.close();
+            if let Some(loading) = &slot.loading {
+                loading.life.close();
             }
         }
         self.context.tasks.clear();

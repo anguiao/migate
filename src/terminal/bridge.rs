@@ -44,7 +44,7 @@ fn configuration_lines(view: &View, did: &str) -> Vec<String> {
         let state = if current.derived.published.contains(&group_key) {
             "published".to_string()
         } else {
-            format!("not published ({})", unpublished_reason(view, relation))
+            format!("not published ({})", unpublished_reason(relation))
         };
         lines.push(format!(
             "  Group {} ({}): {state}.",
@@ -104,10 +104,7 @@ fn configuration_lines(view: &View, did: &str) -> Vec<String> {
                 ));
             }
         } else {
-            lines.push(format!(
-                "  Not published: {}.",
-                unpublished_reason(view, group)
-            ));
+            lines.push(format!("  Not published: {}.", unpublished_reason(group)));
         }
         if let Some(error) = &group.error {
             lines.push(format!("  Relation: {error}."));
@@ -132,7 +129,7 @@ fn capabilities(description: &crate::device::FunctionDescription) -> String {
         .join(", ")
 }
 
-fn unpublished_reason(view: &View, relation: &GroupRelation) -> String {
+fn unpublished_reason(relation: &GroupRelation) -> String {
     if let Some(error) = &relation.error {
         return error.clone();
     }
@@ -142,18 +139,7 @@ fn unpublished_reason(view: &View, relation: &GroupRelation) -> String {
     if relation.instance_type.is_none() {
         return "native group description has no instance type".into();
     }
-    match view
-        .current
-        .entries
-        .iter()
-        .find(|entry| entry.physical.key().id == relation.group_did)
-    {
-        Some(entry) => entry
-            .problem
-            .clone()
-            .unwrap_or_else(|| "waiting for a usable native description".into()),
-        None => "waiting for a usable native description".into(),
-    }
+    "waiting for a usable native description".into()
 }
 
 fn render(view: &View, did: Option<&str>) -> String {
@@ -169,7 +155,7 @@ fn render(view: &View, did: Option<&str>) -> String {
         lines.push(format!(
             "{} (native group): not published ({}).",
             relation.group_did,
-            unpublished_reason(view, relation)
+            unpublished_reason(relation)
         ));
     }
     for physical in view

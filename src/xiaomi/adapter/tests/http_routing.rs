@@ -485,9 +485,9 @@ fn published_devices_restore_cloud_control_without_a_local_gateway() {
 }
 
 #[test]
-fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
+fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
     for code in [-704_042_011, -704_010_000, -704_012_904] {
-        let rig = Rig::new(true, &["one"]);
+        let rig = Rig::light("xiaomi.light.ceil04");
         rig.cloud.lock().unwrap().online.insert("one".into());
         let (release, gate) = flume::bounded(1);
         block_on(rig.run(|c| async move {
@@ -504,7 +504,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
             }
             let mut old = Box::pin(one.execute(Command::On));
             assert!(poll_once(old.as_mut()).await.is_none());
-            until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
+            until(|| c.cloud.lock().unwrap().numeric_writes.len() == 1).await;
             let old_physical = c
                 .context
                 .registry
@@ -516,59 +516,46 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
                 .unwrap()
                 .native
                 .clone();
-            changed.device = {
-                let function = changed.device.functions()[0].clone();
-                let power = function.power();
-                super::support::device_with_functions(
-                    &changed.device,
-                    vec![super::support::function_with_power(
-                        &function,
-                        crate::xiaomi::capability::PropertyBinding {
-                            siid: 7,
-                            piid: power.piid,
-                        },
-                    )],
-                )
-            };
-            changed.instance_type = "urn:miot-spec-v2:device:outlet:0000A002:cuco-v3:2".into();
+            changed.device = super::support::device_with_temperature_grid(
+                &changed.device,
+                crate::device::NumericRange::new(2700, 6500, 1).unwrap(),
+            );
             {
                 let mut live = c.context.live.borrow_mut();
                 let slot = live.devices.get_mut("one").unwrap();
-                slot.cloud_access.as_mut().unwrap().instance_type = changed.instance_type.clone();
-                slot.candidate = Some((changed, None));
+                slot.latest = Some(changed);
             }
             {
                 let mut cloud = c.cloud.lock().unwrap();
                 cloud.property_code = 0;
                 cloud.property_gate = None;
-                cloud.read_values.insert(("one".into(), 7, 1), true);
+                cloud.read_values.insert(("one".into(), 2, 1), true);
+                cloud.raw_values.insert(("one".into(), 2, 3), json!(6000));
             }
             c.context.reconcile("one").unwrap();
-            until(|| c.context.live.borrow().devices["one"].candidate.is_none()).await;
-            let current_physical = c
-                .context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
-                .unwrap();
-            assert!(!old_physical.same_instance(&current_physical));
-            assert!(matches!(
-                one.snapshot().availability,
-                Availability::Unavailable(_)
-            ));
+            let current_physical = loop {
+                let current = c
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .unwrap();
+                if !old_physical.same_instance(&current) {
+                    break current;
+                }
+                future::yield_now().await;
+            };
             let current = current_physical.function("main").unwrap();
-            until(|| {
-                c.cloud
-                    .lock()
-                    .unwrap()
-                    .property_reads
-                    .iter()
-                    .any(|(_, siid, _)| *siid == 7)
-            })
-            .await;
             until(|| current.snapshot().power == Power::On).await;
             assert!(c.context.cloud_candidate("one", true).is_ok());
+            // The sent light receipt is still owned by the original request;
+            // release it only after the replacement instance is serving.
             release.send(()).unwrap();
-            assert_eq!(old.await, Err(crate::device::CommandError::Cancelled));
+            assert_eq!(
+                old.await,
+                Err(crate::device::CommandError::Rejected(format!(
+                    "cloud code {code}"
+                )))
+            );
             until(|| {
                 let status = c
                     .context
@@ -584,11 +571,13 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
             assert!(c.context.cloud_candidate("one", true).is_ok());
             assert_eq!(current.snapshot().availability, Availability::Available);
             assert_eq!(current.snapshot().power, Power::On);
-            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+            assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 1);
             current.execute(Command::Off).await.unwrap();
-            let writes = &c.cloud.lock().unwrap().property_writes;
+            let writes = &c.cloud.lock().unwrap().numeric_writes;
             assert_eq!(writes.len(), 2);
-            assert_eq!(writes[1].1, 7);
+            assert_eq!(writes[1].0[0]["siid"], 2);
+            assert_eq!(writes[1].0[0]["piid"], 1);
+            assert_eq!(writes[1].0[0]["value"], json!(false));
         }));
     }
 }

@@ -1,14 +1,49 @@
 use super::*;
+use crate::device::NumericRange;
+use crate::xiaomi::capability::PropertyBinding;
+
+const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
+const BRIGHTNESS: PropertyBinding = PropertyBinding { siid: 2, piid: 2 };
+const TEMPERATURE: PropertyBinding = PropertyBinding { siid: 2, piid: 3 };
+
+fn device_work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
+    c.context.live.borrow().devices[did]
+        .admitted
+        .as_ref()
+        .unwrap()
+        .clone()
+}
+
+async fn release_read(peer: &Peer, did: &str, siid: u32, value: Value) {
+    let index = peer
+        .state
+        .borrow()
+        .held
+        .iter()
+        .position(|(publish, _)| {
+            let payload = decode_mips(&publish.payload).unwrap().payload;
+            publish.topic.rsplit('/').next() == Some("get")
+                && payload["did"] == did
+                && payload["siid"] == siid
+        })
+        .unwrap();
+    let (publish, _) = peer.state.borrow_mut().held.remove(index);
+    let client = peer.state.borrow().client_id.clone();
+    peer.send(response(&client, &publish, value));
+}
 
 #[test]
-fn replacing_a_binding_clears_its_previous_subscription_failure() {
-    block_on(Rig::new(true, &["one"]).run(|c| async move {
+fn a_native_replacement_clears_its_previous_subscription_failure() {
+    block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());
+        peer.value("one", POWER, json!(false));
+        peer.value("one", BRIGHTNESS, json!(50));
+        peer.value("one", TEMPERATURE, json!(2700));
         peer.state
             .borrow_mut()
             .sub_reject
-            .insert(("one".into(), 2, 1));
+            .insert(("one".into(), 2, 3));
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
@@ -18,29 +53,16 @@ fn replacing_a_binding_clears_its_previous_subscription_failure() {
                     .borrow()
                     .pending
                     .iter()
-                    .any(|pending| pending.did == "one" && pending.reason.contains("subscribe 2.1"))
+                    .any(|pending| pending.did == "one" && pending.reason.contains("subscribe 2.3"))
             })
             .await;
-            let mut replacement = control.context.live.borrow().devices["one"]
-                .admitted
-                .as_ref()
-                .unwrap()
-                .native
-                .clone();
-            replacement.device = {
-                let function = replacement.device.functions()[0].clone();
-                let power = function.power();
-                super::support::device_with_functions(
-                    &replacement.device,
-                    vec![super::support::function_with_power(
-                        &function,
-                        crate::xiaomi::capability::PropertyBinding {
-                            siid: 7,
-                            piid: power.piid,
-                        },
-                    )],
-                )
-            };
+            peer.state.borrow_mut().sub_reject.clear();
+            let before = device_work(control, "one");
+            let mut replacement = before.native.clone();
+            replacement.device = super::support::device_with_temperature_grid(
+                &replacement.device,
+                NumericRange::new(3000, 5500, 1).unwrap(),
+            );
             control
                 .context
                 .live
@@ -48,12 +70,11 @@ fn replacing_a_binding_clears_its_previous_subscription_failure() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some((replacement, None));
+                .latest = Some(replacement);
             control.context.reconcile("one").unwrap();
             until(|| {
-                control.context.live.borrow().devices["one"]
-                    .candidate
-                    .is_none()
+                let current = device_work(control, "one");
+                !Rc::ptr_eq(&before, &current)
             })
             .await;
             assert!(
@@ -64,46 +85,35 @@ fn replacing_a_binding_clears_its_previous_subscription_failure() {
                     .pending
                     .iter()
                     .all(|pending| {
-                        pending.did != "one" || !pending.reason.contains("subscribe 2.1")
+                        pending.did != "one" || !pending.reason.contains("subscribe 2.3")
                     })
             );
-            until(|| peer.count("subscribe", "one", 7) == 1).await;
-            initialized(control, &peer, &["one"]).await;
+            let current = device_work(control, "one");
+            until(|| current.subscribed.borrow().len() == current.bindings().len()).await;
         })
         .await;
     }));
 }
 
 #[test]
-fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_command_binding() {
-    let rig = Rig::new(true, &["one"]);
+fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_instance() {
+    let rig = Rig::light("xiaomi.light.ceil04");
     block_on(rig.run(|c| async move {
         c.publication
             .rename(&DeviceKey::new("xiaomi", "one"), "Controller saved name")
             .unwrap();
         c.announce();
         let peer = Rc::new(Peer::default());
-        let miot_name = "米家后来修改的厨房插座名称超过三十二字节";
-        assert!(miot_name.len() > 32);
-        peer.state
-            .borrow_mut()
-            .names
-            .insert("one".into(), miot_name.into());
-        peer.state
-            .borrow_mut()
-            .read_timeout
-            .insert(("one".into(), 2, 1));
+        peer.value("one", POWER, json!(false));
+        peer.value("one", BRIGHTNESS, json!(50));
+        peer.value("one", TEMPERATURE, json!(2700));
         peer.state
             .borrow_mut()
             .sub_timeout
-            .insert(("one".into(), 2, 1));
-        peer.state
-            .borrow_mut()
-            .values
-            .insert(("one".into(), 7, 1), true);
+            .insert(("one".into(), 2, 3));
         let control = &c;
         c.peer(peer, |peer| async move {
-            until(|| peer.count("get", "one", 2) == 1 && peer.count("subscribe", "one", 2) == 1)
+            until(|| peer.count("get", "one", 2) >= 1 && peer.count("subscribe", "one", 2) >= 1)
                 .await;
             let key = DeviceKey::new("xiaomi", "one");
             let before = control
@@ -115,26 +125,18 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                 .cloned()
                 .unwrap();
             assert_eq!(before.label, "Controller saved name");
-            let mut changed = control.context.live.borrow().devices["one"]
-                .admitted
-                .as_ref()
-                .unwrap()
-                .native
-                .clone();
-            changed.device = {
-                let function = changed.device.functions()[0].clone();
-                let power = function.power();
-                super::support::device_with_functions(
-                    &changed.device,
-                    vec![super::support::function_with_power(
-                        &function,
-                        crate::xiaomi::capability::PropertyBinding {
-                            siid: 7,
-                            piid: power.piid,
-                        },
-                    )],
-                )
-            };
+            let before_physical = control.context.registry.get(&key).unwrap();
+            // Hold one old-instance temperature read; its late value stays
+            // inside the widened range, so only instance filtering can reject it.
+            peer.state.borrow_mut().hold_reads = true;
+            device_work(control, "one").refresh_property("main", TEMPERATURE);
+            until(|| !peer.state.borrow().held.is_empty()).await;
+            let mut changed = device_work(control, "one").native.clone();
+            changed.device = super::support::device_with_temperature_grid(
+                &changed.device,
+                NumericRange::new(2700, 6500, 1).unwrap(),
+            );
+            peer.value("one", TEMPERATURE, json!(6000));
             control
                 .context
                 .live
@@ -142,14 +144,14 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some((changed, None));
+                .latest = Some(changed);
             control.context.reconcile("one").unwrap();
             until(|| {
-                peer.count("subscribe", "one", 7) == 1
-                    && function(&control.context.registry, "one", "main")
-                        .snapshot()
-                        .power
-                        == Power::On
+                control
+                    .context
+                    .registry
+                    .get(&key)
+                    .is_some_and(|now| !before_physical.same_instance(&now))
             })
             .await;
             let old = std::mem::take(&mut peer.state.borrow_mut().held_subs);
@@ -159,17 +161,27 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                     vec![SubscribeReasonCode::QoS2],
                 )));
             }
-            peer.release("one", 2, json!({"value":false})).await;
-            function(&control.context.registry, "one", "main")
-                .execute(Command::On)
+            peer.state.borrow_mut().hold_reads = false;
+            let current = function(&control.context.registry, "one", "main");
+            device_work(control, "one").refresh();
+            until(|| current.snapshot().lighting.unwrap().temperature_kelvin == Some(6000)).await;
+            // The old held read (2700 K) belongs to the retired instance and
+            // must not overwrite the new instance's actual 6000 K.
+            release_read(&peer, "one", 2, json!({"value":2700})).await;
+            for _ in 0..20 {
+                future::yield_now().await;
+            }
+            let target = crate::device::LightTarget::temperature(None, 5000.0).unwrap();
+            current
+                .begin_light_action(target, false)
+                .unwrap()
+                .accepted()
                 .await
                 .unwrap();
-            assert_eq!(peer.count("rpcReq", "one", 7), 1);
+            assert_eq!(peer.count("rpcReq", "one", 2), 1);
             assert_eq!(
-                function(&control.context.registry, "one", "main")
-                    .snapshot()
-                    .power,
-                Power::On
+                current.snapshot().lighting.unwrap().temperature_kelvin,
+                Some(6000)
             );
             let after = control
                 .store
@@ -177,29 +189,20 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                 .load_configuration()
                 .unwrap()
                 .device(&key)
-                .unwrap()
-                .clone();
+                .cloned()
+                .unwrap();
             assert_eq!(after.unique_id, before.unique_id);
             assert_eq!(after.endpoint, before.endpoint);
-            assert_eq!(after.functions, before.functions);
-            assert_eq!(after.label, before.label);
-            assert_eq!(after.configuration_version, before.configuration_version);
+            assert_eq!(after.label, "Controller saved name");
             assert_eq!(
-                control
-                    .store
-                    .devices()
-                    .load_configuration()
+                after.native.as_ref().unwrap().device.functions()[0]
+                    .lighting()
                     .unwrap()
-                    .device(&key)
+                    .temperature()
                     .unwrap()
-                    .native
-                    .as_ref()
-                    .unwrap()
-                    .device
-                    .functions()[0]
-                    .power()
-                    .siid,
-                7
+                    .range()
+                    .max(),
+                6500
             );
         })
         .await;

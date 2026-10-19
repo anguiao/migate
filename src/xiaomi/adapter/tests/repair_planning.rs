@@ -112,7 +112,7 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
                 .devices
                 .get_mut("member-a")
                 .unwrap()
-                .native_confirmed = Some(cached);
+                .latest = Some(cached);
         };
         set_range(3000, 6400);
         let db = rusqlite::Connection::open(c.store.path()).unwrap();

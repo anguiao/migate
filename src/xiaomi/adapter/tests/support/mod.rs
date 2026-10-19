@@ -51,6 +51,35 @@ pub(super) use groups::{
 pub(super) use peer::{Peer, peer_run, response, topic_key};
 pub(super) use rig::{Control, Rig};
 
+/// Test-only outage/removal simulation: close the installed runtime authority
+/// and retire its attachments without going through description handling.
+pub(super) fn force_unavailable(context: &super::super::state::Context, did: &str, reason: &str) {
+    let reason = reason.to_owned();
+    if let Some(slot) = context.live.borrow_mut().devices.get_mut(did) {
+        slot.blocked = Some(reason.clone());
+    }
+    if let Some(work) = context
+        .live
+        .borrow()
+        .devices
+        .get(did)
+        .and_then(|slot| slot.admitted.clone())
+    {
+        work.physical()
+            .set_availability(Availability::Unavailable(reason.clone()));
+    }
+    context.retire_work(did);
+    if let Some(session) = context.live.borrow().session.as_ref() {
+        drop(session.handle.unsubscribe_properties(did));
+    }
+    if let Some(session) = context.notifications.borrow().as_ref() {
+        drop(session.handle.unsubscribe_properties(did));
+    }
+    context.changed.notify(usize::MAX);
+    context.refresh_group_states(did);
+    context.problem(did, Some(reason));
+}
+
 pub(super) fn cached(_uid: &str, did: &str, multi: bool) -> NativeDescription {
     let instance: Value = serde_json::from_str(if multi {
         include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
@@ -232,11 +261,9 @@ pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
                             .as_ref()
                             .and_then(|session| session.devices.get(*did))
                             .is_some_and(|work| {
-                                work.subscribed.borrow().len()
-                                    == physical.functions().len()
-                                        + usize::from(
-                                            work.native.device.refresh_trigger().is_some(),
-                                        )
+                                // Every function owns one or more native
+                                // property bindings, not one per channel.
+                                work.subscribed.borrow().len() == work.bindings().len()
                             })
                 })
         }) && peer
@@ -281,25 +308,6 @@ pub(super) fn device_with_key(
         device.refresh_trigger(),
     )
     .unwrap()
-}
-
-pub(super) fn function_with_power(
-    function: &crate::xiaomi::capability::ParsedFunction,
-    power: crate::xiaomi::capability::PropertyBinding,
-) -> crate::xiaomi::capability::ParsedFunction {
-    match function.lighting() {
-        None => crate::xiaomi::capability::ParsedFunction::outlet(
-            function.id(),
-            function.label(),
-            power,
-        ),
-        Some(lighting) => crate::xiaomi::capability::ParsedFunction::light(
-            function.id(),
-            function.label(),
-            power,
-            *lighting,
-        ),
-    }
 }
 
 /// Rebuild a light description with a different native temperature grid.

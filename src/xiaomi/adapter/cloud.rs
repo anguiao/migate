@@ -1,6 +1,6 @@
 use super::{
     model::AdapterError,
-    state::{Backoff, Context, Lifetime},
+    state::{Backoff, Context},
 };
 use crate::{
     configuration::Scope,
@@ -145,7 +145,7 @@ pub(super) async fn run(
             live.devices
                 .iter()
                 .filter(|(did, slot)| {
-                    home.dids.contains(did) && (slot.admitted.is_some() || slot.candidate.is_some())
+                    home.dids.contains(did) && (slot.admitted.is_some() || slot.latest.is_some())
                 })
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
@@ -266,23 +266,37 @@ pub(super) async fn run(
             if group_like {
                 continue;
             }
+            // Capture the target metadata this load is allowed to apply.
+            let target = context.live.borrow().devices[&did]
+                .cloud_access
+                .as_ref()
+                .map(|access| (access.model.clone(), access.instance_type.clone()));
+            // A directory target change retires the in-flight load so a new
+            // target can start instead of waiting for a result that will be
+            // discarded. Online changes keep the same target.
+            {
+                let mut live = context.live.borrow_mut();
+                if let Some(slot) = live.devices.get_mut(&did) {
+                    slot.retarget_loading(&target);
+                }
+            }
             let prepare = context.live.borrow().devices[&did].needs_description();
             if !prepare {
                 context.reconcile(&did)?;
                 continue;
             }
-            let life = Rc::new(Lifetime::default());
-            context
-                .live
-                .borrow_mut()
-                .devices
-                .get_mut(&did)
-                .unwrap()
-                .loading = Some(life.clone());
+            let life = {
+                let mut live = context.live.borrow_mut();
+                live.devices
+                    .get_mut(&did)
+                    .unwrap()
+                    .start_loading(target.clone())
+            };
             let current = context.clone();
             let client = cloud.clone();
             let credentials = credentials.clone();
             let home = home.clone();
+            let captured_scope = scope.clone();
             let task = async move {
                 let Some(result) = future::or(
                     async {
@@ -295,33 +309,60 @@ pub(super) async fn run(
                 else {
                     return Ok(());
                 };
-                current
-                    .live
-                    .borrow_mut()
-                    .devices
-                    .get_mut(&did)
-                    .unwrap()
-                    .loading = None;
+                // A retired/removed slot, a superseding load or a changed
+                // directory target must discard this older result.
+                let current_loading = {
+                    let live = current.live.borrow();
+                    let Some(slot) = live.devices.get(&did) else {
+                        return Ok(());
+                    };
+                    slot.loading_is(&life)
+                        && slot
+                            .cloud_access
+                            .as_ref()
+                            .map(|access| (access.model.clone(), access.instance_type.clone()))
+                            == target
+                };
+                if !current_loading
+                    || !current.current_token(&credentials.tokens.access_token)
+                    || current.live.borrow().scope.as_ref() != Some(&captured_scope)
+                {
+                    if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
+                        slot.finish_loading(&life);
+                    }
+                    return Ok(());
+                }
+                if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
+                    slot.finish_loading(&life);
+                }
                 match result {
-                    Ok(candidate) => {
-                        {
-                            let mut live = current.live.borrow_mut();
-                            let slot = live.devices.get_mut(&did).unwrap();
-                            slot.blocked = None;
-                            slot.native_confirmed = Some(candidate.0.clone());
-                            slot.candidate = Some(candidate);
+                    Ok((native, name)) => {
+                        let matches_target = target.as_ref().is_none_or(|(model, urn)| {
+                            *model == native.model && *urn == native.instance_type
+                        });
+                        if matches_target {
+                            if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
+                                slot.latest = Some(native);
+                                slot.latest_name = name;
+                                slot.blocked = None;
+                            }
+                            current.stage();
+                            // The new latest fact must enter the next
+                            // directory pass so its access facts are read
+                            // without another description load.
+                            current.request_sync();
                         }
-                        current.reconcile(&did)?;
-                        current.request_sync();
                     }
                     Err(error) => {
-                        match &error {
-                            CatalogError::Cloud(_) => {
-                                current.problem(&did, Some(error.to_string()))
-                            }
-                            _ => current.block_device(&did, error.to_string()),
-                        }
-                        if let CatalogError::Cloud(error) = &error {
+                        // A failed new description is diagnostic only; the
+                        // committed runtime keeps serving and the latest fact
+                        // is retained for the next retry. Temporary fetch
+                        // failures must not pause account-wide HTTP control;
+                        // real access rejections keep their source rule.
+                        current.pending_description(&did, error.to_string());
+                        if let CatalogError::Cloud(error) = &error
+                            && !error.is_temporary()
+                        {
                             current.cloud_error(
                                 &credentials.tokens.access_token,
                                 Some(&did),

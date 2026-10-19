@@ -99,10 +99,25 @@ fn an_offline_event_before_an_active_success_reply_preserves_acceptance() {
 }
 
 #[test]
-fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_value() {
-    block_on(Rig::new(true, &["one"]).run(|c| async move {
+fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_value() {
+    block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());
+        peer.value(
+            "one",
+            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+            json!(false),
+        );
+        peer.value(
+            "one",
+            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 2 },
+            json!(50),
+        );
+        peer.value(
+            "one",
+            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 3 },
+            json!(2700),
+        );
         let control = &c;
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
@@ -111,22 +126,20 @@ fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_va
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            let before_physical = control
+                .context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "one"))
+                .unwrap();
             let mut changed = control.context.live.borrow().devices["one"]
                 .admitted
                 .as_ref()
                 .unwrap()
                 .native
                 .clone();
-            let power = changed.device.functions()[0].power();
-            changed.device = super::support::device_with_functions(
+            changed.device = super::support::device_with_temperature_grid(
                 &changed.device,
-                vec![super::support::function_with_power(
-                    &changed.device.functions()[0],
-                    crate::xiaomi::capability::PropertyBinding {
-                        siid: 7,
-                        piid: power.piid,
-                    },
-                )],
+                crate::device::NumericRange::new(2700, 6500, 1).unwrap(),
             );
             control
                 .context
@@ -135,25 +148,53 @@ fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_va
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some((changed, None));
+                .latest = Some(changed);
             control.context.reconcile("one").unwrap();
-            until(|| peer.count("get", "one", 7) == 1).await;
-            // The new current instance completes its own read before the
-            // obsolete write receipt returns.
-            let current = function(&control.context.registry, "one", "main");
+            let current_physical = loop {
+                let current = control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .unwrap();
+                if !before_physical.same_instance(&current) {
+                    break current;
+                }
+                future::yield_now().await;
+            };
+            let current = current_physical.function("main").unwrap();
             until(|| current.snapshot().power == Power::Off).await;
             peer.release("one", 2, accepted("one", 2, 0)).await;
-            assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
-            assert_eq!(one.snapshot().power, Power::Off);
+            // A sent light receipt keeps its ownership and settles the
+            // original request; it must not project into the new instance.
+            assert!(
+                command.await.is_ok(),
+                "the original light receipt settles after the sink is retired"
+            );
             assert!(matches!(
                 one.snapshot().availability,
                 Availability::Unavailable(_)
             ));
+            assert_ne!(one.snapshot().power, Power::On);
             until(|| current.snapshot().availability == Availability::Available).await;
             assert_eq!(current.snapshot().power, Power::Off);
             peer.state.borrow_mut().hold_writes = false;
-            current.execute(Command::Off).await.unwrap();
-            assert_eq!(peer.count("rpcReq", "one", 7), 1);
+            current.execute(Command::On).await.unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 2), 2);
+            assert!(
+                peer.state.borrow().seen.iter().any(|(operation, value)| {
+                    operation == "rpcReq"
+                        && value["did"] == "one"
+                        && value["rpc"]["params"][0]["siid"] == 2
+                        && value["rpc"]["params"][0]["piid"] == 1
+                        && value["rpc"]["params"][0]["value"] == true
+                }),
+                "the replacement instance sends its own absolute power target"
+            );
+            assert_eq!(
+                current.snapshot().power,
+                Power::Off,
+                "light acceptance does not infer actual power before feedback"
+            );
         })
         .await;
     }));
@@ -210,7 +251,7 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some((stable.clone(), None));
+                .latest = Some(stable.clone());
             control.context.reconcile("multi").unwrap();
             let current = control.context.registry.get(&key).unwrap();
             assert!(

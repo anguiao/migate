@@ -70,21 +70,21 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn open(source: SourceHandle, store: Store) -> Result<Self, StorageError> {
         let configuration = store.devices().load_configuration()?;
-        let snapshot = source.snapshot();
         // The committed derived graph is never overlaid with the recovery
         // state: planning must still see revoked devices as previously
         // published so they can be withdrawn with a real version bump. The
         // initial serving view is the intersection with the restored entries;
         // revocation and account switches legitimately lack old references.
         let derived = configuration.derive();
-        let published = serving_registry(&derived.published, &snapshot.entries);
+        let entries = source.entries(&configuration);
+        let published = serving_registry(&derived.published, &entries);
         Ok(Self {
             source,
             store,
             current: RefCell::new(Rc::new(EffectiveConfiguration {
                 configuration,
                 derived,
-                entries: snapshot.entries,
+                entries,
                 published,
             })),
             failure: RefCell::new(None),
@@ -184,7 +184,7 @@ impl App {
     pub(crate) fn plan(&self) -> Result<Option<Plan>, StorageError> {
         let current = self.current();
         let snapshot = self.source.snapshot();
-        if snapshot.facts.scope.is_none() {
+        if snapshot.scope.is_none() {
             return Ok(None);
         }
         let revocations = self.store.devices().load_revocations()?;
@@ -192,7 +192,7 @@ impl App {
             .iter()
             .map(|revocation| revocation.key.clone())
             .collect::<BTreeSet<_>>();
-        let mut facts = snapshot.facts;
+        let mut facts = snapshot;
         facts
             .devices
             .retain(|device| !revoked.contains(&device.key) || device.fresh);

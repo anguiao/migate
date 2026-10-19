@@ -273,7 +273,7 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some((narrower, None));
+                .latest = Some(narrower);
             control.context.reconcile("one").unwrap();
 
             // Wait for the actual instance replacement, not the still-serving
@@ -381,10 +381,14 @@ fn freeze_light_clock(c: &Control) {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 async fn ready_replacement_light(c: &Control) -> crate::device::Function {
+    let before = c.context.registry.get(&DeviceKey::new("xiaomi", "one"));
     future::or(
         async {
             until(|| {
-                c.context.live.borrow().devices["one"].candidate.is_none()
+                c.context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .is_some_and(|now| before.as_ref().is_none_or(|old| !old.same_instance(&now)))
                     && c.context.active_notification("one")
                         == Some(super::super::model::PathKind::Local)
             })
@@ -744,7 +748,7 @@ fn binding_change_retires_old_feedback_authority() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some((changed, None));
+                .latest = Some(changed);
             control.context.reconcile("one").unwrap();
             let new = ready_replacement_light(control).await;
             assert_eq!(
@@ -800,55 +804,43 @@ fn retired_work_replacement_retires_old_feedback_authority() {
             let accepted_at = control.clock.now();
             first.ended().await.unwrap();
             drop(first);
-            assert_eq!(peer.count("rpcReq", "one", 0), 1);
+            assert_eq!(peer.count("rpcReq", "one", 2), 1);
             assert_eq!(
                 old.snapshot().lighting.unwrap().brightness_percent,
                 Some(1.0)
             );
             drop(old);
 
-            let retired_work = Rc::downgrade(
-                control.context.live.borrow().devices["one"]
-                    .admitted
-                    .as_ref()
-                    .unwrap(),
-            );
-            let mut changed = control.context.live.borrow().devices["one"]
+            let old_work = control.context.live.borrow().devices["one"]
                 .admitted
-                .as_ref()
-                .unwrap()
-                .native
-                .clone();
-            changed.device = super::support::device_with_brightness_format(
+                .clone()
+                .unwrap();
+            let retired_work = Rc::downgrade(&old_work);
+            let mut changed = old_work.native.clone();
+            changed.device = super::support::device_with_temperature_grid(
                 &changed.device,
-                crate::xiaomi::capability::NumericFormat::Uint16,
+                crate::device::NumericRange::new(3000, 5500, 1).unwrap(),
             );
-
-            // There is no outstanding receipt and no test-owned strong work
-            // reference to accidentally keep the old feedback gate alive.
+            drop(old_work);
+            peer.value("one", TEMPERATURE, json!(4000));
             control
                 .context
-                .block_device("one", "retiring old lighting bindings".into());
-            // Wake the idle refresh scheduler so it releases its snapshot of
-            // the retired work before the replacement is installed.
-            control.context.refresh_changed.notify(usize::MAX);
-            until(|| retired_work.strong_count() == 0).await;
-            {
-                let mut live = control.context.live.borrow_mut();
-                let slot = live.devices.get_mut("one").unwrap();
-                slot.blocked = None;
-                slot.candidate = Some((changed, None));
-            }
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut("one")
+                .unwrap()
+                .latest = Some(changed);
             control.context.reconcile("one").unwrap();
             let new = ready_replacement_light(control).await;
             assert_eq!(
                 new.description().temperature_interval().unwrap().max(),
-                5700
+                5500
             );
             assert!(retired_work.upgrade().is_none());
             let next = new.begin_light_action(brightness(70.0), false).unwrap();
             next.accepted().await.unwrap();
-            assert_eq!(peer.count("rpcReq", "one", 0), 2);
+            assert_eq!(peer.count("rpcReq", "one", 2), 2);
             assert_eq!(
                 new.snapshot().lighting.unwrap().brightness_percent,
                 Some(1.0)
@@ -868,7 +860,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
                 new.snapshot().lighting.unwrap().brightness_percent,
                 Some(60.0)
             );
-            assert_eq!(peer.count("rpcReq", "one", 0), 2);
+            assert_eq!(peer.count("rpcReq", "one", 2), 2);
         })
         .await;
     }));
@@ -898,7 +890,8 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
                 .clone();
             control.context.remove("one").unwrap();
             let slot = super::super::state::DeviceSlot {
-                candidate: Some((cached, None)),
+                latest: Some(cached),
+                latest_name: None,
                 access,
                 cloud_access,
                 // A genuine fresh confirmation clears the durable tombstone.
@@ -1980,15 +1973,26 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
             &changed.device,
             crate::xiaomi::capability::NumericFormat::Uint16,
         );
+        let before = c
+            .context
+            .registry
+            .get(&DeviceKey::new("xiaomi", "one"))
+            .expect("the committed light is served");
         c.context
             .live
             .borrow_mut()
             .devices
             .get_mut("one")
             .unwrap()
-            .candidate = Some((changed, None));
+            .latest = Some(changed);
         c.context.reconcile("one").unwrap();
-        until(|| c.context.live.borrow().devices["one"].candidate.is_none()).await;
+        until(|| {
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "one"))
+                .is_some_and(|now| !before.same_instance(&now))
+        })
+        .await;
         let new = function(&c.context.registry, "one", "main");
         until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(50.0)).await;
         let next = new.begin_light_action(brightness(70.0), true).unwrap();

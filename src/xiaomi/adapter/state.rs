@@ -74,18 +74,22 @@ pub(super) struct DeviceSlot {
     pub(super) effective_group: Option<GroupSource>,
     /// Repair plan installed only by a successful configuration commit.
     pub(super) effective_repair: Option<Rc<RepairPlan>>,
-    /// Latest confirmed description read, including one rejected by the
-    /// independent-lamp contract, retained for confirmed group planning.
-    pub(super) native_confirmed: Option<NativeDescription>,
+    /// The single latest valid native description. It may be newer than
+    /// the installed runtime (pending commit) and survives a failed commit so
+    /// the next plan can retry it. It is never replaced by the runtime's older
+    /// committed metadata.
+    pub(super) latest: Option<NativeDescription>,
+    /// Directory name for `latest`; display/planning metadata only.
+    pub(super) latest_name: Option<String>,
 
     pub(super) confirmed: bool,
-    /// A description awaiting admission; accepted descriptions live only in the record.
-    pub(super) candidate: Option<(NativeDescription, Option<String>)>,
     /// The installed native runtime; native control and subscriptions live here.
     pub(super) admitted: Option<Rc<DeviceWork>>,
     pub(super) cloud_access: Option<CloudDeviceInfo>,
     pub(super) cloud_forbidden: bool,
-    pub(super) loading: Option<Rc<Lifetime>>,
+    /// The one in-flight directory load and the model/URN target it may
+    /// apply. `None` target is a genuine first read without metadata facts.
+    pub(super) loading: Option<Loading>,
     pub(super) access: Option<Result<DeviceAccess, CentralError>>,
     pub(super) blocked: Option<String>,
     pub(super) last_switch_reason: Option<String>,
@@ -94,6 +98,12 @@ pub(super) struct DeviceSlot {
     /// Virtual groups are cloud-only; physical groups keep their own route.
     pub(super) group: Option<GroupSource>,
 }
+#[derive(Clone)]
+pub(super) struct Loading {
+    pub(super) life: Rc<Lifetime>,
+    pub(super) target: Option<(String, String)>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct GroupSource {
     pub(super) record_did: String,
@@ -105,26 +115,57 @@ pub(super) struct GroupSource {
 impl DeviceSlot {
     pub(super) fn restored(work: Rc<DeviceWork>) -> Self {
         Self {
+            latest: Some(work.native.clone()),
             admitted: Some(work),
             ..Self::default()
         }
     }
+    /// Retire a load aimed at an older target; online changes keep it.
+    pub(super) fn retarget_loading(&mut self, target: &Option<(String, String)>) {
+        if self
+            .loading
+            .as_ref()
+            .is_some_and(|loading| &loading.target != target)
+            && let Some(loading) = self.loading.take()
+        {
+            loading.life.close();
+        }
+    }
+    pub(super) fn start_loading(&mut self, target: Option<(String, String)>) -> Rc<Lifetime> {
+        debug_assert!(self.loading.is_none());
+        let life = Rc::new(Lifetime::default());
+        self.loading = Some(Loading {
+            life: life.clone(),
+            target,
+        });
+        life
+    }
+    pub(super) fn loading_is(&self, life: &Rc<Lifetime>) -> bool {
+        self.loading
+            .as_ref()
+            .is_some_and(|loading| Rc::ptr_eq(&loading.life, life))
+    }
+    /// Finish this exact load once; a superseded load is left untouched.
+    pub(super) fn finish_loading(&mut self, life: &Rc<Lifetime>) -> bool {
+        if self.loading_is(life) {
+            self.loading = None;
+            true
+        } else {
+            false
+        }
+    }
+    /// A directory description read is needed only when the latest valid
+    /// fact is missing or its metadata differs from the current access facts.
     pub(super) fn needs_description(&self) -> bool {
         if self.loading.is_some() {
             return false;
         }
-        let differs = |cached: &NativeDescription| {
-            self.cloud_access.as_ref().is_some_and(|access| {
-                access.model != cached.model || access.instance_type != cached.instance_type
-            })
+        let Some(latest) = &self.latest else {
+            return true;
         };
-        match &self.admitted {
-            Some(work) => self.blocked.is_some() || differs(&work.native),
-            None => self
-                .candidate
-                .as_ref()
-                .is_none_or(|(cached, _)| differs(cached)),
-        }
+        self.cloud_access.as_ref().is_some_and(|access| {
+            access.model != latest.model || access.instance_type != latest.instance_type
+        })
     }
 }
 pub(super) struct Session {

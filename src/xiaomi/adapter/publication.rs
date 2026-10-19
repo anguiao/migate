@@ -14,7 +14,8 @@ use super::{
 };
 use crate::{
     configuration::{
-        GroupRelation, NativeDescription, OperationKind, Plan, SourceDevice, SourceFacts,
+        CommittedConfiguration, GroupRelation, NativeDescription, OperationKind, Plan,
+        SourceDevice, SourceFacts,
     },
     device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
 };
@@ -27,15 +28,9 @@ pub struct SourceHandle(pub(super) Rc<Context>);
 /// One serving source device as seen by the terminal and diagnostics. It never
 /// exposes prepared receivers or configuration submission.
 pub(crate) struct SourceEntry {
+    /// The committed native metadata and control description.
     pub(crate) native: NativeDescription,
     pub(crate) physical: PhysicalDevice,
-    pub(crate) problem: Option<String>,
-}
-
-/// The latest pure source facts and the currently serving entries.
-pub(crate) struct SourceSnapshot {
-    pub(crate) facts: SourceFacts,
-    pub(crate) entries: Vec<Rc<SourceEntry>>,
 }
 
 /// One prepared, not yet installed source instance. Its receivers are owned
@@ -72,7 +67,7 @@ impl SourceHandle {
 
     /// Collect the latest pure source facts and the serving entries. No
     /// running device is created here.
-    pub(crate) fn snapshot(&self) -> SourceSnapshot {
+    pub(crate) fn snapshot(&self) -> SourceFacts {
         #[cfg(test)]
         if let Some(observer) = self.0.snapshot_observer.borrow_mut().as_mut() {
             observer();
@@ -80,37 +75,18 @@ impl SourceHandle {
         let live = self.0.live.borrow();
         let scope = live.scope.clone();
         let mut devices = Vec::new();
-        let mut entries = Vec::new();
         for slot in live.devices.values() {
-            let native = slot
-                .native_confirmed
-                .clone()
-                .or_else(|| {
-                    slot.candidate
-                        .as_ref()
-                        .map(|(candidate, _)| candidate.clone())
-                })
-                .or_else(|| slot.admitted.as_ref().map(|work| work.native.clone()));
-            let Some(native) = native else {
+            let Some(native) = slot.latest.clone() else {
                 continue;
             };
-            let name = slot.candidate.as_ref().and_then(|(_, name)| name.clone());
             devices.push(SourceDevice {
                 key: native.device.key().clone(),
                 native,
-                name,
+                name: slot.latest_name.clone(),
                 fresh: slot.confirmed,
             });
-            if let Some(work) = &slot.admitted {
-                entries.push(Rc::new(SourceEntry {
-                    native: work.native.clone(),
-                    physical: work.physical(),
-                    problem: slot.blocked.clone(),
-                }));
-            }
         }
         devices.sort_by(|a, b| a.key.cmp(&b.key));
-        entries.sort_by(|a, b| a.physical.key().cmp(b.physical.key()));
         let problems = live
             .devices
             .iter()
@@ -143,14 +119,34 @@ impl SourceHandle {
                 }
             })
             .collect();
-        SourceSnapshot {
-            facts: SourceFacts {
-                scope,
-                devices,
-                relations,
-            },
-            entries,
+        SourceFacts {
+            scope,
+            devices,
+            relations,
         }
+    }
+
+    /// Serving entries projected from one committed configuration. The native
+    /// metadata comes from the committed value, never from an older runtime.
+    pub(crate) fn entries(&self, configuration: &CommittedConfiguration) -> Vec<Rc<SourceEntry>> {
+        let live = self.0.live.borrow();
+        let mut entries = live
+            .devices
+            .values()
+            .filter_map(|slot| {
+                let work = slot.admitted.as_ref()?;
+                let native = configuration
+                    .device(&work.key)
+                    .and_then(|device| device.native.clone())
+                    .expect("an installed device has committed native facts");
+                Some(Rc::new(SourceEntry {
+                    native,
+                    physical: work.physical(),
+                }))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| a.physical.key().cmp(b.physical.key()));
+        entries
     }
 
     /// Prepare resources for the explicit plan operations. A reused native
@@ -303,13 +299,19 @@ impl SourceHandle {
                 .get(&source.key)
                 .and_then(|served| served.repair.clone())
                 .map(Rc::new);
+            let committed = plan
+                .configuration
+                .device(&source.key)
+                .and_then(|device| device.native.clone())
+                .expect("an installed device has planned native facts");
             {
                 let mut live = self.0.live.borrow_mut();
                 let slot: &mut DeviceSlot = live.devices.get_mut(&did).unwrap();
                 slot.admitted = Some(source.work.clone());
+                slot.latest = Some(committed);
+                slot.latest_name = None;
                 slot.effective_group = group;
                 slot.effective_repair = repair;
-                slot.candidate = None;
             }
             started.push(source);
         }
@@ -343,7 +345,7 @@ impl SourceHandle {
         {
             self.0.refresh_group_states(&did);
         }
-        let entries = self.serving_entries();
+        let entries = self.entries(&plan.configuration);
         self.0.changed.notify(usize::MAX);
         entries
     }
@@ -385,24 +387,6 @@ impl SourceHandle {
         // Drop the retired runtime from the connection attachment so the
         // replacement starts its own local subscription work.
         self.0.retire_work(&key.id);
-    }
-
-    fn serving_entries(&self) -> Vec<Rc<SourceEntry>> {
-        let live = self.0.live.borrow();
-        let mut entries = live
-            .devices
-            .values()
-            .filter_map(|slot| {
-                let work = slot.admitted.as_ref()?;
-                Some(Rc::new(SourceEntry {
-                    native: work.native.clone(),
-                    physical: work.physical(),
-                    problem: slot.blocked.clone(),
-                }))
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|a, b| a.physical.key().cmp(b.physical.key()));
-        entries
     }
 }
 

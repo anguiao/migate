@@ -9,7 +9,7 @@
 use super::{
     model::AdapterError,
     relations::ConfirmedGroup,
-    state::{Context, GroupSource, Lifetime},
+    state::{Context, GroupSource},
 };
 use crate::{
     configuration::NativeDescription,
@@ -23,13 +23,11 @@ use futures_lite::future;
 use std::rc::Rc;
 
 impl Context {
-    /// Stage native descriptions; only a committed configuration installs them.
+    /// A group runtime is installed by the unified configuration commit; this
+    /// only refreshes the serving access conditions.
     pub(super) fn reconcile_group(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
-        if self.live.borrow().devices[did].admitted.is_some() {
-            self.install_work(did);
-            self.update_availability(did);
-        }
-        self.stage();
+        self.install_work(did);
+        self.update_availability(did);
         Ok(())
     }
 
@@ -129,14 +127,25 @@ impl Context {
                 );
                 continue;
             };
+            // Retire a load aimed at an older relation target.
+            {
+                let target = Some((group.model.clone(), instance_type.clone()));
+                let mut live = self.live.borrow_mut();
+                if let Some(slot) = live.devices.get_mut(did) {
+                    slot.retarget_loading(&target);
+                }
+            }
             if !self.live.borrow().devices[did].needs_description() {
                 if let Err(error) = self.reconcile_group(did) {
                     log::warn!("Native group {did} reconcile failed: {error}");
                 }
                 continue;
             }
-            let life = Rc::new(Lifetime::default());
-            self.live.borrow_mut().devices.get_mut(did).unwrap().loading = Some(life.clone());
+            let life = {
+                let mut live = self.live.borrow_mut();
+                let target = Some((group.model.clone(), instance_type.clone()));
+                live.devices.get_mut(did).unwrap().start_loading(target)
+            };
             let context = self.clone();
             let client = cloud.clone();
             let token = token.to_string();
@@ -147,12 +156,21 @@ impl Context {
             let scope = group.scope.clone();
             let captured_scope = scope.clone();
             self.tasks.spawn(async move {
+                // A superseded or removed target retires this fetch as well
+                // as its loading token.
+                let wait_life = life.clone();
                 let result = future::or(
                     async { Some(client.get_instance(&instance_type).await) },
-                    async {
-                        context.token_retired(&token).await;
-                        None
-                    },
+                    future::or(
+                        async {
+                            context.token_retired(&token).await;
+                            None
+                        },
+                        async {
+                            wait_life.ended().await;
+                            None
+                        },
+                    ),
                 )
                 .await;
                 let cleared = {
@@ -160,16 +178,7 @@ impl Context {
                     let Some(slot) = live.devices.get_mut(&group_did) else {
                         return Ok::<(), AdapterError>(());
                     };
-                    if slot
-                        .loading
-                        .as_ref()
-                        .is_some_and(|current| Rc::ptr_eq(current, &life))
-                    {
-                        slot.loading = None;
-                        true
-                    } else {
-                        false
-                    }
+                    slot.finish_loading(&life)
                 };
                 if !cleared {
                     return Ok::<(), AdapterError>(());
@@ -214,18 +223,13 @@ impl Context {
                                     context.live.borrow_mut().devices.get_mut(&group_did)
                                 {
                                     slot.blocked = None;
-                                    slot.candidate = Some((cached, name));
+                                    slot.latest = Some(cached);
+                                    slot.latest_name = name;
                                 }
-                                context.reconcile_group(&group_did)?;
+                                context.stage();
                             }
                             Err(error) => {
-                                {
-                                    let mut live = context.live.borrow_mut();
-                                    let slot = live.devices.get_mut(&group_did).unwrap();
-                                    slot.candidate = None;
-                                }
-                                context.block_device(&group_did, error.to_string());
-                                context.stage();
+                                context.pending_description(&group_did, error.to_string());
                             }
                         }
                     }

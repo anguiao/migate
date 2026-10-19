@@ -51,8 +51,11 @@ pub(in super::super) struct CloudState {
     pub(in super::super) catalog_groups: Vec<Value>,
     pub(in super::super) catalog_status: u16,
     pub(in super::super) catalog_instances: BTreeMap<String, Value>,
+    /// Per-DID cloud URN overrides. Unset DIDs keep their fixture value.
+    pub(in super::super) instance_types: BTreeMap<String, String>,
     pub(in super::super) instance_gates: BTreeMap<String, flume::Receiver<()>>,
     pub(in super::super) instance_reads: BTreeMap<String, usize>,
+    pub(in super::super) instance_status: BTreeMap<String, u16>,
     pub(in super::super) catalogs: usize,
     pub(in super::super) catalog_partial: bool,
     /// Per-DID gates holding that device's property write response.
@@ -335,9 +338,7 @@ impl Rig {
                     let mut list = records
                         .iter()
                         .filter(|record| state.members.contains(&record.device.key().id))
-                        .map(|record| {
-                            json!({"did":record.device.key().id,"name":state.names.get(&record.device.key().id).cloned().unwrap_or_else(||format!("name {}", record.device.key().id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key().id)})
-                        })
+                        .map(|record| cloud_record(&state, record))
                         .collect::<Vec<_>>();
                     list.extend(state.catalog_groups.iter().cloned());
                     let value = json!({"code":0,"result":{"list":list,"has_more":state.catalog_partial,"next_start_did":Value::Null}});
@@ -349,7 +350,7 @@ impl Rig {
                     .all(|did| info_dids.contains(did.as_str().unwrap()))
                 {
                     state.infos += 1;
-                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key().id)).map(|record|json!({"did":record.device.key().id,"name":state.names.get(&record.device.key().id).cloned().unwrap_or_else(||format!("name {}", record.device.key().id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key().id)})).collect::<Vec<_>>(),"has_more":state.info_partial}});
+                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key().id)).map(|record|cloud_record(&state, record)).collect::<Vec<_>>(),"has_more":state.info_partial}});
                     let mut response = MockResponse::json(state.info_status, &value.to_string());
                     if let Some(gate) = state.info_gate.clone() {
                         response = response.gated(gate);
@@ -366,7 +367,7 @@ impl Rig {
                     }
                     return response;
                 }
-                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key().id)).map(|record|json!({"did":record.device.key().id,"name":state.names.get(&record.device.key().id).cloned().unwrap_or_else(||format!("name {}", record.device.key().id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key().id)})).collect::<Vec<_>>()}})
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key().id)).map(|record|cloud_record(&state, record)).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
                 let query = request
                     .target
@@ -377,6 +378,13 @@ impl Rig {
                     .find_map(|(key, value)| (key == "type").then(|| value.into_owned()));
                 if let Some(urn) = &requested_type {
                     *state.instance_reads.entry(urn.clone()).or_default() += 1;
+                }
+                if let Some(status) = requested_type
+                    .as_ref()
+                    .and_then(|urn| state.instance_status.get(urn))
+                    && *status != 200
+                {
+                    return MockResponse::json(*status, "{}");
                 }
                 if let Some(instance) = requested_type
                     .as_ref()
@@ -609,6 +617,17 @@ impl Control {
         )
         .await;
     }
+}
+
+fn cloud_record(state: &CloudState, record: &NativeDescription) -> Value {
+    let did = &record.device.key().id;
+    json!({
+        "did": did,
+        "name": state.names.get(did).cloned().unwrap_or_else(|| format!("name {did}")),
+        "model": record.model,
+        "spec_type": state.instance_types.get(did).unwrap_or(&record.instance_type),
+        "isOnline": state.online.contains(did),
+    })
 }
 
 fn light_fixture(model: &str) -> &'static str {
