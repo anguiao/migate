@@ -194,7 +194,7 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
     let changed = configuration != current || !clear_revocations.is_empty();
     Ok(Plan {
         configuration,
-        derived,
+        derived: std::rc::Rc::new(derived),
         operations,
         clear_revocations,
         rebuild,

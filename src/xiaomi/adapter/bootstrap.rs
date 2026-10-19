@@ -1,11 +1,12 @@
 use super::{
     model::{AdapterError, AdapterStatus, GatewayStatus, Ready, TopologyReady},
     runner::XiaomiAdapter,
-    state::{Backoff, Context, DeviceSlot, GroupSource, Live, LogicalSink},
+    state::{Backoff, Context, DeviceSlot, Live, LogicalSink},
     tasks::TaskSet,
     work::DeviceWork,
 };
 use crate::{
+    configuration::DerivedConfiguration,
     device::{Availability, DeviceRegistry, PhysicalDevice},
     storage::Store,
     xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
@@ -60,8 +61,8 @@ impl XiaomiAdapter {
         let registry = DeviceRegistry::new();
         let mut restored = Vec::new();
         let mut restored_relations = Vec::new();
+        let mut graph = DerivedConfiguration::default();
         if scope.is_some() {
-            let derived = stored.derive();
             restored_relations = stored.groups.clone();
             for relation in &mut restored_relations {
                 if let Some(revocation) = revocations
@@ -72,33 +73,34 @@ impl XiaomiAdapter {
                     relation.error = Some(revocation.reason.clone());
                 }
             }
-            // Every current non-revoked native entity is restored, including
-            // currently unpublishable native groups; publication is decided by
-            // the derived graph, not by what was serving before the restart.
-            for device in &stored.devices {
-                let Some(native) = &device.native else {
-                    continue;
-                };
+            // The recovery graph is derived from the committed configuration
+            // with persisted revocations already applied.
+            let mut recovery = stored.clone();
+            recovery.groups = restored_relations.clone();
+            for device in &mut recovery.devices {
                 if revocations
                     .iter()
                     .any(|revocation| revocation.key == device.key)
                 {
-                    continue;
+                    device.native = None;
                 }
-                let served = derived
+            }
+            graph = recovery.derive();
+            // Every current non-revoked native entity is restored, including
+            // currently unpublishable native groups; publication is decided by
+            // the derived graph, not by what was serving before the restart.
+            for device in &recovery.devices {
+                let Some(native) = &device.native else {
+                    continue;
+                };
+                let served = graph
                     .served
                     .get(&device.key)
                     .expect("a current native device has a served description");
                 let (physical, receivers) = PhysicalDevice::new(served.description.clone());
                 physical
                     .set_availability(Availability::Unavailable("restoring Xiaomi access".into()));
-                restored.push((
-                    device.key.clone(),
-                    native.clone(),
-                    physical,
-                    receivers,
-                    served.repair.clone(),
-                ));
+                restored.push((device.key.clone(), native.clone(), physical, receivers));
             }
         }
         let relations = scope
@@ -134,6 +136,7 @@ impl XiaomiAdapter {
                 devices: BTreeMap::new(),
                 session: None,
             }),
+            graph: RefCell::new(Rc::new(graph)),
             registry,
             store,
             tasks: TaskSet::default(),
@@ -158,7 +161,7 @@ impl XiaomiAdapter {
             sync_requested: Cell::new(true),
             sync_changed: Event::new(),
         });
-        for (key, native, physical, receivers, repair) in restored {
+        for (key, native, physical, receivers) in restored {
             let did = key.id.clone();
             let sink = Rc::new(LogicalSink::new(physical));
             let light_write = native
@@ -175,24 +178,14 @@ impl XiaomiAdapter {
             ));
             context.registry.insert(sink.physical.clone());
             let mut slot = DeviceSlot::restored(work.clone());
-            slot.effective_repair = repair.map(Rc::new);
-            if let Some(group) = restored_relations
+            slot.group = restored_relations
                 .iter()
-                .find(|group| group.group_did == did)
-            {
-                let group = GroupSource {
-                    record_did: group.record_did.clone(),
-                    model: group.model.clone(),
-                    instance_type: group.instance_type.clone(),
-                    members: group.members.clone(),
-                    is_physical: group.is_physical,
-                };
-                slot.group = Some(group.clone());
-                slot.effective_group = Some(group);
-            }
-            let virtual_group = slot
-                .effective_group
-                .as_ref()
+                .any(|group| group.group_did == did);
+            let virtual_group = context
+                .graph
+                .borrow()
+                .rules
+                .get(&did)
                 .is_some_and(|group| !group.is_physical);
             context.live.borrow_mut().devices.insert(did.clone(), slot);
             if !virtual_group {

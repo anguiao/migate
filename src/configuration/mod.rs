@@ -196,7 +196,7 @@ impl std::fmt::Display for PlanError {
 #[derive(Clone, Debug)]
 pub(crate) struct Plan {
     pub configuration: CommittedConfiguration,
-    pub derived: DerivedConfiguration,
+    pub derived: std::rc::Rc<DerivedConfiguration>,
     pub operations: Vec<PlanOperation>,
     pub clear_revocations: Vec<DeviceKey>,
     pub rebuild: bool,

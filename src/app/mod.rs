@@ -36,7 +36,7 @@ pub struct BridgeOptions<'a> {
 /// One committed configuration with its derived graph and serving devices.
 pub(crate) struct EffectiveConfiguration {
     pub(crate) configuration: CommittedConfiguration,
-    pub(crate) derived: DerivedConfiguration,
+    pub(crate) derived: Rc<DerivedConfiguration>,
     pub(crate) entries: Vec<Rc<SourceEntry>>,
     pub(crate) published: DeviceRegistry,
 }
@@ -75,7 +75,7 @@ impl App {
         // published so they can be withdrawn with a real version bump. The
         // initial serving view is the intersection with the restored entries;
         // revocation and account switches legitimately lack old references.
-        let derived = configuration.derive();
+        let derived = Rc::new(configuration.derive());
         let entries = source.entries(&configuration);
         let published = serving_registry(&derived.published, &entries);
         Ok(Self {
@@ -210,7 +210,7 @@ impl App {
         }
         let plan = match configuration::plan(PlanInput {
             current: current.configuration.clone(),
-            current_derived: current.derived.clone(),
+            current_derived: (*current.derived).clone(),
             current_shapes,
             facts,
             facts_shapes,
@@ -303,7 +303,7 @@ impl App {
             .devices()
             .commit_configuration(&configuration, &[])?;
         self.source.set_label(key, label);
-        let mut derived = current.derived.clone();
+        let mut derived = (*current.derived).clone();
         if let Some(served) = derived.served.get_mut(key) {
             served.description = crate::device::PhysicalDeviceDescription::new(
                 key.clone(),
@@ -314,7 +314,7 @@ impl App {
         }
         *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
             configuration,
-            derived,
+            derived: Rc::new(derived),
             entries: current.entries.clone(),
             published: current.published.clone(),
         });

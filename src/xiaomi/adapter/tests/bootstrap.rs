@@ -106,11 +106,7 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         );
         for group in &groups {
             assert!(registry.get(group.device.key()).is_some());
-            assert!(
-                source.context.live.borrow().devices[&group.device.key().id]
-                    .group
-                    .is_none()
-            );
+            assert!(!source.context.live.borrow().devices[&group.device.key().id].group);
             assert_eq!(
                 rig.store
                     .devices()

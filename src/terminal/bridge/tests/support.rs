@@ -93,7 +93,7 @@ fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<View, StorageE
     Ok(View {
         current: Rc::new(EffectiveConfiguration {
             configuration,
-            derived,
+            derived: derived.into(),
             entries,
             published: registry.clone(),
         }),

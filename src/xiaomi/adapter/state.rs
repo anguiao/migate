@@ -6,12 +6,11 @@ use super::{
     work::DeviceWork,
 };
 use crate::{
-    configuration::{NativeDescription, Scope},
+    configuration::{DerivedConfiguration, NativeDescription, Scope},
     device::{DeviceRegistry, PhysicalDevice},
     storage::{Store, XiaomiRecord},
     xiaomi::{
         auth::{AuthenticationState, CertificateUpdate},
-        capability::RepairPlan,
         central::{CentralError, DeviceAccess, SessionHandle},
         certificate::CertificateValidity,
         cloud::{CloudClient, CloudDeviceInfo},
@@ -71,9 +70,9 @@ impl LogicalSink {
 /// One entry owns all preparation and admission state for a current home member.
 #[derive(Default)]
 pub(super) struct DeviceSlot {
-    pub(super) effective_group: Option<GroupSource>,
-    /// Repair plan installed only by a successful configuration commit.
-    pub(super) effective_repair: Option<Rc<RepairPlan>>,
+    /// This slot is a native group source. Executable group rules live only in
+    /// the installed committed graph.
+    pub(super) group: bool,
     /// The single latest valid native description. It may be newer than
     /// the installed runtime (pending commit) and survives a failed commit so
     /// the next plan can retry it. It is never replaced by the runtime's older
@@ -93,24 +92,11 @@ pub(super) struct DeviceSlot {
     pub(super) access: Option<Result<DeviceAccess, CentralError>>,
     pub(super) blocked: Option<String>,
     pub(super) last_switch_reason: Option<String>,
-    /// Native group identity confirmed by the account catalog. Group slots
-    /// reuse the ordinary record/work machinery but never persist identity.
-    /// Virtual groups are cloud-only; physical groups keep their own route.
-    pub(super) group: Option<GroupSource>,
 }
 #[derive(Clone)]
 pub(super) struct Loading {
     pub(super) life: Rc<Lifetime>,
     pub(super) target: Option<(String, String)>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct GroupSource {
-    pub(super) record_did: String,
-    pub(super) model: String,
-    pub(super) instance_type: Option<String>,
-    pub(super) members: Vec<String>,
-    pub(super) is_physical: bool,
 }
 impl DeviceSlot {
     pub(super) fn restored(work: Rc<DeviceWork>) -> Self {
@@ -319,6 +305,8 @@ pub(super) struct Context {
     pub(super) sync_backoff: RefCell<Backoff>,
     pub(super) refresh_changed: Rc<Event>,
     pub(super) live: RefCell<Live>,
+    /// The one committed group graph installed with the serving configuration.
+    pub(super) graph: RefCell<Rc<DerivedConfiguration>>,
     pub(super) registry: DeviceRegistry,
     pub(super) store: Store,
     pub(super) tasks: TaskSet,

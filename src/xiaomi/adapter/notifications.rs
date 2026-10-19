@@ -138,8 +138,8 @@ impl Context {
     pub(super) fn active_notification(&self, did: &str) -> Option<super::model::PathKind> {
         if self.is_virtual_group(did) {
             self.control_path(did)?;
-            let live = self.live.borrow();
-            let group = live.devices[did].effective_group.as_ref().unwrap();
+            let graph = self.graph.borrow().clone();
+            let group = graph.rules.get(did)?;
             return group
                 .members
                 .iter()
@@ -296,40 +296,6 @@ impl Context {
         self.changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
     }
-
-    /// Retire every notification subscription owned by a device whose slot is
-    /// leaving the confirmed set about to be dropped. Mirrors the desired `None`
-    /// branches of `reconcile_source` without a new mechanism.
-    pub(super) fn retire_device_notifications(&self, did: &str) {
-        let Some(work) = self
-            .live
-            .borrow()
-            .devices
-            .get(did)
-            .and_then(|slot| slot.admitted.clone())
-        else {
-            return;
-        };
-        let local = self
-            .live
-            .borrow()
-            .session
-            .as_ref()
-            .map(|session| session.handle.clone());
-        if let Some(local) = local {
-            // Retire property preparation including queued SUBACKs, then
-            // advance the attachment generation so none can be reinstated.
-            drop(local.unsubscribe_properties(did));
-        }
-        work.retire_local_preparation();
-        if let Some(session) = self.notifications.borrow().as_ref() {
-            // The cloud session also owns online notifications for this DID;
-            // both are retired through the existing device-level unsubscribe.
-            drop(session.handle.unsubscribe_device(did));
-        }
-        work.retire_cloud_preparation();
-        work.take_observer();
-    }
 }
 fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
     let did = &work.key.id;
@@ -419,11 +385,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
 fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
     let live = context.live.borrow();
     let slot = live.devices.get(did)?;
-    if slot
-        .effective_group
-        .as_ref()
-        .is_some_and(|group| !group.is_physical)
-    {
+    if context.is_virtual_group(did) {
         return None;
     }
     let work = slot.admitted.as_ref()?;

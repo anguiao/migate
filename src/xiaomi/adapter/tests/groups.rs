@@ -156,7 +156,14 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
         let report = terminal.handle_line("status", 0).await.unwrap().unwrap();
         assert!(report.contains("pending application"));
         assert!(report.contains("Configuration apply failed:"));
-        assert_eq!(c.context.live.borrow().devices["group-1"].effective_group.as_ref().unwrap().members, ["one"]);
+        assert_eq!(
+            c.context.graph.borrow().rules["group-1"]
+                .members
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["one"]
+        );
         let saved = c.store.devices().load_configuration().unwrap();
         assert_eq!(saved.root_version, old.root_version);
         assert_eq!(saved.groups[0].members, old.groups[0].members);
@@ -601,8 +608,14 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
                 .devices
                 .get("group-1")
                 .expect("retained relation keeps the group slot");
-            let group = slot.group.as_ref().expect("retained relation");
-            assert!(group.members.iter().any(|member| member == "member-a"));
+            assert!(slot.group);
+            assert!(c.context.relations.borrow().snapshot().iter().any(|group| {
+                group
+                    .membership
+                    .members
+                    .iter()
+                    .any(|member| member == "member-a")
+            }));
             assert!(std::rc::Rc::ptr_eq(
                 slot.admitted.as_ref().unwrap(),
                 &admitted
@@ -1223,11 +1236,11 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             until(|| runtime_socket_live(port)).await;
             assert_eq!(version(), root_settled);
             assert_eq!(
-                c.context.live.borrow().devices["group-1"]
-                    .effective_group
-                    .as_ref()
-                    .unwrap()
-                    .members,
+                c.context.graph.borrow().rules["group-1"]
+                    .members
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 ["one"]
             );
             let group_after_failure = store
@@ -1350,6 +1363,66 @@ fn failed_source_wins_before_configured_startup_commits() {
         );
     }))
     .unwrap();
+}
+
+#[test]
+fn failed_revocation_persistence_stops_the_source_after_closing_control() {
+    let rig = Rig::new(false, &["one"]);
+    let instance = group_instance();
+    let urn = instance["type"].as_str().unwrap().to_string();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        // Keep the group DID in the selected home so withdrawal reaches the
+        // group-sync retirement path instead of the ordinary member removal.
+        cloud.members.push("group-1".into());
+        cloud.catalog_groups = vec![group_record("record-1", "group-1", &["one"], false)];
+        cloud.catalog_instances.insert(urn, instance);
+    }
+    let store = rig.store.clone();
+    let context = rig.source.context.clone();
+    let result = block_on(rig.run_result(|c| async move {
+        c.announce();
+        let group = DeviceKey::new("xiaomi", "group-1");
+        until(|| c.publication.current().published.get(&group).is_some()).await;
+        let physical = c.publication.current().published.get(&group).unwrap();
+        let db = rusqlite::Connection::open(c.store.path()).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fail_revocation BEFORE INSERT ON publication_revocation
+             BEGIN SELECT RAISE(ABORT, 'injected revocation failure'); END;",
+        )
+        .unwrap();
+        c.cloud.lock().unwrap().catalog_groups[0]["extra"]["member_list"]["member_ship"] =
+            json!({});
+        c.context.request_sync();
+        until(|| {
+            matches!(
+                physical.availability(),
+                crate::device::Availability::Unavailable(_)
+            )
+        })
+        .await;
+        async_io::Timer::after(Duration::from_millis(100)).await;
+    }));
+    let error = result.expect_err("a revocation persistence failure must stop the source");
+    assert!(error.to_string().contains("record revocation"), "{error}");
+    assert!(
+        context
+            .registry
+            .get(&DeviceKey::new("xiaomi", "group-1"))
+            .is_none()
+            || context
+                .live
+                .borrow()
+                .devices
+                .get("group-1")
+                .and_then(|slot| slot.admitted.as_ref())
+                .is_none_or(|work| work.life.is_closed()),
+        "native authority must remain closed after the failed revocation"
+    );
+    assert!(
+        store.devices().load_revocations().unwrap().is_empty(),
+        "a failed revocation write must not be reported as saved"
+    );
 }
 
 #[test]
@@ -1529,6 +1602,19 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
                 "hidden member is restored"
             );
         }
+        assert!(
+            !restored.context.is_group("group-1"),
+            "a revoked group has no executable rule after recovery"
+        );
+        assert!(
+            !restored
+                .context
+                .graph
+                .borrow()
+                .rules
+                .contains_key("group-1"),
+            "the recovery graph applies the persisted revocation"
+        );
         let member = restored.context.registry.get(&one).unwrap();
         assert_eq!(member.functions()[0].snapshot().power, Power::Unknown);
         let reopened = crate::app::App::open(

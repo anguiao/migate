@@ -92,7 +92,7 @@ impl Context {
         Ok(())
     }
     pub(super) fn reconcile(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
-        if self.live.borrow().devices[did].group.is_some() {
+        if self.live.borrow().devices[did].group {
             return self.reconcile_group(did);
         }
         if self.live.borrow().devices[did].admitted.is_some() {
@@ -147,7 +147,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .is_some_and(|slot| slot.group.is_some())
+            .is_some_and(|slot| slot.group)
         {
             return self.remove_group(did);
         }

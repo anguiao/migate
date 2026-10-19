@@ -169,6 +169,7 @@ impl Context {
             .spawn(super::work::run(work, handle, self.clone()));
     }
     pub(super) fn local_candidate(&self, did: &str, push: bool) -> Result<SessionHandle, String> {
+        let virtual_group = self.is_virtual_group(did);
         let live = self.live.borrow();
         let slot = live
             .devices
@@ -184,11 +185,7 @@ impl Context {
         {
             return Err("gateway certificate not currently valid".into());
         }
-        if slot
-            .effective_group
-            .as_ref()
-            .is_some_and(|group| !group.is_physical)
-        {
+        if virtual_group {
             return Err("virtual group has no local route".into());
         }
         let work = slot
@@ -216,11 +213,7 @@ impl Context {
         Ok(session.handle.clone())
     }
     pub(super) fn is_group(&self, did: &str) -> bool {
-        self.live
-            .borrow()
-            .devices
-            .get(did)
-            .is_some_and(|slot| slot.effective_group.is_some())
+        self.live.borrow().devices.contains_key(did) && self.graph.borrow().rules.contains_key(did)
     }
     pub(super) fn cloud_authenticated(&self) -> bool {
         self.cloud_authentication().is_ok()
@@ -326,8 +319,11 @@ impl Context {
         }
     }
     pub(super) fn group_member_work(&self, did: &str) -> Vec<Rc<DeviceWork>> {
+        let graph = self.graph.borrow().clone();
+        let Some(group) = graph.rules.get(did) else {
+            return Vec::new();
+        };
         let live = self.live.borrow();
-        let group = live.devices[did].effective_group.as_ref().unwrap();
         group
             .members
             .iter()

@@ -5,8 +5,8 @@ use super::{
 };
 use crate::{
     device::{
-        Availability, CommandError, LightColorTarget, LightDimension, LightMode, LightPatch,
-        LightSnapshot, LightTarget, Power, Rgb,
+        Availability, CommandError, DeviceKey, LightColorTarget, LightDimension, LightMode,
+        LightPatch, LightSnapshot, LightTarget, Power, Rgb,
     },
     xiaomi::capability::{CapabilityError, ParsedFunction, PropertyBinding},
 };
@@ -294,15 +294,10 @@ pub(super) fn observe(
 
 impl Context {
     pub(super) fn is_independent_light(&self, did: &str) -> bool {
-        let live = self.live.borrow();
-        live.devices
-            .get(did)
-            .is_some_and(|slot| slot.effective_group.is_none())
-            && !live
-                .devices
-                .values()
-                .filter_map(|slot| slot.effective_group.as_ref())
-                .any(|group| group.members.iter().any(|member| member == did))
+        let graph = self.graph.borrow().clone();
+        self.live.borrow().devices.contains_key(did)
+            && !graph.rules.contains_key(did)
+            && !graph.memberships.contains_key(did)
     }
 
     /// New source targets take over other effective groups sharing members.
@@ -312,38 +307,32 @@ impl Context {
         power: Option<bool>,
         dimension: Option<LightDimension>,
     ) {
-        let members = {
-            let live = self.live.borrow();
-            match live
-                .devices
-                .get(did)
-                .and_then(|slot| slot.effective_group.as_ref())
-            {
-                Some(group) => group.members.clone(),
-                None => vec![did.to_owned()],
-            }
-        };
+        let graph = self.graph.borrow().clone();
+        let members = graph.rules.get(did).map_or_else(
+            || vec![did.to_owned()],
+            |group| group.members.iter().cloned().collect(),
+        );
         let off = power == Some(false);
         let dimensions = dimension.into_iter().collect::<Vec<_>>();
         if !off && dimensions.is_empty() {
             return;
         }
-        let groups = {
-            let live = self.live.borrow();
-            live.devices
-                .iter()
-                .filter_map(|(group_did, slot)| {
-                    let group = slot.effective_group.as_ref()?;
-                    if group_did == did
-                        || !group.members.iter().any(|member| members.contains(member))
-                    {
-                        return None;
-                    }
-                    let work = slot.admitted.as_ref()?;
-                    Some((work.physical().function("main")?, work.clone()))
-                })
-                .collect::<Vec<_>>()
-        };
+        let groups = members
+            .iter()
+            .filter_map(|member| graph.memberships.get(member))
+            .flatten()
+            .filter(|group_did| group_did.as_str() != did)
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let live = self.live.borrow();
+        let groups = groups
+            .iter()
+            .filter_map(|group_did| {
+                let work = live.devices.get(group_did)?.admitted.as_ref()?;
+                Some((work.physical().function("main")?, work.clone()))
+            })
+            .collect::<Vec<_>>();
+        drop(live);
         for (function, work) in groups {
             if off {
                 work.light_frames.borrow_mut().cancel_all();
@@ -369,48 +358,57 @@ impl Context {
     }
 
     pub(super) fn is_virtual_group(&self, did: &str) -> bool {
-        self.live
+        self.graph
             .borrow()
-            .devices
+            .rules
             .get(did)
-            .and_then(|slot| slot.effective_group.as_ref())
             .is_some_and(|group| !group.is_physical)
     }
 
     /// Recompute a source group's state and groups sharing this source
     /// after an observation or availability change.
     pub(super) fn refresh_group_states(&self, member_did: &str) {
-        let groups = {
-            let live = self.live.borrow();
-            live.devices
-                .iter()
-                .filter(|(did, slot)| {
-                    slot.effective_group.as_ref().is_some_and(|group| {
-                        (!group.is_physical || slot.effective_repair.is_some())
-                            && (*did == member_did
-                                || group.members.iter().any(|member| member == member_did))
-                    })
-                })
-                .map(|(did, _)| did.clone())
-                .collect::<Vec<_>>()
-        };
+        let graph = self.graph.borrow().clone();
+        let mut groups = std::collections::BTreeSet::new();
+        if graph.rules.contains_key(member_did) {
+            groups.insert(member_did.to_owned());
+        }
+        if let Some(affected) = graph.memberships.get(member_did) {
+            groups.extend(affected.iter().cloned());
+        }
         for did in groups {
+            let Some(group) = graph.rules.get(&did) else {
+                continue;
+            };
+            let repair = graph
+                .served
+                .get(&DeviceKey::new("xiaomi", &did))
+                .and_then(|served| served.repair.as_ref());
+            if group.is_physical && repair.is_none() {
+                continue;
+            }
             self.refresh_group_state(&did);
         }
     }
 
     /// Derive virtual state from members; physical groups only repair RGB/mode.
     pub(super) fn refresh_group_state(&self, group_did: &str) {
+        let graph = self.graph.borrow().clone();
+        let Some(group) = graph.rules.get(group_did) else {
+            return;
+        };
+        if group.is_physical
+            && graph
+                .served
+                .get(&DeviceKey::new("xiaomi", group_did))
+                .is_none_or(|served| served.repair.is_none())
+        {
+            return;
+        }
         let live = self.live.borrow();
         let Some(slot) = live.devices.get(group_did) else {
             return;
         };
-        let Some(group) = &slot.effective_group else {
-            return;
-        };
-        if group.is_physical && slot.effective_repair.is_none() {
-            return;
-        }
         let Some(work) = &slot.admitted else {
             return;
         };

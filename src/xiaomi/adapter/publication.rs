@@ -9,7 +9,7 @@
 
 use super::{
     model::AdapterError,
-    state::{Context, DeviceSlot, GroupSource, LogicalSink},
+    state::{Context, DeviceSlot, LogicalSink},
     work::DeviceWork,
 };
 use crate::{
@@ -244,7 +244,7 @@ impl SourceHandle {
     /// prepare, commit and install.
     pub(crate) fn install(&self, plan: &Plan, prepared: PreparedSources) -> Vec<Rc<SourceEntry>> {
         for key in &prepared.removed {
-            self.retire_instance(key);
+            self.0.retire_work(&key.id);
         }
         let mut started = Vec::new();
         for source in prepared.installed {
@@ -270,7 +270,7 @@ impl SourceHandle {
                 OperationKind::Added
                 | OperationKind::ReplacedNative
                 | OperationKind::ReplacedAuthority => {
-                    self.retire_instance(&source.key);
+                    self.0.retire_work(&source.key.id);
                     if let Some(device) = plan.configuration.device(&source.key) {
                         source.sink.physical.set_label(device.label.clone());
                     }
@@ -281,24 +281,9 @@ impl SourceHandle {
                     if matches!(source.kind, OperationKind::ReplacedNative) {
                         self.0.light_writes.clear_authority(&did);
                     }
-                    if matches!(
-                        source.kind,
-                        OperationKind::ReplacedNative | OperationKind::ReplacedAuthority
-                    ) {
-                        self.0.retire_device_notifications(&did);
-                    }
                 }
                 OperationKind::Removed => unreachable!("removed operations are retired above"),
             }
-            // Relation facts are part of the committed configuration, even
-            // when the logical shape itself was reused.
-            let group = plan.derived.groups.get(&did).map(group_source);
-            let repair = plan
-                .derived
-                .served
-                .get(&source.key)
-                .and_then(|served| served.repair.clone())
-                .map(Rc::new);
             let committed = plan
                 .configuration
                 .device(&source.key)
@@ -310,13 +295,13 @@ impl SourceHandle {
                 slot.admitted = Some(source.work.clone());
                 slot.latest = Some(committed);
                 slot.latest_name = None;
-                slot.effective_group = group;
-                slot.effective_repair = repair;
+                slot.group = plan.derived.groups.contains_key(&did);
             }
             started.push(source);
         }
         // Every member and group is installed and the committed graph is in
         // place before any work, refresh or aggregation starts.
+        *self.0.graph.borrow_mut() = plan.derived.clone();
         let mut refreshed = Vec::new();
         for source in started {
             let did = source.key.id.clone();
@@ -366,38 +351,6 @@ impl SourceHandle {
     pub(crate) fn pending(&self, key: &DeviceKey, reason: String) {
         self.0.problem(&key.id, Some(reason));
     }
-
-    /// Retire one serving native runtime without touching its committed identity.
-    fn retire_instance(&self, key: &DeviceKey) {
-        let work = self
-            .0
-            .live
-            .borrow()
-            .devices
-            .get(&key.id)
-            .and_then(|slot| slot.admitted.clone());
-        if let Some(work) = work {
-            let sink = work.current_sink();
-            sink.physical
-                .set_availability(Availability::Unavailable("source replaced".into()));
-            work.life.close();
-            sink.close();
-            self.0.registry.remove(sink.physical.key());
-        }
-        // Drop the retired runtime from the connection attachment so the
-        // replacement starts its own local subscription work.
-        self.0.retire_work(&key.id);
-    }
-}
-
-fn group_source(relation: &GroupRelation) -> GroupSource {
-    GroupSource {
-        record_did: relation.record_did.clone(),
-        model: relation.model.clone(),
-        instance_type: relation.instance_type.clone(),
-        members: relation.members.clone(),
-        is_physical: relation.is_physical,
-    }
 }
 
 impl Context {
@@ -411,12 +364,12 @@ impl Context {
         &self,
         did: &str,
     ) -> Option<Rc<crate::xiaomi::capability::RepairPlan>> {
-        self.live
+        self.graph
             .borrow()
-            .devices
-            .get(did)?
-            .effective_repair
-            .clone()
+            .served
+            .get(&DeviceKey::new("xiaomi", did))
+            .and_then(|served| served.repair.clone())
+            .map(Rc::new)
     }
 
     /// Confirmed removal closes every retained authority before persistence.
@@ -432,7 +385,7 @@ impl Context {
             let sink = work.current_sink();
             sink.physical
                 .set_availability(Availability::Unavailable(reason.into()));
-            sink.physical.close();
+            work.retire();
         }
         if admitted.is_some() {
             self.store

@@ -165,7 +165,7 @@ pub(super) struct DeviceWork {
     pub(super) observations: Observations,
     pub(super) light_write: Option<Rc<LightWriteGate>>,
     /// Current logical delivery target; logical-only replacement swaps it.
-    pub(super) sink: RefCell<Rc<LogicalSink>>,
+    sink: RefCell<Rc<LogicalSink>>,
     local: RefCell<LocalAttachment>,
     cloud: RefCell<CloudAttachment>,
     active: RefCell<Option<super::notifications::NotificationSource>>,

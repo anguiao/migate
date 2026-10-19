@@ -6,11 +6,7 @@
 //! the runtime configuration boundary. Virtual groups
 //! are cloud-only; physical groups keep their own DID's real route.
 
-use super::{
-    model::AdapterError,
-    relations::ConfirmedGroup,
-    state::{Context, GroupSource},
-};
+use super::{model::AdapterError, relations::ConfirmedGroup, state::Context};
 use crate::{
     configuration::NativeDescription,
     device::DeviceKey,
@@ -37,7 +33,6 @@ impl Context {
         // subscriptions through the existing source mechanisms before the
         // slot disappears.
         self.revoke(did, "native group withdrawn")?;
-        self.retire_device_notifications(did);
         self.remove_source_slot(did);
         Ok(())
     }
@@ -52,7 +47,7 @@ impl Context {
         cloud: &CloudClient,
         token: &str,
         active: &[ConfirmedGroup],
-    ) {
+    ) -> Result<(), AdapterError> {
         let wanted = active
             .iter()
             .map(|group| group.membership.group_did.clone())
@@ -62,38 +57,40 @@ impl Context {
             .borrow()
             .devices
             .iter()
-            .filter(|(did, slot)| slot.group.is_some() && !wanted.contains(*did))
+            .filter(|(did, slot)| slot.group && !wanted.contains(*did))
             .map(|(did, _)| did.clone())
             .collect::<Vec<_>>();
         for did in stale {
-            if let Err(error) = self.remove_group(&did) {
-                log::warn!("Retiring native group {did} failed: {error}");
-            }
+            self.remove_group(&did)?;
         }
         for group in active {
             let did = &group.membership.group_did;
+            let existing = self
+                .live
+                .borrow()
+                .devices
+                .get(did)
+                .is_some_and(|slot| slot.group);
+            let known = if existing {
+                self.graph.borrow().groups.get(did).map(|known| {
+                    (
+                        known.is_physical,
+                        known.model.clone(),
+                        known.instance_type.clone(),
+                    )
+                })
+            } else {
+                None
+            };
             let needs_local = {
                 let mut live = self.live.borrow_mut();
                 let slot = live.devices.entry(did.clone()).or_default();
-                let known = slot.group.as_ref().map(|group| {
-                    (
-                        group.is_physical,
-                        group.model.clone(),
-                        group.instance_type.clone(),
-                    )
-                });
                 slot.confirmed = true;
                 // Retained relations with a read error cannot restore revoked access.
                 if group.error.is_none() {
                     slot.cloud_forbidden = false;
                 }
-                slot.group = Some(GroupSource {
-                    record_did: group.record_did.clone(),
-                    model: group.model.clone(),
-                    instance_type: group.instance_type.clone(),
-                    members: group.membership.members.clone(),
-                    is_physical: group.membership.is_physical,
-                });
+                slot.group = true;
                 slot.cloud_access =
                     group
                         .instance_type
@@ -136,9 +133,7 @@ impl Context {
                 }
             }
             if !self.live.borrow().devices[did].needs_description() {
-                if let Err(error) = self.reconcile_group(did) {
-                    log::warn!("Native group {did} reconcile failed: {error}");
-                }
+                self.reconcile_group(did)?;
                 continue;
             }
             let life = {
@@ -190,19 +185,12 @@ impl Context {
                     && context.live.borrow().scope.as_ref().is_some_and(|scope| {
                         scope.uid == captured_scope.uid && scope.home_id == captured_scope.home_id
                     })
-                    && context
-                        .live
-                        .borrow()
-                        .devices
-                        .get(&group_did)
-                        .is_some_and(|slot| {
-                            slot.group.as_ref().is_some_and(|group| {
-                                group.record_did == record_did
-                                    && group.instance_type.as_deref()
-                                        == Some(instance_type.as_str())
-                                    && group.model == model
-                            })
-                        });
+                    && context.relations.borrow().matches_fetch(
+                        &group_did,
+                        &record_did,
+                        &model,
+                        &instance_type,
+                    );
                 if !current {
                     return Ok::<(), AdapterError>(());
                 }
@@ -244,5 +232,6 @@ impl Context {
             });
             self.changed.notify(usize::MAX);
         }
+        Ok(())
     }
 }

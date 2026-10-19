@@ -51,6 +51,22 @@ impl Relations {
         self.groups.values().cloned().collect()
     }
 
+    /// True while a native fetch still matches the latest confirmed relation.
+    pub(super) fn matches_fetch(
+        &self,
+        group_did: &str,
+        record_did: &str,
+        model: &str,
+        instance_type: &str,
+    ) -> bool {
+        self.groups.get(group_did).is_some_and(|group| {
+            group.active
+                && group.record_did == record_did
+                && group.instance_type.as_deref() == Some(instance_type)
+                && group.model == model
+        })
+    }
+
     pub(super) fn restored(scope: &Scope, relations: &[GroupRelation]) -> Self {
         Self {
             groups: relations

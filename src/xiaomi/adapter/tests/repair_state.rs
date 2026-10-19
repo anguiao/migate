@@ -109,17 +109,19 @@ fn virtual_power_and_brightness_use_current_members_without_treating_unknown_as_
         member_b.set_availability(Availability::Available);
         members[0].observe(false);
         members[1].observe(false);
-        c.context
-            .live
-            .borrow_mut()
-            .devices
+        let mut graph = (**c.context.graph.borrow()).clone();
+        graph
+            .rules
             .get_mut("group-1")
             .unwrap()
-            .effective_group
-            .as_mut()
-            .unwrap()
             .members
-            .push("missing-description".into());
+            .insert("missing-description".into());
+        graph
+            .memberships
+            .entry("missing-description".into())
+            .or_default()
+            .insert("group-1".into());
+        *c.context.graph.borrow_mut() = Rc::new(graph);
         c.context.refresh_group_state("group-1");
         assert_eq!(
             group.snapshot().power,
@@ -157,17 +159,8 @@ fn virtual_color_uses_one_stable_snapshot_and_clears_missing_fields() {
         assert_eq!(color.temperature_kelvin, Some(3000));
         assert_eq!(color.color, Rgb::from_packed(0xff0000));
         assert_eq!(color.mode, Some(LightMode::Rgb));
-        c.context
-            .live
-            .borrow_mut()
-            .devices
-            .get_mut("group-1")
-            .unwrap()
-            .effective_group
-            .as_mut()
-            .unwrap()
-            .members
-            .reverse();
+        // The committed graph stores a canonical member set; representative
+        // stability across notification order is covered by the direct rules test.
         c.context.refresh_group_states("member-b");
         assert_eq!(
             group.snapshot(),

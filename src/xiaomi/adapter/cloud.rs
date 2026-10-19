@@ -196,16 +196,14 @@ pub(super) async fn run(
             .borrow()
             .devices
             .iter()
-            .filter(|(_, slot)| slot.group.is_none())
+            .filter(|(_, slot)| !slot.group)
             .map(|(did, _)| did)
             .ne(members.iter());
         let removed = {
             let live = context.live.borrow();
             live.devices
                 .iter()
-                .filter(|(did, slot)| {
-                    scope_changed || (slot.group.is_none() && !members.contains(*did))
-                })
+                .filter(|(did, slot)| scope_changed || (!slot.group && !members.contains(*did)))
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
         };
@@ -227,7 +225,7 @@ pub(super) async fn run(
             for (did, slot) in &mut live.devices {
                 // Native groups keep their own catalog access metadata; an
                 // ordinary home detail absence must never clear it.
-                if slot.group.is_some() {
+                if slot.group {
                     continue;
                 }
                 slot.confirmed = true;
@@ -253,7 +251,7 @@ pub(super) async fn run(
             // relation, never through the ordinary home description path.
             let group_like = {
                 let live = context.live.borrow();
-                live.devices[&did].group.is_some()
+                live.devices[&did].group
                     || crate::xiaomi::capability::is_light_group(
                         &crate::device::DeviceKey::new("xiaomi", &did),
                         live.devices[&did]
@@ -416,7 +414,7 @@ pub(super) async fn run(
                             group.membership.members.len()
                         );
                     }
-                    context.sync_groups(cloud, token, &update.active);
+                    context.sync_groups(cloud, token, &update.active)?;
                 }
                 Some(Err(error)) => {
                     log::warn!(
