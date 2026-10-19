@@ -10,21 +10,21 @@ async fn next_power(
 use futures_lite::future::{block_on, poll_once};
 
 use super::{
-    Availability, Capability, Category, Command, CommandError, CommandReceiver, DeviceKey,
-    FunctionDescription, PhysicalDevice, PhysicalDeviceDescription, Power,
+    Availability, Command, CommandError, CommandReceiver, DeviceKey, FunctionDescription,
+    FunctionKind, PhysicalDevice, PhysicalDeviceDescription, Power,
 };
 
 fn outlet() -> PhysicalDeviceDescription {
-    PhysicalDeviceDescription {
-        key: DeviceKey::new("xiaomi", "test-outlet"),
-        label: "Test Outlet".into(),
-        functions: vec![FunctionDescription {
+    PhysicalDeviceDescription::new(
+        DeviceKey::new("xiaomi", "test-outlet"),
+        "Test Outlet",
+        vec![FunctionDescription {
             id: "main".into(),
             label: "Main power".into(),
-            category: Category::Outlet,
-            capabilities: vec![Capability::OnOff],
+            kind: FunctionKind::Outlet,
         }],
-    }
+    )
+    .unwrap()
 }
 
 fn new_device(description: PhysicalDeviceDescription) -> (PhysicalDevice, CommandReceiver) {
@@ -167,22 +167,6 @@ fn toggle_unknown_and_unavailable_commands_fail_without_sending() {
             device.execute(Command::On).await,
             Err(CommandError::Unavailable("offline".into()))
         );
-    });
-}
-
-#[test]
-fn unsupported_capabilities_fail_without_sending() {
-    block_on(async {
-        let mut description = outlet();
-        description.functions[0].capabilities.clear();
-        let (physical, mut receiver) = new_device(description);
-        let device = &physical.functions()[0];
-        physical.set_availability(Availability::Available);
-        assert_eq!(
-            device.execute(Command::On).await,
-            Err(CommandError::Unsupported)
-        );
-        assert!(poll_once(next_power(&mut receiver)).await.is_none());
     });
 }
 
@@ -392,3 +376,5 @@ fn preserving_acceptance_does_not_restore_a_closed_function() {
 mod lighting;
 
 mod light_commands;
+
+mod validity;

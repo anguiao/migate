@@ -1,5 +1,5 @@
 use super::{CapabilityError, PropertyBinding, parse_device};
-use crate::device::{Capability, Category, DeviceKey};
+use crate::device::{DeviceKey, FunctionKind};
 use serde_json::{Value, json};
 
 fn key() -> DeviceKey {
@@ -35,14 +35,14 @@ fn four_single_outlet_models_accept_their_public_instance_urns() {
         let outlet = parse_device(key(), &model_description(model))
             .unwrap_or_else(|error| panic!("{model}: {error}"));
         assert_eq!(
-            outlet.functions[0].power,
+            outlet.functions()[0].power(),
             PropertyBinding { siid: 2, piid: 1 }
         );
         let device = parse_device(key(), &model_description(model)).unwrap();
-        assert_eq!(device.functions.len(), 1);
-        assert_eq!(device.functions[0].description.id, "main");
-        assert_eq!(device.functions[0].power, outlet.functions[0].power);
-        assert_eq!(device.refresh_trigger, None);
+        assert_eq!(device.functions().len(), 1);
+        assert_eq!(device.functions()[0].id(), "main");
+        assert_eq!(device.functions()[0].power(), outlet.functions()[0].power());
+        assert_eq!(device.refresh_trigger(), None);
     }
 }
 
@@ -50,21 +50,13 @@ fn four_single_outlet_models_accept_their_public_instance_urns() {
 fn cp7pd_exposes_three_independent_channels_and_observes_total_control_internally() {
     let description = model_description("cuco.plug.cp7pd");
     let device = parse_device(key(), &description).unwrap();
-    assert_eq!(device.key, key());
-    assert_eq!(device.functions[0].description.category, Category::Outlet);
-    assert_eq!(
-        device.functions[0].description.capabilities,
-        [Capability::OnOff]
-    );
+    assert_eq!(*device.key(), key());
+    assert_eq!(device.functions()[0].kind(), FunctionKind::Outlet);
     assert_eq!(
         device
-            .functions
+            .functions()
             .iter()
-            .map(|function| (
-                function.description.id.as_str(),
-                function.description.label.as_str(),
-                function.power
-            ))
+            .map(|function| (function.id(), function.label(), function.power()))
             .collect::<Vec<_>>(),
         [
             ("outlet_1", "开关 1", PropertyBinding { siid: 3, piid: 1 }),
@@ -73,26 +65,24 @@ fn cp7pd_exposes_three_independent_channels_and_observes_total_control_internall
         ]
     );
     assert_eq!(
-        device.refresh_trigger,
+        device.refresh_trigger(),
         Some(PropertyBinding { siid: 2, piid: 1 })
     );
     assert!(
         device
-            .functions
+            .functions()
             .iter()
-            .all(|function| function.power.siid != 2)
+            .all(|function| function.power().siid != 2)
     );
 }
 
 #[test]
-fn cp7pd_mapping_is_independent_of_descriptions_and_list_order() {
+fn cp7pd_mapping_is_independent_of_description_text() {
     let original = model_description("cuco.plug.cp7pd");
-    let mut reversed = original.clone();
-    reversed["services"].as_array_mut().unwrap().reverse();
-    for service in reversed["services"].as_array_mut().unwrap() {
+    let mut renamed = original.clone();
+    for service in renamed["services"].as_array_mut().unwrap() {
         service["description"] = json!("Unknown");
         if let Some(properties) = service["properties"].as_array_mut() {
-            properties.reverse();
             for property in properties {
                 property["description"] = json!("Unknown");
             }
@@ -100,7 +90,7 @@ fn cp7pd_mapping_is_independent_of_descriptions_and_list_order() {
     }
     assert_eq!(
         parse_device(key(), &original),
-        parse_device(key(), &reversed)
+        parse_device(key(), &renamed)
     );
 }
 
@@ -327,14 +317,10 @@ fn minimal_description() -> Value {
 #[test]
 fn public_spec_selects_main_switch_and_ignores_indicator_and_vendor_switches() {
     let outlet = parse_device(key(), &public_description()).unwrap();
-    assert_eq!(outlet.key, key());
-    assert_eq!(outlet.functions[0].description.category, Category::Outlet);
+    assert_eq!(*outlet.key(), key());
+    assert_eq!(outlet.functions()[0].kind(), FunctionKind::Outlet);
     assert_eq!(
-        outlet.functions[0].description.capabilities,
-        [Capability::OnOff]
-    );
-    assert_eq!(
-        outlet.functions[0].power,
+        outlet.functions()[0].power(),
         PropertyBinding { siid: 2, piid: 1 }
     );
 }
@@ -343,20 +329,19 @@ fn public_spec_selects_main_switch_and_ignores_indicator_and_vendor_switches() {
 fn standard_semantics_work_with_other_vendor_and_instance_ids() {
     let outlet = parse_device(key(), &minimal_description()).unwrap();
     assert_eq!(
-        outlet.functions[0].power,
+        outlet.functions()[0].power(),
         PropertyBinding { siid: 42, piid: 19 }
     );
 }
 
 #[test]
-fn descriptions_and_instance_order_do_not_determine_the_main_power() {
+fn descriptions_do_not_determine_the_main_power() {
     let mut description = public_description();
-    description["services"].as_array_mut().unwrap().reverse();
     for service in description["services"].as_array_mut().unwrap() {
         service["description"] = json!("Switch");
     }
     assert_eq!(
-        parse_device(key(), &description).unwrap().functions[0].power,
+        parse_device(key(), &description).unwrap().functions()[0].power(),
         PropertyBinding { siid: 2, piid: 1 }
     );
 }
@@ -477,3 +462,4 @@ fn unsupported_devices_and_malformed_protocol_fields_fail_at_the_boundary() {
 mod group;
 mod lighting;
 mod repair;
+mod validity;

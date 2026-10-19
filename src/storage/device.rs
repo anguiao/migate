@@ -1,16 +1,17 @@
 use super::{StorageError, Store};
-use crate::xiaomi::capability::ls2307;
 use crate::{
-    device::{Category, DeviceKey, PhysicalDeviceDescription},
+    device::{Capability, DeviceKey, NumericRange, PhysicalDeviceDescription},
     xiaomi::{
         capability::{
-            ParsedDevice, ParsedFunction, PropertyBinding, is_light_type, is_ls2307_type,
-            is_outlet_type,
+            BrightnessBinding, CapabilityError, ColorBinding, LightBindings, ModeBinding,
+            NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, TemperatureBinding,
+            validate_model_topology,
         },
         cloud::group_id,
     },
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedPhysicalDevice {
@@ -23,16 +24,7 @@ pub struct CachedPhysicalDevice {
 }
 impl CachedPhysicalDevice {
     pub fn physical_description(&self, label: impl Into<String>) -> PhysicalDeviceDescription {
-        PhysicalDeviceDescription {
-            key: self.device.key.clone(),
-            label: label.into(),
-            functions: self
-                .device
-                .functions
-                .iter()
-                .map(|function| function.description.clone())
-                .collect(),
-        }
+        self.device.physical_description(label)
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,103 +107,27 @@ pub(super) fn validate_cached(cached: &CachedPhysicalDevice) -> Result<(), &'sta
     validate_scope(&cached.uid, &cached.home_id, &cached.group_id)?;
     validate_text(&cached.model)?;
     validate_text(&cached.instance_type)?;
-    validate_key(&cached.device.key)?;
-    if cached.model == ls2307::MODEL && !is_ls2307_type(&cached.instance_type)
-        || cached.device.key.source != "xiaomi"
-        || !(is_outlet_type(&cached.instance_type) || is_light_type(&cached.instance_type))
-        || cached.device.functions.is_empty()
-    {
+    validate_key(cached.device.key())?;
+    if cached.device.key().source != "xiaomi" {
         return Err("Stored Xiaomi device description is invalid");
     }
-    let mut ids = std::collections::HashSet::new();
-    let mut bindings = std::collections::HashSet::new();
-    for function in &cached.device.functions {
-        validate_text(&function.description.id)?;
-        if !ids.insert(&function.description.id)
-            || !bindings.insert((function.power.siid, function.power.piid))
-            || !function.description.valid_capabilities()
-            || function.power.siid == 0
-            || function.power.piid == 0
-            || (function.description.category == Category::Light
-                && function.light_profile().is_err())
-        {
-            return Err("Stored Xiaomi function description is invalid");
-        }
-    }
-    if is_light_type(&cached.instance_type) {
-        if cached.device.functions.len() != 1
-            || cached.device.functions[0].description.id != "main"
-            || cached.device.refresh_trigger.is_some()
-        {
-            return Err("Stored Xiaomi light topology is invalid");
-        }
-        let function = &cached.device.functions[0];
-        let Some(lighting) = &function.lighting else {
-            return Err("Stored Xiaomi light bindings are missing");
-        };
-        if function.description.category != Category::Light || !lighting.valid() {
-            return Err("Stored Xiaomi light bindings are invalid");
-        }
-        if cached.model == ls2307::MODEL {
-            let (Some(brightness), Some(temperature), Some(color), Some(mode)) = (
-                &lighting.brightness,
-                &lighting.temperature,
-                &lighting.color,
-                &lighting.mode,
-            ) else {
-                return Err("Stored Xiaomi ls2307 adapter is incompatible");
-            };
-            if !is_ls2307_type(&cached.instance_type)
-                || !ls2307::main_bindings(function.power, *brightness, *temperature)
-                || *color != ls2307::COLOR
-                || *mode != ls2307::MODE
-            {
-                return Err("Stored Xiaomi ls2307 adapter is incompatible");
-            }
-        }
-        for binding in [
-            lighting.brightness.as_ref().map(|binding| binding.property),
-            lighting
-                .temperature
-                .as_ref()
-                .map(|binding| binding.property),
-            lighting.color.as_ref().map(|binding| binding.property),
-            lighting.mode.as_ref().map(|binding| binding.property),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if !bindings.insert((binding.siid, binding.piid)) {
-                return Err("Stored Xiaomi light bindings overlap");
-            }
-        }
-    } else if cached.device.functions.iter().any(|function| {
-        function.description.category != Category::Outlet || function.lighting.is_some()
-    }) {
-        return Err("Stored Xiaomi outlet description is invalid");
-    }
-    if let Some(binding) = cached.device.refresh_trigger
-        && (binding.siid == 0
-            || binding.piid == 0
-            || bindings.contains(&(binding.siid, binding.piid)))
-    {
-        return Err("Stored Xiaomi refresh binding is invalid");
-    }
-    Ok(())
+    validate_model_topology(&cached.device, &cached.model, &cached.instance_type)
 }
 pub(super) fn save_cached(
     connection: &Connection,
     cached: &CachedPhysicalDevice,
 ) -> rusqlite::Result<()> {
-    let functions = serde_json::to_string(&cached.device.functions)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let category = match cached.device.functions[0].description.category {
-        Category::Outlet => "outlet",
-        Category::Light => "light",
+    let device = WireDevice::from_parsed(&cached.device);
+    let functions = serde_json::to_string(&device).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let first = &cached.device.functions()[0];
+    let category = if first.kind().is_light() {
+        "light"
+    } else {
+        "outlet"
     };
-    let capabilities = serde_json::to_string(&cached.device.functions[0].description.capabilities)
+    let capabilities = capability_json(&first.description().capabilities())
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let key = &cached.device.key;
+    let key = cached.device.key();
     connection.execute(
         "INSERT INTO device_cache (
             uid, source, device_id, home_id, group_id, model, instance_type,
@@ -231,8 +147,8 @@ pub(super) fn save_cached(
             cached.model,
             cached.instance_type,
             functions,
-            cached.device.refresh_trigger.map(|binding| binding.siid),
-            cached.device.refresh_trigger.map(|binding| binding.piid),
+            cached.device.refresh_trigger().map(|binding| binding.siid),
+            cached.device.refresh_trigger().map(|binding| binding.piid),
             category,
             capabilities
         ],
@@ -278,35 +194,215 @@ pub(super) fn load_cached(
     else {
         return Ok(None);
     };
-    let functions: Vec<ParsedFunction> =
-        serde_json::from_str(&functions).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let first = functions.first().ok_or(rusqlite::Error::InvalidQuery)?;
-    let expected_category = match first.description.category {
-        Category::Outlet => "outlet",
-        Category::Light => "light",
-    };
-    let expected_capabilities = serde_json::to_string(&first.description.capabilities)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    if category != expected_category || capabilities != expected_capabilities {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
     let refresh_trigger = match (refresh_siid, refresh_piid) {
         (None, None) => None,
         (Some(siid), Some(piid)) => Some(PropertyBinding { siid, piid }),
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
+    let wire: WireDevice =
+        serde_json::from_str(&functions).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let device = wire
+        .into_parsed(key.clone(), refresh_trigger)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let first = &device.functions()[0];
+    let expected_category = if first.kind().is_light() {
+        "light"
+    } else {
+        "outlet"
+    };
+    let expected_capabilities = capability_json(&first.description().capabilities())
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if category != expected_category || capabilities != expected_capabilities {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let cached = CachedPhysicalDevice {
         uid: uid.into(),
         home_id: home_id.into(),
         group_id,
         model,
         instance_type,
-        device: ParsedDevice {
-            key: key.clone(),
-            functions,
-            refresh_trigger,
-        },
+        device,
     };
     validate_cached(&cached).map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(Some(cached))
+}
+
+/// Private persistence encoding of the native model. Values are re-created
+/// through the domain constructors on load, so the stored form cannot bypass
+/// the valid-model constraints.
+#[derive(Serialize, Deserialize)]
+struct WireDevice {
+    functions: Vec<WireFunction>,
+}
+#[derive(Serialize, Deserialize)]
+struct WireFunction {
+    id: String,
+    label: String,
+    power: PropertyBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lighting: Option<WireLight>,
+}
+#[derive(Serialize, Deserialize)]
+struct WireLight {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    brightness: Option<WireNumeric>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    temperature: Option<WireNumeric>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<WireFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<WireMode>,
+}
+#[derive(Serialize, Deserialize)]
+struct WireNumeric {
+    property: PropertyBinding,
+    format: NumericFormat,
+    min: u32,
+    max: u32,
+    step: u32,
+}
+#[derive(Serialize, Deserialize)]
+struct WireFormat {
+    property: PropertyBinding,
+    format: NumericFormat,
+}
+#[derive(Serialize, Deserialize)]
+struct WireMode {
+    property: PropertyBinding,
+    format: NumericFormat,
+    temperature_value: u32,
+    rgb_value: u32,
+}
+impl WireDevice {
+    fn from_parsed(device: &ParsedDevice) -> Self {
+        Self {
+            functions: device
+                .functions()
+                .iter()
+                .map(WireFunction::from_parsed)
+                .collect(),
+        }
+    }
+    fn into_parsed(
+        self,
+        key: DeviceKey,
+        refresh_trigger: Option<PropertyBinding>,
+    ) -> Result<ParsedDevice, CapabilityError> {
+        let functions = self
+            .functions
+            .into_iter()
+            .map(WireFunction::into_parsed)
+            .collect::<Result<Vec<_>, _>>()?;
+        ParsedDevice::new(key, functions, refresh_trigger)
+    }
+}
+impl WireFunction {
+    fn from_parsed(function: &ParsedFunction) -> Self {
+        let lighting = function.lighting().map(|lighting| WireLight {
+            brightness: lighting.brightness().map(|binding| WireNumeric {
+                property: binding.property(),
+                format: binding.format(),
+                min: binding.range().min(),
+                max: binding.range().max(),
+                step: binding.range().step(),
+            }),
+            temperature: lighting.temperature().map(|binding| WireNumeric {
+                property: binding.property(),
+                format: binding.format(),
+                min: binding.range().min(),
+                max: binding.range().max(),
+                step: binding.range().step(),
+            }),
+            color: lighting.color().map(|binding| WireFormat {
+                property: binding.property(),
+                format: binding.format(),
+            }),
+            mode: lighting.mode().map(|binding| WireMode {
+                property: binding.property(),
+                format: binding.format(),
+                temperature_value: binding.temperature_value(),
+                rgb_value: binding.rgb_value(),
+            }),
+        });
+        Self {
+            id: function.id().to_owned(),
+            label: function.label().to_owned(),
+            power: function.power(),
+            lighting,
+        }
+    }
+    fn into_parsed(self) -> Result<ParsedFunction, CapabilityError> {
+        let Some(lighting) = self.lighting else {
+            return Ok(ParsedFunction::outlet(self.id, self.label, self.power));
+        };
+        let brightness = lighting
+            .brightness
+            .map(|binding| {
+                BrightnessBinding::new(
+                    binding.property,
+                    binding.format,
+                    numeric_range(binding.min, binding.max, binding.step)?,
+                )
+            })
+            .transpose()?;
+        let temperature = lighting
+            .temperature
+            .map(|binding| {
+                TemperatureBinding::new(
+                    binding.property,
+                    binding.format,
+                    numeric_range(binding.min, binding.max, binding.step)?,
+                )
+            })
+            .transpose()?;
+        let color = lighting
+            .color
+            .map(|binding| ColorBinding::new(binding.property, binding.format))
+            .transpose()?;
+        let mode = lighting
+            .mode
+            .map(|binding| {
+                ModeBinding::new(
+                    binding.property,
+                    binding.format,
+                    binding.temperature_value,
+                    binding.rgb_value,
+                )
+            })
+            .transpose()?;
+        Ok(ParsedFunction::light(
+            self.id,
+            self.label,
+            self.power,
+            LightBindings::new(brightness, temperature, color, mode)?,
+        ))
+    }
+}
+fn numeric_range(min: u32, max: u32, step: u32) -> Result<NumericRange, CapabilityError> {
+    NumericRange::new(min, max, step).map_err(|_| CapabilityError::InvalidLight("range or format"))
+}
+
+/// Derived diagnostics encoding of the temporary legacy capability column.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "capability", rename_all = "snake_case")]
+enum WireCapability {
+    OnOff,
+    Brightness,
+    ColorTemperature { min: u32, max: u32 },
+    ColorRgb,
+}
+fn capability_json(capabilities: &[Capability]) -> serde_json::Result<String> {
+    let wire = capabilities
+        .iter()
+        .map(|capability| match capability {
+            Capability::OnOff => WireCapability::OnOff,
+            Capability::Brightness => WireCapability::Brightness,
+            Capability::ColorTemperature(interval) => WireCapability::ColorTemperature {
+                min: interval.min(),
+                max: interval.max(),
+            },
+            Capability::ColorRgb => WireCapability::ColorRgb,
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&wire)
 }

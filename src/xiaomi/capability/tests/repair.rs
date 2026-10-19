@@ -1,7 +1,7 @@
-use crate::device::{Capability, DeviceKey, LightProfile, NumericRange, standard_light_profile};
+use crate::device::{DeviceKey, LightProfile, LightProfileKind, NumericRange, TemperatureInterval};
 use crate::xiaomi::capability::{
     ParsedDevice, effective_temperature_range, parse_device_for_model, parse_group,
-    plan_rgb_repair, repaired_capabilities,
+    plan_rgb_repair, repaired_profile,
 };
 use serde_json::{Value, json};
 
@@ -40,15 +40,13 @@ fn parse_model(did: &str, model: &str, instance: &Value) -> ParsedDevice {
     parse_device_for_model(DeviceKey::new("xiaomi", did), model, instance).unwrap()
 }
 
-fn member_temperature(device: &ParsedDevice) -> NumericRange {
-    device.functions[0]
-        .lighting
-        .as_ref()
+fn member_temperature(device: &ParsedDevice) -> TemperatureInterval {
+    device.functions()[0]
+        .lighting()
         .unwrap()
-        .temperature
-        .as_ref()
+        .temperature()
         .unwrap()
-        .range
+        .interval()
 }
 
 #[test]
@@ -77,21 +75,11 @@ fn ls2307_members_extend_group_profile_and_narrow_temperature() {
         member_temperature(&group),
         &[member_temperature(&a), member_temperature(&b)],
     );
-    assert_eq!(
-        logical,
-        NumericRange {
-            min: 2700,
-            max: 6500,
-            step: 1
-        }
-    );
-    let capabilities = repaired_capabilities(&group.functions[0], logical);
-    assert!(capabilities.contains(&Capability::ColorRgb));
-    assert!(capabilities.contains(&Capability::ColorTemperature(logical)));
-    assert_eq!(
-        standard_light_profile(&capabilities),
-        Ok(LightProfile::ExtendedColor)
-    );
+    assert_eq!(logical, TemperatureInterval::new(2700, 6500).unwrap());
+    let profile = repaired_profile(logical);
+    assert!(profile.has_rgb());
+    assert_eq!(profile.temperature_interval(), Some(logical));
+    assert_eq!(profile.kind(), LightProfileKind::ExtendedColor);
 }
 
 #[test]
@@ -179,38 +167,17 @@ fn native_rgb_is_not_repaired_and_scene_mode_is_not_rgb() {
 
 #[test]
 fn effective_range_falls_back_and_keeps_the_genuine_native_grid() {
-    let native = NumericRange {
-        min: 1700,
-        max: 7000,
-        step: 100,
-    };
+    let native_grid = NumericRange::new(1700, 7000, 100).unwrap();
+    let native = TemperatureInterval::from_grid(native_grid).unwrap();
     // A member bound that is off the native grid still yields a continuous
-    // logical interval bounded by the explicit member range.
+    // logical interval bounded by the explicit member interval.
     assert_eq!(
-        effective_temperature_range(
-            native,
-            &[NumericRange {
-                min: 2750,
-                max: 6450,
-                step: 1
-            }]
-        ),
-        NumericRange {
-            min: 2750,
-            max: 6450,
-            step: 1
-        }
+        effective_temperature_range(native, &[TemperatureInterval::new(2750, 6450).unwrap()]),
+        TemperatureInterval::new(2750, 6450).unwrap()
     );
-    // A disjoint member range keeps the native declaration, grid included.
+    // A disjoint member range keeps the native declaration.
     assert_eq!(
-        effective_temperature_range(
-            native,
-            &[NumericRange {
-                min: 1000,
-                max: 1600,
-                step: 1
-            }]
-        ),
+        effective_temperature_range(native, &[TemperatureInterval::new(1000, 1600).unwrap()]),
         native
     );
     // The genuine native binding stays on its own grid after parsing.
@@ -223,4 +190,26 @@ fn effective_range_falls_back_and_keeps_the_genuine_native_grid() {
     )
     .unwrap();
     assert_eq!(member_temperature(&group), native);
+    assert_eq!(
+        group.functions()[0]
+            .lighting()
+            .unwrap()
+            .temperature()
+            .unwrap()
+            .range(),
+        native_grid
+    );
+}
+
+#[test]
+fn narrowed_profile_preserves_native_rgb_but_replaces_only_the_interval() {
+    let native = LightProfile::ExtendedColor(TemperatureInterval::new(2700, 6500).unwrap());
+    let narrowed = crate::xiaomi::capability::narrowed_profile(
+        native,
+        TemperatureInterval::new(3000, 6000).unwrap(),
+    );
+    assert_eq!(
+        narrowed,
+        LightProfile::ExtendedColor(TemperatureInterval::new(3000, 6000).unwrap())
+    );
 }

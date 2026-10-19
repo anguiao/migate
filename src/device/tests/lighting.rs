@@ -1,139 +1,67 @@
 use super::{new_device, outlet};
 use crate::device::{
-    Capability, Category, LightMode, LightPatch, NumericRange, Rgb, brightness_from_matter_level,
+    DeviceKey, FunctionDescription, FunctionKind, LightMode, LightPatch, LightProfile,
+    PhysicalDeviceDescription, Rgb, TemperatureInterval, brightness_from_matter_level,
     brightness_to_matter_level,
 };
+use crate::lighting::temperature::{kelvin_from_mireds, mired_bounds, mireds_from_kelvin};
 
-fn light(rgb: bool) -> crate::device::PhysicalDeviceDescription {
-    let mut description = outlet();
-    let function = &mut description.functions[0];
-    function.category = Category::Light;
-    function.capabilities.extend([
-        Capability::Brightness,
-        Capability::ColorTemperature(NumericRange {
-            min: 2700,
-            max: 6500,
-            step: 1,
-        }),
-    ]);
-    if rgb {
-        function.capabilities.push(Capability::ColorRgb);
-    }
-    description
+fn interval() -> TemperatureInterval {
+    TemperatureInterval::new(2700, 6500).unwrap()
 }
 
-fn capability_light(capabilities: Vec<Capability>) -> crate::device::PhysicalDeviceDescription {
-    let mut description = outlet();
-    let function = &mut description.functions[0];
-    function.category = Category::Light;
-    function.capabilities = capabilities;
-    description
+fn description(kind: FunctionKind) -> PhysicalDeviceDescription {
+    PhysicalDeviceDescription::new(
+        DeviceKey::new("xiaomi", "test-outlet"),
+        "Test Outlet",
+        vec![FunctionDescription {
+            id: "main".into(),
+            label: "Main power".into(),
+            kind,
+        }],
+    )
+    .unwrap()
 }
 
-fn temperature_range() -> NumericRange {
-    NumericRange {
-        min: 2700,
-        max: 6500,
-        step: 1,
-    }
+fn light(rgb: bool) -> PhysicalDeviceDescription {
+    let profile = if rgb {
+        LightProfile::ExtendedColor(interval())
+    } else {
+        LightProfile::ColorTemperature(interval())
+    };
+    description(FunctionKind::Light(profile))
 }
 
 #[test]
 fn four_standard_light_profiles_are_valid_and_infer_only_temperature_mode() {
-    use crate::device::LightProfile;
-    let ct = temperature_range();
-    for (capabilities, profile) in [
-        (vec![Capability::OnOff], LightProfile::OnOff),
-        (
-            vec![Capability::OnOff, Capability::Brightness],
-            LightProfile::Dimmable,
-        ),
-        (
-            vec![
-                Capability::OnOff,
-                Capability::Brightness,
-                Capability::ColorTemperature(ct),
-            ],
-            LightProfile::ColorTemperature,
-        ),
-        (
-            vec![
-                Capability::OnOff,
-                Capability::Brightness,
-                Capability::ColorTemperature(ct),
-                Capability::ColorRgb,
-            ],
-            LightProfile::ExtendedColor,
-        ),
+    for profile in [
+        LightProfile::OnOff,
+        LightProfile::Dimmable,
+        LightProfile::ColorTemperature(interval()),
+        LightProfile::ExtendedColor(interval()),
     ] {
-        let (device, _) = new_device(capability_light(capabilities.clone()));
+        let (device, _) = new_device(description(FunctionKind::Light(profile)));
         let function = &device.functions()[0];
-        assert!(
-            function.description().valid_capabilities(),
-            "{capabilities:?}"
-        );
-        assert_eq!(
-            function.description().light_profile().unwrap(),
-            profile,
-            "{capabilities:?}"
-        );
-        let expected =
-            (profile == LightProfile::ColorTemperature).then_some(LightMode::Temperature);
-        assert_eq!(
-            function.description().inferred_color_mode(),
-            expected,
-            "{capabilities:?}"
-        );
+        assert_eq!(function.description().kind, FunctionKind::Light(profile));
+        let expected = if matches!(profile, LightProfile::ColorTemperature(_)) {
+            Some(LightMode::Temperature)
+        } else {
+            None
+        };
+        assert_eq!(function.description().inferred_color_mode(), expected);
         let lighting = function.snapshot().lighting.expect("light state");
-        assert_eq!(lighting.brightness_percent, None, "{capabilities:?}");
-        assert_eq!(lighting.temperature_kelvin, None, "{capabilities:?}");
-        assert_eq!(lighting.color, None, "{capabilities:?}");
-        assert_eq!(lighting.mode, expected, "{capabilities:?}");
-    }
-}
-
-#[test]
-fn unsupported_light_capability_sets_are_invalid() {
-    let ct = temperature_range();
-    for capabilities in [
-        vec![Capability::Brightness],
-        vec![Capability::ColorTemperature(ct)],
-        vec![Capability::ColorRgb],
-        vec![Capability::Brightness, Capability::ColorTemperature(ct)],
-        vec![Capability::Brightness, Capability::ColorRgb],
-        vec![Capability::OnOff, Capability::ColorTemperature(ct)],
-        vec![Capability::OnOff, Capability::ColorRgb],
-        vec![
-            Capability::OnOff,
-            Capability::Brightness,
-            Capability::ColorRgb,
-        ],
-        vec![
-            Capability::OnOff,
-            Capability::Brightness,
-            Capability::ColorTemperature(ct),
-            Capability::OnOff,
-        ],
-    ] {
-        let description = capability_light(capabilities.clone());
-        assert!(
-            !description.functions[0].valid_capabilities(),
-            "{capabilities:?}"
-        );
-        assert!(
-            description.functions[0].light_profile().is_err(),
-            "{capabilities:?}"
-        );
+        assert_eq!(lighting.brightness_percent, None);
+        assert_eq!(lighting.temperature_kelvin, None);
+        assert_eq!(lighting.color, None);
+        assert_eq!(lighting.mode, expected);
     }
 }
 
 #[test]
 fn losing_all_paths_clears_light_state_and_keeps_single_color_mode() {
-    let (device, _) = new_device(capability_light(vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(temperature_range()),
-    ]));
+    let (device, _) = new_device(description(FunctionKind::Light(
+        LightProfile::ColorTemperature(interval()),
+    )));
     let function = &device.functions()[0];
     function
         .observe_light(LightPatch {
@@ -154,12 +82,9 @@ fn losing_all_paths_clears_light_state_and_keeps_single_color_mode() {
     assert_eq!(lighting.color, None);
     assert_eq!(lighting.mode, Some(LightMode::Temperature));
 
-    let (device, _) = new_device(capability_light(vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(temperature_range()),
-        Capability::ColorRgb,
-    ]));
+    let (device, _) = new_device(description(FunctionKind::Light(
+        LightProfile::ExtendedColor(interval()),
+    )));
     let function = &device.functions()[0];
     function
         .observe_light(LightPatch {
@@ -198,7 +123,7 @@ fn reports_for_absent_capabilities_are_unsupported() {
         green: 2,
         blue: 3,
     };
-    let (device, _) = new_device(capability_light(vec![Capability::OnOff]));
+    let (device, _) = new_device(description(FunctionKind::Light(LightProfile::OnOff)));
     let function = &device.functions()[0];
     assert!(
         function
@@ -225,10 +150,7 @@ fn reports_for_absent_capabilities_are_unsupported() {
             .is_err()
     );
 
-    let (device, _) = new_device(capability_light(vec![
-        Capability::OnOff,
-        Capability::Brightness,
-    ]));
+    let (device, _) = new_device(description(FunctionKind::Light(LightProfile::Dimmable)));
     let function = &device.functions()[0];
     assert!(
         function
@@ -247,11 +169,9 @@ fn reports_for_absent_capabilities_are_unsupported() {
             .is_err()
     );
 
-    let (device, _) = new_device(capability_light(vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(temperature_range()),
-    ]));
+    let (device, _) = new_device(description(FunctionKind::Light(
+        LightProfile::ColorTemperature(interval()),
+    )));
     let function = &device.functions()[0];
     assert!(
         function
@@ -345,50 +265,22 @@ fn brightness_and_temperature_matter_conversion_preserve_physical_ranges() {
     assert_eq!(brightness_from_matter_level(254).unwrap(), 100.0);
     assert!(brightness_from_matter_level(0).is_err());
     assert!(brightness_to_matter_level(f64::INFINITY).is_err());
-    let range = NumericRange {
-        min: 2700,
-        max: 5700,
-        step: 100,
-    };
-    let (min, max) = range.mired_bounds().unwrap();
+    let interval = TemperatureInterval::new(2700, 5700).unwrap();
+    let (min, max) = mired_bounds(interval);
     assert_eq!((min, max), (176, 370));
     for mired in min..=max {
-        let kelvin = range.kelvin_from_mireds(mired).unwrap();
-        assert!(range.contains(kelvin));
+        let kelvin = kelvin_from_mireds(mired);
+        assert!((2700.0..=5700.0).contains(&kelvin));
     }
-    assert!(range.kelvin_from_mireds(0).is_err());
+    assert!(!kelvin_from_mireds(0).is_finite());
 }
 
 #[test]
 fn matter_temperature_rejects_unrepresentable_ranges_without_panicking() {
-    for range in [
-        NumericRange {
-            min: 4500,
-            max: 4501,
-            step: 1,
-        },
-        NumericRange {
-            min: 10,
-            max: 6500,
-            step: 1,
-        },
-        NumericRange {
-            min: 1,
-            max: 6500,
-            step: 1,
-        },
-    ] {
-        assert!(range.mireds_from_kelvin(range.min).is_err());
-        assert!(range.kelvin_from_mireds(250).is_err());
-        let mut description = light(false);
-        description.functions[0].capabilities[2] = Capability::ColorTemperature(range);
-        assert!(!description.functions[0].valid_capabilities());
+    for (min, max) in [(4500, 4501), (10, 6500), (1, 6500)] {
+        assert!(TemperatureInterval::new(min, max).is_err());
     }
-    let range = NumericRange {
-        min: 4000,
-        max: 4001,
-        step: 1,
-    };
-    assert_eq!(range.mireds_from_kelvin(4000).unwrap(), 250);
-    assert_eq!(range.kelvin_from_mireds(250).unwrap(), 4000);
+    let interval = TemperatureInterval::new(4000, 4001).unwrap();
+    assert_eq!(mireds_from_kelvin(interval, 4000).unwrap(), 250);
+    assert_eq!(kelvin_from_mireds(250).round() as u32, 4000);
 }

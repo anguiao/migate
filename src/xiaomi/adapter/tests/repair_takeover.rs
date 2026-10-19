@@ -2,7 +2,7 @@ use super::{
     support::{group_instance, group_record, repair_ready, repair_rig},
     *,
 };
-use crate::device::{LightColorTarget, LightDimension, LightTarget, Rgb};
+use crate::device::{LightDimension, LightTarget, Rgb};
 
 fn overlapping_groups() -> Rig {
     let rig = repair_rig(0, true);
@@ -27,10 +27,7 @@ fn overlapping_groups() -> Rig {
 }
 
 fn rgb(value: u32) -> LightTarget {
-    LightTarget {
-        color: Some(LightColorTarget::Rgb(Rgb::from_packed(value).unwrap())),
-        ..Default::default()
-    }
+    LightTarget::rgb(None, Rgb::from_packed(value).unwrap())
 }
 
 #[test]
@@ -40,14 +37,10 @@ fn new_group_and_member_targets_take_over_shared_groups_by_dimension() {
         until(|| c.context.group_repair("group-2").is_some()).await;
         let first = function(&c.context.registry, "group-1", "main");
         let second = function(&c.context.registry, "group-2", "main");
-        let earlier = first
-            .begin_light_action(LightDimension::Color, rgb(0x19aa33), false)
-            .unwrap();
+        let earlier = first.begin_light_action(rgb(0x19aa33), false).unwrap();
         earlier.accepted().await.unwrap();
         assert!(first.light_action_current(earlier.token()));
-        let newer = second
-            .begin_light_action(LightDimension::Color, rgb(0x2255cc), false)
-            .unwrap();
+        let newer = second.begin_light_action(rgb(0x2255cc), false).unwrap();
         newer.accepted().await.unwrap();
         assert!(
             !first.light_action_current(earlier.token()),
@@ -62,11 +55,7 @@ fn new_group_and_member_targets_take_over_shared_groups_by_dimension() {
         );
         let brightness = first
             .begin_light_action(
-                LightDimension::Brightness,
-                LightTarget {
-                    brightness_percent: Some(80.0),
-                    ..Default::default()
-                },
+                LightTarget::brightness(None, 80.0).expect("valid test target"),
                 false,
             )
             .unwrap();
@@ -137,18 +126,12 @@ fn member_notifications_update_feedback_without_stopping_group_actions() {
             .await;
             let brightness = group
                 .begin_light_action(
-                    LightDimension::Brightness,
-                    LightTarget {
-                        brightness_percent: Some(60.0),
-                        ..Default::default()
-                    },
+                    LightTarget::brightness(None, 60.0).expect("valid test target"),
                     false,
                 )
                 .unwrap();
             brightness.accepted().await.unwrap();
-            let color = group
-                .begin_light_action(LightDimension::Color, rgb(0x00ff00), false)
-                .unwrap();
+            let color = group.begin_light_action(rgb(0x00ff00), false).unwrap();
             color.accepted().await.unwrap();
             for (siid, piid, value) in [
                 (2, 2, json!(80)),
@@ -215,14 +198,14 @@ fn newer_shared_target_retires_an_older_completed_frames_unsent_member() {
             .await;
             let first = function(&c.context.registry, "group-1", "main");
             first
-                .begin_light_action(LightDimension::Color, rgb(0x00ff00), true)
+                .begin_light_action(rgb(0x00ff00), true)
                 .unwrap()
                 .accepted()
                 .await
                 .unwrap();
             let second = function(&c.context.registry, "group-2", "main");
             second
-                .begin_light_action(LightDimension::Color, rgb(0xff0000), true)
+                .begin_light_action(rgb(0xff0000), true)
                 .unwrap()
                 .accepted()
                 .await

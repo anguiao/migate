@@ -133,44 +133,44 @@ fn refresh_after_write(
         let original = original.record.cached.borrow();
         let original = original
             .device
-            .functions
+            .functions()
             .iter()
-            .find(|function| function.description.id == id)
+            .find(|function| function.id() == id)
             .unwrap();
         let cached = work.record.cached.borrow();
         let Some(function) = cached
             .device
-            .functions
+            .functions()
             .iter()
-            .find(|function| function.description.id == id)
+            .find(|function| function.id() == id)
         else {
             return;
         };
-        // Removing and readding the same DID preserves its in-flight write;
-        // a new binding description must not inherit that write's invalidation.
-        if original.power != function.power || original.lighting != function.lighting {
+        if original.power() != function.power() || original.lighting() != function.lighting() {
             return;
         }
-        let light = function.lighting.as_ref().unwrap();
+        let light = function.lighting().unwrap();
         if context.is_virtual_group(&work.record.physical.key().id) {
             let written = |property| properties.iter().any(|(binding, _)| *binding == property);
-            let power = written(function.power);
+            let power = written(function.power());
             let brightness = light
-                .brightness
-                .is_some_and(|binding| written(binding.property));
+                .brightness()
+                .is_some_and(|binding| written(binding.property()));
             let temperature = light
-                .temperature
-                .is_some_and(|binding| written(binding.property));
-            let color = light.color.is_some_and(|binding| written(binding.property));
+                .temperature()
+                .is_some_and(|binding| written(binding.property()));
+            let color = light
+                .color()
+                .is_some_and(|binding| written(binding.property()));
             for member in context.group_member_work(&work.record.physical.key().id) {
                 let cached = member.record.cached.borrow();
                 let function = cached
                     .device
-                    .functions
+                    .functions()
                     .iter()
-                    .find(|function| function.description.id == "main")
+                    .find(|function| function.id() == "main")
                     .unwrap();
-                let light = function.lighting.as_ref().unwrap();
+                let light = function.lighting().unwrap();
                 // Power can restore the member's remembered settings. Other
                 // writes refresh the affected value and its actual mode.
                 let bindings = if power {
@@ -178,21 +178,21 @@ fn refresh_after_write(
                 } else {
                     [
                         light
-                            .brightness
+                            .brightness()
                             .filter(|_| brightness)
-                            .map(|binding| binding.property),
+                            .map(|binding| binding.property()),
                         light
-                            .temperature
+                            .temperature()
                             .filter(|_| temperature)
-                            .map(|binding| binding.property),
+                            .map(|binding| binding.property()),
                         light
-                            .color
+                            .color()
                             .filter(|_| color)
-                            .map(|binding| binding.property),
+                            .map(|binding| binding.property()),
                         light
-                            .mode
+                            .mode()
                             .filter(|_| temperature || color)
-                            .map(|binding| binding.property),
+                            .map(|binding| binding.property()),
                     ]
                     .into_iter()
                     .flatten()
@@ -205,26 +205,26 @@ fn refresh_after_write(
             }
             return;
         }
-        let color_written = [light.color, light.temperature]
-            .into_iter()
-            .flatten()
-            .any(|color| {
-                properties
-                    .iter()
-                    .any(|(binding, _)| *binding == color.property)
-            });
-        light.mode.filter(|mode| {
-            color_written
-                && !properties
-                    .iter()
-                    .any(|(binding, _)| *binding == mode.property)
-        })
+        let color_written = light.color().is_some_and(|binding| {
+            properties
+                .iter()
+                .any(|(property, _)| *property == binding.property())
+        }) || light.temperature().is_some_and(|binding| {
+            properties
+                .iter()
+                .any(|(property, _)| *property == binding.property())
+        });
+        light
+            .mode()
+            .filter(|mode| {
+                color_written
+                    && !properties
+                        .iter()
+                        .any(|(binding, _)| *binding == mode.property())
+            })
+            .map(|mode| mode.property())
     };
-    for binding in properties
-        .iter()
-        .map(|(binding, _)| *binding)
-        .chain(mode.map(|mode| mode.property))
-    {
+    for binding in properties.iter().map(|(binding, _)| *binding).chain(mode) {
         work.observations.invalidate_write(id, binding);
         work.request_dirty_read(id, binding);
     }
@@ -498,17 +498,19 @@ pub(super) async fn send(
 ) -> Result<(), AdapterError> {
     let did = record.physical.key().id.clone();
     let native_group = context.is_group(&did);
-    let target = match &request {
-        DeviceRequest::Power(request) => LightTarget {
-            power: Some(request.target),
-            ..Default::default()
-        },
-        DeviceRequest::Light(request) => request.target,
+    let light_target = match &request {
+        DeviceRequest::Power(_) => None,
+        DeviceRequest::Light(request) => Some(request.target),
+    };
+    let power = match &request {
+        DeviceRequest::Power(request) => Some(request.target),
+        DeviceRequest::Light(request) => request.target.power(),
     };
     if current(&request) {
-        context.take_over_related_targets(&did, target);
+        context.take_over_related_targets(&did, power, light_target.map(LightTarget::dimension));
     }
-    if let Some(LightColorTarget::Rgb(rgb)) = target.color
+    if let Some(target) = light_target
+        && let Some(LightColorTarget::Rgb(rgb)) = target.color_target()
         && let Some(plan) = context.group_repair(&did)
     {
         let DeviceRequest::Light(request) = request else {
@@ -527,16 +529,19 @@ pub(super) async fn send(
         reject(request, error);
         return Ok(());
     };
-    let properties = match super::super::lighting::encode(&work, id, target, native_group) {
-        Ok(properties) => properties,
-        Err(error) => {
-            reject(request, error);
-            return Ok(());
-        }
-    };
+    let properties =
+        match super::super::lighting::encode(&work, id, power, light_target, native_group) {
+            Ok(properties) => properties,
+            Err(error) => {
+                reject(request, error);
+                return Ok(());
+            }
+        };
     let diagnostic_target = match &request {
         DeviceRequest::Power(request) => CommandTarget::Power(request.target),
-        DeviceRequest::Light(_) => CommandTarget::Light(target),
+        DeviceRequest::Light(_) => {
+            CommandTarget::Light(light_target.expect("light requests carry a target"))
+        }
     };
     let operation = context.commands.begin_operation(
         &did,
@@ -560,14 +565,15 @@ pub(super) async fn send(
             reject(request, error);
             return Ok(());
         }
-        let properties = match super::super::lighting::encode(&work, id, target, native_group) {
-            Ok(properties) => properties,
-            Err(error) => {
-                operation.0.finish(Err(error.clone()));
-                reject(request, error);
-                return Ok(());
-            }
-        };
+        let properties =
+            match super::super::lighting::encode(&work, id, power, light_target, native_group) {
+                Ok(properties) => properties,
+                Err(error) => {
+                    operation.0.finish(Err(error.clone()));
+                    reject(request, error);
+                    return Ok(());
+                }
+            };
         operation.0.properties(properties.clone());
         if properties.is_empty() {
             operation.0.finish(skip(request));
@@ -591,7 +597,7 @@ pub(super) async fn send(
             let id = id.to_owned();
             let properties = properties.clone();
             Rc::new(move || {
-                super::super::lighting::encode(&work, &id, target, native_group)
+                super::super::lighting::encode(&work, &id, power, light_target, native_group)
                     .ok()
                     .as_ref()
                     == Some(&properties)
@@ -618,7 +624,9 @@ pub(super) async fn send(
             }
             BatchAttempt::Settled(receipt) => {
                 if !context.is_virtual_group(&did)
-                    && matches!(target.color, Some(LightColorTarget::Temperature(_)))
+                    && light_target
+                        .and_then(LightTarget::color_target)
+                        .is_some_and(|color| matches!(color, LightColorTarget::Temperature(_)))
                 {
                     repair::refresh_native_color_mode(&context, &did);
                 }

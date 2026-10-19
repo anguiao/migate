@@ -1,8 +1,6 @@
 use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler, storage::StoreAdapter};
-use crate::{
-    device::{Category, DeviceRegistry, Function, LightProfile, PhysicalDevice},
-    storage::{Identity, StorageError, Store, StoredDevice},
-};
+use crate::device::{DeviceRegistry, Function, LightProfileKind, PhysicalDevice};
+use crate::storage::{Identity, StorageError, Store, StoredDevice};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use rand::RngExt as _;
 use rs_matter::{
@@ -206,7 +204,7 @@ enum ControlKind {
 }
 impl Control {
     fn new(function: Function, endpoint: u16, versions: Versions) -> Self {
-        let kind = if function.description().category == Category::Light {
+        let kind = if function.description().kind.is_light() {
             ControlKind::Light(Box::new(
                 lighting::Lighting::new(
                     function,
@@ -350,15 +348,6 @@ macro_rules! dispatch {
 }
 
 /// Why a light cannot map to any of the four standard Matter light types.
-fn light_publication_problem(
-    description: &crate::device::FunctionDescription,
-) -> Option<&'static str> {
-    if description.category != Category::Light {
-        return None;
-    }
-    description.light_profile().err()
-}
-
 impl Entry {
     fn descriptor(&self) -> desc::DescHandler<'_> {
         desc::DescHandler::new_matching(Dataver::new(self.descriptor.get()), self)
@@ -367,23 +356,23 @@ impl Entry {
         match &self.role {
             Role::Single { control, .. } => {
                 if let Some(light) = control.light() {
-                    match light.profile() {
-                        LightProfile::ExtendedColor => Endpoint::new(
+                    match light.profile().kind() {
+                        LightProfileKind::ExtendedColor => Endpoint::new(
                             self.endpoint,
                             devices!(RGB_LIGHT, DEV_TYPE_BRIDGED_NODE),
                             OBCR_CLUSTERS,
                         ),
-                        LightProfile::ColorTemperature => Endpoint::new(
+                        LightProfileKind::ColorTemperature => Endpoint::new(
                             self.endpoint,
                             devices!(CT_LIGHT, DEV_TYPE_BRIDGED_NODE),
                             OBC_CLUSTERS,
                         ),
-                        LightProfile::Dimmable => Endpoint::new(
+                        LightProfileKind::Dimmable => Endpoint::new(
                             self.endpoint,
                             devices!(DEV_TYPE_DIMMABLE_LIGHT, DEV_TYPE_BRIDGED_NODE),
                             OB_CLUSTERS,
                         ),
-                        LightProfile::OnOff => Endpoint::new(
+                        LightProfileKind::OnOff => Endpoint::new(
                             self.endpoint,
                             devices!(DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_BRIDGED_NODE),
                             O_CLUSTERS,
@@ -535,14 +524,6 @@ pub(super) fn handler_from(
         );
     let mut built = Vec::new();
     for FrozenEntry { device, stored } in entries {
-        if let Some(reason) = device
-            .functions()
-            .iter()
-            .find_map(|function| light_publication_problem(function.description()))
-        {
-            log::warn!("Not publishing Xiaomi device {}: {reason}", device.key().id);
-            continue;
-        }
         let versions = Versions::new(&mut random);
         let multiple = stored.functions.len() > 1;
         let parent = multiple.then_some((stored.endpoint, None));

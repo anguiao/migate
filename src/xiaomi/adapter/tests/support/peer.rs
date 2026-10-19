@@ -271,7 +271,7 @@ pub(in super::super) async fn peer_run(
                         "getDevList" => {
                             let mut list = serde_json::Map::new();
                             for record in &data {
-                                let did = &record.device.key.id;
+                                let did = &record.device.key().id;
                                 if state.omit.contains(did)
                                     || payload["filter"]["did"].as_array().is_some_and(|dids| {
                                         !dids.iter().any(|value| value.as_str() == Some(did))

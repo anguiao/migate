@@ -614,12 +614,12 @@ fn real_model_run_drives_transition_acceptance_reports_and_dataver() {
                     else {
                         panic!("unexpected power frame")
                     };
-                    assert_eq!(request.target.power, None);
+                    assert_eq!(request.target.power(), None);
                     let final_frame = request.final_frame;
                     request.mark_sent().unwrap();
                     function
                         .observe_light(LightPatch {
-                            brightness_percent: request.target.brightness_percent,
+                            brightness_percent: request.target.brightness_percent(),
                             ..Default::default()
                         })
                         .unwrap();
@@ -711,12 +711,10 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
             .unwrap();
         let mut updated = stored.clone();
         updated.configuration_version = 2;
-        updated.functions[0].capabilities[2] =
-            crate::device::Capability::ColorTemperature(crate::device::NumericRange {
-                min: 3000,
-                max: 4000,
-                step: 1,
-            });
+        updated.functions[0].kind =
+            crate::device::FunctionKind::Light(crate::device::LightProfile::ColorTemperature(
+                crate::device::TemperatureInterval::new(3000, 4000).unwrap(),
+            ));
         let root_version = store.devices().load_publication(None).unwrap().root_version;
         store
             .devices()
@@ -846,16 +844,8 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
             &instance,
         )
         .unwrap();
-        let binding = parsed.functions[0].lighting.clone().unwrap();
-        let description = crate::device::PhysicalDeviceDescription {
-            key: parsed.key,
-            label: "Precision".into(),
-            functions: parsed
-                .functions
-                .into_iter()
-                .map(|f| f.description)
-                .collect(),
-        };
+        let binding = parsed.functions()[0].lighting().cloned().unwrap();
+        let description = parsed.physical_description("Precision");
         let (device, mut receivers) = crate::device::PhysicalDevice::new(description);
         setup_light!(@source (device,receivers.remove(0)),device,receiver,registry,handler,ctx);
         let function = device.functions()[0].clone();
@@ -877,20 +867,14 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                 let DeviceRequest::Light(request) = receiver.next_operation().await.unwrap() else {
                     panic!("missing level request")
                 };
-                let percent = request.target.brightness_percent.unwrap();
+                let percent = request.target.brightness_percent().unwrap();
                 assert_eq!(
                     percent,
                     crate::device::brightness_from_matter_level(111).unwrap()
                 );
-                let raw = binding
-                    .brightness
-                    .as_ref()
-                    .unwrap()
-                    .brightness_to_raw(percent)
-                    .unwrap();
+                let raw = binding.brightness().unwrap().brightness_to_raw(percent);
                 let actual = binding
-                    .brightness
-                    .as_ref()
+                    .brightness()
                     .unwrap()
                     .brightness_from_raw(&serde_json::json!(raw))
                     .unwrap();
@@ -909,7 +893,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                         .unwrap(),
                     crate::device::brightness_to_matter_level(actual).unwrap()
                 );
-                if binding.brightness.as_ref().unwrap().range.max == 65535 {
+                if binding.brightness().unwrap().range().max() == 65535 {
                     assert!(actual.fract() > 0.0);
                     assert!((actual - percent).abs() < 0.002);
                 }
@@ -919,14 +903,10 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                 report_value(&read_bytes(&handler, &ctx).await.unwrap())
                     .u16()
                     .unwrap(),
-                binding
-                    .temperature
-                    .as_ref()
-                    .unwrap()
-                    .range
-                    .mired_bounds()
-                    .unwrap()
-                    .0
+                crate::lighting::temperature::mired_bounds(
+                    binding.temperature().unwrap().interval(),
+                )
+                .0
             );
             ctx.command.cluster_id = 0x300;
             ctx.command.cmd_id = 10;
@@ -944,8 +924,10 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                     panic!("missing temperature request")
                 };
                 assert_eq!(
-                    request.target.color,
-                    Some(crate::device::LightColorTarget::Temperature(3333))
+                    request.target.color_target(),
+                    Some(crate::device::LightColorTarget::Temperature(
+                        1_000_000.0 / 300.0
+                    ))
                 );
                 request.mark_sent().unwrap();
                 function
@@ -1001,8 +983,8 @@ fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_po
             let DeviceRequest::Light(request) = receiver.next_operation().await.unwrap() else {
                 panic!("missing onlevel action")
             };
-            assert_eq!(request.target.power, Some(power));
-            assert_eq!(request.target.brightness_percent, Some(1.0));
+            assert_eq!(request.target.power(), Some(power));
+            assert_eq!(request.target.brightness_percent(), Some(1.0));
             request.mark_sent().unwrap();
             function
                 .observe_light(LightPatch {
@@ -1032,9 +1014,9 @@ fn actual_onlevel_write_affects_ordinary_on_and_off_but_min_with_onoff_closes_po
             let DeviceRequest::Light(request) = receiver.next_operation().await.unwrap() else {
                 panic!("missing min action")
             };
-            assert_eq!(request.target.brightness_percent, Some(1.0));
+            assert_eq!(request.target.brightness_percent(), Some(1.0));
             assert_eq!(
-                request.target.power,
+                request.target.power(),
                 if command == 4 { Some(false) } else { None }
             );
             request.accept_unchanged().unwrap();
@@ -1132,12 +1114,12 @@ fn real_rgb_dispatch_accepts_hs_commands_and_reports_hs_attributes() {
                 let DeviceRequest::Light(request) = receiver.next_operation().await.unwrap() else {
                     panic!("missing HS request")
                 };
-                let Some(LightColorTarget::Rgb(rgb)) = request.target.color else {
+                let Some(LightColorTarget::Rgb(rgb)) = request.target.color_target() else {
                     panic!("HS command did not dispatch RGB")
                 };
                 assert!(request.final_frame);
-                assert_eq!(request.target.power, None);
-                assert_eq!(request.target.brightness_percent, None);
+                assert_eq!(request.target.power(), None);
+                assert_eq!(request.target.brightness_percent(), None);
                 match (hue, saturation) {
                     (0, 254) => assert_eq!((rgb.red, rgb.green, rgb.blue), (255, 0, 0)),
                     (85, 254) => {

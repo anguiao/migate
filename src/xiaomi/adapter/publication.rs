@@ -7,13 +7,13 @@ use super::{
 };
 use crate::{
     device::{
-        Availability, CommandReceiver, DeviceKey, DeviceRegistry, PhysicalDevice,
-        PhysicalDeviceDescription,
+        Availability, CommandReceiver, DeviceKey, DeviceRegistry, FunctionDescription,
+        FunctionKind, PhysicalDevice, PhysicalDeviceDescription,
     },
     storage::{CachedPhysicalDevice, CachedScope, PublicationState, StorageError, StoredRelation},
     xiaomi::capability::{
-        RepairPlan, effective_temperature_range, narrowed_capabilities, plan_rgb_repair,
-        repaired_capabilities,
+        RepairPlan, effective_temperature_range, narrowed_profile, plan_rgb_repair,
+        repaired_profile,
     },
 };
 use std::{
@@ -169,19 +169,19 @@ impl SourceHandle {
                         .unwrap_or_else(|| {
                             crate::runtime::default_device_label(
                                 &cached.model,
-                                &cached.device.key.id,
+                                &cached.device.key().id,
                             )
                         })
                 });
             let description = cached.physical_description(label);
-            let native_range = cached
+            let native_interval = cached
                 .device
-                .functions
+                .functions()
                 .first()
-                .and_then(|function| function.lighting.as_ref())
-                .and_then(|light| light.temperature.as_ref())
-                .map(|temperature| temperature.range);
-            let (repair, repair_reason, description) = match (&slot.group, native_range) {
+                .and_then(|function| function.lighting())
+                .and_then(|light| light.temperature())
+                .map(|temperature| temperature.interval());
+            let (repair, repair_reason, description) = match (&slot.group, native_interval) {
                 (None, _) => (None, None, description),
                 (Some(_), None) => (
                     None,
@@ -201,41 +201,45 @@ impl SourceHandle {
                                 .map(|cached| {
                                     cached
                                         .device
-                                        .functions
+                                        .functions()
                                         .first()
-                                        .and_then(|function| function.lighting.as_ref())
-                                        .and_then(|light| light.temperature.as_ref())
-                                        .map(|temperature| temperature.range)
+                                        .and_then(|function| function.lighting())
+                                        .and_then(|light| light.temperature())
+                                        .map(|temperature| temperature.interval())
                                 })
                                 .collect::<Option<Vec<_>>>()
-                                .map(|ranges| effective_temperature_range(native, &ranges))
+                                .map(|intervals| effective_temperature_range(native, &intervals))
                                 .unwrap_or(native);
-                            let function = &cached.device.functions[0];
-                            let (repair, reason, capabilities) = match plan_rgb_repair(
+                            let function = &cached.device.functions()[0];
+                            let native_profile = function
+                                .kind()
+                                .light_profile()
+                                .expect("a native group is a light");
+                            let (repair, reason, profile) = match plan_rgb_repair(
                                 &cached.device,
                                 members.iter().map(|cached| {
                                     (
-                                        cached.device.key.id.as_str(),
+                                        cached.device.key().id.as_str(),
                                         cached.model.as_str(),
                                         cached.instance_type.as_str(),
                                         &cached.device,
                                     )
                                 }),
                             ) {
-                                Ok(Some(plan)) => (
-                                    Some(Rc::new(plan)),
-                                    None,
-                                    repaired_capabilities(function, logical),
-                                ),
-                                Ok(None) => (None, None, narrowed_capabilities(function, logical)),
-                                Err(reason) => {
-                                    (None, Some(reason), narrowed_capabilities(function, logical))
+                                Ok(Some(plan)) => {
+                                    (Some(Rc::new(plan)), None, repaired_profile(logical))
                                 }
+                                Ok(None) => (None, None, narrowed_profile(native_profile, logical)),
+                                Err(reason) => (
+                                    None,
+                                    Some(reason),
+                                    narrowed_profile(native_profile, logical),
+                                ),
                             };
                             (
                                 repair,
                                 reason,
-                                with_light_capabilities(description, capabilities),
+                                with_light_kind(description, FunctionKind::Light(profile)),
                             )
                         }
                         None => (
@@ -333,7 +337,7 @@ impl SourceHandle {
     pub(crate) fn install(&self, snapshot: &SourceSnapshot) {
         let mut refresh = Vec::new();
         for entry in &snapshot.entries {
-            let did = &entry.cached.device.key.id;
+            let did = &entry.cached.device.key().id;
             let old = self.0.live.borrow().devices[did].admitted.clone();
             let replaced = old
                 .as_ref()
@@ -390,7 +394,7 @@ impl SourceHandle {
             self.0.refresh_source(did);
         }
         for entry in &snapshot.entries {
-            self.0.refresh_group_states(&entry.cached.device.key.id);
+            self.0.refresh_group_states(&entry.cached.device.key().id);
         }
         self.0.changed.notify(usize::MAX);
     }
@@ -412,29 +416,54 @@ impl SourceHandle {
     }
 }
 
-fn with_light_capabilities(
-    mut description: PhysicalDeviceDescription,
-    capabilities: Vec<crate::device::Capability>,
+fn with_light_kind(
+    description: PhysicalDeviceDescription,
+    kind: FunctionKind,
 ) -> PhysicalDeviceDescription {
-    for function in &mut description.functions {
-        if function.category == crate::device::Category::Light {
-            function.capabilities = capabilities.clone();
+    PhysicalDeviceDescription::new(
+        description.key().clone(),
+        description.label(),
+        description
+            .functions()
+            .iter()
+            .map(|function| FunctionDescription {
+                id: function.id.clone(),
+                label: function.label.clone(),
+                kind: if function.kind.is_light() {
+                    kind
+                } else {
+                    function.kind
+                },
+            })
+            .collect(),
+    )
+    .expect("a light replacement keeps the description valid")
+}
+
+/// True when both descriptions publish the same fixed light surface: the
+/// profile kind and the mired span, so equivalent kelvin encodings compare
+/// equal regardless of the native quantization grid.
+fn same_kind(a: FunctionKind, b: FunctionKind) -> bool {
+    match (a.light_profile(), b.light_profile()) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.kind() == b.kind()
+                && a.temperature_interval()
+                    .map(crate::lighting::temperature::mired_bounds)
+                    == b.temperature_interval()
+                        .map(crate::lighting::temperature::mired_bounds)
         }
+        _ => false,
     }
-    description
 }
 
 pub(super) fn same_shape(a: &PhysicalDeviceDescription, b: &PhysicalDeviceDescription) -> bool {
-    a.key == b.key
-        && a.functions.len() == b.functions.len()
-        && a.functions.iter().all(|old| {
-            b.functions.iter().any(|new| {
-                old.id == new.id
-                    && old.category == new.category
-                    && old.light_profile() == new.light_profile()
-                    && old.temperature_range().map(|range| range.mired_bounds())
-                        == new.temperature_range().map(|range| range.mired_bounds())
-            })
+    a.key() == b.key()
+        && a.functions().len() == b.functions().len()
+        && a.functions().iter().all(|old| {
+            b.functions()
+                .iter()
+                .any(|new| old.id == new.id && same_kind(old.kind, new.kind))
         })
 }
 
@@ -442,17 +471,17 @@ fn same_bindings(a: &CachedPhysicalDevice, b: &CachedPhysicalDevice) -> bool {
     let bindings = |cached: &CachedPhysicalDevice| {
         cached
             .device
-            .functions
+            .functions()
             .iter()
             .map(|function| {
                 (
-                    function.description.id.clone(),
-                    (function.power, function.lighting.clone()),
+                    function.id().to_owned(),
+                    (function.power(), function.lighting().cloned()),
                 )
             })
             .collect::<BTreeMap<_, _>>()
     };
-    a.device.refresh_trigger == b.device.refresh_trigger && bindings(a) == bindings(b)
+    a.device.refresh_trigger() == b.device.refresh_trigger() && bindings(a) == bindings(b)
 }
 
 impl Context {

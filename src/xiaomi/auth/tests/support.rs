@@ -11,20 +11,16 @@ pub(super) fn cached_bridge_device(uid: &str) -> crate::storage::CachedPhysicalD
         group_id: crate::xiaomi::cloud::group_id(uid, "local-home"),
         model: "vendor.plug".into(),
         instance_type: "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1".into(),
-        device: crate::xiaomi::capability::ParsedDevice {
-            key: crate::device::DeviceKey::new("xiaomi", "target"),
-            functions: vec![crate::xiaomi::capability::ParsedFunction {
-                description: crate::device::FunctionDescription {
-                    id: "main".into(),
-                    label: "主电源".into(),
-                    category: crate::device::Category::Outlet,
-                    capabilities: vec![crate::device::Capability::OnOff],
-                },
-                power: crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-                lighting: None,
-            }],
-            refresh_trigger: None,
-        },
+        device: crate::xiaomi::capability::ParsedDevice::new(
+            crate::device::DeviceKey::new("xiaomi", "target"),
+            vec![crate::xiaomi::capability::ParsedFunction::outlet(
+                "main",
+                "主电源",
+                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+            )],
+            None,
+        )
+        .unwrap(),
     }
 }
 

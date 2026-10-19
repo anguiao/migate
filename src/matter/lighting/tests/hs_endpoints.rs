@@ -49,7 +49,10 @@ fn check_hue_254_endpoint(outcome: FinalOutcome) {
         assert_eq!(final_frame.token, token);
         assert!(final_frame.final_frame);
         let red = Rgb::from_packed(0xff0000).unwrap();
-        assert_eq!(final_frame.target.color, Some(LightColorTarget::Rgb(red)));
+        assert_eq!(
+            final_frame.target.color_target(),
+            Some(LightColorTarget::Rgb(red))
+        );
         final_frame.mark_sent().unwrap();
 
         // A valid device observation can precede the final receipt. It

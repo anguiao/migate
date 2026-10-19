@@ -1,27 +1,28 @@
+use super::new_device;
 use super::next_power;
-use super::{new_device, outlet};
 use crate::device::{
-    Availability, Capability, Category, Command, CommandError, CommandReceiver, Function,
-    NumericRange, PhysicalDevice,
+    Availability, Command, CommandError, CommandReceiver, DeviceKey, Function, FunctionDescription,
+    FunctionKind, LightProfile, PhysicalDevice, PhysicalDeviceDescription, TemperatureInterval,
 };
 use futures_lite::future::{block_on, poll_once};
 
 fn ready_light(rgb: bool) -> (PhysicalDevice, CommandReceiver) {
-    let mut description = outlet();
-    description.functions[0].category = Category::Light;
-    description.functions[0].capabilities.extend([
-        Capability::Brightness,
-        Capability::ColorTemperature(NumericRange {
-            min: 2700,
-            max: 6500,
-            step: 1,
-        }),
-    ]);
-    if rgb {
-        description.functions[0]
-            .capabilities
-            .push(Capability::ColorRgb);
-    }
+    let interval = TemperatureInterval::new(2700, 6500).unwrap();
+    let profile = if rgb {
+        LightProfile::ExtendedColor(interval)
+    } else {
+        LightProfile::ColorTemperature(interval)
+    };
+    let description = PhysicalDeviceDescription::new(
+        DeviceKey::new("xiaomi", "test-outlet"),
+        "Test Outlet",
+        vec![FunctionDescription {
+            id: "main".into(),
+            label: "Main power".into(),
+            kind: FunctionKind::Light(profile),
+        }],
+    )
+    .unwrap();
     let (physical, receiver) = new_device(description);
     physical.set_availability(Availability::Available);
     (physical, receiver)
@@ -41,21 +42,14 @@ fn light_toggle_requires_known_state_before_entering_the_send_queue() {
 }
 
 use crate::device::{
-    DeviceRequest, LightAction, LightColorTarget, LightDimension, LightPatch, LightRequest,
-    LightTarget, Rgb,
+    DeviceRequest, LightAction, LightDimension, LightPatch, LightRequest, LightTarget, Rgb,
 };
 
 fn brightness(value: f64) -> LightTarget {
-    LightTarget {
-        brightness_percent: Some(value),
-        ..LightTarget::default()
-    }
+    LightTarget::brightness(None, value).expect("valid test target")
 }
-fn temperature(value: u32) -> LightTarget {
-    LightTarget {
-        color: Some(LightColorTarget::Temperature(value)),
-        ..LightTarget::default()
-    }
+fn temperature(value: f64) -> LightTarget {
+    LightTarget::temperature(None, value).expect("valid test target")
 }
 async fn frame(receiver: &mut CommandReceiver) -> LightRequest {
     match receiver.next_operation().await.unwrap() {
@@ -65,7 +59,7 @@ async fn frame(receiver: &mut CommandReceiver) -> LightRequest {
 }
 fn begin(function: &Function, value: f64, final_frame: bool) -> LightAction {
     function
-        .begin_light_action(LightDimension::Brightness, brightness(value), final_frame)
+        .begin_light_action(brightness(value), final_frame)
         .unwrap()
 }
 
@@ -121,22 +115,20 @@ fn independent_dimensions_progress_fairly_and_temperature_rgb_share_a_slot() {
         let first = frame(&mut receiver).await;
         first.mark_sent().unwrap();
         let white = function
-            .begin_light_action(LightDimension::Color, temperature(3100), false)
+            .begin_light_action(temperature(3100.0), false)
             .unwrap();
         function
             .submit_light_frame(level.token(), brightness(40.0), false)
             .unwrap();
-        let red = LightTarget {
-            color: Some(LightColorTarget::Rgb(Rgb {
+        let red = LightTarget::rgb(
+            None,
+            Rgb {
                 red: 255,
                 green: 0,
                 blue: 0,
-            })),
-            ..LightTarget::default()
-        };
-        let color = function
-            .begin_light_action(LightDimension::Color, red, true)
-            .unwrap();
+            },
+        );
+        let color = function.begin_light_action(red, true).unwrap();
         assert_eq!(white.accepted().await, Err(CommandError::Superseded));
         first.accept().unwrap();
         let next = frame(&mut receiver).await;
@@ -160,29 +152,23 @@ fn invalid_new_targets_leave_the_existing_action_and_pending_frame_intact() {
         let (physical, mut receiver) = ready_light(false);
         let function = &physical.functions()[0];
         let valid = begin(function, 20.0, false);
-        for invalid in [
-            brightness(f64::NAN),
-            brightness(-1.0),
-            brightness(101.0),
-            temperature(3100),
-            LightTarget::default(),
-        ] {
-            assert!(
-                function
-                    .begin_light_action(LightDimension::Brightness, invalid, false)
-                    .is_err()
-            );
-        }
-        let rgb = LightTarget {
-            color: Some(LightColorTarget::Rgb(Rgb {
+        // Invalid numeric targets cannot be constructed at all.
+        assert!(LightTarget::brightness(None, f64::NAN).is_err());
+        assert!(LightTarget::brightness(None, -1.0).is_err());
+        assert!(LightTarget::brightness(None, 101.0).is_err());
+        assert!(LightTarget::brightness(None, 0.0).is_err());
+        assert!(LightTarget::temperature(None, 0.0).is_err());
+        // A valid target unsupported by this profile is rejected before takeover.
+        let rgb = LightTarget::rgb(
+            None,
+            Rgb {
                 red: 0,
                 green: 255,
                 blue: 0,
-            })),
-            ..LightTarget::default()
-        };
+            },
+        );
         assert!(matches!(
-            function.begin_light_action(LightDimension::Color, rgb, true),
+            function.begin_light_action(rgb, true),
             Err(CommandError::Unsupported)
         ));
         assert!(function.light_action_current(valid.token()));
@@ -264,7 +250,7 @@ fn ordinary_observation_does_not_take_over_and_explicit_external_takeover_is_dim
         let function = &physical.functions()[0];
         let level = begin(function, 20.0, false);
         let color = function
-            .begin_light_action(LightDimension::Color, temperature(3100), false)
+            .begin_light_action(temperature(3100.0), false)
             .unwrap();
         function
             .observe_light(LightPatch {
@@ -304,7 +290,7 @@ fn lamp_power_and_lighting_share_one_gate_and_valid_off_cancels_both_dimensions(
         let sent = frame(&mut receiver).await;
         sent.mark_sent().unwrap();
         let color = function
-            .begin_light_action(LightDimension::Color, temperature(3100), false)
+            .begin_light_action(temperature(3100.0), false)
             .unwrap();
         let mut off = Box::pin(function.execute(Command::Off));
         assert!(poll_once(off.as_mut()).await.is_none());
@@ -336,7 +322,7 @@ fn unavailable_paths_clear_pending_actions_without_finishing_sent_startup_early(
         let sent = frame(&mut receiver).await;
         sent.mark_sent().unwrap();
         let pending = function
-            .begin_light_action(LightDimension::Color, temperature(3100), false)
+            .begin_light_action(temperature(3100.0), false)
             .unwrap();
         let unavailable = CommandError::Unavailable("no control path".into());
         physical.set_availability(Availability::Unavailable("no control path".into()));
@@ -357,12 +343,12 @@ fn partial_acceptance_updates_one_snapshot_and_failure_stops_only_the_original_a
         let (physical, mut receiver) = ready_light(true);
         let function = &physical.functions()[0];
         let old = function
-            .begin_light_action(LightDimension::Color, temperature(3100), false)
+            .begin_light_action(temperature(3100.0), false)
             .unwrap();
         let request = frame(&mut receiver).await;
         request.mark_sent().unwrap();
         let new = function
-            .begin_light_action(LightDimension::Color, temperature(5000), true)
+            .begin_light_action(temperature(5000.0), true)
             .unwrap();
         let revision = function.snapshot().revision;
         function
@@ -557,19 +543,9 @@ fn zero_level_target_is_rejected_before_taking_over_an_existing_action() {
     let (physical, _receiver) = ready_light(true);
     let function = &physical.functions()[0];
     let old = begin(function, 20.0, false);
-    for target in [
-        brightness(0.0),
-        LightTarget {
-            power: Some(false),
-            ..brightness(0.0)
-        },
-    ] {
-        assert!(
-            function
-                .begin_light_action(LightDimension::Brightness, target, true)
-                .is_err()
-        );
-    }
+    // Zero brightness can no longer be a target at all.
+    assert!(LightTarget::brightness(None, 0.0).is_err());
+    assert!(LightTarget::brightness(Some(false), 0.0).is_err());
     assert!(function.light_action_current(old.token()));
 }
 
@@ -580,24 +556,10 @@ fn linked_off_invalidates_both_old_dimensions_and_retains_its_own_action() {
         let function = &physical.functions()[0];
         let old = begin(function, 20.0, false);
         let color = function
-            .begin_light_action(
-                LightDimension::Color,
-                LightTarget {
-                    power: Some(true),
-                    ..temperature(3100)
-                },
-                false,
-            )
+            .begin_light_action(temperature(3100.0).with_power(Some(true)), false)
             .unwrap();
         let off = function
-            .begin_light_action(
-                LightDimension::Brightness,
-                LightTarget {
-                    power: Some(false),
-                    ..brightness(1.0)
-                },
-                true,
-            )
+            .begin_light_action(brightness(1.0).with_power(Some(false)), true)
             .unwrap();
         assert_eq!(old.accepted().await, Err(CommandError::Superseded));
         assert!(!function.light_action_current(color.token()));
@@ -614,17 +576,10 @@ fn linked_off_tick_cancels_the_other_dimension_and_preserves_its_token() {
         let function = &physical.functions()[0];
         let level = begin(function, 20.0, false);
         let color = function
-            .begin_light_action(LightDimension::Color, temperature(3100), false)
+            .begin_light_action(temperature(3100.0), false)
             .unwrap();
         function
-            .submit_light_frame(
-                level.token(),
-                LightTarget {
-                    power: Some(false),
-                    ..brightness(1.0)
-                },
-                true,
-            )
+            .submit_light_frame(level.token(), brightness(1.0).with_power(Some(false)), true)
             .unwrap();
         assert!(!function.light_action_current(color.token()));
         assert_eq!(color.accepted().await, Err(CommandError::Superseded));
@@ -734,7 +689,7 @@ fn unknown_toggle_does_not_cancel_either_existing_light_dimension() {
         let function = &physical.functions()[0];
         let level = begin(function, 20.0, false);
         let color = function
-            .begin_light_action(LightDimension::Color, temperature(3100), false)
+            .begin_light_action(temperature(3100.0), false)
             .unwrap();
         assert_eq!(
             function.execute(Command::Toggle).await,
@@ -749,8 +704,13 @@ fn unknown_toggle_does_not_cancel_either_existing_light_dimension() {
 fn action_tokens_do_not_cross_different_device_keys() {
     let (old_physical, _old_receiver) = ready_light(true);
     let old = begin(&old_physical.functions()[0], 20.0, false);
-    let mut description = old_physical.description();
-    description.key.id = "different-light".into();
+    let old_description = old_physical.description();
+    let description = PhysicalDeviceDescription::new(
+        DeviceKey::new("xiaomi", "different-light"),
+        old_description.label(),
+        old_description.functions().to_vec(),
+    )
+    .unwrap();
     let (new_physical, _new_receiver) = new_device(description);
     new_physical.set_availability(Availability::Available);
     let new_function = &new_physical.functions()[0];
@@ -872,14 +832,7 @@ fn merging_unsent_ticks_retains_startup_power_until_a_frame_is_submitted() {
         let (physical, mut receiver) = ready_light(true);
         let function = &physical.functions()[0];
         let action = function
-            .begin_light_action(
-                LightDimension::Brightness,
-                LightTarget {
-                    power: Some(true),
-                    ..brightness(20.0)
-                },
-                false,
-            )
+            .begin_light_action(brightness(20.0).with_power(Some(true)), false)
             .unwrap();
         function
             .submit_light_frame(action.token(), brightness(30.0), false)
@@ -888,13 +841,7 @@ fn merging_unsent_ticks_retains_startup_power_until_a_frame_is_submitted() {
             .submit_light_frame(action.token(), brightness(70.0), true)
             .unwrap();
         let request = frame(&mut receiver).await;
-        assert_eq!(
-            request.target,
-            LightTarget {
-                power: Some(true),
-                ..brightness(70.0)
-            }
-        );
+        assert_eq!(request.target, brightness(70.0).with_power(Some(true)));
         request.mark_sent().unwrap();
         request.accept().unwrap();
         assert!(action.accepted().await.is_ok());
@@ -907,26 +854,16 @@ fn a_new_explicit_linked_power_value_overrides_the_pending_startup_value() {
         let (physical, mut receiver) = ready_light(true);
         let function = &physical.functions()[0];
         let action = function
-            .begin_light_action(
-                LightDimension::Brightness,
-                LightTarget {
-                    power: Some(true),
-                    ..brightness(20.0)
-                },
-                false,
-            )
+            .begin_light_action(brightness(20.0).with_power(Some(true)), false)
             .unwrap();
         function
             .submit_light_frame(
                 action.token(),
-                LightTarget {
-                    power: Some(false),
-                    ..brightness(1.0)
-                },
+                brightness(1.0).with_power(Some(false)),
                 true,
             )
             .unwrap();
-        assert_eq!(frame(&mut receiver).await.target.power, Some(false));
+        assert_eq!(frame(&mut receiver).await.target.power(), Some(false));
     });
 }
 
@@ -936,23 +873,16 @@ fn dequeued_startup_power_is_not_repeated_in_later_controller_ticks() {
         let (physical, mut receiver) = ready_light(true);
         let function = &physical.functions()[0];
         let action = function
-            .begin_light_action(
-                LightDimension::Brightness,
-                LightTarget {
-                    power: Some(true),
-                    ..brightness(20.0)
-                },
-                false,
-            )
+            .begin_light_action(brightness(20.0).with_power(Some(true)), false)
             .unwrap();
         let first = frame(&mut receiver).await;
-        assert_eq!(first.target.power, Some(true));
+        assert_eq!(first.target.power(), Some(true));
         first.mark_sent().unwrap();
         function
             .submit_light_frame(action.token(), brightness(70.0), true)
             .unwrap();
         first.accept().unwrap();
-        assert_eq!(frame(&mut receiver).await.target.power, None);
+        assert_eq!(frame(&mut receiver).await.target.power(), None);
     });
 }
 
@@ -963,23 +893,13 @@ fn newer_ticks_withdraw_dequeued_unsent_frames_without_ending_the_action() {
             let (physical, mut receiver) = ready_light(true);
             let function = &physical.functions()[0];
             let action = function
-                .begin_light_action(
-                    LightDimension::Brightness,
-                    LightTarget {
-                        power: Some(true),
-                        ..brightness(20.0)
-                    },
-                    false,
-                )
+                .begin_light_action(brightness(20.0).with_power(Some(true)), false)
                 .unwrap();
             let old = frame(&mut receiver).await;
             function
                 .submit_light_frame(
                     action.token(),
-                    LightTarget {
-                        power,
-                        ..brightness(70.0)
-                    },
+                    LightTarget::brightness(power, 70.0).expect("valid test target"),
                     true,
                 )
                 .unwrap();
@@ -990,8 +910,8 @@ fn newer_ticks_withdraw_dequeued_unsent_frames_without_ending_the_action() {
             assert!(poll_once(action.ended()).await.is_none());
             old.reject(CommandError::Superseded);
             let latest = frame(&mut receiver).await;
-            assert_eq!(latest.target.power, power.or(Some(true)));
-            assert_eq!(latest.target.brightness_percent, Some(70.0));
+            assert_eq!(latest.target.power(), power.or(Some(true)));
+            assert_eq!(latest.target.brightness_percent(), Some(70.0));
             assert_eq!(latest.token, action.token());
             assert!(latest.final_frame);
             latest.mark_sent().unwrap();

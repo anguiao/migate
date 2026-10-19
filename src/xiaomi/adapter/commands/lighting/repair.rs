@@ -11,7 +11,7 @@ use super::super::super::{
 };
 use super::{Batch, BatchAttempt, submit_properties};
 use crate::{
-    device::{ActionToken, CommandError, LightColorTarget, LightRequest, LightTarget, Rgb},
+    device::{ActionToken, CommandError, LightRequest, LightTarget, Rgb},
     xiaomi::capability::RepairPlan,
 };
 use event_listener::Event;
@@ -171,27 +171,22 @@ async fn member_task(
         let cached = member.record.cached.borrow();
         cached
             .device
-            .functions
+            .functions()
             .iter()
-            .find(|function| function.description.id == "main")
+            .find(|function| function.id() == "main")
             .unwrap()
-            .lighting
-            .as_ref()
+            .lighting()
             .unwrap()
-            .color
-            .as_ref()
+            .color()
             .unwrap()
-            .property
+            .property()
     };
     let properties = vec![(property, json!(rgb.packed()))];
     let operation = context.commands.begin_operation(
         &member.record.physical.key().id,
         "main",
         property,
-        CommandTarget::Light(LightTarget {
-            color: Some(LightColorTarget::Rgb(rgb)),
-            ..LightTarget::default()
-        }),
+        CommandTarget::Light(LightTarget::rgb(None, rgb)),
         properties.clone(),
         std::time::Instant::now(),
     );
@@ -236,16 +231,15 @@ fn refresh_mode(work: &DeviceWork) {
         .cached
         .borrow()
         .device
-        .functions
+        .functions()
         .iter()
-        .find(|function| function.description.id == "main")
+        .find(|function| function.id() == "main")
         .unwrap()
-        .lighting
-        .as_ref()
+        .lighting()
         .unwrap()
-        .mode
+        .mode()
         .unwrap()
-        .property;
+        .property();
     work.request_dirty_read("main", mode);
 }
 

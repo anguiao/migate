@@ -78,13 +78,12 @@ fn configuration_lines(view: &View<'_>, did: &str) -> Vec<String> {
             .iter()
             .find(|entry| entry.physical.key() == &key)
         {
-            let native = &entry.cached.device.functions[0].description;
+            let native = entry.cached.device.functions()[0].description();
             let logical = entry.physical.functions()[0].description();
-            let repaired = logical.has_capability(Capability::ColorRgb)
-                && !native.has_capability(Capability::ColorRgb);
+            let repaired = logical.supports_rgb() && !native.supports_rgb();
             lines.push(format!(
                 "  Native capabilities: {}. Repaired: {}. State source: {}.",
-                capabilities(native),
+                capabilities(&native),
                 if repaired {
                     "RGB and color mode"
                 } else {
@@ -103,11 +102,11 @@ fn configuration_lines(view: &View<'_>, did: &str) -> Vec<String> {
             {
                 lines.push(format!("  RGB repair: unavailable ({reason})."));
             }
-            if let Some(range) = logical.temperature_range() {
+            if let Some(interval) = logical.temperature_interval() {
                 lines.push(format!(
                     "  Effective temperature range: {}–{} K.",
-                    range.min,
-                    range.effective_max()
+                    interval.min(),
+                    interval.max()
                 ));
             }
         } else {
@@ -125,13 +124,13 @@ fn configuration_lines(view: &View<'_>, did: &str) -> Vec<String> {
 
 fn capabilities(description: &crate::device::FunctionDescription) -> String {
     description
-        .capabilities
+        .capabilities()
         .iter()
         .map(|capability| match capability {
             Capability::OnOff => "on/off".into(),
             Capability::Brightness => "brightness".into(),
-            Capability::ColorTemperature(range) => {
-                format!("temperature {}–{} K", range.min, range.effective_max())
+            Capability::ColorTemperature(interval) => {
+                format!("temperature {}–{} K", interval.min(), interval.max())
             }
             Capability::ColorRgb => "RGB".into(),
         })
@@ -212,7 +211,7 @@ fn render(registry: &View<'_>, did: Option<&str>) -> String {
                 let capabilities = capabilities(description);
                 lines.push(format!("    Capabilities: {capabilities}."));
                 let mut values = Vec::new();
-                if description.has_capability(Capability::Brightness) {
+                if description.supports_brightness() {
                     values.push(format!(
                         "Brightness: {}",
                         light
@@ -220,7 +219,7 @@ fn render(registry: &View<'_>, did: Option<&str>) -> String {
                             .map_or_else(|| "unknown".into(), |value| format!("{value}%"))
                     ));
                 }
-                if description.temperature_range().is_some() {
+                if description.supports_color_temperature() {
                     values.push(format!(
                         "temperature: {}",
                         light
@@ -228,7 +227,7 @@ fn render(registry: &View<'_>, did: Option<&str>) -> String {
                             .map_or_else(|| "unknown".into(), |value| format!("{value} K"))
                     ));
                 }
-                if description.has_capability(Capability::ColorRgb) {
+                if description.supports_rgb() {
                     values.push(format!(
                         "RGB: {}",
                         light.color.map_or_else(
@@ -240,9 +239,7 @@ fn render(registry: &View<'_>, did: Option<&str>) -> String {
                         )
                     ));
                 }
-                if description.temperature_range().is_some()
-                    || description.has_capability(Capability::ColorRgb)
-                {
+                if description.supports_color_temperature() || description.supports_rgb() {
                     values.push(format!(
                         "mode: {}",
                         match light.mode {

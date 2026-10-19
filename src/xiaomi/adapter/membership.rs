@@ -14,7 +14,7 @@ impl Context {
         receivers: Vec<CommandReceiver>,
     ) {
         for (function, receiver) in record.physical.functions().iter().zip(receivers) {
-            if function.description().category == crate::device::Category::Light {
+            if function.description().kind.is_light() {
                 let function = function.clone();
                 let context = self.clone();
                 let life = record.clone();
@@ -203,9 +203,9 @@ impl Context {
                     .cached
                     .borrow()
                     .device
-                    .functions
+                    .functions()
                     .iter()
-                    .any(|function| function.lighting.is_some())
+                    .any(|function| function.lighting().is_some())
             });
             live.session
                 .as_ref()

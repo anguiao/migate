@@ -1,7 +1,6 @@
 use super::*;
 use crate::device::{
-    Capability, DeviceKey, LightColorTarget, LightDimension, LightMode, LightTarget, NumericRange,
-    Power, Rgb,
+    Capability, DeviceKey, LightDimension, LightMode, LightTarget, Power, Rgb, TemperatureInterval,
 };
 
 async fn wait_for(predicate: impl FnMut() -> bool, what: &str) {
@@ -40,33 +39,28 @@ fn repaired_group_publishes_extended_color_and_dispatches_rgb_to_members() {
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "main");
-        let capabilities = light.description().capabilities.clone();
+        let capabilities = light.description().capabilities().clone();
         assert!(
             capabilities.contains(&Capability::ColorRgb),
             "repaired group must publish RGB: {capabilities:?}"
         );
         assert_eq!(
-            light.description().temperature_range(),
-            Some(NumericRange {
-                min: 2700,
-                max: 6500,
-                step: 1
-            })
+            light.description().temperature_interval(),
+            Some(TemperatureInterval::new(2700, 6500).unwrap())
         );
         let before = light.snapshot();
         c.cloud.lock().unwrap().property_reads.clear();
         // The same cached RGB must still be sent to switch from white mode.
         let action = light
             .begin_light_action(
-                LightDimension::Color,
-                LightTarget {
-                    color: Some(LightColorTarget::Rgb(Rgb {
+                LightTarget::rgb(
+                    None,
+                    Rgb {
                         red: 0x11,
                         green: 0x22,
                         blue: 0x33,
-                    })),
-                    ..Default::default()
-                },
+                    },
+                ),
                 true,
             )
             .unwrap();
@@ -123,20 +117,14 @@ fn repaired_group_native_controls_do_not_depend_on_member_writes() {
         let before = light.snapshot();
         light.execute(Command::On).await.unwrap();
         light.execute(Command::Off).await.unwrap();
-        for (dimension, target) in [
-            (LightDimension::Brightness, brightness(80.0)),
-            (
-                LightDimension::Color,
-                LightTarget {
-                    // The native value already equals this target, but writing it
-                    // still selects white mode on the members.
-                    color: Some(LightColorTarget::Temperature(2700)),
-                    ..Default::default()
-                },
-            ),
+        for target in [
+            brightness(80.0),
+            // The native value already equals this target, but writing it
+            // still selects white mode on the members.
+            LightTarget::temperature(None, 2700.0).expect("valid test target"),
         ] {
             light
-                .begin_light_action(dimension, target, true)
+                .begin_light_action(target, true)
                 .unwrap()
                 .accepted()
                 .await
@@ -246,17 +234,11 @@ async fn wait_holding_member_b(c: &Control) {
 }
 
 fn brightness(value: f64) -> LightTarget {
-    LightTarget {
-        brightness_percent: Some(value),
-        ..LightTarget::default()
-    }
+    LightTarget::brightness(None, value).expect("valid test target")
 }
 
 fn rgb(value: u32) -> LightTarget {
-    LightTarget {
-        color: Some(LightColorTarget::Rgb(Rgb::from_packed(value).unwrap())),
-        ..LightTarget::default()
-    }
+    LightTarget::rgb(None, Rgb::from_packed(value).unwrap())
 }
 
 /// Let the outer executor honour the released DID gate and poll the queued
@@ -296,9 +278,7 @@ fn queued_rgb_rechecks_action_and_member_power_before_sending() {
             let scenario = async {
                 wait_holding_member_b(&c).await;
                 let light = function(&c.context.registry, "group-1", "main");
-                let action = light
-                    .begin_light_action(LightDimension::Color, rgb(0x00ff00), true)
-                    .unwrap();
+                let action = light.begin_light_action(rgb(0x00ff00), true).unwrap();
                 action.accepted().await.unwrap();
                 match change {
                     Change::Stop => {
@@ -306,7 +286,7 @@ fn queued_rgb_rechecks_action_and_member_power_before_sending() {
                     }
                     Change::NewTarget => {
                         light
-                            .begin_light_action(LightDimension::Color, rgb(0xff0000), true)
+                            .begin_light_action(rgb(0xff0000), true)
                             .unwrap()
                             .accepted()
                             .await
@@ -315,11 +295,7 @@ fn queued_rgb_rechecks_action_and_member_power_before_sending() {
                     Change::NativeTemperature => {
                         light
                             .begin_light_action(
-                                LightDimension::Color,
-                                LightTarget {
-                                    color: Some(LightColorTarget::Temperature(4000)),
-                                    ..Default::default()
-                                },
+                                LightTarget::temperature(None, 4000.0).expect("valid test target"),
                                 true,
                             )
                             .unwrap()
@@ -387,9 +363,7 @@ fn submitted_rgb_receipt_survives_stop_before_or_after_early_success() {
         block_on(rig.run(|c| async move {
             repair_ready(&c).await;
             let light = function(&c.context.registry, "group-1", "main");
-            let action = light
-                .begin_light_action(LightDimension::Color, rgb(0x0000ff), true)
-                .unwrap();
+            let action = light.begin_light_action(rgb(0x0000ff), true).unwrap();
             if early_success {
                 action.accepted().await.unwrap();
             }
@@ -476,20 +450,12 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "main");
         assert_eq!(
-            light.description().temperature_range(),
-            Some(NumericRange {
-                min: 2700,
-                max: 6450,
-                step: 1
-            })
+            light.description().temperature_interval(),
+            Some(TemperatureInterval::new(2700, 6450).unwrap())
         );
         let action = light
             .begin_light_action(
-                LightDimension::Color,
-                LightTarget {
-                    color: Some(LightColorTarget::Temperature(6450)),
-                    ..LightTarget::default()
-                },
+                LightTarget::temperature(None, 6450.0).expect("valid test target"),
                 true,
             )
             .unwrap();
@@ -585,10 +551,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         c.context.stage();
         until(|| c.publication.failure().is_some()).await;
         assert!(
-            light
-                .description()
-                .capabilities
-                .contains(&Capability::ColorRgb),
+            light.description().supports_rgb(),
             "a failed commit must retain the old repair plan"
         );
         assert!(c.context.group_repair("group-1").is_some());
@@ -604,12 +567,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
                     .registry
                     .get(&group_key)
                     .and_then(|physical| physical.function("main"))
-                    .is_none_or(|function| {
-                        !function
-                            .description()
-                            .capabilities
-                            .contains(&Capability::ColorRgb)
-                    })
+                    .is_none_or(|function| !function.description().supports_rgb())
             },
             "successful commit must fall back to the native profile",
         )
@@ -619,7 +577,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         let native_a = saved
             .cached
             .iter()
-            .find(|cached| cached.device.key.id == "member-a")
+            .find(|cached| cached.device.key().id == "member-a")
             .expect("member native input restored from the committed configuration");
         let stored_a = saved
             .records
@@ -628,18 +586,18 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
             .expect("member logical identity restored");
         assert_eq!(native_a.model, "yeelink.light.light3");
         assert!(
-            native_a.device.functions[0]
-                .lighting
-                .as_ref()
+            native_a.device.functions()[0]
+                .lighting()
                 .unwrap()
-                .color
+                .color()
                 .is_none(),
             "the persisted confirmed input is the genuine new Native description"
         );
         assert!(
             stored_a.functions[0]
-                .capabilities
-                .contains(&Capability::ColorRgb),
+                .kind
+                .light_profile()
+                .is_some_and(crate::device::LightProfile::has_rgb),
             "the stored logical description may intentionally differ and stays static"
         );
         assert!(saved.root_version > root);
@@ -680,12 +638,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         )
         .await;
         let light = function(&c.context.registry, "group-1", "main");
-        assert!(
-            light
-                .description()
-                .capabilities
-                .contains(&Capability::ColorRgb)
-        );
+        assert!(light.description().supports_rgb());
         let again = c
             .store
             .devices()
@@ -705,9 +658,7 @@ fn repaired_group_unauthorized_member_path_recovers_after_token_refresh() {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "main");
         c.cloud.lock().unwrap().property_status = 401;
-        let denied = light
-            .begin_light_action(LightDimension::Color, rgb(0x00ff00), true)
-            .unwrap();
+        let denied = light.begin_light_action(rgb(0x00ff00), true).unwrap();
         assert!(denied.accepted().await.is_err());
         // The existing cloud coordination refreshes the rejected token.
         until(|| c.cloud.lock().unwrap().tokens > 0).await;
@@ -719,9 +670,7 @@ fn repaired_group_unauthorized_member_path_recovers_after_token_refresh() {
                 .all(|did| function(&c.context.registry, did, "main").snapshot().power == Power::On)
         })
         .await;
-        let next = light
-            .begin_light_action(LightDimension::Color, rgb(0x0000ff), true)
-            .unwrap();
+        let next = light.begin_light_action(rgb(0x0000ff), true).unwrap();
         next.accepted().await.unwrap();
         wait_for(
             || {
@@ -761,11 +710,7 @@ fn repaired_group_native_partial_failure_fails_without_optimistic_state() {
         let before = light.snapshot();
         let action = light
             .begin_light_action(
-                LightDimension::Color,
-                LightTarget {
-                    color: Some(LightColorTarget::Temperature(4200)),
-                    ..LightTarget::default()
-                },
+                LightTarget::temperature(None, 4200.0).expect("valid test target"),
                 true,
             )
             .unwrap();
@@ -835,9 +780,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                     Power::Unknown
                 }
             );
-            let action = light
-                .begin_light_action(LightDimension::Color, rgb(0x00ff00), true)
-                .unwrap();
+            let action = light.begin_light_action(rgb(0x00ff00), true).unwrap();
             assert_eq!(
                 action.accepted().await.is_ok(),
                 accepted,

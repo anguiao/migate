@@ -1,32 +1,26 @@
 use migate::{
-    device::{
-        self, Capability, Category, DeviceKey, FunctionDescription, PhysicalDeviceDescription,
-    },
+    device::{self, DeviceKey, FunctionDescription, FunctionKind, PhysicalDeviceDescription},
     storage::{self, CachedPhysicalDevice, CachedScope, Store},
-    xiaomi::{
-        self,
-        capability::{ParsedDevice, ParsedFunction, PropertyBinding},
-        cloud::group_id,
-    },
+    xiaomi::{self, capability::parse_device_for_model, cloud::group_id},
 };
 use rusqlite::Connection;
 #[path = "../src/storage/tests/fixtures.rs"]
 mod publication_support;
 use publication_support::{commit, record, scope};
 fn description(id: &str) -> PhysicalDeviceDescription {
-    PhysicalDeviceDescription {
-        key: DeviceKey::new("xiaomi", id),
-        label: "米家插座".into(),
-        functions: ["outlet_1", "outlet_2", "usb"]
+    PhysicalDeviceDescription::new(
+        DeviceKey::new("xiaomi", id),
+        "米家插座",
+        ["outlet_1", "outlet_2", "usb"]
             .into_iter()
             .map(|id| FunctionDescription {
                 id: id.into(),
                 label: id.into(),
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
+                kind: FunctionKind::Outlet,
             })
             .collect(),
-    }
+    )
+    .unwrap()
 }
 fn cached(uid: &str, home: &str) -> CachedPhysicalDevice {
     CachedPhysicalDevice {
@@ -35,24 +29,12 @@ fn cached(uid: &str, home: &str) -> CachedPhysicalDevice {
         group_id: group_id(uid, home),
         model: "cuco.plug.cp7pd".into(),
         instance_type: "urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:1".into(),
-        device: ParsedDevice {
-            key: DeviceKey::new("xiaomi", "multi"),
-            functions: [3, 4, 9]
-                .into_iter()
-                .zip(["outlet_1", "outlet_2", "usb"])
-                .map(|(siid, id)| ParsedFunction {
-                    description: FunctionDescription {
-                        id: id.into(),
-                        label: id.into(),
-                        category: Category::Outlet,
-                        capabilities: vec![Capability::OnOff],
-                    },
-                    power: PropertyBinding { siid, piid: 1 },
-                    lighting: None,
-                })
-                .collect(),
-            refresh_trigger: Some(PropertyBinding { siid: 2, piid: 1 }),
-        },
+        device: parse_device_for_model(
+            DeviceKey::new("xiaomi", "multi"),
+            "cuco.plug.cp7pd",
+            &serde_json::from_str(include_str!("fixtures/miot/cuco-cp7pd.json")).unwrap(),
+        )
+        .unwrap(),
     }
 }
 
@@ -137,9 +119,11 @@ fn stored_identity_names_and_endpoints_survive_withdrawal_and_republication() {
 fn names_are_utf8_truncated_on_import_and_validated_on_write() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let mut desc = description("multi");
-    desc.label = "插".repeat(20);
-    desc.functions[0].label = "路".repeat(20);
+    let original = description("multi");
+    let mut functions = original.functions().to_vec();
+    functions[0].label = "路".repeat(20);
+    let desc =
+        PhysicalDeviceDescription::new(original.key().clone(), "插".repeat(20), functions).unwrap();
     let saved = record(&desc, 2);
     store
         .devices()
@@ -150,11 +134,11 @@ fn names_are_utf8_truncated_on_import_and_validated_on_write() {
     assert!(
         store
             .devices()
-            .set_device_label(&desc.key, &"x".repeat(33))
+            .set_device_label(desc.key(), &"x".repeat(33))
             .is_err()
     );
     assert_eq!(
-        store.devices().load_published(&desc.key).unwrap(),
+        store.devices().load_published(desc.key()).unwrap(),
         Some(saved)
     );
 }
@@ -230,8 +214,13 @@ fn invalid_records_and_function_write_failures_do_not_allocate_endpoints() {
     );
     assert_eq!(store.devices().next_endpoint().unwrap(), 2);
     db.execute_batch("DROP TRIGGER fail_function;").unwrap();
-    let mut single = description("last");
-    single.functions.truncate(1);
+    let original = description("last");
+    let single = PhysicalDeviceDescription::new(
+        original.key().clone(),
+        original.label(),
+        original.functions()[..1].to_vec(),
+    )
+    .unwrap();
     let last = record(&single, 65534);
     store
         .devices()
@@ -249,8 +238,23 @@ fn cache_and_selected_scope_are_account_and_home_scoped() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let first = cached("account", "home-one");
-    let mut second = cached("account", "home-two");
-    second.device.functions[0].power.siid = 30;
+    // A distinct but fully valid native description still keys the cache by
+    // account/home scope instead of the device identity.
+    let instance: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/miot/outlet.json")).unwrap();
+    let second = CachedPhysicalDevice {
+        uid: "account".into(),
+        home_id: "home-two".into(),
+        group_id: group_id("account", "home-two"),
+        model: "cuco.plug.v3".into(),
+        instance_type: instance["type"].as_str().unwrap().into(),
+        device: parse_device_for_model(
+            DeviceKey::new("xiaomi", "multi"),
+            "cuco.plug.v3",
+            &instance,
+        )
+        .unwrap(),
+    };
     let other = cached("other", "home-one");
     let identity = record(&first.physical_description("Outlet"), 2);
     for cached in [&first, &second, &other] {
@@ -302,7 +306,7 @@ fn cache_and_selected_scope_are_account_and_home_scoped() {
     assert!(
         store
             .devices()
-            .load_parsed("account", "missing", &first.device.key)
+            .load_parsed("account", "missing", first.device.key())
             .unwrap()
             .is_none()
     );

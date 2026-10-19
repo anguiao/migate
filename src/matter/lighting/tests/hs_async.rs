@@ -172,7 +172,7 @@ fn gray_hue_waits_for_older_red_receipt_and_rejects_failed_white_correction() {
         assert!(poll_once(new_invoke.as_mut()).await.is_none());
         let correction = frame(&mut receiver).await;
         assert_eq!(
-            correction.target.color,
+            correction.target.color_target(),
             Some(LightColorTarget::Rgb(Rgb::from_packed(0xffffff).unwrap()))
         );
         correction.mark_sent().unwrap();
@@ -210,7 +210,7 @@ fn gray_hue_waits_for_its_source_receipt_even_when_an_older_write_failed() {
         assert!(poll_once(new_invoke.as_mut()).await.is_none());
         let unchanged = frame(&mut receiver).await;
         assert_eq!(
-            unchanged.target.color,
+            unchanged.target.color_target(),
             Some(LightColorTarget::Rgb(Rgb::from_packed(0xffffff).unwrap()))
         );
         accept(&function, unchanged);

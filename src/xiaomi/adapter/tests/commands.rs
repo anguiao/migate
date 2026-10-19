@@ -118,7 +118,17 @@ fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_va
                 .cached
                 .borrow()
                 .clone();
-            changed.device.functions[0].power.siid = 7;
+            let power = changed.device.functions()[0].power();
+            changed.device = super::support::device_with_functions(
+                &changed.device,
+                vec![super::support::function_with_power(
+                    &changed.device.functions()[0],
+                    crate::xiaomi::capability::PropertyBinding {
+                        siid: 7,
+                        piid: power.piid,
+                    },
+                )],
+            );
             control
                 .context
                 .live
@@ -139,17 +149,16 @@ fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_va
 }
 
 #[test]
-fn restored_and_updated_description_order_cannot_cross_wire_channel_commands() {
+fn restored_and_repeated_description_sync_keep_wire_channel_commands() {
     let mut rig = Rig::new(true, &["multi"]);
-    let mut reordered = rig.data[1].clone();
-    reordered.device.functions.reverse();
-    let scope = scope(&reordered.uid);
+    let stored = rig.data[1].clone();
+    let scope = scope(&stored.uid);
     let mut state = rig.store.devices().load_publication(Some(&scope)).unwrap();
     *state
         .cached
         .iter_mut()
-        .find(|cached| cached.device.key == reordered.device.key)
-        .unwrap() = reordered.clone();
+        .find(|cached| cached.device.key() == stored.device.key())
+        .unwrap() = stored.clone();
     rig.store
         .devices()
         .apply_publication(&crate::storage::tests::fixtures::commit(
@@ -182,13 +191,13 @@ fn restored_and_updated_description_order_cannot_cross_wire_channel_commands() {
                 .iter()
                 .map(|function| function.function_key().id.clone())
                 .collect::<Vec<_>>();
-            let cached_order = reordered
+            let cached_order = stored
                 .device
-                .functions
+                .functions()
                 .iter()
-                .map(|function| function.description.id.clone())
+                .map(|function| function.id().to_owned())
                 .collect::<Vec<_>>();
-            assert_ne!(runtime_order, cached_order);
+            assert_eq!(runtime_order, cached_order);
             for (id, siid) in [("outlet_1", 3), ("outlet_2", 4), ("usb", 9)] {
                 physical
                     .function(id)
@@ -198,7 +207,8 @@ fn restored_and_updated_description_order_cannot_cross_wire_channel_commands() {
                     .unwrap();
                 assert_eq!(peer.count("rpcReq", "multi", siid), 1);
             }
-            reordered.device.functions.reverse();
+            // Repeating the same stored description keeps the instance and its
+            // stable function keys; channel commands stay on their own siid.
             control
                 .context
                 .live
@@ -206,7 +216,7 @@ fn restored_and_updated_description_order_cannot_cross_wire_channel_commands() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some((reordered, None));
+                .candidate = Some((stored.clone(), None));
             control.context.reconcile("multi").unwrap();
             for (id, siid) in [("outlet_1", 3), ("outlet_2", 4), ("usb", 9)] {
                 physical

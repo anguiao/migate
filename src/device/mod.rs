@@ -10,10 +10,10 @@ pub use light_command::{
     LightActionResult, LightColorTarget, LightDimension, LightRequest, LightTarget,
 };
 pub use model::{
-    Availability, Capability, Category, Command, CommandError, DeviceKey, FunctionDescription,
-    FunctionKey, FunctionSnapshot, LightMode, LightPatch, LightProfile, LightSnapshot,
-    NumericRange, PhysicalDeviceDescription, Power, Rgb, brightness_from_matter_level,
-    brightness_to_matter_level, standard_light_profile,
+    Availability, Capability, Command, CommandError, DescriptionError, DeviceKey,
+    FunctionDescription, FunctionKey, FunctionKind, FunctionSnapshot, LightMode, LightPatch,
+    LightProfile, LightProfileKind, LightSnapshot, NumericRange, PhysicalDeviceDescription, Power,
+    RangeError, Rgb, TemperatureInterval, brightness_from_matter_level, brightness_to_matter_level,
 };
 pub use registry::{DeviceRegistry, RegistryChanges, RegistrySnapshot};
 pub use state::{AvailabilityChanges, Function, FunctionChanges, PhysicalDevice};

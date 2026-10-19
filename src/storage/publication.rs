@@ -15,7 +15,7 @@ use super::{
     },
     registry::{StoredDevice, load_stored, validate_label},
 };
-use crate::device::{DeviceKey, FunctionDescription};
+use crate::device::{DeviceKey, FunctionDescription, PhysicalDeviceDescription};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use std::collections::BTreeSet;
 
@@ -478,12 +478,12 @@ impl DeviceStore {
                     function.key.id,
                     function.endpoint,
                     function.label,
-                    match function.category {
-                        crate::device::Category::Outlet => "outlet",
-                        crate::device::Category::Light => "light",
+                    if function.kind.is_light() {
+                        "light"
+                    } else {
+                        "outlet"
                     },
-                    serde_json::to_string(&function.capabilities)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    super::registry::encode_kind(function.kind)?,
                 ],
             )?;
         }
@@ -571,13 +571,6 @@ fn validate_record(record: &StoredDevice) -> Result<(), &'static str> {
             || function.key.device != record.key
             || !(2..=65534).contains(&function.endpoint)
             || validate_label(&function.label).is_err()
-            || !(FunctionDescription {
-                id: function.key.id.clone(),
-                label: function.label.clone(),
-                category: function.category,
-                capabilities: function.capabilities.clone(),
-            })
-            .valid_capabilities()
         {
             return Err("Published device function is invalid");
         }
@@ -588,6 +581,23 @@ fn validate_record(record: &StoredDevice) -> Result<(), &'static str> {
         } else if function.endpoint <= record.endpoint {
             return Err("Published device function endpoint is invalid");
         }
+    }
+    if PhysicalDeviceDescription::new(
+        record.key.clone(),
+        String::new(),
+        record
+            .functions
+            .iter()
+            .map(|function| FunctionDescription {
+                id: function.key.id.clone(),
+                label: function.label.clone(),
+                kind: function.kind,
+            })
+            .collect(),
+    )
+    .is_err()
+    {
+        return Err("Published device function is invalid");
     }
     if !single {
         let children = record

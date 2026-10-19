@@ -193,7 +193,7 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
         until(|| c.context.registry.get(&key).is_some()).await;
         assert!(c.context.live.borrow().session.is_none());
         let physical = c.context.registry.get(&key).unwrap();
-        assert_eq!(physical.description().label, "Cloud strip");
+        assert_eq!(physical.description().label(), "Cloud strip");
         assert_eq!(physical.functions().len(), 3);
         for function in physical.functions() {
             assert_eq!(function.snapshot().power, Power::Unknown);
@@ -240,7 +240,7 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
         assert_eq!(after.functions, before.functions);
         assert_eq!(after.label, "Controller saved strip");
         assert_eq!(
-            c.context.registry.get(&key).unwrap().description().label,
+            c.context.registry.get(&key).unwrap().description().label(),
             "Controller saved strip"
         );
         assert!(c.context.live.borrow().session.is_none());
@@ -435,7 +435,20 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
                     record.binding_generation.get(),
                 )
             };
-            changed.device.functions[0].power.siid = 7;
+            changed.device = {
+                let function = changed.device.functions()[0].clone();
+                let power = function.power();
+                super::support::device_with_functions(
+                    &changed.device,
+                    vec![super::support::function_with_power(
+                        &function,
+                        crate::xiaomi::capability::PropertyBinding {
+                            siid: 7,
+                            piid: power.piid,
+                        },
+                    )],
+                )
+            };
             changed.instance_type = "urn:miot-spec-v2:device:outlet:0000A002:cuco-v3:2".into();
             {
                 let mut live = c.context.live.borrow_mut();

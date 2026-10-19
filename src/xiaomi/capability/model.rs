@@ -1,54 +1,179 @@
 use std::{error::Error, fmt};
 
-use crate::device::{DeviceKey, FunctionDescription, NumericRange};
+use crate::device::{
+    DeviceKey, FunctionDescription, FunctionKind, LightMode, LightProfile, NumericRange,
+    PhysicalDeviceDescription, TemperatureInterval,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct PropertyBinding {
     pub siid: u32,
     pub piid: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedFunction {
-    pub description: FunctionDescription,
-    pub power: PropertyBinding,
-    pub lighting: Option<LightBindings>,
+    id: String,
+    label: String,
+    bindings: FunctionBindings,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FunctionBindings {
+    Outlet {
+        power: PropertyBinding,
+    },
+    Light {
+        power: PropertyBinding,
+        lighting: LightBindings,
+    },
 }
 impl ParsedFunction {
-    /// The single capability description shared by parsing, persistence and publication.
-    pub fn capabilities(&self) -> Vec<crate::device::Capability> {
-        let mut capabilities = vec![crate::device::Capability::OnOff];
-        if let Some(light) = &self.lighting {
-            if light.brightness.is_some() {
-                capabilities.push(crate::device::Capability::Brightness);
-            }
-            if let Some(temperature) = &light.temperature {
-                capabilities.push(crate::device::Capability::ColorTemperature(
-                    temperature.range,
-                ));
-            }
-            if light.color.is_some() {
-                capabilities.push(crate::device::Capability::ColorRgb);
-            }
+    pub(crate) fn outlet(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        power: PropertyBinding,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Outlet { power },
         }
-        capabilities
     }
-    /// Fixed capability description plus one of the four standard light profiles.
-    pub fn light_profile(&self) -> Result<crate::device::LightProfile, &'static str> {
-        if self.capabilities() != self.description.capabilities {
-            return Err("capabilities do not match the real bindings");
+    pub(crate) fn light(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        power: PropertyBinding,
+        lighting: LightBindings,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Light { power, lighting },
         }
-        self.description.light_profile()
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    pub fn power(&self) -> PropertyBinding {
+        match &self.bindings {
+            FunctionBindings::Outlet { power } | FunctionBindings::Light { power, .. } => *power,
+        }
+    }
+    pub fn lighting(&self) -> Option<&LightBindings> {
+        match &self.bindings {
+            FunctionBindings::Outlet { .. } => None,
+            FunctionBindings::Light { lighting, .. } => Some(lighting),
+        }
+    }
+    pub fn kind(&self) -> FunctionKind {
+        match &self.bindings {
+            FunctionBindings::Outlet { .. } => FunctionKind::Outlet,
+            FunctionBindings::Light { lighting, .. } => FunctionKind::Light(lighting.profile()),
+        }
+    }
+    /// The logical description derived from the real bindings on demand.
+    pub fn description(&self) -> FunctionDescription {
+        FunctionDescription {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            kind: self.kind(),
+        }
+    }
+    /// Every native binding this function really reads or writes.
+    pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {
+        let mut bindings = vec![self.power()];
+        if let Some(lighting) = self.lighting() {
+            bindings.extend(lighting.bindings());
+        }
+        bindings
     }
 }
 
+/// A parsed device description with non-empty, uniquely keyed functions and
+/// uniquely owned real bindings. Lights use the single `main` function layout.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedDevice {
-    pub key: DeviceKey,
-    pub functions: Vec<ParsedFunction>,
-    pub refresh_trigger: Option<PropertyBinding>,
+    key: DeviceKey,
+    functions: Vec<ParsedFunction>,
+    refresh_trigger: Option<PropertyBinding>,
+}
+impl ParsedDevice {
+    pub(crate) fn new(
+        key: DeviceKey,
+        functions: Vec<ParsedFunction>,
+        refresh_trigger: Option<PropertyBinding>,
+    ) -> Result<Self, CapabilityError> {
+        if functions.is_empty() {
+            return Err(CapabilityError::InvalidDescription("functions"));
+        }
+        let mut ids = std::collections::HashSet::new();
+        if functions.iter().any(|function| !ids.insert(function.id())) {
+            return Err(CapabilityError::InvalidDescription(
+                "duplicate function key",
+            ));
+        }
+        let mut bindings = std::collections::HashSet::new();
+        for binding in functions
+            .iter()
+            .flat_map(ParsedFunction::bindings)
+            .chain(refresh_trigger)
+        {
+            if binding.siid == 0 || binding.piid == 0 || !bindings.insert(binding) {
+                return Err(CapabilityError::InvalidDescription("function bindings"));
+            }
+        }
+        let lights = functions
+            .iter()
+            .filter(|function| function.lighting().is_some())
+            .count();
+        if lights > 0 {
+            if functions.len() != 1 || functions[0].id() != "main" || refresh_trigger.is_some() {
+                return Err(CapabilityError::InvalidDescription("light topology"));
+            }
+        } else {
+            // Outlets support only a single main channel or the concrete
+            // cuco.plug.cp7pd three-channel layout with its master trigger.
+            let ids = functions.iter().map(ParsedFunction::id).collect::<Vec<_>>();
+            let single_main = ids == ["main"] && refresh_trigger.is_none();
+            let cp7pd = ids == ["outlet_1", "outlet_2", "usb"] && refresh_trigger.is_some();
+            if !(single_main || cp7pd) {
+                return Err(CapabilityError::InvalidDescription("outlet topology"));
+            }
+        }
+        Ok(Self {
+            key,
+            functions,
+            refresh_trigger,
+        })
+    }
+    pub fn key(&self) -> &DeviceKey {
+        &self.key
+    }
+    pub fn functions(&self) -> &[ParsedFunction] {
+        &self.functions
+    }
+    pub fn refresh_trigger(&self) -> Option<PropertyBinding> {
+        self.refresh_trigger
+    }
+    pub(crate) fn physical_description(
+        &self,
+        label: impl Into<String>,
+    ) -> PhysicalDeviceDescription {
+        PhysicalDeviceDescription::new(
+            self.key.clone(),
+            label,
+            self.functions
+                .iter()
+                .map(ParsedFunction::description)
+                .collect(),
+        )
+        .expect("a parsed device keeps a valid description")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,30 +247,59 @@ impl NumericFormat {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NumericUnit {
-    Percentage,
-    Kelvin,
-    Rgb,
+
+fn raw_integer(value: &Value) -> Result<u32, CapabilityError> {
+    value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(CapabilityError::InvalidValue("type"))
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct NumericBinding {
-    pub property: PropertyBinding,
-    pub format: NumericFormat,
-    pub unit: NumericUnit,
-    pub range: NumericRange,
+fn grid_raw(value: &Value, range: NumericRange) -> Result<u32, CapabilityError> {
+    let raw = raw_integer(value)?;
+    if !range.contains(raw) {
+        return Err(CapabilityError::InvalidValue("range or step"));
+    }
+    Ok(raw)
 }
-impl NumericBinding {
-    pub fn read_raw(&self, value: &Value) -> Result<u32, CapabilityError> {
-        let raw = value
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or(CapabilityError::InvalidValue("type"))?;
-        if !self.range.contains(raw) {
-            return Err(CapabilityError::InvalidValue("range or step"));
+
+/// A native brightness grid. Construction guarantees a nonzero reachable
+/// span that the declared format can hold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BrightnessBinding {
+    property: PropertyBinding,
+    format: NumericFormat,
+    range: NumericRange,
+}
+impl BrightnessBinding {
+    pub(crate) fn new(
+        property: PropertyBinding,
+        format: NumericFormat,
+        range: NumericRange,
+    ) -> Result<Self, CapabilityError> {
+        if property.siid == 0
+            || property.piid == 0
+            || range.nonzero_bounds().is_none()
+            || range.max() > format.maximum()
+        {
+            return Err(CapabilityError::InvalidLight("brightness range or format"));
         }
-        Ok(raw)
+        Ok(Self {
+            property,
+            format,
+            range,
+        })
+    }
+    pub fn property(&self) -> PropertyBinding {
+        self.property
+    }
+    pub fn format(&self) -> NumericFormat {
+        self.format
+    }
+    pub fn range(&self) -> NumericRange {
+        self.range
+    }
+    pub fn read_raw(&self, value: &Value) -> Result<u32, CapabilityError> {
+        grid_raw(value, self.range)
     }
     pub fn brightness_from_raw(&self, value: &Value) -> Result<f64, CapabilityError> {
         let raw = self.read_raw(value)?;
@@ -155,102 +309,259 @@ impl NumericBinding {
         let (min, max) = self
             .range
             .nonzero_bounds()
-            .ok_or(CapabilityError::InvalidValue("brightness range"))?;
+            .expect("a valid brightness grid has a nonzero span");
         Ok(1.0 + (raw - min) as f64 * 99.0 / (max - min) as f64)
     }
-    pub fn brightness_to_raw(&self, percent: f64) -> Result<u32, CapabilityError> {
-        if percent == 0.0 && self.range.contains(0) {
-            return Ok(0);
-        }
-        if !percent.is_finite() || !(1.0..=100.0).contains(&percent) {
-            return Err(CapabilityError::InvalidValue("brightness"));
+    /// Convert an already validated brightness; zero uses a reachable zero.
+    /// Quantization to the native grid stays at the Xiaomi source boundary.
+    pub fn brightness_to_raw(&self, percent: f64) -> u32 {
+        if percent == 0.0 && self.range.min() == 0 {
+            return 0;
         }
         let (min, max) = self
             .range
             .nonzero_bounds()
-            .ok_or(CapabilityError::InvalidValue("brightness range"))?;
-        Ok(self
-            .range
+            .expect("a valid brightness grid has a nonzero span");
+        self.range
             .quantize(min as f64 + (percent - 1.0) * (max - min) as f64 / 99.0)
-            .max(min))
+            .max(min)
     }
-    pub fn temperature_to_raw(&self, kelvin: u32) -> Result<u32, CapabilityError> {
-        if kelvin == 0 {
-            return Err(CapabilityError::InvalidValue("temperature"));
+}
+
+/// A native color-temperature grid plus the logical interval it advertises.
+/// The grid keeps its own step for Xiaomi quantization; the interval carries
+/// no step and is what publication compares.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TemperatureBinding {
+    property: PropertyBinding,
+    format: NumericFormat,
+    range: NumericRange,
+    interval: TemperatureInterval,
+}
+impl TemperatureBinding {
+    pub(crate) fn new(
+        property: PropertyBinding,
+        format: NumericFormat,
+        range: NumericRange,
+    ) -> Result<Self, CapabilityError> {
+        if property.siid == 0
+            || property.piid == 0
+            || range.min() == 0
+            || range.max() > 1_000_000
+            || range.max() > format.maximum()
+        {
+            return Err(CapabilityError::InvalidLight("temperature range or format"));
         }
-        Ok(self.range.quantize(kelvin as f64))
+        let interval = TemperatureInterval::from_grid(range)
+            .map_err(|_| CapabilityError::InvalidLight("temperature range or format"))?;
+        Ok(Self {
+            property,
+            format,
+            range,
+            interval,
+        })
     }
-    pub(crate) fn valid(&self, unit: NumericUnit) -> bool {
-        self.property.siid > 0
-            && self.property.piid > 0
-            && self.unit == unit
-            && self.range.valid()
-            && self.range.max <= self.format.maximum()
+    pub fn property(&self) -> PropertyBinding {
+        self.property
+    }
+    pub fn format(&self) -> NumericFormat {
+        self.format
+    }
+    pub fn range(&self) -> NumericRange {
+        self.range
+    }
+    pub fn interval(&self) -> TemperatureInterval {
+        self.interval
+    }
+    pub fn read_raw(&self, value: &Value) -> Result<u32, CapabilityError> {
+        grid_raw(value, self.range)
+    }
+    /// Quantize a kelvin target onto the native grid. The target keeps full
+    /// precision until this single source-boundary quantization.
+    pub fn temperature_to_raw(&self, kelvin: f64) -> u32 {
+        self.range.quantize(kelvin)
     }
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BrightnessConversion {
-    NonzeroLinear,
+
+/// A native RGB binding. The advertised range is fixed at `0..=0xffffff`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ColorBinding {
+    property: PropertyBinding,
+    format: NumericFormat,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+impl ColorBinding {
+    pub(crate) fn new(
+        property: PropertyBinding,
+        format: NumericFormat,
+    ) -> Result<Self, CapabilityError> {
+        if property.siid == 0 || property.piid == 0 || format.maximum() < 0xffffff {
+            return Err(CapabilityError::InvalidLight("rgb range or format"));
+        }
+        Ok(Self { property, format })
+    }
+    pub fn property(&self) -> PropertyBinding {
+        self.property
+    }
+    pub fn format(&self) -> NumericFormat {
+        self.format
+    }
+    pub fn read_raw(&self, value: &Value) -> Result<u32, CapabilityError> {
+        let raw = raw_integer(value)?;
+        if raw > 0xffffff {
+            return Err(CapabilityError::InvalidValue("range or step"));
+        }
+        Ok(raw)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModeBinding {
-    pub property: PropertyBinding,
-    pub format: NumericFormat,
-    pub temperature_value: u32,
-    pub rgb_value: u32,
+    property: PropertyBinding,
+    format: NumericFormat,
+    temperature_value: u32,
+    rgb_value: u32,
 }
 impl ModeBinding {
-    pub fn read_mode(&self, value: &Value) -> Result<crate::device::LightMode, CapabilityError> {
+    pub(crate) fn new(
+        property: PropertyBinding,
+        format: NumericFormat,
+        temperature_value: u32,
+        rgb_value: u32,
+    ) -> Result<Self, CapabilityError> {
+        if property.siid == 0
+            || property.piid == 0
+            || temperature_value == rgb_value
+            || temperature_value > format.maximum()
+            || rgb_value > format.maximum()
+        {
+            return Err(CapabilityError::InvalidLight("mode"));
+        }
+        Ok(Self {
+            property,
+            format,
+            temperature_value,
+            rgb_value,
+        })
+    }
+    pub fn property(&self) -> PropertyBinding {
+        self.property
+    }
+    pub fn format(&self) -> NumericFormat {
+        self.format
+    }
+    pub fn temperature_value(&self) -> u32 {
+        self.temperature_value
+    }
+    pub fn rgb_value(&self) -> u32 {
+        self.rgb_value
+    }
+    pub fn read_mode(&self, value: &Value) -> Result<LightMode, CapabilityError> {
         match value.as_u64() {
-            Some(value) if value == self.temperature_value as u64 => {
-                Ok(crate::device::LightMode::Temperature)
-            }
-            Some(value) if value == self.rgb_value as u64 => Ok(crate::device::LightMode::Rgb),
+            Some(value) if value == self.temperature_value as u64 => Ok(LightMode::Temperature),
+            Some(value) if value == self.rgb_value as u64 => Ok(LightMode::Rgb),
             _ => Err(CapabilityError::InvalidValue("mode")),
         }
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LightBindings {
-    pub brightness: Option<NumericBinding>,
-    pub temperature: Option<NumericBinding>,
-    pub color: Option<NumericBinding>,
-    pub mode: Option<ModeBinding>,
-    pub brightness_conversion: BrightnessConversion,
+
+/// Real light bindings in one of the four supported profiles. The stored
+/// representation is the closed valid value; construction from the optional
+/// real bindings is the only fallible step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LightBindings {
+    OnOff,
+    Dimmable {
+        brightness: BrightnessBinding,
+    },
+    ColorTemperature {
+        brightness: BrightnessBinding,
+        temperature: TemperatureBinding,
+    },
+    ExtendedColor {
+        brightness: BrightnessBinding,
+        temperature: TemperatureBinding,
+        color: ColorBinding,
+        mode: Option<ModeBinding>,
+    },
 }
 impl LightBindings {
-    pub(crate) fn valid(&self) -> bool {
-        let brightness = self.brightness.as_ref().is_none_or(|binding| {
-            binding.valid(NumericUnit::Percentage) && binding.range.nonzero_bounds().is_some()
-        });
-        let temperature = self.temperature.as_ref().is_none_or(|binding| {
-            binding.valid(NumericUnit::Kelvin)
-                && binding.range.min > 0
-                && binding.range.max <= 1_000_000
-                && binding.range.mired_bounds().is_ok()
-        });
-        let color = self.color.as_ref().is_none_or(|binding| {
-            binding.valid(NumericUnit::Rgb)
-                && binding.range
-                    == NumericRange {
-                        min: 0,
-                        max: 0xffffff,
-                        step: 1,
-                    }
-        });
-        let mode = match &self.mode {
-            None => true,
-            Some(mode) => {
-                self.temperature.is_some()
-                    && self.color.is_some()
-                    && mode.property.siid > 0
-                    && mode.property.piid > 0
-                    && mode.temperature_value != mode.rgb_value
-                    && mode.temperature_value <= mode.format.maximum()
-                    && mode.rgb_value <= mode.format.maximum()
+    pub(crate) fn new(
+        brightness: Option<BrightnessBinding>,
+        temperature: Option<TemperatureBinding>,
+        color: Option<ColorBinding>,
+        mode: Option<ModeBinding>,
+    ) -> Result<Self, CapabilityError> {
+        match (brightness, temperature, color, mode) {
+            (None, None, None, None) => Ok(Self::OnOff),
+            (Some(brightness), None, None, None) => Ok(Self::Dimmable { brightness }),
+            (Some(brightness), Some(temperature), None, None) => Ok(Self::ColorTemperature {
+                brightness,
+                temperature,
+            }),
+            (Some(brightness), Some(temperature), Some(color), mode) => Ok(Self::ExtendedColor {
+                brightness,
+                temperature,
+                color,
+                mode,
+            }),
+            _ => Err(CapabilityError::InvalidLight(
+                "unsupported light capability combination",
+            )),
+        }
+    }
+    pub fn brightness(&self) -> Option<&BrightnessBinding> {
+        match self {
+            Self::OnOff => None,
+            Self::Dimmable { brightness }
+            | Self::ColorTemperature { brightness, .. }
+            | Self::ExtendedColor { brightness, .. } => Some(brightness),
+        }
+    }
+    pub fn temperature(&self) -> Option<&TemperatureBinding> {
+        match self {
+            Self::OnOff | Self::Dimmable { .. } => None,
+            Self::ColorTemperature { temperature, .. }
+            | Self::ExtendedColor { temperature, .. } => Some(temperature),
+        }
+    }
+    pub fn color(&self) -> Option<&ColorBinding> {
+        match self {
+            Self::ExtendedColor { color, .. } => Some(color),
+            Self::OnOff | Self::Dimmable { .. } | Self::ColorTemperature { .. } => None,
+        }
+    }
+    pub fn mode(&self) -> Option<&ModeBinding> {
+        match self {
+            Self::ExtendedColor { mode, .. } => mode.as_ref(),
+            Self::OnOff | Self::Dimmable { .. } | Self::ColorTemperature { .. } => None,
+        }
+    }
+    pub fn profile(&self) -> LightProfile {
+        match self {
+            Self::OnOff => LightProfile::OnOff,
+            Self::Dimmable { .. } => LightProfile::Dimmable,
+            Self::ColorTemperature { temperature, .. } => {
+                LightProfile::ColorTemperature(temperature.interval())
             }
-        };
-        brightness && temperature && color && mode
+            Self::ExtendedColor { temperature, .. } => {
+                LightProfile::ExtendedColor(temperature.interval())
+            }
+        }
+    }
+    pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {
+        let mut bindings = Vec::new();
+        if let Some(brightness) = self.brightness() {
+            bindings.push(brightness.property());
+        }
+        if let Some(temperature) = self.temperature() {
+            bindings.push(temperature.property());
+        }
+        if let Some(color) = self.color() {
+            bindings.push(color.property());
+        }
+        if let Some(mode) = self.mode() {
+            bindings.push(mode.property());
+        }
+        bindings
     }
 }

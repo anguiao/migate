@@ -2,7 +2,7 @@ use super::{
     CapabilityError, ParsedDevice, ParsedFunction, PropertyBinding,
     description::{Description, Property, Urn, array, string},
 };
-use crate::device::{Capability, Category, DeviceKey, FunctionDescription};
+use crate::device::DeviceKey;
 
 /// Parse stable outlet functions without treating vendor extensions as standard switches.
 pub(super) fn parse_outlet(
@@ -15,25 +15,52 @@ pub(super) fn parse_outlet(
     if instance.urn.vendor == "cuco-cp7pd" {
         parse_cp7pd(key, instance)
     } else {
-        Ok(ParsedDevice {
+        ParsedDevice::new(
             key,
-            functions: vec![ParsedFunction {
-                description: FunctionDescription {
-                    id: "main".into(),
-                    label: "主电源".into(),
-                    category: Category::Outlet,
-                    capabilities: vec![Capability::OnOff],
-                },
-                power: standard_main_power(instance)?,
-                lighting: None,
-            }],
-            refresh_trigger: None,
-        })
+            vec![ParsedFunction::outlet(
+                "main",
+                "主电源",
+                standard_main_power(instance)?,
+            )],
+            None,
+        )
     }
 }
 
 pub(crate) fn is_outlet_type(value: &str) -> bool {
     Urn::parse(value).is_ok_and(|urn| urn.standard("device", "outlet", 0x0000A002))
+}
+
+pub(crate) const CP7PD_MODEL: &str = "cuco.plug.cp7pd";
+
+pub(crate) fn is_cp7pd_type(value: &str) -> bool {
+    Urn::parse(value).is_ok_and(|urn| {
+        urn.standard("device", "outlet", 0x0000A002)
+            && urn.vendor == "cuco-cp7pd"
+            && urn.version == 1
+            && urn.suffix.is_none()
+    })
+}
+
+/// The exact cp7pd channel bindings and master trigger in their fixed layout.
+pub(crate) fn is_cp7pd_topology(device: &ParsedDevice) -> bool {
+    const CHANNELS: [(&str, PropertyBinding); 3] = [
+        ("outlet_1", PropertyBinding { siid: 3, piid: 1 }),
+        ("outlet_2", PropertyBinding { siid: 4, piid: 1 }),
+        ("usb", PropertyBinding { siid: 9, piid: 1 }),
+    ];
+    if device.refresh_trigger() != Some(PropertyBinding { siid: 2, piid: 1 })
+        || device.functions().len() != CHANNELS.len()
+    {
+        return false;
+    }
+    device
+        .functions()
+        .iter()
+        .zip(CHANNELS)
+        .all(|(function, (id, power))| {
+            function.lighting().is_none() && function.id() == id && function.power() == power
+        })
 }
 
 fn standard_main_power(instance: &Description<'_>) -> Result<PropertyBinding, CapabilityError> {
@@ -97,22 +124,13 @@ fn parse_cp7pd(
         ("outlet_2", "开关 2", 4, "cuco-spec", 0x00007802),
         ("usb", "USB", 9, "miot-spec-v2", 0x0000780C),
     ] {
-        functions.push(ParsedFunction {
-            description: FunctionDescription {
-                id: id.into(),
-                label: label.into(),
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
-            },
-            power: cp7pd_binding(instance, id, siid, namespace, type_id)?,
-            lighting: None,
-        });
+        functions.push(ParsedFunction::outlet(
+            id,
+            label,
+            cp7pd_binding(instance, id, siid, namespace, type_id)?,
+        ));
     }
-    Ok(ParsedDevice {
-        key,
-        functions,
-        refresh_trigger: Some(refresh_trigger),
-    })
+    ParsedDevice::new(key, functions, Some(refresh_trigger))
 }
 
 fn cp7pd_binding(

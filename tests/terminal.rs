@@ -11,7 +11,7 @@ fn add_device(store: &Store, description: &PhysicalDeviceDescription) {
         state
             .records
             .iter()
-            .all(|record| record.key != description.key)
+            .all(|record| &record.key != description.key())
     );
     state.records.push(publication_support::record(
         description,
@@ -33,8 +33,8 @@ use futures_lite::{
 };
 use migate::{
     device::{
-        Availability, Capability, Category, CommandReceiver, DeviceKey, DeviceRegistry,
-        FunctionDescription, PhysicalDevice, PhysicalDeviceDescription, Power,
+        Availability, CommandReceiver, DeviceKey, DeviceRegistry, FunctionDescription,
+        FunctionKind, PhysicalDevice, PhysicalDeviceDescription, Power,
     },
     storage::Store,
     terminal::{
@@ -63,19 +63,20 @@ fn fixture() -> (
         ("two", vec!["main"]),
         ("multi", vec!["outlet_1", "outlet_2", "usb"]),
     ] {
-        let (physical, mut consumers) = PhysicalDevice::new(PhysicalDeviceDescription {
-            key: DeviceKey::new("xiaomi", did),
-            label: format!("name {did}"),
-            functions: ids
-                .into_iter()
-                .map(|id| FunctionDescription {
-                    id: id.into(),
-                    label: id.into(),
-                    category: Category::Outlet,
-                    capabilities: vec![Capability::OnOff],
-                })
-                .collect(),
-        });
+        let (physical, mut consumers) = PhysicalDevice::new(
+            PhysicalDeviceDescription::new(
+                DeviceKey::new("xiaomi", did),
+                format!("name {did}"),
+                ids.into_iter()
+                    .map(|id| FunctionDescription {
+                        id: id.into(),
+                        label: id.into(),
+                        kind: FunctionKind::Outlet,
+                    })
+                    .collect(),
+            )
+            .unwrap(),
+        );
         physical.set_availability(Availability::Available);
         add_device(&store, &physical.description());
         registry.insert(physical);
@@ -214,15 +215,16 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                     .unwrap();
             add_device(
                 &store,
-                &PhysicalDeviceDescription {
-                    key: key.clone(),
-                    label: "Imported 米家 name".into(),
-                    functions: parsed
-                        .functions
-                        .into_iter()
-                        .map(|function| function.description)
+                &PhysicalDeviceDescription::new(
+                    key.clone(),
+                    "Imported 米家 name",
+                    parsed
+                        .functions()
+                        .iter()
+                        .map(|function| function.description())
                         .collect(),
-                },
+                )
+                .unwrap(),
             );
             store
                 .devices()
@@ -324,28 +326,24 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
 
 #[test]
 fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
-    use migate::device::{DeviceRequest, LightMode, LightPatch, NumericRange};
+    use migate::device::{DeviceRequest, LightMode, LightPatch, LightProfile, TemperatureInterval};
 
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
-        let (physical, mut receivers) = PhysicalDevice::new(PhysicalDeviceDescription {
-            key: DeviceKey::new("xiaomi", "light"),
-            label: "Original name".into(),
-            functions: vec![FunctionDescription {
-                id: "main".into(),
-                label: "Saved function name".into(),
-                category: Category::Light,
-                capabilities: vec![
-                    Capability::OnOff,
-                    Capability::Brightness,
-                    Capability::ColorTemperature(NumericRange {
-                        min: 2700,
-                        max: 6500,
-                        step: 1,
-                    }),
-                ],
-            }],
-        });
+        let (physical, mut receivers) = PhysicalDevice::new(
+            PhysicalDeviceDescription::new(
+                DeviceKey::new("xiaomi", "light"),
+                "Original name",
+                vec![FunctionDescription {
+                    id: "main".into(),
+                    label: "Saved function name".into(),
+                    kind: FunctionKind::Light(LightProfile::ColorTemperature(
+                        TemperatureInterval::new(2700, 6500).unwrap(),
+                    )),
+                }],
+            )
+            .unwrap(),
+        );
         physical.set_availability(Availability::Available);
         physical.functions()[0]
             .observe_light(LightPatch {

@@ -1669,12 +1669,10 @@ fn frozen_light_boot(directory: &Path, boot: u16, previous: Option<u32>) -> (u32
         // bumped endpoint version and a bumped root version.
         let mut updated = stored.clone();
         updated.configuration_version = 2;
-        updated.functions[0].capabilities[2] =
-            crate::device::Capability::ColorTemperature(crate::device::NumericRange {
-                min: 3000,
-                max: 4000,
-                step: 1,
-            });
+        updated.functions[0].kind =
+            crate::device::FunctionKind::Light(crate::device::LightProfile::ColorTemperature(
+                crate::device::TemperatureInterval::new(3000, 4000).unwrap(),
+            ));
         let scope = crate::storage::CachedScope {
             uid: "u".into(),
             home_id: "h".into(),

@@ -124,7 +124,7 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
             .expect("native admission must use the complete configuration commit");
         let scope = c.context.live.borrow().scope.clone().unwrap();
         let old = c.store.devices().load_publication(Some(&scope)).unwrap();
-        assert!(old.cached.iter().any(|cached| cached.device.key == key));
+        assert!(old.cached.iter().any(|cached| cached.device.key() == &key));
         assert_eq!(old.relations[0].members, ["one"]);
         assert!(c.store.devices().load_published(&DeviceKey::new("xiaomi", "one")).unwrap().is_none(), "a member of a published group must be hidden");
 
@@ -230,18 +230,18 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
             assert_eq!(cached.model, "mijia.light.group3");
             let light = cached
                 .device
-                .functions
+                .functions()
                 .iter()
-                .find(|function| function.lighting.is_some())
+                .find(|function| function.lighting().is_some())
                 .unwrap();
             assert!(
                 light
-                    .description
-                    .capabilities
+                    .description()
+                    .capabilities()
                     .iter()
                     .any(|capability| matches!(capability, crate::device::Capability::Brightness))
             );
-            assert!(light.description.capabilities.iter().any(|capability| {
+            assert!(light.description().capabilities().iter().any(|capability| {
                 matches!(capability, crate::device::Capability::ColorTemperature(_))
             }));
             // The member has no description and no source of its own.
@@ -334,11 +334,11 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
             let cached = record.cached.borrow();
             let function = cached
                 .device
-                .functions
+                .functions()
                 .iter()
-                .find(|function| function.lighting.is_some())
+                .find(|function| function.lighting().is_some())
                 .unwrap();
-            (function.description.id.clone(), function.power)
+            (function.description().id.clone(), function.power())
         };
         let light = function(&c.context.registry, "group-1", &id);
         until(|| light.snapshot().power == Power::Off).await;
@@ -455,33 +455,28 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
             let cached = record.cached.borrow();
             let light = cached
                 .device
-                .functions
+                .functions()
                 .iter()
-                .find(|function| function.lighting.is_some())
+                .find(|function| function.lighting().is_some())
                 .unwrap();
-            let bindings = light.lighting.as_ref().unwrap();
+            let bindings = light.lighting().unwrap();
             (
-                light.description.id.clone(),
-                light.power,
-                bindings.brightness.as_ref().unwrap().property,
+                light.description().id.clone(),
+                light.power(),
+                bindings.brightness().as_ref().unwrap().property(),
             )
         };
         let light = function(&c.context.registry, "group-1", &id);
         until(|| light.snapshot().power == Power::Off).await;
-        let target = || crate::device::LightTarget {
-            power: Some(true),
-            brightness_percent: Some(70.0),
-            ..Default::default()
-        };
+        let target =
+            || crate::device::LightTarget::brightness(Some(true), 70.0).expect("valid test target");
         // Per-property results: power accepted, brightness rejected. The whole
         // action fails and no optimistic state appears.
         c.cloud.lock().unwrap().property_codes.insert(
             ("group-1".into(), brightness.siid, brightness.piid),
             -704_030_013,
         );
-        let action = light
-            .begin_light_action(crate::device::LightDimension::Brightness, target(), true)
-            .unwrap();
+        let action = light.begin_light_action(target(), true).unwrap();
         assert!(action.accepted().await.is_err());
         assert_eq!(light.snapshot().power, Power::Off);
         {
@@ -521,9 +516,7 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
                 .raw_values
                 .insert(("group-1".into(), power.siid, power.piid), json!(true));
         }
-        let action = light
-            .begin_light_action(crate::device::LightDimension::Brightness, target(), true)
-            .unwrap();
+        let action = light.begin_light_action(target(), true).unwrap();
         action.accepted().await.unwrap();
         assert_eq!(light.snapshot().power, Power::Off);
         release.send(()).unwrap();
@@ -571,8 +564,8 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
                     .cached
                     .borrow()
                     .device
-                    .functions[0]
-                    .description
+                    .functions()[0]
+                    .description()
                     .id
                     .clone(),
                 slot.admitted.clone().unwrap(),
@@ -700,8 +693,8 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
                     .cached
                     .borrow()
                     .device
-                    .functions[0]
-                    .description
+                    .functions()[0]
+                    .description()
                     .id
                     .clone()
             };
@@ -1000,30 +993,9 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                                         .map(|record| record.cached.borrow().clone())
                                 })
                                 .unwrap();
-                            for capability in
-                                &mut cached.device.functions[0].description.capabilities
-                            {
-                                if let crate::device::Capability::ColorTemperature(range) =
-                                    capability
-                                {
-                                    *range = crate::device::NumericRange {
-                                        min: 2700,
-                                        max: 6500,
-                                        step: 1,
-                                    };
-                                }
-                            }
-                            if let Some(temperature) = cached.device.functions[0]
-                                .lighting
-                                .as_mut()
-                                .and_then(|lighting| lighting.temperature.as_mut())
-                            {
-                                temperature.range = crate::device::NumericRange {
-                                    min: 2700,
-                                    max: 6500,
-                                    step: 1,
-                                };
-                            }
+                            let grid = crate::device::NumericRange::new(2700, 6500, 1).unwrap();
+                            cached.device =
+                                super::support::device_with_temperature_grid(&cached.device, grid);
                             slot.candidate = Some((cached, None));
                             slot.confirmed = true;
                         }
@@ -1091,21 +1063,17 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 let cached = record.cached.borrow();
                 let light = cached
                     .device
-                    .functions
+                    .functions()
                     .iter()
-                    .find(|function| function.lighting.is_some())
+                    .find(|function| function.lighting().is_some())
                     .unwrap();
-                (light.description.id.clone(), light.power)
+                (light.description().id.clone(), light.power())
             };
             let light = function(&c.context.registry, "group-1", &id);
             let action = light
                 .begin_light_action(
-                    crate::device::LightDimension::Brightness,
-                    crate::device::LightTarget {
-                        power: Some(true),
-                        brightness_percent: Some(70.0),
-                        ..Default::default()
-                    },
+                    crate::device::LightTarget::brightness(Some(true), 70.0)
+                        .expect("valid test target"),
                     false,
                 )
                 .unwrap();
@@ -1749,28 +1717,20 @@ fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
         // Native control acceptance does not manufacture actual state. Reads
         // must use the members, including mode when a CT command selects white.
         for (dimension, target, values) in [
-            (
-                None,
-                crate::device::LightTarget {
-                    power: Some(false),
-                    ..Default::default()
-                },
-                vec![(2, 1, json!(false))],
-            ),
+            (None, None, vec![(2, 1, json!(false))]),
             (
                 Some(crate::device::LightDimension::Brightness),
-                crate::device::LightTarget {
-                    brightness_percent: Some(70.0),
-                    ..Default::default()
-                },
+                Some(
+                    crate::device::LightTarget::brightness(None, 70.0).expect("valid test target"),
+                ),
                 vec![(2, 2, json!(60))],
             ),
             (
                 Some(crate::device::LightDimension::Color),
-                crate::device::LightTarget {
-                    color: Some(crate::device::LightColorTarget::Temperature(4000)),
-                    ..Default::default()
-                },
+                Some(
+                    crate::device::LightTarget::temperature(None, 4000.0)
+                        .expect("valid test target"),
+                ),
                 vec![(2, 3, json!(3800)), (4, 2, json!(0))],
             ),
         ] {
@@ -1798,9 +1758,9 @@ fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
                     }
                 }
             }
-            if let Some(dimension) = dimension {
+            if let Some(target) = target {
                 light
-                    .begin_light_action(dimension, target, true)
+                    .begin_light_action(target, true)
                     .unwrap()
                     .accepted()
                     .await

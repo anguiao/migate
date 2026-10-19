@@ -1,7 +1,7 @@
 use crate::device::{
-    Availability, Capability, Category, CommandReceiver, DeviceKey, DeviceRequest, Function,
-    FunctionDescription, LightDimension, LightPatch, NumericRange, PhysicalDevice,
-    PhysicalDeviceDescription,
+    Availability, CommandReceiver, DeviceKey, DeviceRequest, Function, FunctionDescription,
+    FunctionKind, LightDimension, LightPatch, LightProfile, PhysicalDevice,
+    PhysicalDeviceDescription, TemperatureInterval,
 };
 use crate::lighting::{Scheduler, Task, clock::Clock, level};
 use futures_lite::future::{block_on, poll_once};
@@ -37,29 +37,21 @@ impl Clock for TestClock {
     }
 }
 
-fn temperature_range() -> NumericRange {
-    NumericRange {
-        min: 2700,
-        max: 6500,
-        step: 1,
-    }
+fn temperature_interval() -> TemperatureInterval {
+    TemperatureInterval::new(2700, 6500).unwrap()
 }
 
 fn light_device() -> (Function, CommandReceiver) {
-    let description = PhysicalDeviceDescription {
-        key: DeviceKey::new("test", "shared-light"),
-        label: "Shared Light".into(),
-        functions: vec![FunctionDescription {
+    let description = PhysicalDeviceDescription::new(
+        DeviceKey::new("test", "shared-light"),
+        "Shared Light",
+        vec![FunctionDescription {
             id: "main".into(),
             label: "Main light".into(),
-            category: Category::Light,
-            capabilities: vec![
-                Capability::OnOff,
-                Capability::Brightness,
-                Capability::ColorTemperature(temperature_range()),
-            ],
+            kind: FunctionKind::Light(LightProfile::ColorTemperature(temperature_interval())),
         }],
-    };
+    )
+    .unwrap();
     let (device, mut receivers) = PhysicalDevice::new(description);
     device.set_availability(Availability::Available);
     (device.functions()[0].clone(), receivers.remove(0))
@@ -85,7 +77,7 @@ fn level_task() -> Task {
 fn canceled_token_suppresses_frames_and_delayed_receipt_keeps_the_original_deadline() {
     let (function, mut receiver) = light_device();
     let clock = Rc::new(TestClock::default());
-    let scheduler = Scheduler::new(function.clone(), Some(temperature_range()), clock.clone());
+    let scheduler = Scheduler::new(function.clone(), clock.clone());
     function
         .observe_light(LightPatch {
             power: Some(true),
@@ -98,7 +90,7 @@ fn canceled_token_suppresses_frames_and_delayed_receipt_keeps_the_original_deadl
         // the engine advances to the original final frame directly.
         let action = scheduler.begin(level_task(), None).unwrap();
         let first = next_light(&mut receiver).await;
-        assert_eq!(first.target.brightness_percent, Some(1.0));
+        assert_eq!(first.target.brightness_percent(), Some(1.0));
         assert!(!first.final_frame);
         first.mark_sent().unwrap();
         clock.set(250);
@@ -107,7 +99,7 @@ fn canceled_token_suppresses_frames_and_delayed_receipt_keeps_the_original_deadl
         let final_frame = next_light(&mut receiver).await;
         assert_eq!(final_frame.token, action.token());
         assert!(final_frame.final_frame);
-        assert_eq!(final_frame.target.brightness_percent, Some(100.0));
+        assert_eq!(final_frame.target.brightness_percent(), Some(100.0));
         assert_eq!(scheduler.remaining_time(LightDimension::Brightness), 0);
         final_frame.mark_sent().unwrap();
         final_frame.accept().unwrap();

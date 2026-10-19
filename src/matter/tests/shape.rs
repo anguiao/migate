@@ -1,89 +1,62 @@
 use super::*;
-use crate::device::{Capability, NumericRange};
+use crate::device::{LightProfile, TemperatureInterval};
 
-fn light(capabilities: Vec<Capability>) -> FunctionDescription {
+fn light(profile: LightProfile) -> FunctionDescription {
     FunctionDescription {
         id: "main".into(),
         label: "主灯".into(),
-        category: Category::Light,
-        capabilities,
+        kind: FunctionKind::Light(profile),
     }
 }
 
 #[test]
 fn equivalent_kelvin_encodings_share_one_shape() {
-    let first = light(vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(NumericRange {
-            min: 2700,
-            max: 6500,
-            step: 1,
-        }),
-    ]);
-    let second = light(vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(NumericRange {
-            min: 2700,
-            max: 6500,
-            step: 100,
-        }),
-    ]);
+    let first = light(LightProfile::ColorTemperature(
+        TemperatureInterval::new(2700, 6500).unwrap(),
+    ));
+    let second = light(LightProfile::ColorTemperature(
+        TemperatureInterval::new(2701, 6501).unwrap(),
+    ));
     assert_eq!(fixed_shape(&[first]), fixed_shape(&[second]));
 }
 
 #[test]
 fn profile_range_and_outlet_order_change_the_shape() {
-    let on_off = light(vec![Capability::OnOff]);
-    let dimmable = light(vec![Capability::OnOff, Capability::Brightness]);
+    let on_off = light(LightProfile::OnOff);
+    let dimmable = light(LightProfile::Dimmable);
     assert_ne!(
         fixed_shape(std::slice::from_ref(&on_off)),
         fixed_shape(&[dimmable])
     );
 
-    let narrow = light(vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(NumericRange {
-            min: 3000,
-            max: 6500,
-            step: 1,
-        }),
-    ]);
-    let wide = light(vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(NumericRange {
-            min: 2000,
-            max: 6500,
-            step: 1,
-        }),
-    ]);
+    let narrow = light(LightProfile::ColorTemperature(
+        TemperatureInterval::new(3000, 6500).unwrap(),
+    ));
+    let wide = light(LightProfile::ColorTemperature(
+        TemperatureInterval::new(2000, 6500).unwrap(),
+    ));
     assert_ne!(fixed_shape(&[narrow]), fixed_shape(&[wide]));
 
     let outlet = |id: &str| FunctionDescription {
         id: id.into(),
         label: id.into(),
-        category: Category::Outlet,
-        capabilities: vec![Capability::OnOff],
+        kind: FunctionKind::Outlet,
     };
     let first = fixed_shape(&[outlet("a"), outlet("b")]);
     let second = fixed_shape(&[outlet("b"), outlet("a")]);
     assert_ne!(first, second);
 
-    // Child labels are part of a multi-function Descriptor TagList, while
-    // a single function's label is not part of the fixed surface.
+    // Only multi-function child labels are part of the Descriptor TagList.
     let mut renamed = outlet("a");
     renamed.label = "Renamed".into();
     assert_ne!(
         fixed_shape(&[outlet("a"), outlet("b")]),
         fixed_shape(&[renamed, outlet("b")])
     );
-    let mut light_renamed = light(vec![Capability::OnOff]);
+    let mut light_renamed = light(LightProfile::OnOff);
     light_renamed.label = "Renamed".into();
     assert_eq!(
-        fixed_shape(&[light(vec![Capability::OnOff])]),
+        fixed_shape(&[light(LightProfile::OnOff)]),
         fixed_shape(&[light_renamed])
     );
 }

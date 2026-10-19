@@ -28,7 +28,20 @@ fn replacing_a_binding_clears_its_previous_subscription_failure() {
                 .cached
                 .borrow()
                 .clone();
-            replacement.device.functions[0].power.siid = 7;
+            replacement.device = {
+                let function = replacement.device.functions()[0].clone();
+                let power = function.power();
+                super::support::device_with_functions(
+                    &replacement.device,
+                    vec![super::support::function_with_power(
+                        &function,
+                        crate::xiaomi::capability::PropertyBinding {
+                            siid: 7,
+                            piid: power.piid,
+                        },
+                    )],
+                )
+            };
             control
                 .context
                 .live
@@ -109,7 +122,20 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                 .cached
                 .borrow()
                 .clone();
-            changed.device.functions[0].power.siid = 7;
+            changed.device = {
+                let function = changed.device.functions()[0].clone();
+                let power = function.power();
+                super::support::device_with_functions(
+                    &changed.device,
+                    vec![super::support::function_with_power(
+                        &function,
+                        crate::xiaomi::capability::PropertyBinding {
+                            siid: 7,
+                            piid: power.piid,
+                        },
+                    )],
+                )
+            };
             control
                 .context
                 .live
@@ -163,8 +189,8 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                     .unwrap()
                     .unwrap()
                     .device
-                    .functions[0]
-                    .power
+                    .functions()[0]
+                    .power()
                     .siid,
                 7
             );
@@ -189,7 +215,18 @@ fn incompatible_topology_stays_published_and_unavailable_until_a_compatible_desc
                 .borrow()
                 .clone();
             let mut incompatible = original.clone();
-            incompatible.device.functions.pop();
+            // A representable but differently shaped description: the stored
+            // three-channel identity cannot adopt a single-main source.
+            incompatible.device = crate::xiaomi::capability::ParsedDevice::new(
+                incompatible.device.key().clone(),
+                vec![crate::xiaomi::capability::ParsedFunction::outlet(
+                    "main",
+                    "Main power",
+                    crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                )],
+                None,
+            )
+            .unwrap();
             control
                 .context
                 .live

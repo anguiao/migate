@@ -14,10 +14,11 @@ pub(crate) mod clock;
 pub(crate) mod color;
 pub(crate) mod hs;
 pub(crate) mod level;
+pub(crate) mod temperature;
 
 use crate::device::{
-    ActionToken, CommandError, Function, LightAction, LightColorTarget, LightDimension,
-    LightTarget, NumericRange, brightness_from_matter_level,
+    ActionToken, CommandError, Function, LightAction, LightDimension, LightTarget,
+    brightness_from_matter_level,
 };
 use clock::Clock;
 use futures_util::FutureExt;
@@ -72,41 +73,25 @@ impl Task {
             Self::Color(task) => task.duration(),
         }
     }
-    fn target(
-        self,
-        elapsed: u64,
-        range: Option<NumericRange>,
-    ) -> Result<(LightTarget, bool), CommandError> {
+    fn target(self, elapsed: u64) -> Result<(LightTarget, bool), CommandError> {
         match self {
             Self::Level(task) => {
                 let (level, end, power) = task.frame(elapsed);
                 Ok((
-                    LightTarget {
-                        power,
-                        brightness_percent: Some(brightness_from_matter_level(level)?),
-                        color: None,
-                    },
+                    LightTarget::brightness(power, brightness_from_matter_level(level)?)?,
                     end,
                 ))
             }
             Self::Color(task) => {
                 let (target, end) = task.frame(elapsed);
-                let color = match target {
-                    color::Target::Xy(x, y) => LightColorTarget::Rgb(color::xy_to_rgb(x, y)),
-                    color::Target::Hs(value) => LightColorTarget::Rgb(hs::hs_to_rgb(value)),
-                    color::Target::Temperature(mireds) => LightColorTarget::Temperature(
-                        range
-                            .ok_or(CommandError::UnknownState)?
-                            .kelvin_from_mireds(mireds)?,
-                    ),
+                let target = match target {
+                    color::Target::Xy(x, y) => LightTarget::rgb(None, color::xy_to_rgb(x, y)),
+                    color::Target::Hs(value) => LightTarget::rgb(None, hs::hs_to_rgb(value)),
+                    color::Target::Temperature(mireds) => {
+                        LightTarget::temperature(None, temperature::kelvin_from_mireds(mireds))?
+                    }
                 };
-                Ok((
-                    LightTarget {
-                        color: Some(color),
-                        ..Default::default()
-                    },
-                    end,
-                ))
+                Ok((target, end))
             }
         }
     }
@@ -152,7 +137,6 @@ fn index(dimension: LightDimension) -> usize {
 /// and action tokens and knows nothing about Matter or native groups.
 pub(crate) struct Scheduler {
     function: Function,
-    range: Option<NumericRange>,
     clock: Rc<dyn Clock>,
     active: RefCell<[Option<Active>; 2]>,
     remaining: RefCell<[RemainingTime; 2]>,
@@ -160,14 +144,9 @@ pub(crate) struct Scheduler {
     remaining_report: Cell<[bool; 2]>,
 }
 impl Scheduler {
-    pub(crate) fn new(
-        function: Function,
-        range: Option<NumericRange>,
-        clock: Rc<dyn Clock>,
-    ) -> Self {
+    pub(crate) fn new(function: Function, clock: Rc<dyn Clock>) -> Self {
         Self {
             function,
-            range,
             clock,
             active: RefCell::new([None, None]),
             remaining: RefCell::new([RemainingTime::default(), RemainingTime::default()]),
@@ -180,15 +159,14 @@ impl Scheduler {
         task: Task,
         forced_power: Option<bool>,
     ) -> Result<Rc<LightAction>, CommandError> {
-        let (mut target, final_frame) = task.target(0, self.range)?;
+        let (mut target, final_frame) = task.target(0)?;
         if forced_power.is_some() {
-            target.power = forced_power;
+            target = target.with_power(forced_power);
         }
         let dimension = task.dimension();
         let allow_unchanged_startup =
             matches!(task, Task::Color(color::Task::Hs(task)) if task.is_achromatic());
         let action = Rc::new(self.function.begin_light_action_with_unchanged_startup(
-            dimension,
             target,
             final_frame,
             allow_unchanged_startup,
@@ -225,7 +203,7 @@ impl Scheduler {
             let elapsed = now.saturating_sub(active.start);
             let (target, final_frame) = active
                 .task
-                .target(elapsed, self.range)
+                .target(elapsed)
                 .expect("validated controller task");
             let mut remaining = active.task.duration().saturating_sub(elapsed);
             if final_frame || target != active.last {

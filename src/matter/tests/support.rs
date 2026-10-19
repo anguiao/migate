@@ -25,7 +25,7 @@ pub(super) fn add_device(
         state
             .records
             .iter()
-            .all(|stored| stored.key != description.key)
+            .all(|stored| &stored.key != description.key())
     );
     let stored = record(description, store.devices().next_endpoint().unwrap());
     state.records.push(stored.clone());
@@ -69,19 +69,21 @@ pub(super) fn physical(
     } else {
         vec![("main", "主电源")]
     };
-    crate::device::PhysicalDevice::new(crate::device::PhysicalDeviceDescription {
-        key: DeviceKey::new("xiaomi", id),
-        label: format!("Outlet {id}"),
-        functions: functions
-            .into_iter()
-            .map(|(id, label)| crate::device::FunctionDescription {
-                id: id.into(),
-                label: label.into(),
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
-            })
-            .collect(),
-    })
+    crate::device::PhysicalDevice::new(
+        crate::device::PhysicalDeviceDescription::new(
+            DeviceKey::new("xiaomi", id),
+            format!("Outlet {id}"),
+            functions
+                .into_iter()
+                .map(|(id, label)| crate::device::FunctionDescription {
+                    id: id.into(),
+                    label: label.into(),
+                    kind: FunctionKind::Outlet,
+                })
+                .collect(),
+        )
+        .unwrap(),
+    )
 }
 pub(crate) fn test_registry(
     store: &Store,
@@ -104,28 +106,24 @@ pub(crate) fn test_device() -> (PhysicalDevice, CommandReceiver) {
 }
 
 pub(in crate::matter) fn light(rgb: bool) -> (PhysicalDevice, CommandReceiver) {
-    let mut capabilities = vec![
-        Capability::OnOff,
-        Capability::Brightness,
-        Capability::ColorTemperature(crate::device::NumericRange {
-            min: 2700,
-            max: 6500,
-            step: 1,
-        }),
-    ];
-    if rgb {
-        capabilities.push(Capability::ColorRgb);
-    }
-    light_with(capabilities)
+    let interval = crate::device::TemperatureInterval::new(2700, 6500).unwrap();
+    light_with(if rgb {
+        LightProfile::ExtendedColor(interval)
+    } else {
+        LightProfile::ColorTemperature(interval)
+    })
 }
 
-pub(in crate::matter) fn light_with(
-    capabilities: Vec<Capability>,
-) -> (PhysicalDevice, CommandReceiver) {
-    let mut description = physical("test-light", false).0.description();
-    let function = &mut description.functions[0];
-    function.category = Category::Light;
-    function.capabilities = capabilities;
+pub(in crate::matter) fn light_with(profile: LightProfile) -> (PhysicalDevice, CommandReceiver) {
+    let outlet = physical("test-light", false).0.description();
+    let mut functions = outlet.functions().to_vec();
+    functions[0].kind = FunctionKind::Light(profile);
+    let description = crate::device::PhysicalDeviceDescription::new(
+        outlet.key().clone(),
+        outlet.label(),
+        functions,
+    )
+    .unwrap();
     let (device, mut receivers) = PhysicalDevice::new(description);
     (device, receivers.remove(0))
 }

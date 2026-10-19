@@ -89,7 +89,7 @@ impl XiaomiAdapter {
                 let Some(stored) = saved
                     .records
                     .iter()
-                    .find(|stored| stored.key == metadata.device.key)
+                    .find(|stored| stored.key == *metadata.device.key())
                 else {
                     return Err(crate::storage::StorageError::new(
                         store.path(),
@@ -110,7 +110,7 @@ impl XiaomiAdapter {
                 physical
                     .set_availability(Availability::Unavailable("restoring Xiaomi access".into()));
                 registry.insert(physical.clone());
-                let did = metadata.device.key.id.clone();
+                let did = metadata.device.key().id.clone();
                 let incompatible_native = !super::publication::same_shape(
                     &stored.description(),
                     &metadata.physical_description(stored.label.clone()),

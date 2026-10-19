@@ -165,18 +165,14 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
         records
     });
     assert_eq!(records[0].model, records[1].model);
-    assert_ne!(records[0].device.key, records[1].device.key);
-    assert_eq!(records[0].device.functions[0].description.id, "main");
+    assert_ne!(records[0].device.key(), records[1].device.key());
+    assert_eq!(records[0].device.functions()[0].description().id, "main");
     assert_eq!(
         records[2]
             .device
-            .functions
+            .functions()
             .iter()
-            .map(|function| (
-                function.description.id.as_str(),
-                function.power.siid,
-                function.power.piid
-            ))
+            .map(|function| (function.id(), function.power().siid, function.power().piid))
             .collect::<Vec<_>>(),
         [("outlet_1", 3, 1), ("outlet_2", 4, 1), ("usb", 9, 1)]
     );
@@ -260,8 +256,8 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
     .unwrap();
     assert_eq!(cached.home_id, "local");
     assert_eq!(cached.group_id, group_id("account", "local"));
-    assert_eq!(cached.device.functions[0].power.siid, 2);
-    assert_eq!(cached.device.functions[0].power.piid, 1);
+    assert_eq!(cached.device.functions()[0].power().siid, 2);
+    assert_eq!(cached.device.functions()[0].power().piid, 1);
     assert_eq!(name.as_deref(), Some("Cloud outlet"));
     let captured = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(captured.len(), 3);
@@ -439,10 +435,10 @@ fn light_catalog_uses_cloud_model_for_the_exact_ls2307_color_adapter() {
     ))
     .unwrap();
     assert_eq!(name.as_deref(), Some("Bedroom light"));
-    assert_eq!(cached.device.functions.len(), 1);
-    let lighting = cached.device.functions[0].lighting.as_ref().unwrap();
-    assert_eq!(lighting.color.as_ref().unwrap().property.siid, 4);
-    assert_eq!(lighting.mode.as_ref().unwrap().property.piid, 2);
+    assert_eq!(cached.device.functions().len(), 1);
+    let lighting = cached.device.functions()[0].lighting().unwrap();
+    assert_eq!(lighting.color().unwrap().property().siid, 4);
+    assert_eq!(lighting.mode().unwrap().property().piid, 2);
     assert_eq!(requests.try_iter().count(), 2);
 }
 
@@ -465,7 +461,7 @@ fn light_group_descriptors_load_for_confirmed_group_dids() {
         "group.42",
     ))
     .unwrap();
-    assert_eq!(cached.device.key.id, "group.42");
+    assert_eq!(cached.device.key().id, "group.42");
     assert_eq!(cached.model, "mijia.light.group3");
     assert_eq!(name.as_deref(), Some("Grouped lights"));
     assert_eq!(requests.try_iter().count(), 2);

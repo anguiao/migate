@@ -183,13 +183,13 @@ fn accept(function: &Function, request: LightRequest) {
     request.mark_sent().unwrap();
     let target = request.target;
     let mut patch = LightPatch {
-        power: target.power,
-        brightness_percent: target.brightness_percent,
+        power: target.power(),
+        brightness_percent: target.brightness_percent(),
         ..Default::default()
     };
-    match target.color {
+    match target.color_target() {
         Some(LightColorTarget::Temperature(value)) => {
-            patch.temperature_kelvin = Some(value);
+            patch.temperature_kelvin = Some(value.round() as u32);
             patch.mode = Some(LightMode::Temperature);
         }
         Some(LightColorTarget::Rgb(value)) => {
@@ -227,8 +227,8 @@ fn ct_wire_zero_clips_and_step_keeps_requested_rate_at_boundary() {
         assert!(poll_once(invoke.as_mut()).await.is_none());
         let request = frame(&mut receiver).await;
         assert_eq!(
-            request.target.color,
-            Some(LightColorTarget::Temperature(6494))
+            request.target.color_target(),
+            Some(LightColorTarget::Temperature(1_000_000.0 / 154.0))
         );
         accept(&function, request);
         invoke.await.unwrap();
@@ -255,8 +255,8 @@ fn ct_wire_zero_clips_and_step_keeps_requested_rate_at_boundary() {
         let request = frame(&mut receiver).await;
         assert!(request.final_frame);
         assert_eq!(
-            request.target.color,
-            Some(LightColorTarget::Temperature(4000))
+            request.target.color_target(),
+            Some(LightColorTarget::Temperature(4000.0))
         );
     });
 }
@@ -327,13 +327,13 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
         assert_eq!(task.frame(0).0, 1);
         let action = light.begin(LightingTask::Level(task), None).unwrap();
         let request = frame(&mut receiver).await;
-        assert_eq!(request.target.brightness_percent, Some(1.0));
+        assert_eq!(request.target.brightness_percent(), Some(1.0));
         accept(&function, request);
         action.accepted().await.unwrap();
         clock.set(1000);
         light.advance();
         let request = frame(&mut receiver).await;
-        assert!(request.target.brightness_percent.unwrap() > 1.0);
+        assert!(request.target.brightness_percent().unwrap() > 1.0);
     });
 }
 
@@ -382,7 +382,7 @@ fn startup_waiter_does_not_block_ticks_merge_or_final_and_sent_stop_retains_rece
         let final_request = frame(&mut receiver).await;
         assert_eq!(final_request.token, action.token());
         assert!(final_request.final_frame);
-        assert_eq!(final_request.target.brightness_percent, Some(100.0));
+        assert_eq!(final_request.target.brightness_percent(), Some(100.0));
         accept(&function, final_request);
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(ctx.changes.borrow().contains(&(2, 8, 0)));
@@ -705,8 +705,8 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
         let mut on = pin!(light.power(Command::On));
         assert!(poll_once(on.as_mut()).await.is_none());
         let request = frame(&mut receiver).await;
-        assert_eq!(request.target.power, Some(true));
-        assert_eq!(request.target.brightness_percent, Some(1.0));
+        assert_eq!(request.target.power(), Some(true));
+        assert_eq!(request.target.brightness_percent(), Some(1.0));
         accept(&function, request);
         on.await.unwrap();
         function
@@ -731,8 +731,8 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
         let mut off = pin!(light.power(Command::Off));
         assert!(poll_once(off.as_mut()).await.is_none());
         let request = frame(&mut receiver).await;
-        assert_eq!(request.target.power, Some(false));
-        assert_eq!(request.target.brightness_percent, Some(1.0));
+        assert_eq!(request.target.power(), Some(false));
+        assert_eq!(request.target.brightness_percent(), Some(1.0));
         accept(&function, request);
         off.await.unwrap();
         function
@@ -879,8 +879,8 @@ fn clipped_ct_step_reaches_two_mired_boundary_in_two_milliseconds_and_equal_targ
         let final_request = frame(&mut receiver).await;
         assert!(final_request.final_frame);
         assert_eq!(
-            final_request.target.color,
-            Some(LightColorTarget::Temperature(4950))
+            final_request.target.color_target(),
+            Some(LightColorTarget::Temperature(1_000_000.0 / 202.0))
         );
         accept(&function, final_request);
         function

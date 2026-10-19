@@ -145,13 +145,13 @@ impl fmt::Display for CommandTarget {
             Self::Light(target) => {
                 use crate::device::LightColorTarget;
                 let mut fields = Vec::new();
-                if let Some(value) = target.power {
+                if let Some(value) = target.power() {
                     fields.push(format!("power={}", if value { "on" } else { "off" }));
                 }
-                if let Some(value) = target.brightness_percent {
+                if let Some(value) = target.brightness_percent() {
                     fields.push(format!("brightness={value}%"));
                 }
-                if let Some(value) = target.color {
+                if let Some(value) = target.color_target() {
                     fields.push(match value {
                         LightColorTarget::Temperature(value) => format!("temperature={value} K"),
                         LightColorTarget::Rgb(value) => format!(

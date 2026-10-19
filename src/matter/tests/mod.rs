@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     RuntimeError,
-    device::{Capability, Category, CommandReceiver, DeviceKey, PhysicalDevice},
+    device::{CommandReceiver, DeviceKey, FunctionKind, LightProfile, PhysicalDevice},
     storage::Store,
 };
 use futures_lite::future::{block_on, or};
@@ -209,15 +209,11 @@ fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
 
 #[test]
 fn on_off_and_dimmable_light_metadata_use_their_standard_device_types() {
-    for (capabilities, device_type, has_level) in [
-        (vec![Capability::OnOff], 0x0100u16, false),
-        (
-            vec![Capability::OnOff, Capability::Brightness],
-            0x0101u16,
-            true,
-        ),
+    for (profile, device_type, has_level) in [
+        (LightProfile::OnOff, 0x0100u16, false),
+        (LightProfile::Dimmable, 0x0101u16, true),
     ] {
-        let (device, _receiver) = support::light_with(capabilities);
+        let (device, _receiver) = support::light_with(profile);
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let model = model::handler(

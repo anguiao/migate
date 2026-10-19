@@ -3,9 +3,11 @@ use super::{
     device::{DeviceStore, validate_key, validate_text},
 };
 use crate::device::{
-    Capability, Category, DeviceKey, FunctionDescription, FunctionKey, PhysicalDeviceDescription,
+    DeviceKey, FunctionDescription, FunctionKey, FunctionKind, LightProfile,
+    PhysicalDeviceDescription, TemperatureInterval,
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13,8 +15,7 @@ pub struct StoredFunction {
     pub key: FunctionKey,
     pub endpoint: u16,
     pub label: String,
-    pub category: Category,
-    pub capabilities: Vec<Capability>,
+    pub kind: FunctionKind,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredDevice {
@@ -29,20 +30,19 @@ pub struct StoredDevice {
 impl StoredDevice {
     /// Build runtime metadata from the identity and names committed at admission.
     pub fn description(&self) -> PhysicalDeviceDescription {
-        PhysicalDeviceDescription {
-            key: self.key.clone(),
-            label: self.label.clone(),
-            functions: self
-                .functions
+        PhysicalDeviceDescription::new(
+            self.key.clone(),
+            self.label.clone(),
+            self.functions
                 .iter()
                 .map(|function| FunctionDescription {
                     id: function.key.id.clone(),
                     label: function.label.clone(),
-                    category: function.category,
-                    capabilities: function.capabilities.clone(),
+                    kind: function.kind,
                 })
                 .collect(),
-        }
+        )
+        .expect("validated stored device keeps a valid description")
     }
 }
 
@@ -136,35 +136,36 @@ pub(super) fn load_stored(
                     if validate_text(&id).is_err() || validate_label(&label).is_err() {
                         return Err(rusqlite::Error::InvalidQuery);
                     }
-                    let category = match row.get::<_, String>(3)?.as_str() {
-                        "outlet" => Category::Outlet,
-                        "light" => Category::Light,
-                        _ => return Err(rusqlite::Error::InvalidQuery),
-                    };
-                    let capabilities: Vec<Capability> =
-                        serde_json::from_str(&row.get::<_, String>(4)?)
-                            .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                    if !(FunctionDescription {
-                        id: id.clone(),
-                        label: label.clone(),
-                        category,
-                        capabilities: capabilities.clone(),
-                    })
-                    .valid_capabilities()
-                    {
+                    let wire: WireKind = serde_json::from_str(&row.get::<_, String>(4)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    let kind = wire.into_kind().ok_or(rusqlite::Error::InvalidQuery)?;
+                    if row.get::<_, String>(3)? != category_name(kind) {
                         return Err(rusqlite::Error::InvalidQuery);
                     }
                     Ok(StoredFunction {
                         key: FunctionKey::new(key.clone(), id),
                         endpoint: row.get(1)?,
                         label,
-                        category,
-                        capabilities,
+                        kind,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()
         })?;
-    if functions.is_empty() {
+    if functions.is_empty()
+        || PhysicalDeviceDescription::new(
+            key.clone(),
+            String::new(),
+            functions
+                .iter()
+                .map(|function| FunctionDescription {
+                    id: function.key.id.clone(),
+                    label: function.label.clone(),
+                    kind: function.kind,
+                })
+                .collect(),
+        )
+        .is_err()
+    {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let single = functions.len() == 1;
@@ -207,4 +208,57 @@ fn check_allocation(
         return Err(rusqlite::Error::InvalidQuery);
     }
     Ok(())
+}
+
+fn category_name(kind: FunctionKind) -> &'static str {
+    if kind.is_light() { "light" } else { "outlet" }
+}
+
+/// Private persistence encoding of a function kind. Values are re-created
+/// through the valid interval constructors on load.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WireKind {
+    Outlet,
+    OnOff,
+    Dimmable,
+    ColorTemperature { min: u32, max: u32 },
+    ExtendedColor { min: u32, max: u32 },
+}
+impl WireKind {
+    fn from_kind(kind: FunctionKind) -> Self {
+        match kind {
+            FunctionKind::Outlet => Self::Outlet,
+            FunctionKind::Light(LightProfile::OnOff) => Self::OnOff,
+            FunctionKind::Light(LightProfile::Dimmable) => Self::Dimmable,
+            FunctionKind::Light(LightProfile::ColorTemperature(interval)) => {
+                Self::ColorTemperature {
+                    min: interval.min(),
+                    max: interval.max(),
+                }
+            }
+            FunctionKind::Light(LightProfile::ExtendedColor(interval)) => Self::ExtendedColor {
+                min: interval.min(),
+                max: interval.max(),
+            },
+        }
+    }
+    fn into_kind(self) -> Option<FunctionKind> {
+        let interval = |min, max| TemperatureInterval::new(min, max).ok();
+        match self {
+            Self::Outlet => Some(FunctionKind::Outlet),
+            Self::OnOff => Some(FunctionKind::Light(LightProfile::OnOff)),
+            Self::Dimmable => Some(FunctionKind::Light(LightProfile::Dimmable)),
+            Self::ColorTemperature { min, max } => interval(min, max)
+                .map(LightProfile::ColorTemperature)
+                .map(FunctionKind::Light),
+            Self::ExtendedColor { min, max } => interval(min, max)
+                .map(LightProfile::ExtendedColor)
+                .map(FunctionKind::Light),
+        }
+    }
+}
+
+pub(super) fn encode_kind(kind: FunctionKind) -> rusqlite::Result<String> {
+    serde_json::to_string(&WireKind::from_kind(kind)).map_err(|_| rusqlite::Error::InvalidQuery)
 }

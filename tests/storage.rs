@@ -2,8 +2,8 @@ use migate::{
     config::Config,
     device,
     device::{
-        Capability, Category, DeviceKey, FunctionDescription, PhysicalDevice,
-        PhysicalDeviceDescription, Power,
+        DeviceKey, FunctionDescription, FunctionKind, PhysicalDevice, PhysicalDeviceDescription,
+        Power,
     },
     storage,
     storage::{
@@ -45,16 +45,16 @@ fn initializes_and_restores_identity_without_power() {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(columns, ["id", "bridge_id"]);
-        let description = PhysicalDeviceDescription {
-            key: DeviceKey::new("xiaomi", "test-outlet"),
-            label: "Test Outlet".into(),
-            functions: vec![FunctionDescription {
+        let description = PhysicalDeviceDescription::new(
+            DeviceKey::new("xiaomi", "test-outlet"),
+            "Test Outlet",
+            vec![FunctionDescription {
                 id: "main".into(),
                 label: "Main power".into(),
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
+                kind: FunctionKind::Outlet,
             }],
-        };
+        )
+        .unwrap();
         let (device, _receiver) = PhysicalDevice::new(description.clone());
         device.functions()[0].observe(true);
         drop(store);
@@ -351,16 +351,16 @@ fn directory_snapshot(dir: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>
 }
 
 fn outlet_description(id: &str, label: &str) -> PhysicalDeviceDescription {
-    PhysicalDeviceDescription {
-        key: DeviceKey::new("xiaomi", id),
-        label: label.into(),
-        functions: vec![FunctionDescription {
+    PhysicalDeviceDescription::new(
+        DeviceKey::new("xiaomi", id),
+        label,
+        vec![FunctionDescription {
             id: "main".into(),
             label: "Main power".into(),
-            category: Category::Outlet,
-            capabilities: vec![Capability::OnOff],
+            kind: FunctionKind::Outlet,
         }],
-    }
+    )
+    .unwrap()
 }
 
 fn publication_scope() -> CachedScope {
@@ -516,7 +516,7 @@ fn late_transaction_failure_rolls_back_the_whole_first_publication() {
     assert_eq!(devices.next_endpoint().unwrap(), 2);
     assert_eq!(
         devices
-            .load_parsed(&scope.uid, &scope.home_id, &cached.device.key)
+            .load_parsed(&scope.uid, &scope.home_id, cached.device.key())
             .unwrap(),
         None
     );

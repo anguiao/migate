@@ -142,7 +142,7 @@ impl Rig {
             cached(&tls.credentials.uid, "two", false),
         ];
         for did in members {
-            if !data.iter().any(|record| record.device.key.id == *did) {
+            if !data.iter().any(|record| record.device.key().id == *did) {
                 data.push(cached(&tls.credentials.uid, did, false));
             }
         }
@@ -162,7 +162,7 @@ impl Rig {
         for (did, model, instance) in lights {
             let record = data
                 .iter_mut()
-                .find(|record| record.device.key.id == *did)
+                .find(|record| record.device.key().id == *did)
                 .unwrap_or_else(|| panic!("missing light DID {did}"));
             record.model = (*model).into();
             record.instance_type = instance["type"].as_str().unwrap().into();
@@ -180,7 +180,7 @@ impl Rig {
         if restore {
             let cached = data
                 .iter()
-                .filter(|record| members.contains(&record.device.key.id.as_str()))
+                .filter(|record| members.contains(&record.device.key().id.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
             let mut endpoint = 2;
@@ -188,7 +188,7 @@ impl Rig {
                 .iter()
                 .map(|cached| {
                     let description =
-                        cached.physical_description(format!("name {}", cached.device.key.id));
+                        cached.physical_description(format!("name {}", cached.device.key().id));
                     let record = crate::storage::tests::fixtures::record(&description, endpoint);
                     endpoint = record
                         .functions
@@ -275,7 +275,8 @@ impl Rig {
                 });
                 let light = native_group
                     || records.iter().any(|record| {
-                        record.device.key.id == did && record.device.functions[0].lighting.is_some()
+                        record.device.key().id == did
+                            && record.device.functions()[0].lighting().is_some()
                     });
                 if light {
                     state
@@ -353,9 +354,9 @@ impl Rig {
                     }
                     let mut list = records
                         .iter()
-                        .filter(|record| state.members.contains(&record.device.key.id))
+                        .filter(|record| state.members.contains(&record.device.key().id))
                         .map(|record| {
-                            json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})
+                            json!({"did":record.device.key().id,"name":state.names.get(&record.device.key().id).cloned().unwrap_or_else(||format!("name {}", record.device.key().id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key().id)})
                         })
                         .collect::<Vec<_>>();
                     list.extend(state.catalog_groups.iter().cloned());
@@ -368,7 +369,7 @@ impl Rig {
                     .all(|did| info_dids.contains(did.as_str().unwrap()))
                 {
                     state.infos += 1;
-                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>(),"has_more":state.info_partial}});
+                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key().id)).map(|record|json!({"did":record.device.key().id,"name":state.names.get(&record.device.key().id).cloned().unwrap_or_else(||format!("name {}", record.device.key().id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key().id)})).collect::<Vec<_>>(),"has_more":state.info_partial}});
                     let mut response = MockResponse::json(state.info_status, &value.to_string());
                     if let Some(gate) = state.info_gate.clone() {
                         response = response.gated(gate);
@@ -385,7 +386,7 @@ impl Rig {
                     }
                     return response;
                 }
-                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key.id)).map(|record|json!({"did":record.device.key.id,"name":state.names.get(&record.device.key.id).cloned().unwrap_or_else(||format!("name {}", record.device.key.id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key.id)})).collect::<Vec<_>>()}})
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key().id)).map(|record|json!({"did":record.device.key().id,"name":state.names.get(&record.device.key().id).cloned().unwrap_or_else(||format!("name {}", record.device.key().id)),"model":record.model,"spec_type":record.instance_type,"isOnline":state.online.contains(&record.device.key().id)})).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
                 let query = request
                     .target
@@ -413,7 +414,7 @@ impl Rig {
                         && !multi
                     {
                         instance.as_str()
-                    } else if records[0].device.functions[0].lighting.is_some() && !multi {
+                    } else if records[0].device.functions()[0].lighting().is_some() && !multi {
                         light_fixture(&records[0].model)
                     } else if multi {
                         include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")

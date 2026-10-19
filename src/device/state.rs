@@ -90,15 +90,15 @@ impl PhysicalDevice {
             }),
             changed: Event::new(),
         });
-        let (functions, receivers): (Vec<_>, Vec<_>) = description
-            .functions
+        let (key, label, functions) = description.into_parts();
+        let (functions, receivers): (Vec<_>, Vec<_>) = functions
             .into_iter()
-            .map(|function| Function::new(description.key.clone(), function, inner.clone()))
+            .map(|function| Function::new(key.clone(), function, inner.clone()))
             .unzip();
         (
             Self {
-                key: description.key,
-                label: Arc::new(Mutex::new(description.label)),
+                key,
+                label: Arc::new(Mutex::new(label)),
                 inner,
                 functions: functions.into(),
             },
@@ -115,15 +115,15 @@ impl PhysicalDevice {
         *self.label.lock().unwrap() = label;
     }
     pub fn description(&self) -> PhysicalDeviceDescription {
-        PhysicalDeviceDescription {
-            key: self.key.clone(),
-            label: self.label(),
-            functions: self
-                .functions
+        PhysicalDeviceDescription::new(
+            self.key.clone(),
+            self.label(),
+            self.functions
                 .iter()
                 .map(|function| function.description().clone())
                 .collect(),
-        }
+        )
+        .expect("a live device keeps a valid description")
     }
     pub(crate) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
@@ -214,13 +214,12 @@ impl Function {
         physical: Arc<PhysicalInner>,
     ) -> (Self, CommandReceiver) {
         let key = FunctionKey::new(physical_key, description.id.clone());
-        let lighting =
-            (description.category == super::Category::Light).then_some(super::LightSnapshot {
-                brightness_percent: None,
-                temperature_kelvin: None,
-                color: None,
-                mode: description.inferred_color_mode(),
-            });
+        let lighting = description.kind.is_light().then_some(super::LightSnapshot {
+            brightness_percent: None,
+            temperature_kelvin: None,
+            color: None,
+            mode: description.inferred_color_mode(),
+        });
         let function = Self(Arc::new(Inner {
             description,
             key,
@@ -277,13 +276,12 @@ impl Function {
         &self,
         patch: super::LightPatch,
     ) -> Result<FunctionSnapshot, super::CommandError> {
-        use super::{Capability, CommandError, LightMode};
+        use super::{CommandError, LightMode};
         let description = self.description();
-        if description.category != super::Category::Light {
+        let Some(profile) = description.kind.light_profile() else {
             return Err(CommandError::Unsupported);
-        }
-        if patch.brightness_percent.is_some() && !description.has_capability(Capability::Brightness)
-        {
+        };
+        if patch.brightness_percent.is_some() && !profile.has_brightness() {
             return Err(CommandError::Unsupported);
         }
         if let Some(percent) = patch.brightness_percent
@@ -294,21 +292,19 @@ impl Function {
             ));
         }
         if let Some(value) = patch.temperature_kelvin {
-            let Some(range) = description.temperature_range() else {
+            let Some(interval) = profile.temperature_interval() else {
                 return Err(CommandError::Unsupported);
             };
-            if !range.contains(value) {
+            if !interval.contains(value) {
                 return Err(CommandError::Rejected(
                     "color temperature is outside its physical range".into(),
                 ));
             }
         }
-        if patch.mode == Some(LightMode::Temperature) && description.temperature_range().is_none() {
+        if patch.mode == Some(LightMode::Temperature) && profile.temperature_interval().is_none() {
             return Err(CommandError::Unsupported);
         }
-        if !description.capabilities.contains(&Capability::ColorRgb)
-            && (patch.color.is_some() || patch.mode == Some(LightMode::Rgb))
-        {
+        if !profile.has_rgb() && (patch.color.is_some() || patch.mode == Some(LightMode::Rgb)) {
             return Err(CommandError::Unsupported);
         }
         let mut state = self.0.state.lock().unwrap();

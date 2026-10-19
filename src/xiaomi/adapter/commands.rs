@@ -480,11 +480,11 @@ pub(super) async fn consume(
                             .cached
                             .borrow()
                             .device
-                            .functions
+                            .functions()
                             .iter()
-                            .find(|function| function.description.id == function_id)
+                            .find(|function| function.id() == function_id)
                             .unwrap()
-                            .lighting
+                            .lighting()
                             .is_some() =>
                     {
                         lighting::send_owned(

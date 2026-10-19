@@ -3,24 +3,24 @@ use support::next_power;
 
 use futures_lite::future::{block_on, poll_once};
 use migate::device::{
-    Availability, Capability, Category, Command, CommandError, DeviceKey, DeviceRegistry,
-    FunctionDescription, PhysicalDevice, PhysicalDeviceDescription, Power,
+    Availability, Command, CommandError, DeviceKey, DeviceRegistry, FunctionDescription,
+    FunctionKind, PhysicalDevice, PhysicalDeviceDescription, Power,
 };
 
 fn description(id: &str) -> PhysicalDeviceDescription {
-    PhysicalDeviceDescription {
-        key: DeviceKey::new("xiaomi", id),
-        label: "三路插座".into(),
-        functions: ["outlet_1", "outlet_2", "usb"]
+    PhysicalDeviceDescription::new(
+        DeviceKey::new("xiaomi", id),
+        "三路插座",
+        ["outlet_1", "outlet_2", "usb"]
             .into_iter()
             .map(|id| FunctionDescription {
                 id: id.into(),
                 label: id.into(),
-                category: Category::Outlet,
-                capabilities: vec![Capability::OnOff],
+                kind: FunctionKind::Outlet,
             })
             .collect(),
-    }
+    )
+    .unwrap()
 }
 
 #[test]

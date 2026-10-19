@@ -1,7 +1,5 @@
 use std::{error::Error, fmt};
 
-use serde::{Deserialize, Serialize};
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     On,
@@ -24,21 +22,195 @@ impl DeviceKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Category {
-    Outlet,
-    Light,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Diagnostics-only capability list derived from a valid function kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Capability {
     OnOff,
     Brightness,
-    ColorTemperature(NumericRange),
+    ColorTemperature(TemperatureInterval),
     ColorRgb,
 }
+
+/// The four standard light profiles without their interval, for comparisons
+/// that treat equivalent logical intervals independently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LightProfileKind {
+    OnOff,
+    Dimmable,
+    ColorTemperature,
+    ExtendedColor,
+}
+
+/// The four standard light profiles. Color-temperature profiles carry their
+/// valid logical interval; the extended profile additionally implies RGB.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LightProfile {
+    OnOff,
+    Dimmable,
+    ColorTemperature(TemperatureInterval),
+    ExtendedColor(TemperatureInterval),
+}
+impl LightProfile {
+    pub fn kind(self) -> LightProfileKind {
+        match self {
+            Self::OnOff => LightProfileKind::OnOff,
+            Self::Dimmable => LightProfileKind::Dimmable,
+            Self::ColorTemperature(_) => LightProfileKind::ColorTemperature,
+            Self::ExtendedColor(_) => LightProfileKind::ExtendedColor,
+        }
+    }
+    pub fn temperature_interval(self) -> Option<TemperatureInterval> {
+        match self {
+            Self::ColorTemperature(interval) | Self::ExtendedColor(interval) => Some(interval),
+            Self::OnOff | Self::Dimmable => None,
+        }
+    }
+    pub fn has_brightness(self) -> bool {
+        !matches!(self, Self::OnOff)
+    }
+    pub fn has_rgb(self) -> bool {
+        matches!(self, Self::ExtendedColor(_))
+    }
+    /// A color temperature profile determines its mode; extended color needs feedback.
+    pub fn inferred_color_mode(self) -> Option<LightMode> {
+        match self {
+            Self::ColorTemperature(_) => Some(LightMode::Temperature),
+            Self::OnOff | Self::Dimmable | Self::ExtendedColor(_) => None,
+        }
+    }
+}
+
+/// The closed set of function kinds; every function is one of these values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FunctionKind {
+    Outlet,
+    Light(LightProfile),
+}
+impl FunctionKind {
+    pub fn is_light(self) -> bool {
+        matches!(self, Self::Light(_))
+    }
+    pub fn light_profile(self) -> Option<LightProfile> {
+        match self {
+            Self::Light(profile) => Some(profile),
+            Self::Outlet => None,
+        }
+    }
+    /// Derived only for diagnostics and the temporary legacy storage columns.
+    pub fn capabilities(self) -> Vec<Capability> {
+        match self {
+            Self::Outlet => vec![Capability::OnOff],
+            Self::Light(profile) => {
+                let mut capabilities = vec![Capability::OnOff];
+                if profile.has_brightness() {
+                    capabilities.push(Capability::Brightness);
+                }
+                if let Some(interval) = profile.temperature_interval() {
+                    capabilities.push(Capability::ColorTemperature(interval));
+                }
+                if profile.has_rgb() {
+                    capabilities.push(Capability::ColorRgb);
+                }
+                capabilities
+            }
+        }
+    }
+}
+
+/// A function's stable identity and its valid kind. The kind is closed, so
+/// category and profile cannot be changed independently.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionDescription {
+    pub id: String,
+    pub label: String,
+    pub kind: FunctionKind,
+}
+impl FunctionDescription {
+    /// Derived for diagnostics and the temporary legacy storage columns only.
+    pub fn capabilities(&self) -> Vec<Capability> {
+        self.kind.capabilities()
+    }
+    pub fn temperature_interval(&self) -> Option<TemperatureInterval> {
+        self.kind
+            .light_profile()
+            .and_then(LightProfile::temperature_interval)
+    }
+    pub fn supports_brightness(&self) -> bool {
+        self.kind
+            .light_profile()
+            .is_some_and(LightProfile::has_brightness)
+    }
+    pub fn supports_color_temperature(&self) -> bool {
+        self.temperature_interval().is_some()
+    }
+    pub fn supports_rgb(&self) -> bool {
+        self.kind.light_profile().is_some_and(LightProfile::has_rgb)
+    }
+    pub fn inferred_color_mode(&self) -> Option<LightMode> {
+        self.kind
+            .light_profile()
+            .and_then(LightProfile::inferred_color_mode)
+    }
+}
+
+/// A physical device description with non-empty, uniquely keyed functions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhysicalDeviceDescription {
+    key: DeviceKey,
+    label: String,
+    functions: Vec<FunctionDescription>,
+}
+impl PhysicalDeviceDescription {
+    pub fn new(
+        key: DeviceKey,
+        label: impl Into<String>,
+        functions: Vec<FunctionDescription>,
+    ) -> Result<Self, DescriptionError> {
+        if functions.is_empty() {
+            return Err(DescriptionError(
+                "a device description needs at least one function",
+            ));
+        }
+        let mut ids = std::collections::HashSet::new();
+        if functions
+            .iter()
+            .any(|function| !ids.insert(function.id.as_str()))
+        {
+            return Err(DescriptionError("function keys must be unique"));
+        }
+        Ok(Self {
+            key,
+            label: label.into(),
+            functions,
+        })
+    }
+    pub fn key(&self) -> &DeviceKey {
+        &self.key
+    }
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    pub fn functions(&self) -> &[FunctionDescription] {
+        &self.functions
+    }
+    pub(crate) fn into_parts(self) -> (DeviceKey, String, Vec<FunctionDescription>) {
+        (self.key, self.label, self.functions)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DescriptionError(&'static str);
+impl DescriptionError {
+    pub fn message(self) -> &'static str {
+        self.0
+    }
+}
+impl fmt::Display for DescriptionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+impl Error for DescriptionError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Power {
@@ -134,49 +306,74 @@ impl FunctionKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct FunctionDescription {
-    pub id: String,
-    pub label: String,
-    pub category: Category,
-    pub capabilities: Vec<Capability>,
+/// A construction error for an invalid integer range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RangeError {
+    Empty,
+    ZeroStep,
+    StepExceedsSpan,
+    InvalidTemperature,
+    UnrepresentableTemperature,
 }
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PhysicalDeviceDescription {
-    pub key: DeviceKey,
-    pub label: String,
-    pub functions: Vec<FunctionDescription>,
+impl fmt::Display for RangeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Empty => "range is empty",
+            Self::ZeroStep => "range step is zero",
+            Self::StepExceedsSpan => "range step exceeds the span",
+            Self::InvalidTemperature => "temperature is outside the representable kelvin bounds",
+            Self::UnrepresentableTemperature => {
+                "temperature range cannot be represented in Matter mireds"
+            }
+        })
+    }
 }
+impl Error for RangeError {}
 
-/// An integer physical range. Every accepted value lies on its declared grid.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// A native quantization grid. Construction guarantees a non-empty interval
+/// and a legal step, so every accepted value lies on its declared grid. The
+/// grid belongs to the Xiaomi source boundary; Matter never reads its step.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct NumericRange {
-    pub min: u32,
-    pub max: u32,
-    pub step: u32,
+    min: u32,
+    max: u32,
+    step: u32,
 }
 impl NumericRange {
-    pub fn valid(self) -> bool {
-        self.min < self.max && self.step > 0 && self.step <= self.max - self.min
+    pub fn new(min: u32, max: u32, step: u32) -> Result<Self, RangeError> {
+        if min >= max {
+            return Err(RangeError::Empty);
+        }
+        if step == 0 {
+            return Err(RangeError::ZeroStep);
+        }
+        if step > max - min {
+            return Err(RangeError::StepExceedsSpan);
+        }
+        Ok(Self { min, max, step })
+    }
+    pub fn min(self) -> u32 {
+        self.min
+    }
+    pub fn max(self) -> u32 {
+        self.max
+    }
+    pub fn step(self) -> u32 {
+        self.step
     }
     pub fn contains(self, value: u32) -> bool {
-        self.valid()
-            && (self.min..=self.max).contains(&value)
-            && (value - self.min).is_multiple_of(self.step)
+        (self.min..=self.max).contains(&value) && (value - self.min).is_multiple_of(self.step)
     }
     pub fn effective_max(self) -> u32 {
         self.min + (self.max - self.min) / self.step * self.step
     }
     pub fn nonzero_bounds(self) -> Option<(u32, u32)> {
-        if !self.valid() {
-            return None;
-        }
         let min = if self.min == 0 { self.step } else { self.min };
         let max = self.effective_max();
         (min < max).then_some((min, max))
     }
     /// Clamp and round to the nearest reachable value, without exceeding max.
+    /// This is the native source quantization used before a Xiaomi write.
     pub fn quantize(self, value: f64) -> u32 {
         let last = (self.max - self.min) / self.step;
         let index = ((value.clamp(self.min as f64, self.max as f64) - self.min as f64)
@@ -184,38 +381,52 @@ impl NumericRange {
             .round() as u32;
         self.min + index.min(last) * self.step
     }
-    pub fn mired_bounds(self) -> Result<(u16, u16), CommandError> {
-        if !self.valid() || self.min == 0 {
-            return Err(CommandError::Rejected("invalid temperature range".into()));
-        }
-        // Check the full physical range before narrowing to the Matter encoding.
-        let min = 1_000_000_u64.div_ceil(self.effective_max() as u64);
-        let max = 1_000_000_u64 / self.min as u64;
-        if min == 0 || min > max || max > 0xfeff {
-            return Err(CommandError::Rejected(
-                "temperature range cannot be represented in Matter mireds".into(),
-            ));
-        }
-        Ok((min as u16, max as u16))
+}
+
+/// A logical color-temperature interval with no quantization step. The native
+/// grid keeps its own step in the source binding; group publication and Matter
+/// use this interval.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TemperatureInterval {
+    min: u32,
+    max: u32,
+}
+impl TemperatureInterval {
+    /// Construct from a native grid's effective span: the declared interval
+    /// narrowed to the last reachable grid value. The native grid keeps its own
+    /// step for Xiaomi writes; this step-less span is what publication uses.
+    pub fn from_grid(range: NumericRange) -> Result<Self, RangeError> {
+        Self::new(range.min(), range.effective_max())
     }
-    pub fn kelvin_from_mireds(self, mireds: u16) -> Result<u32, CommandError> {
-        self.mired_bounds()?;
-        if !(1..=0xfeff).contains(&mireds) {
-            return Err(CommandError::Rejected(
-                "color temperature is outside the Matter range".into(),
-            ));
+    pub fn new(min: u32, max: u32) -> Result<Self, RangeError> {
+        if min >= max {
+            return Err(RangeError::Empty);
         }
-        Ok(self.quantize(1_000_000.0 / mireds as f64))
-    }
-    pub fn mireds_from_kelvin(self, kelvin: u32) -> Result<u16, CommandError> {
-        if !self.contains(kelvin) {
-            return Err(CommandError::Rejected(
-                "color temperature is outside its physical range".into(),
-            ));
+        if min == 0 || max > 1_000_000 {
+            return Err(RangeError::InvalidTemperature);
         }
-        let (min, max) = self.mired_bounds()?;
-        Ok(((1_000_000.0 / kelvin as f64).round() as u16).clamp(min, max))
+        if mired_span(min, max).is_none() {
+            return Err(RangeError::UnrepresentableTemperature);
+        }
+        Ok(Self { min, max })
     }
+    pub fn min(self) -> u32 {
+        self.min
+    }
+    pub fn max(self) -> u32 {
+        self.max
+    }
+    pub fn contains(self, value: u32) -> bool {
+        (self.min..=self.max).contains(&value)
+    }
+}
+
+/// The Matter mired span of a valid temperature range, with its upper bound
+/// taken from the interval itself.
+fn mired_span(min: u32, max: u32) -> Option<(u16, u16)> {
+    let lo = 1_000_000_u64.div_ceil(max as u64);
+    let hi = 1_000_000_u64 / min as u64;
+    (lo > 0 && lo <= hi && hi <= 0xfeff).then_some((lo as u16, hi as u16))
 }
 
 /// Nonzero brightness uses [1, 100] percent; zero is handled by command semantics.
@@ -278,84 +489,4 @@ pub struct LightPatch {
     pub temperature_kelvin: Option<u32>,
     pub color: Option<Rgb>,
     pub mode: Option<LightMode>,
-}
-/// One of the four standard light profiles shared by every layer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LightProfile {
-    OnOff,
-    Dimmable,
-    ColorTemperature,
-    ExtendedColor,
-}
-
-/// The single standard-profile decision used by parsing, storage and Matter.
-pub fn standard_light_profile(capabilities: &[Capability]) -> Result<LightProfile, &'static str> {
-    let count = |capability: fn(&Capability) -> bool| {
-        capabilities
-            .iter()
-            .filter(|candidate| capability(candidate))
-            .count()
-    };
-    let on_off = count(|capability| matches!(capability, Capability::OnOff));
-    let brightness = count(|capability| matches!(capability, Capability::Brightness));
-    let rgb = count(|capability| matches!(capability, Capability::ColorRgb));
-    let temperatures = capabilities
-        .iter()
-        .filter_map(|capability| match capability {
-            Capability::ColorTemperature(range) => Some(*range),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if on_off > 1 || brightness > 1 || rgb > 1 || temperatures.len() > 1 {
-        return Err("duplicate light capability");
-    }
-    if on_off == 0 {
-        return Err("standard light profiles require On/Off");
-    }
-    let temperature = temperatures.first().copied();
-    if let Some(range) = temperature
-        && (range.mired_bounds().is_err() || range.min == 0 || range.max > 1_000_000)
-    {
-        return Err("color temperature range is not representable");
-    }
-    match (brightness > 0, temperature, rgb > 0) {
-        (false, None, false) => Ok(LightProfile::OnOff),
-        (true, None, false) => Ok(LightProfile::Dimmable),
-        (true, Some(_), false) => Ok(LightProfile::ColorTemperature),
-        (true, Some(_), true) => Ok(LightProfile::ExtendedColor),
-        _ => Err("unsupported light capability combination"),
-    }
-}
-
-impl FunctionDescription {
-    pub fn temperature_range(&self) -> Option<NumericRange> {
-        self.capabilities
-            .iter()
-            .find_map(|capability| match capability {
-                Capability::ColorTemperature(range) => Some(*range),
-                _ => None,
-            })
-    }
-    pub fn has_capability(&self, capability: Capability) -> bool {
-        self.capabilities.contains(&capability)
-    }
-    pub fn light_profile(&self) -> Result<LightProfile, &'static str> {
-        if self.category != Category::Light {
-            return Err("not a light");
-        }
-        standard_light_profile(&self.capabilities)
-    }
-    /// A color temperature profile determines its mode; extended color needs feedback.
-    pub fn inferred_color_mode(&self) -> Option<LightMode> {
-        match self.light_profile() {
-            Ok(LightProfile::ColorTemperature) => Some(LightMode::Temperature),
-            _ => None,
-        }
-    }
-    pub fn valid_capabilities(&self) -> bool {
-        match self.category {
-            Category::Outlet => self.capabilities == [Capability::OnOff],
-            Category::Light => self.light_profile().is_ok(),
-        }
-    }
 }

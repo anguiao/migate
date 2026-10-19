@@ -173,10 +173,10 @@ fn initial_list_waits_for_baseline_suback_and_preserves_its_timeout() {
 
 pub(super) fn observation(record: &CachedPhysicalDevice, online: bool) -> DeviceEntry {
     DeviceEntry {
-        did: record.device.key.id.clone(),
+        did: record.device.key().id.clone(),
         access: Ok(DeviceAccess {
-            did: record.device.key.id.clone(),
-            name: Some(format!("name {}", record.device.key.id)),
+            did: record.device.key().id.clone(),
+            name: Some(format!("name {}", record.device.key().id)),
             model: record.model.clone(),
             instance_type: record.instance_type.clone(),
             online,

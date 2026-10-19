@@ -148,7 +148,7 @@ fn an_incompatible_device_rejects_a_late_accepted_write_from_the_old_binding() {
 }
 
 #[test]
-fn a_compatible_description_reorder_preserves_a_held_write_and_its_consumer() {
+fn a_repeated_compatible_description_sync_preserves_a_held_write_and_its_consumer() {
     block_on(observation_rig(&["multi"]).run(|c| async move {
         c.announce();
         let control = &c;
@@ -162,8 +162,7 @@ fn a_compatible_description_reorder_preserves_a_held_write_and_its_consumer() {
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "multi", 3) == 1).await;
 
-            let mut reordered = work.record.cached.borrow().clone();
-            reordered.device.functions.reverse();
+            let same = work.record.cached.borrow().clone();
             control
                 .context
                 .live
@@ -171,7 +170,7 @@ fn a_compatible_description_reorder_preserves_a_held_write_and_its_consumer() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate = Some((reordered, None));
+                .candidate = Some((same, None));
             control.context.reconcile("multi").unwrap();
             assert_eq!(work.record.binding_generation.get(), generation);
             assert!(Rc::ptr_eq(&work, &device_work(control, "multi")));
@@ -242,42 +241,45 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
 
 #[test]
 fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readiness() {
-    block_on(observation_rig(&["one", "multi"]).run(|c| async move {
+    block_on(observation_rig(&["one", "two"]).run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());
         peer.state
             .borrow_mut()
             .sub_timeout
-            .insert(("multi".into(), 3, 1));
+            .insert(("two".into(), 2, 1));
         let control = &c;
         c.peer(peer, |peer| async move {
             freeze_initialized(control, &peer, &["one"]).await;
             until(|| !peer.state.borrow().held_subs.is_empty()).await;
             let old = peer.state.borrow_mut().held_subs.remove(0);
-            let work = device_work(control, "multi");
+            let work = device_work(control, "two");
             let original = work.record.cached.borrow().clone();
             let generation = work.record.binding_generation.get();
+            let outlet_function = original.device.functions()[0].clone();
             let mut changed = original.clone();
-            changed
-                .device
-                .functions
-                .iter_mut()
-                .find(|function| function.description.id == "outlet_1")
-                .unwrap()
-                .power
-                .siid = 7;
+            changed.device = super::support::device_with_functions(
+                &changed.device,
+                vec![super::support::function_with_power(
+                    &outlet_function,
+                    crate::xiaomi::capability::PropertyBinding {
+                        siid: 7,
+                        piid: outlet_function.power().piid,
+                    },
+                )],
+            );
             for candidate in [changed, original] {
                 control
                     .context
                     .live
                     .borrow_mut()
                     .devices
-                    .get_mut("multi")
+                    .get_mut("two")
                     .unwrap()
                     .candidate = Some((candidate, None));
-                control.context.reconcile("multi").unwrap();
+                control.context.reconcile("two").unwrap();
                 until(|| {
-                    control.context.live.borrow().devices["multi"]
+                    control.context.live.borrow().devices["two"]
                         .candidate
                         .is_none()
                 })
@@ -285,7 +287,7 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
             }
             assert_eq!(work.record.binding_generation.get(), generation + 2);
             assert!(work.subscribed.borrow().is_empty());
-            let current_work = device_work(control, "multi");
+            let current_work = device_work(control, "two");
             advance_to(
                 &control.clock,
                 control.clock.now() + Duration::from_millis(10),
@@ -296,7 +298,7 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
                     .borrow()
                     .held_subs
                     .iter()
-                    .any(|sub| sub.pkid != old.pkid && topic_key(&sub.filters[0].path).1 == 3)
+                    .any(|sub| sub.pkid != old.pkid && topic_key(&sub.filters[0].path).1 == 2)
             })
             .await;
 
@@ -304,25 +306,27 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
                 old.pkid,
                 vec![SubscribeReasonCode::QoS2],
             )));
+            // A later notification on another device proves the stale SUBACK
+            // was already processed on the shared wire.
             let one = function(&control.context.registry, "one", "main");
             peer.notify("one", 2, true);
             until(|| one.snapshot().power == Power::On).await;
-            assert!(!current_work.subscribed.borrow().contains(&(3, 1)));
+            assert!(!current_work.subscribed.borrow().contains(&(2, 1)));
 
             let index = peer
                 .state
                 .borrow()
                 .held_subs
                 .iter()
-                .position(|sub| sub.pkid != old.pkid && topic_key(&sub.filters[0].path).1 == 3)
+                .position(|sub| sub.pkid != old.pkid && topic_key(&sub.filters[0].path).1 == 2)
                 .unwrap();
             let current = peer.state.borrow_mut().held_subs.remove(index);
             peer.send(Packet::SubAck(SubAck::new(
                 current.pkid,
                 vec![SubscribeReasonCode::QoS2],
             )));
-            until(|| current_work.subscribed.borrow().len() == 4).await;
-            assert!(current_work.subscribed.borrow().contains(&(3, 1)));
+            until(|| current_work.subscribed.borrow().len() == 1).await;
+            assert!(current_work.subscribed.borrow().contains(&(2, 1)));
             assert!(
                 work.record
                     .physical

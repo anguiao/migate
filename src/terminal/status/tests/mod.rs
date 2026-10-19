@@ -300,18 +300,16 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
 #[test]
 fn lighting_command_records_show_explicit_targets_actual_batch_and_no_write_results() {
     use crate::{
-        device::{CommandError, LightColorTarget, LightTarget, Rgb},
+        device::{CommandError, LightTarget, Rgb},
         xiaomi::{adapter::CommandTarget, capability::PropertyBinding},
     };
 
     let mut command = CommandStatus {
         id: 42,
         binding: PropertyBinding { siid: 99, piid: 9 },
-        target: CommandTarget::Light(LightTarget {
-            power: Some(false),
-            brightness_percent: Some(12.5),
-            color: Some(LightColorTarget::Temperature(4000)),
-        }),
+        target: CommandTarget::Light(
+            LightTarget::temperature(Some(false), 4000.0).expect("valid test target"),
+        ),
         properties: vec![
             (PropertyBinding { siid: 2, piid: 1 }, false.into()),
             (PropertyBinding { siid: 2, piid: 2 }, 13.into()),
@@ -323,16 +321,16 @@ fn lighting_command_records_show_explicit_targets_actual_batch_and_no_write_resu
     };
     assert_eq!(
         format_command("main", "last", &command),
-        "main last command #42: target power=off, brightness=12.5%, temperature=4000 K; properties 2.1=false, 2.2=13, 2.3=4000, 4.2=0; actual path local; accepted."
+        "main last command #42: target power=off, temperature=4000 K; properties 2.1=false, 2.2=13, 2.3=4000, 4.2=0; actual path local; accepted."
     );
-    command.target = CommandTarget::Light(LightTarget {
-        color: Some(LightColorTarget::Rgb(Rgb {
+    command.target = CommandTarget::Light(LightTarget::rgb(
+        None,
+        Rgb {
             red: 255,
             green: 128,
             blue: 64,
-        })),
-        ..Default::default()
-    });
+        },
+    ));
     command.properties = vec![
         (PropertyBinding { siid: 4, piid: 1 }, 0xff8040.into()),
         (PropertyBinding { siid: 4, piid: 2 }, 1.into()),
@@ -358,10 +356,8 @@ fn lighting_command_records_show_explicit_targets_actual_batch_and_no_write_resu
         format_command("main", "last", &command),
         "main last command #42: target on; property none; actual path not sent; unchanged (no write)."
     );
-    command.target = CommandTarget::Light(LightTarget {
-        color: Some(LightColorTarget::Temperature(4000)),
-        ..Default::default()
-    });
+    command.target =
+        CommandTarget::Light(LightTarget::temperature(None, 4000.0).expect("valid test target"));
     for (error, expected) in [
         (CommandError::Superseded, "superseded"),
         (CommandError::Stopped, "stopped"),
@@ -377,24 +373,20 @@ fn lighting_command_records_show_explicit_targets_actual_batch_and_no_write_resu
 
 fn light_diagnostics_fixture() -> (crate::device::Function, crate::device::CommandReceiver) {
     use crate::device::*;
-    let (physical, mut receivers) = PhysicalDevice::new(PhysicalDeviceDescription {
-        key: DeviceKey::new("xiaomi", "light"),
-        label: "Light".into(),
-        functions: vec![FunctionDescription {
-            id: "main".into(),
-            label: "Light".into(),
-            category: Category::Light,
-            capabilities: vec![
-                Capability::OnOff,
-                Capability::Brightness,
-                Capability::ColorTemperature(NumericRange {
-                    min: 2700,
-                    max: 6500,
-                    step: 1,
-                }),
-            ],
-        }],
-    });
+    let (physical, mut receivers) = PhysicalDevice::new(
+        PhysicalDeviceDescription::new(
+            DeviceKey::new("xiaomi", "light"),
+            "Light",
+            vec![FunctionDescription {
+                id: "main".into(),
+                label: "Light".into(),
+                kind: FunctionKind::Light(LightProfile::ColorTemperature(
+                    TemperatureInterval::new(2700, 6500).unwrap(),
+                )),
+            }],
+        )
+        .unwrap(),
+    );
     physical.set_availability(Availability::Available);
     (physical.functions()[0].clone(), receivers.remove(0))
 }
@@ -419,26 +411,18 @@ fn action_report(function: &crate::device::Function) -> String {
 
 #[test]
 fn lighting_actions_show_undequeued_superseded_and_stopped_independently_of_frames() {
-    use crate::device::{LightColorTarget, LightDimension, LightTarget};
+    use crate::device::{LightDimension, LightTarget};
 
     let (function, _receiver) = light_diagnostics_fixture();
     function
         .begin_light_action(
-            LightDimension::Brightness,
-            LightTarget {
-                brightness_percent: Some(25.0),
-                ..Default::default()
-            },
+            LightTarget::brightness(None, 25.0).expect("valid test target"),
             false,
         )
         .unwrap();
     function
         .begin_light_action(
-            LightDimension::Brightness,
-            LightTarget {
-                brightness_percent: Some(50.0),
-                ..Default::default()
-            },
+            LightTarget::brightness(None, 50.0).expect("valid test target"),
             false,
         )
         .unwrap();
@@ -448,11 +432,7 @@ fn lighting_actions_show_undequeued_superseded_and_stopped_independently_of_fram
     assert!(!superseded.contains("ActionToken"));
     function
         .begin_light_action(
-            LightDimension::Color,
-            LightTarget {
-                color: Some(LightColorTarget::Temperature(4000)),
-                ..Default::default()
-            },
+            LightTarget::temperature(None, 4000.0).expect("valid test target"),
             false,
         )
         .unwrap();
@@ -468,13 +448,8 @@ fn lighting_actions_distinguish_original_startup_receipt_acceptance_and_failure(
 
     block_on(async {
         let (function, mut receiver) = light_diagnostics_fixture();
-        let target = LightTarget {
-            brightness_percent: Some(25.0),
-            ..Default::default()
-        };
-        function
-            .begin_light_action(LightDimension::Brightness, target, false)
-            .unwrap();
+        let target = LightTarget::brightness(None, 25.0).expect("valid test target");
+        function.begin_light_action(target, false).unwrap();
         let DeviceRequest::Light(original) = receiver.next_operation().await.unwrap() else {
             panic!("expected startup frame")
         };
@@ -483,9 +458,7 @@ fn lighting_actions_distinguish_original_startup_receipt_acceptance_and_failure(
             action_report(&function).contains("awaiting startup receipt brightness; last none.")
         );
         function.stop_light(LightDimension::Brightness).unwrap();
-        function
-            .begin_light_action(LightDimension::Brightness, target, false)
-            .unwrap();
+        function.begin_light_action(target, false).unwrap();
         let waiting = action_report(&function);
         assert!(waiting.contains("brightness active; color idle; awaiting startup receipt brightness (previous action); last brightness stopped."), "{waiting}");
         original.accept().unwrap();
@@ -501,9 +474,7 @@ fn lighting_actions_distinguish_original_startup_receipt_acceptance_and_failure(
         let accepted = action_report(&function);
         assert!(accepted.contains("brightness active; color idle; awaiting startup receipt none; last brightness accepted."), "{accepted}");
         assert!(!accepted.contains("finished"));
-        function
-            .begin_light_action(LightDimension::Brightness, target, false)
-            .unwrap();
+        function.begin_light_action(target, false).unwrap();
         let DeviceRequest::Light(failed) = receiver.next_operation().await.unwrap() else {
             panic!("expected failing frame")
         };
@@ -515,18 +486,14 @@ fn lighting_actions_distinguish_original_startup_receipt_acceptance_and_failure(
 
 #[test]
 fn unchanged_transition_startup_does_not_claim_acceptance() {
-    use crate::device::{DeviceRequest, LightDimension, LightTarget};
+    use crate::device::{DeviceRequest, LightTarget};
     use futures_lite::future::{block_on, poll_once};
 
     block_on(async {
         let (function, mut receiver) = light_diagnostics_fixture();
         let action = function
             .begin_light_action(
-                LightDimension::Brightness,
-                LightTarget {
-                    brightness_percent: Some(50.0),
-                    ..Default::default()
-                },
+                LightTarget::brightness(None, 50.0).expect("valid test target"),
                 false,
             )
             .unwrap();

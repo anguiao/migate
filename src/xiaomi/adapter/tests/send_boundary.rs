@@ -444,9 +444,7 @@ fn dropping_a_zero_byte_refresh_task_retires_its_operation_and_returns_the_deman
 
 #[test]
 fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
-    use crate::device::{
-        LightColorTarget, LightDimension, LightMode, LightPatch, LightTarget, Rgb,
-    };
+    use crate::device::{LightMode, LightPatch, LightTarget, Rgb};
     use crate::xiaomi::capability::PropertyBinding;
     block_on(Rig::light("devcea.light.ls2307").run(|c| async move {
         let wire = Rc::new(Wire::default());
@@ -469,12 +467,7 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
             async {
                 let action = light
                     .begin_light_action(
-                        LightDimension::Color,
-                        LightTarget {
-                            power: Some(true),
-                            color: Some(LightColorTarget::Rgb(Rgb::from_packed(0x456789).unwrap())),
-                            ..Default::default()
-                        },
+                        LightTarget::rgb(Some(true), Rgb::from_packed(0x456789).unwrap()),
                         true,
                     )
                     .unwrap();
@@ -527,7 +520,7 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
 
 #[test]
 fn latest_tick_withdraws_unsent_transport_frame_and_preserves_linked_power() {
-    use crate::device::{LightDimension, LightPatch, LightTarget};
+    use crate::device::{LightPatch, LightTarget};
     for power in [None, Some(false)] {
         block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
             let wire = Rc::new(Wire::default());
@@ -546,13 +539,7 @@ fn latest_tick_withdraws_unsent_transport_frame_and_preserves_linked_power() {
             };
             let commanding = async {
                 let action = light
-                    .begin_light_action(
-                        LightDimension::Brightness,
-                        LightTarget {
-                            power: Some(true),
-                            brightness_percent: Some(20.0),
-                            ..Default::default()
-                        },
+                    .begin_light_action(LightTarget::brightness(Some(true), 20.0).expect("valid test target"),
                         false,
                     )
                     .unwrap();
@@ -560,11 +547,8 @@ fn latest_tick_withdraws_unsent_transport_frame_and_preserves_linked_power() {
                 light
                     .submit_light_frame(
                         action.token(),
-                        LightTarget {
-                            power,
-                            brightness_percent: Some(70.0),
-                            ..Default::default()
-                        },
+                        LightTarget::brightness(power, 70.0)
+                            .expect("valid test target"),
                         true,
                     )
                     .unwrap();
@@ -603,7 +587,7 @@ fn latest_tick_withdraws_unsent_transport_frame_and_preserves_linked_power() {
 
 #[test]
 fn unsent_light_target_reselects_cloud_once_without_local_bytes() {
-    use crate::device::{LightDimension, LightTarget};
+    use crate::device::LightTarget;
     let rig = Rig::light("xiaomi.light.ceil04");
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
@@ -619,11 +603,7 @@ fn unsent_light_target_reselects_cloud_once_without_local_bytes() {
             async {
                 let action = light
                     .begin_light_action(
-                        LightDimension::Brightness,
-                        LightTarget {
-                            brightness_percent: Some(60.0),
-                            ..Default::default()
-                        },
+                        LightTarget::brightness(None, 60.0).expect("valid test target"),
                         true,
                     )
                     .unwrap();
@@ -643,7 +623,7 @@ fn unsent_light_target_reselects_cloud_once_without_local_bytes() {
 
 #[test]
 fn an_unsent_light_target_is_not_own_feedback() {
-    use crate::device::{CommandError, LightDimension, LightPatch, LightTarget};
+    use crate::device::{CommandError, LightPatch, LightTarget};
     use crate::xiaomi::capability::PropertyBinding;
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         let wire = Rc::new(Wire::default());
@@ -663,11 +643,7 @@ fn an_unsent_light_target_is_not_own_feedback() {
             async {
                 let action = light
                     .begin_light_action(
-                        LightDimension::Brightness,
-                        LightTarget {
-                            brightness_percent: Some(60.0),
-                            ..Default::default()
-                        },
+                        LightTarget::brightness(None, 60.0).expect("valid test target"),
                         false,
                     )
                     .unwrap();
@@ -718,11 +694,7 @@ fn unsent_stop_keeps_its_actual_result_in_command_diagnostics() {
             async {
                 let action = light
                     .begin_light_action(
-                        LightDimension::Brightness,
-                        LightTarget {
-                            brightness_percent: Some(60.0),
-                            ..Default::default()
-                        },
+                        LightTarget::brightness(None, 60.0).expect("valid test target"),
                         false,
                     )
                     .unwrap();

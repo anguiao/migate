@@ -64,7 +64,7 @@ fn bridge_cloud_or_refresh_failure_preserves_same_account_cache_and_valid_certif
                 .load_parsed(
                     &prepared.credentials.as_ref().unwrap().uid,
                     "local-home",
-                    &cached.device.key
+                    cached.device.key()
                 )
                 .unwrap(),
             Some(cached)
@@ -105,7 +105,7 @@ fn bridge_account_mismatch_does_not_expose_another_accounts_directory_or_cache()
     assert!(
         store
             .devices()
-            .load_parsed("old-account", "local-home", &other.device.key)
+            .load_parsed("old-account", "local-home", other.device.key())
             .unwrap()
             .is_none()
     );
@@ -159,7 +159,7 @@ fn bridge_preparation_renews_with_processed_credentials_without_reading_device_c
     assert!(
         store
             .devices()
-            .load_parsed("uid", "local-home", &cached.device.key)
+            .load_parsed("uid", "local-home", cached.device.key())
             .is_err()
     );
 }

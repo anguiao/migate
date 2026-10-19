@@ -1,6 +1,6 @@
 use super::super::group::parse_group;
 use super::*;
-use crate::device::{Capability, DeviceKey};
+use crate::device::{DeviceKey, FunctionKind, LightProfile, TemperatureInterval};
 use serde_json::Value;
 
 fn instance() -> Value {
@@ -18,56 +18,31 @@ fn parses_real_group3_native_light_profile() {
         &instance(),
     )
     .unwrap();
-    assert_eq!(parsed.functions.len(), 1);
-    let function = &parsed.functions[0];
-    assert_eq!(function.description.id, "main");
+    assert_eq!(parsed.functions().len(), 1);
+    let function = &parsed.functions()[0];
+    assert_eq!(function.id(), "main");
     assert_eq!(
-        function.description.category,
-        crate::device::Category::Light
+        function.kind(),
+        FunctionKind::Light(LightProfile::ColorTemperature(
+            TemperatureInterval::new(1700, 7000).unwrap()
+        ))
     );
-    assert!(
-        function
-            .description
-            .capabilities
-            .contains(&Capability::OnOff)
-    );
-    assert!(
-        function
-            .description
-            .capabilities
-            .contains(&Capability::Brightness)
-    );
-    assert!(matches!(
-        function
-            .description
-            .capabilities
-            .iter()
-            .find(|capability| matches!(capability, Capability::ColorTemperature(_))),
-        Some(Capability::ColorTemperature(range)) if range.min == 1700 && range.max == 7000
-    ));
-    assert!(
-        !function
-            .description
-            .capabilities
-            .contains(&Capability::ColorRgb),
-        "the group instance has no RGB property"
-    );
-    assert_eq!(function.power, PropertyBinding { siid: 2, piid: 1 });
-    let lighting = function.lighting.as_ref().unwrap();
+    assert_eq!(function.power(), PropertyBinding { siid: 2, piid: 1 });
+    let lighting = function.lighting().unwrap();
     assert_eq!(
-        lighting.brightness.as_ref().unwrap().property,
+        lighting.brightness().unwrap().property(),
         PropertyBinding { siid: 2, piid: 2 }
     );
     assert_eq!(
-        lighting.temperature.as_ref().unwrap().property,
+        lighting.temperature().unwrap().property(),
         PropertyBinding { siid: 2, piid: 3 }
     );
-    assert!(lighting.color.is_none());
+    assert!(lighting.color().is_none());
     assert!(
-        lighting.mode.is_none(),
+        lighting.mode().is_none(),
         "a group mode value cannot create a color capability"
     );
-    assert!(parsed.refresh_trigger.is_none());
+    assert!(parsed.refresh_trigger().is_none());
 }
 
 #[test]

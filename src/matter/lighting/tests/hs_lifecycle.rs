@@ -49,7 +49,7 @@ fn hs_transition_from_temperature_ignores_the_inactive_rgb_cache() {
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
             let request = frame(&mut receiver).await;
-            let Some(LightColorTarget::Rgb(start)) = request.target.color else {
+            let Some(LightColorTarget::Rgb(start)) = request.target.color_target() else {
                 panic!("expected RGB");
             };
             assert_ne!(start, cached);
@@ -67,7 +67,7 @@ fn hs_transition_from_temperature_ignores_the_inactive_rgb_cache() {
             light.advance();
             let final_request = frame(&mut receiver).await;
             assert!(final_request.final_frame);
-            let Some(LightColorTarget::Rgb(end)) = final_request.target.color else {
+            let Some(LightColorTarget::Rgb(end)) = final_request.target.color_target() else {
                 panic!("expected RGB");
             };
             assert_eq!(end.blue, 255);
@@ -118,7 +118,10 @@ fn gray_hue_motion_waits_for_source_acceptance_and_stop_preserves_the_hue_for_sa
             assert!(poll_once(invoke.as_mut()).await.is_none());
             let token = function.light_action_diagnostics().unwrap().color.unwrap();
             let request = frame(&mut receiver).await;
-            assert_eq!(request.target.color, Some(LightColorTarget::Rgb(white)));
+            assert_eq!(
+                request.target.color_target(),
+                Some(LightColorTarget::Rgb(white))
+            );
             assert!(!request.final_frame);
             request.accept_unchanged().unwrap();
             invoke.await.unwrap();
@@ -153,7 +156,7 @@ fn gray_hue_motion_waits_for_source_acceptance_and_stop_preserves_the_hue_for_sa
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
             let request = frame(&mut receiver).await;
-            let Some(LightColorTarget::Rgb(rgb)) = request.target.color else {
+            let Some(LightColorTarget::Rgb(rgb)) = request.target.color_target() else {
                 panic!("expected RGB");
             };
             assert_eq!((rgb.green, rgb.blue), (255, 0));

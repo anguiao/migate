@@ -2,7 +2,7 @@ use super::{
     support::{confirmed_for, group_record, ls2307_instance, repair_ready, repair_rig},
     *,
 };
-use crate::device::{Capability, LightColorTarget, LightDimension, LightTarget, NumericRange, Rgb};
+use crate::device::{LightTarget, Rgb, TemperatureInterval};
 
 #[test]
 fn native_rgb_group_uses_member_temperature_interval_without_repair() {
@@ -22,7 +22,7 @@ fn native_rgb_group_uses_member_temperature_interval_without_repair() {
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "main");
-        assert!(light.description().has_capability(Capability::ColorRgb));
+        assert!(light.description().supports_rgb());
         assert!(c.context.group_repair("group-1").is_none());
         let native = c.publication.current();
         let cached = &native
@@ -32,26 +32,18 @@ fn native_rgb_group_uses_member_temperature_interval_without_repair() {
             .find(|entry| entry.physical.key().id == "group-1")
             .unwrap()
             .cached;
-        let bindings = cached.device.functions[0].lighting.as_ref().unwrap();
-        assert!(bindings.color.is_some(), "RGB must stay genuinely native");
-        assert_eq!(bindings.temperature.as_ref().unwrap().range.min, 2000);
-        assert_eq!(bindings.temperature.as_ref().unwrap().range.max, 8000);
+        let bindings = cached.device.functions()[0].lighting().unwrap();
+        assert!(bindings.color().is_some(), "RGB must stay genuinely native");
+        assert_eq!(bindings.temperature().as_ref().unwrap().range().min(), 2000);
+        assert_eq!(bindings.temperature().as_ref().unwrap().range().max(), 8000);
         assert_eq!(
-            light.description().temperature_range(),
-            Some(NumericRange {
-                min: 2700,
-                max: 6500,
-                step: 1,
-            })
+            light.description().temperature_interval(),
+            Some(TemperatureInterval::new(2700, 6500).unwrap())
         );
         c.cloud.lock().unwrap().property_reads.clear();
         let action = light
             .begin_light_action(
-                LightDimension::Color,
-                LightTarget {
-                    color: Some(LightColorTarget::Rgb(Rgb::from_packed(0xff0000).unwrap())),
-                    ..LightTarget::default()
-                },
+                LightTarget::rgb(None, Rgb::from_packed(0xff0000).unwrap()),
                 false,
             )
             .unwrap();
@@ -158,12 +150,8 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
         c.publication.apply(latest).unwrap();
         let light = function(&c.context.registry, "group-1", "main");
         assert_eq!(
-            light.description().temperature_range(),
-            Some(NumericRange {
-                min: 3200,
-                max: 6200,
-                step: 1,
-            }),
+            light.description().temperature_interval(),
+            Some(TemperatureInterval::new(3200, 6200).unwrap()),
             "a prepared group cannot retain an obsolete member interval"
         );
         let after = c.store.devices().load_published(&key).unwrap().unwrap();

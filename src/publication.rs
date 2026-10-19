@@ -176,22 +176,21 @@ impl Publication {
                     }
                     for function in &mut existing.functions {
                         let actual = description
-                            .functions
+                            .functions()
                             .iter()
                             .find(|actual| actual.id == function.key.id)
                             .ok_or_else(|| {
                                 self.invalid("Stored device topology is incompatible")
                             })?;
-                        function.category = actual.category;
-                        function.capabilities = actual.capabilities.clone();
+                        function.kind = actual.kind;
                     }
                     existing
                 }
                 None => {
-                    let needed = if description.functions.len() == 1 {
+                    let needed = if description.functions().len() == 1 {
                         1
                     } else {
-                        description.functions.len() + 1
+                        description.functions().len() + 1
                     };
                     if usize::from(next_endpoint) + needed - 1 > 65534 {
                         self.source
@@ -201,9 +200,9 @@ impl Publication {
                     }
                     let endpoint = allocate(&mut next_endpoint)
                         .ok_or_else(|| self.invalid("Device endpoint numbers are exhausted"))?;
-                    let single = description.functions.len() == 1;
+                    let single = description.functions().len() == 1;
                     let mut functions = Vec::new();
-                    for function in &description.functions {
+                    for function in description.functions() {
                         functions.push(StoredFunction {
                             key: crate::device::FunctionKey::new(key.clone(), &function.id),
                             endpoint: if single {
@@ -214,8 +213,7 @@ impl Publication {
                                 })?
                             },
                             label: function.label.clone(),
-                            category: function.category,
-                            capabilities: function.capabilities.clone(),
+                            kind: function.kind,
                         });
                     }
                     StoredDevice {

@@ -558,7 +558,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
             .unwrap();
         assert_eq!(report_value(&bytes).utf8().unwrap(), "Renamed first");
         assert_eq!(first.label(), "Renamed first");
-        assert_eq!(first.description().label, "Renamed first");
+        assert_eq!(first.description().label(), "Renamed first");
         assert_eq!(second.label(), second_stored.label);
         assert_eq!(
             write_label(&handler, &im, first_stored.endpoint, &"界".repeat(11))
@@ -607,7 +607,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
             ErrorCode::StdIoError
         );
         assert_eq!(first.label(), "Renamed first");
-        assert_eq!(first.description().label, "Renamed first");
+        assert_eq!(first.description().label(), "Renamed first");
         assert_eq!(second.label(), "Renamed multi");
         let failure = protocol.check_failure().unwrap_err();
         assert_eq!(failure.operation(), "write device label");
@@ -639,7 +639,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_is_fatal() {
             .unwrap();
         assert_eq!(report_value(&bytes).utf8().unwrap(), "Renamed first");
         assert_eq!(first.label(), "Renamed first");
-        assert_eq!(first.description().label, "Renamed first");
+        assert_eq!(first.description().label(), "Renamed first");
         assert_eq!(second.label(), "Renamed multi");
         assert_eq!(
             store

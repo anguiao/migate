@@ -51,7 +51,7 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     assert_eq!(registry.list().len(), 1);
     let physical = registry.get(&DeviceKey::new("xiaomi", "kept")).unwrap();
     assert_eq!(physical.functions().len(), 3);
-    assert_eq!(physical.description().label, "saved name");
+    assert_eq!(physical.description().label(), "saved name");
     for function in physical.functions() {
         assert_eq!(function.snapshot().power, Power::Unknown);
         assert!(matches!(
@@ -83,7 +83,7 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         (4, "43", "mijia.light.group3"),
     ] {
         let mut group = rig.data[0].clone();
-        group.device.key.id = did.into();
+        group.device = super::support::device_with_key(&group.device, did);
         group.model = model.into();
         state
             .records
@@ -118,16 +118,16 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
             3
         );
         for group in &groups {
-            assert!(registry.get(&group.device.key).is_some());
+            assert!(registry.get(group.device.key()).is_some());
             assert!(
-                source.context.live.borrow().devices[&group.device.key.id]
+                source.context.live.borrow().devices[&group.device.key().id]
                     .group
                     .is_none()
             );
             assert_eq!(
                 rig.store
                     .devices()
-                    .load_parsed(&group.uid, &group.home_id, &group.device.key)
+                    .load_parsed(&group.uid, &group.home_id, group.device.key())
                     .unwrap(),
                 Some(group.clone())
             );

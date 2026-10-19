@@ -80,7 +80,7 @@ fn hs_absolute_unknown_start_and_color_mode_follow_the_accepted_command() {
         )
         .await;
         assert_eq!(
-            target.color,
+            target.color_target(),
             Some(LightColorTarget::Rgb(Rgb {
                 red: 255,
                 green: 0,
@@ -172,7 +172,7 @@ fn gray_hue_selection_is_used_when_saturation_increases() {
         )
         .await;
         assert_eq!(
-            target.color,
+            target.color_target(),
             Some(LightColorTarget::Rgb(Rgb {
                 red: 255,
                 green: 255,
@@ -191,7 +191,7 @@ fn gray_hue_selection_is_used_when_saturation_increases() {
             ),
         )
         .await;
-        let Some(LightColorTarget::Rgb(rgb)) = target.color else {
+        let Some(LightColorTarget::Rgb(rgb)) = target.color_target() else {
             panic!("expected RGB")
         };
         assert!(rgb.red <= 5);

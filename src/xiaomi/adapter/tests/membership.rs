@@ -33,7 +33,7 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
                     .get(&DeviceKey::new("xiaomi", "multi"))
                     .unwrap();
                 assert_eq!(strip.functions().len(), 3);
-                assert_eq!(strip.description().label, "Cloud strip");
+                assert_eq!(strip.description().label(), "Cloud strip");
                 assert_eq!(
                     control.context.local_candidate("multi", false).is_ok(),
                     missing_push
@@ -75,7 +75,7 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
                     control.cloud.lock().unwrap().property_writes.len(),
                     writes.len()
                 );
-                assert_eq!(strip.description().label, "Cloud strip");
+                assert_eq!(strip.description().label(), "Cloud strip");
             })
             .await;
         }));
@@ -89,7 +89,7 @@ fn a_stale_local_model_does_not_block_cloud_admission_or_commands() {
     block_on(rig.run(|mut c| async move {
         c.data
             .iter_mut()
-            .find(|record| record.device.key.id == "multi")
+            .find(|record| record.device.key().id == "multi")
             .unwrap()
             .model = "stale.local.model".into();
         c.announce();

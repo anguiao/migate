@@ -7,12 +7,12 @@ mod tests;
 
 use crate::device::{
     Command, CommandError, Function, LightAction, LightDimension, LightMode, LightProfile,
-    NumericRange, brightness_to_matter_level,
+    TemperatureInterval, brightness_to_matter_level,
 };
 use crate::lighting::{
     Scheduler, Task,
     clock::{Clock, SystemClock},
-    color, hs, level,
+    color, hs, level, temperature,
 };
 use futures_lite::future::or;
 pub(super) use handlers::{ColorHandler, LevelHandler, OnOffHandler};
@@ -46,7 +46,7 @@ pub(super) struct Lighting {
     function: Function,
     endpoint: u16,
     profile: LightProfile,
-    range: Option<NumericRange>,
+    interval: Option<TemperatureInterval>,
     bounds: Option<(u16, u16)>,
     scheduler: Scheduler,
     level: RefCell<LevelControlState>,
@@ -101,18 +101,17 @@ impl Lighting {
     ) -> Result<Self, Error> {
         let description = function.description();
         let profile = description
+            .kind
             .light_profile()
-            .map_err(|_| ErrorCode::InvalidState)?;
-        let range = description.temperature_range();
-        let bounds = range
-            .map(|range| range.mired_bounds().map_err(command_error))
-            .transpose()?;
-        let scheduler = Scheduler::new(function.clone(), range, clock);
+            .ok_or(ErrorCode::InvalidState)?;
+        let interval = profile.temperature_interval();
+        let bounds = interval.map(temperature::mired_bounds);
+        let scheduler = Scheduler::new(function.clone(), clock);
         let result = Self {
             function,
             endpoint,
             profile,
-            range,
+            interval,
             bounds,
             scheduler,
             level: RefCell::new(LevelControlState::default()),
@@ -136,19 +135,13 @@ impl Lighting {
         Ok(result)
     }
     pub(super) fn rgb(&self) -> bool {
-        self.profile == LightProfile::ExtendedColor
+        self.profile.has_rgb()
     }
     pub(super) fn ct(&self) -> bool {
-        matches!(
-            self.profile,
-            LightProfile::ColorTemperature | LightProfile::ExtendedColor
-        )
+        self.profile.temperature_interval().is_some()
     }
     pub(super) fn level(&self) -> bool {
-        matches!(
-            self.profile,
-            LightProfile::Dimmable | LightProfile::ColorTemperature | LightProfile::ExtendedColor
-        )
+        self.profile.has_brightness()
     }
     pub(super) fn profile(&self) -> LightProfile {
         self.profile
@@ -160,10 +153,9 @@ impl Lighting {
             .lighting
             .as_ref()
             .expect("lighting Function snapshot");
-        let temperature = self.range.and_then(|range| {
+        let temperature = self.interval.and_then(|interval| {
             lighting.temperature_kelvin.map(|value| {
-                range
-                    .mireds_from_kelvin(value)
+                temperature::mireds_from_kelvin(interval, value)
                     .expect("validated snapshot temperature")
             })
         });

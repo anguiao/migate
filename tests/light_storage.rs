@@ -1,5 +1,5 @@
 use migate::{
-    device::{self, Capability, DeviceKey},
+    device::{self, DeviceKey, FunctionKind, LightProfile},
     storage::{self, CachedPhysicalDevice, Store},
     xiaomi::{self, capability::parse_device_for_model, cloud::group_id},
 };
@@ -60,7 +60,7 @@ fn on_off_and_dimmable_profiles_persist_static_capabilities() {
         .enumerate()
         .map(|(index, cached)| {
             record(
-                &cached.physical_description(&cached.device.key.id),
+                &cached.physical_description(&cached.device.key().id),
                 2 + index as u16,
             )
         })
@@ -73,12 +73,12 @@ fn on_off_and_dimmable_profiles_persist_static_capabilities() {
     assert_eq!(state.records, records);
     assert_eq!(state.cached.len(), 2);
     assert_eq!(
-        state.records[0].functions[0].capabilities,
-        [Capability::OnOff]
+        state.records[0].functions[0].kind,
+        FunctionKind::Light(LightProfile::OnOff)
     );
     assert_eq!(
-        state.records[1].functions[0].capabilities,
-        [Capability::OnOff, Capability::Brightness]
+        state.records[1].functions[0].kind,
+        FunctionKind::Light(LightProfile::Dimmable)
     );
 }
 
@@ -177,13 +177,16 @@ fn corrupted_ls2307_binding_or_mode_conversion_cannot_be_restored() {
             .unwrap();
             match mutation {
                 "color-binding" => {
-                    functions[0]["lighting"]["color"]["property"]["piid"] = serde_json::json!(8)
+                    functions["functions"][0]["lighting"]["color"]["property"]["piid"] =
+                        serde_json::json!(8)
                 }
                 "mode-values" => {
-                    functions[0]["lighting"]["mode"]["rgb_value"] = serde_json::json!(9)
+                    functions["functions"][0]["lighting"]["mode"]["rgb_value"] =
+                        serde_json::json!(9)
                 }
                 "range" => {
-                    functions[0]["lighting"]["brightness"]["range"]["step"] = serde_json::json!(0)
+                    functions["functions"][0]["lighting"]["brightness"]["step"] =
+                        serde_json::json!(0)
                 }
                 _ => unreachable!(),
             }
@@ -217,17 +220,24 @@ fn new_description_and_version_keep_identity_names_and_endpoints() {
             vec![original.clone()],
         ))
         .unwrap();
-    let range = {
-        let binding = cached.device.functions[0].lighting.as_mut().unwrap();
-        binding.brightness.as_mut().unwrap().property.piid = 8;
-        let range = &mut binding.temperature.as_mut().unwrap().range;
-        range.max = 5600;
-        *range
-    };
-    cached.device.functions[0].description.capabilities[2] = Capability::ColorTemperature(range);
+    let mut instance: Value =
+        serde_json::from_str(include_str!("fixtures/miot/xiaomi-light-ceil04.json")).unwrap();
+    let properties = instance["services"][1]["properties"]
+        .as_array_mut()
+        .unwrap();
+    for property in properties {
+        let kind = property["type"].as_str().unwrap();
+        if kind.contains(":brightness:") {
+            property["iid"] = serde_json::json!(8);
+        } else if kind.contains(":color-temperature:") {
+            property["value-range"][1] = serde_json::json!(5600);
+        }
+    }
+    cached.device =
+        parse_device_for_model(cached.device.key().clone(), &cached.model, &instance).unwrap();
     let mut updated = original.clone();
     updated.configuration_version = 2;
-    updated.functions[0].capabilities = cached.device.functions[0].description.capabilities.clone();
+    updated.functions[0].kind = cached.device.functions()[0].kind();
     let mut publication = commit(scope(), vec![cached.clone()], vec![updated.clone()]);
     publication.root_version = 2;
     store.devices().apply_publication(&publication).unwrap();
@@ -277,43 +287,29 @@ fn ls2307_cannot_publish_an_outlet_description() {
 }
 
 #[test]
-fn unrepresentable_mired_ranges_are_rejected_at_publication_and_cache_restore() {
-    use migate::device::NumericRange;
-    for range in [
-        NumericRange {
-            min: 4500,
-            max: 4501,
-            step: 1,
-        },
-        NumericRange {
-            min: 10,
-            max: 6500,
-            step: 1,
-        },
-    ] {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let mut cached = light(
-            "xiaomi.light.ceil04",
-            include_str!("fixtures/miot/xiaomi-light-ceil04.json"),
-        );
-        let mut description = cached.device.functions[0].description.clone();
-        description.capabilities[2] = Capability::ColorTemperature(range);
-        cached.device.functions[0].description = description;
-        cached.device.functions[0]
-            .lighting
-            .as_mut()
+fn unrepresentable_mired_ranges_are_rejected_at_construction_and_cache_restore() {
+    for range in [[4500, 4501, 1], [10, 6500, 1]] {
+        let mut instance: Value =
+            serde_json::from_str(include_str!("fixtures/miot/xiaomi-light-ceil04.json")).unwrap();
+        let temperature = instance["services"][1]["properties"]
+            .as_array_mut()
             .unwrap()
-            .temperature
-            .as_mut()
-            .unwrap()
-            .range = range;
-        let identity = record(&cached.physical_description("Bad range"), 2);
+            .iter_mut()
+            .find(|property| {
+                property["type"]
+                    .as_str()
+                    .unwrap()
+                    .contains(":color-temperature:")
+            })
+            .unwrap();
+        temperature["value-range"] = serde_json::json!(range);
         assert!(
-            store
-                .devices()
-                .apply_publication(&commit(scope(), vec![cached], vec![identity]))
-                .is_err()
+            parse_device_for_model(
+                DeviceKey::new("xiaomi", "bad-range"),
+                "xiaomi.light.ceil04",
+                &instance,
+            )
+            .is_err()
         );
     }
     let directory = tempfile::tempdir().unwrap();
@@ -335,9 +331,7 @@ fn unrepresentable_mired_ranges_are_rejected_at_publication_and_cache_restore() 
         .unwrap(),
     )
     .unwrap();
-    functions[0]["description"]["capabilities"][2]["color_temperature"]["min"] =
-        serde_json::json!(10);
-    functions[0]["lighting"]["temperature"]["range"]["min"] = serde_json::json!(10);
+    functions["functions"][0]["lighting"]["temperature"]["min"] = serde_json::json!(10);
     db.execute(
         "UPDATE device_cache SET functions=?1",
         [functions.to_string()],
@@ -350,7 +344,7 @@ fn unrepresentable_mired_ranges_are_rejected_at_publication_and_cache_restore() 
         .unwrap(),
     )
     .unwrap();
-    capabilities[2]["color_temperature"]["min"] = serde_json::json!(10);
+    capabilities["min"] = serde_json::json!(10);
     db.execute(
         "UPDATE device_function SET capabilities=?1",
         [capabilities.to_string()],

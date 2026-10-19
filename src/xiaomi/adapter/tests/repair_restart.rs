@@ -3,7 +3,7 @@ use super::{
     *,
 };
 use crate::{
-    device::{Capability, LightColorTarget, LightDimension, LightTarget, Rgb},
+    device::{LightTarget, Rgb},
     publication::Publication,
 };
 
@@ -41,7 +41,7 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         let group = registry.get(&key).unwrap();
         assert!(!original.same_instance(&group));
         let light = group.function("main").unwrap();
-        assert!(light.description().has_capability(Capability::ColorRgb));
+        assert!(light.description().supports_rgb());
         let initial = light.snapshot();
         assert_eq!(initial.power, Power::Unknown);
         let color = initial.lighting.unwrap();
@@ -74,13 +74,12 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         assert_eq!(after.root_version, before.root_version);
         assert_eq!(after.records, before.records);
         for native in &after.cached {
-            if native.device.key == key {
+            if native.device.key() == &key {
                 assert!(
-                    native.device.functions[0]
-                        .lighting
-                        .as_ref()
+                    native.device.functions()[0]
+                        .lighting()
                         .unwrap()
-                        .color
+                        .color()
                         .is_none()
                 );
             }
@@ -104,14 +103,7 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
                 blue: 233,
             };
             light
-                .begin_light_action(
-                    LightDimension::Color,
-                    LightTarget {
-                        color: Some(LightColorTarget::Rgb(target)),
-                        ..Default::default()
-                    },
-                    true,
-                )
+                .begin_light_action(LightTarget::rgb(None, target), true)
                 .unwrap()
                 .accepted()
                 .await
@@ -168,11 +160,7 @@ fn fresh_adapter_keeps_downgraded_native_input_and_static_member_unavailable() {
                 .current()
                 .published
                 .get(&key)
-                .is_some_and(|group| {
-                    !group.functions()[0]
-                        .description()
-                        .has_capability(Capability::ColorRgb)
-                })
+                .is_some_and(|group| !group.functions()[0].description().supports_rgb())
         })
         .await;
         let scope = c.context.live.borrow().scope.clone().unwrap();
@@ -187,9 +175,7 @@ fn fresh_adapter_keeps_downgraded_native_input_and_static_member_unavailable() {
         let registry = ready.wait().await.unwrap();
         let member = registry.get(&DeviceKey::new("xiaomi", "member-a")).unwrap();
         assert!(
-            member.functions()[0]
-                .description()
-                .has_capability(Capability::ColorRgb),
+            member.functions()[0].description().supports_rgb(),
             "the reserved independent description stays static"
         );
         assert!(

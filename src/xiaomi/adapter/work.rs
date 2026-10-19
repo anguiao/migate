@@ -185,21 +185,21 @@ impl DeviceWork {
             return false;
         }
         let cached = self.record.cached.borrow();
-        if cached.device.refresh_trigger == Some(binding) && value.as_bool().is_some() {
+        if cached.device.refresh_trigger() == Some(binding) && value.as_bool().is_some() {
             drop(cached);
             self.refresh();
             return false;
         }
         let Some(function) = cached
             .device
-            .functions
+            .functions()
             .iter()
             .find(|function| super::lighting::bindings(function).contains(&binding))
         else {
             return false;
         };
-        let id = function.description.id.clone();
-        let light = function.lighting.is_some();
+        let id = function.id().to_owned();
+        let light = function.lighting().is_some();
         drop(cached);
         if light {
             let origin = if cached_report {
@@ -235,9 +235,10 @@ impl DeviceWork {
         self.changed.notify(usize::MAX);
     }
     pub(super) fn refresh(&self) {
-        for function in &self.record.cached.borrow().device.functions {
+        let cached = self.record.cached.borrow();
+        for function in cached.device.functions() {
             for binding in super::lighting::bindings(function) {
-                self.refresh_property(&function.description.id, binding);
+                self.refresh_property(function.id(), binding);
             }
         }
     }
@@ -263,11 +264,10 @@ impl DeviceWork {
             .cached
             .borrow()
             .device
-            .functions
+            .functions()
             .iter()
             .any(|function| {
-                function.description.id == id
-                    && super::lighting::bindings(function).contains(&binding)
+                function.id() == id && super::lighting::bindings(function).contains(&binding)
             })
     }
     pub(super) fn observe_read(
@@ -288,11 +288,11 @@ impl DeviceWork {
             .cached
             .borrow()
             .device
-            .functions
+            .functions()
             .iter()
-            .find(|function| function.description.id == id)
+            .find(|function| function.id() == id)
             .unwrap()
-            .lighting
+            .lighting()
             .is_some();
         if light {
             super::lighting::observe(
@@ -321,11 +321,11 @@ impl DeviceWork {
             .cached
             .borrow()
             .device
-            .functions
+            .functions()
             .iter()
             .flat_map(super::lighting::bindings)
             .collect::<Vec<_>>();
-        if let Some(trigger) = self.record.cached.borrow().device.refresh_trigger {
+        if let Some(trigger) = self.record.cached.borrow().device.refresh_trigger() {
             values.push(trigger);
         }
         values
@@ -363,7 +363,7 @@ impl DeviceWork {
     ) -> String {
         let message = format!(
             "{} {operation} {}.{}: {error}",
-            self.record.cached.borrow().device.key.id,
+            self.record.cached.borrow().device.key().id,
             binding.siid,
             binding.piid
         );
@@ -391,7 +391,7 @@ async fn subscriptions(
     handle: &SessionHandle,
     context: &Context,
 ) -> Result<(), AdapterError> {
-    let did = work.record.cached.borrow().device.key.id.clone();
+    let did = work.record.cached.borrow().device.key().id.clone();
     loop {
         let listener = work.changed.listen();
         if !work.subscribe_requested.replace(false) {

@@ -7,8 +7,8 @@ use std::{
 };
 
 use super::{
-    Capability, Category, CommandError, CommandReceiver, CommandRequest, Function,
-    FunctionSnapshot, Rgb, command::Completion, state::RuntimeState,
+    CommandError, CommandReceiver, CommandRequest, Function, FunctionSnapshot, Rgb,
+    command::Completion, state::RuntimeState,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -38,18 +38,83 @@ impl ActionToken {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LightColorTarget {
-    Temperature(u32),
+    Temperature(f64),
     Rgb(Rgb),
 }
 
-/// Power is explicit: a level change alone never implies on/off.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// One non-empty light target with private fields: the target itself decides
+/// its dimension, brightness and color can never be combined, and every
+/// accepted numeric value has already been validated at this boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightTarget {
-    pub power: Option<bool>,
-    pub brightness_percent: Option<f64>,
-    pub color: Option<LightColorTarget>,
+    power: Option<bool>,
+    dimension: TargetDimension,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TargetDimension {
+    Brightness(f64),
+    Color(LightColorTarget),
+}
+impl LightTarget {
+    pub fn brightness(power: Option<bool>, percent: f64) -> Result<Self, CommandError> {
+        super::model::validate_brightness(percent)?;
+        Ok(Self {
+            power,
+            dimension: TargetDimension::Brightness(percent),
+        })
+    }
+    pub fn temperature(power: Option<bool>, kelvin: f64) -> Result<Self, CommandError> {
+        if !kelvin.is_finite() || kelvin <= 0.0 {
+            return Err(CommandError::Rejected(
+                "color temperature is not a positive finite value".into(),
+            ));
+        }
+        Ok(Self {
+            power,
+            dimension: TargetDimension::Color(LightColorTarget::Temperature(kelvin)),
+        })
+    }
+    pub fn rgb(power: Option<bool>, rgb: Rgb) -> Self {
+        Self {
+            power,
+            dimension: TargetDimension::Color(LightColorTarget::Rgb(rgb)),
+        }
+    }
+    pub fn power(self) -> Option<bool> {
+        self.power
+    }
+    pub fn dimension(self) -> LightDimension {
+        match self.dimension {
+            TargetDimension::Brightness(_) => LightDimension::Brightness,
+            TargetDimension::Color(_) => LightDimension::Color,
+        }
+    }
+    pub fn brightness_percent(self) -> Option<f64> {
+        match self.dimension {
+            TargetDimension::Brightness(percent) => Some(percent),
+            TargetDimension::Color(_) => None,
+        }
+    }
+    pub fn color_target(self) -> Option<LightColorTarget> {
+        match self.dimension {
+            TargetDimension::Brightness(_) => None,
+            TargetDimension::Color(color) => Some(color),
+        }
+    }
+    /// A merged frame inherits an explicit earlier power target when omitted.
+    fn inherit_power(mut self, power: Option<bool>) -> Self {
+        if self.power.is_none() {
+            self.power = power;
+        }
+        self
+    }
+    /// Force the associated power of an otherwise valid target.
+    pub(crate) fn with_power(mut self, power: Option<bool>) -> Self {
+        self.power = power;
+        self
+    }
 }
 
 struct Action {
@@ -186,13 +251,13 @@ impl LightCoordinator {
     fn enqueue(&mut self, action: Arc<Action>, mut target: LightTarget, final_frame: bool) {
         let index = action.token.dimension.index();
         if let Some(pending) = &self.pending[index] {
-            target.power = target.power.or(pending.target.power);
+            target = target.inherit_power(pending.target.power());
         }
         if let Some(flight) = &self.flight
             && flight.action.token == action.token
             && !flight.sent.load(Ordering::Relaxed)
         {
-            target.power = target.power.or(flight.power);
+            target = target.inherit_power(flight.power);
             // Replacing an unsent tick releases only its frame, never the logical action.
             flight.gate.finish(Err(CommandError::Superseded));
         }
@@ -219,55 +284,36 @@ impl LightCoordinator {
 }
 
 impl Function {
-    fn validate_light_target(
-        &self,
-        dimension: LightDimension,
-        target: LightTarget,
-    ) -> Result<(), CommandError> {
+    /// Validate capability support at the command construction boundary. The
+    /// target's numeric values and dimension were already validated by its
+    /// constructor, so only the function's real kind is checked here.
+    fn validate_light_target(&self, target: LightTarget) -> Result<(), CommandError> {
         let description = self.description();
-        if description.category != Category::Light {
+        let Some(profile) = description.kind.light_profile() else {
             return Err(CommandError::Unsupported);
-        }
-        match dimension {
-            LightDimension::Brightness => {
-                if !description.capabilities.contains(&Capability::Brightness) {
+        };
+        match target.dimension() {
+            LightDimension::Brightness if !profile.has_brightness() => {
+                return Err(CommandError::Unsupported);
+            }
+            LightDimension::Color => match target.color_target() {
+                Some(LightColorTarget::Temperature(value)) => {
+                    let Some(interval) = profile.temperature_interval() else {
+                        return Err(CommandError::Unsupported);
+                    };
+                    if !((interval.min() as f64)..=(interval.max() as f64)).contains(&value) {
+                        return Err(CommandError::Rejected(
+                            "color temperature is outside its physical range".into(),
+                        ));
+                    }
+                }
+                Some(LightColorTarget::Rgb(_)) if !profile.has_rgb() => {
                     return Err(CommandError::Unsupported);
                 }
-                if target.color.is_some() || target.brightness_percent.is_none() {
-                    return Err(CommandError::Rejected(
-                        "brightness action requires only a level target".into(),
-                    ));
-                }
-                super::model::validate_brightness(target.brightness_percent.unwrap())?;
-            }
-            LightDimension::Color => {
-                if target.brightness_percent.is_some() || target.color.is_none() {
-                    return Err(CommandError::Rejected(
-                        "color action requires only a color target".into(),
-                    ));
-                }
-                match target.color.unwrap() {
-                    LightColorTarget::Temperature(value) => {
-                        let Some(range) = description.temperature_range() else {
-                            return Err(CommandError::Unsupported);
-                        };
-                        if !(range.min..=range.max).contains(&value) {
-                            return Err(CommandError::Rejected(
-                                "color temperature is outside its physical range".into(),
-                            ));
-                        }
-                    }
-                    LightColorTarget::Rgb(_)
-                        if !description.capabilities.contains(&Capability::ColorRgb) =>
-                    {
-                        return Err(CommandError::Unsupported);
-                    }
-                    LightColorTarget::Rgb(_) => {}
-                }
-            }
-        }
-        if target.power.is_some() && !description.capabilities.contains(&Capability::OnOff) {
-            return Err(CommandError::Unsupported);
+                Some(LightColorTarget::Rgb(_)) => {}
+                None => unreachable!("a color target always carries a color value"),
+            },
+            LightDimension::Brightness => {}
         }
         Ok(())
     }
@@ -276,26 +322,26 @@ impl Function {
     /// action's acceptance waiter with every subsequent controller tick.
     pub fn begin_light_action(
         &self,
-        dimension: LightDimension,
         target: LightTarget,
         final_frame: bool,
     ) -> Result<LightAction, CommandError> {
-        self.begin_light_action_with_unchanged_startup(dimension, target, final_frame, false)
+        self.begin_light_action_with_unchanged_startup(target, final_frame, false)
     }
 
     /// A physically constant trajectory can accept a source-confirmed no-write startup.
     pub(crate) fn begin_light_action_with_unchanged_startup(
         &self,
-        dimension: LightDimension,
         target: LightTarget,
         final_frame: bool,
         allow_unchanged_startup: bool,
     ) -> Result<LightAction, CommandError> {
-        self.validate_light_target(dimension, target)?;
+        self.validate_light_target(target)?;
+        let dimension = target.dimension();
+        let power = target.power();
         let mut state = self.0.state.lock().unwrap();
         self.validate_light_available(&state)?;
         let coordinator = state.light_commands.as_mut().unwrap();
-        if target.power == Some(false) {
+        if power == Some(false) {
             coordinator.cancel_all(CommandError::Superseded);
         } else {
             coordinator.cancel(dimension, CommandError::Superseded);
@@ -318,7 +364,7 @@ impl Function {
         coordinator.current[dimension.index()] = Some(action.clone());
         coordinator.enqueue(action.clone(), target, final_frame);
         coordinator.revision += 1;
-        if target.power == Some(false) {
+        if power == Some(false) {
             state.queue.invalidate_light_on();
         }
         self.notify_light_actions();
@@ -331,7 +377,13 @@ impl Function {
         target: LightTarget,
         final_frame: bool,
     ) -> Result<(), CommandError> {
-        self.validate_light_target(token.dimension, target)?;
+        if target.dimension() != token.dimension {
+            return Err(CommandError::Rejected(
+                "target dimension does not match the action".into(),
+            ));
+        }
+        self.validate_light_target(target)?;
+        let power = target.power();
         let mut state = self.0.state.lock().unwrap();
         self.validate_light_available(&state)?;
         let coordinator = state.light_commands.as_mut().unwrap();
@@ -345,7 +397,7 @@ impl Function {
             ));
         }
         action.final_submitted.store(final_frame, Ordering::Relaxed);
-        if target.power == Some(false) {
+        if power == Some(false) {
             let other = match token.dimension {
                 LightDimension::Brightness => LightDimension::Color,
                 LightDimension::Color => LightDimension::Brightness,
@@ -353,7 +405,7 @@ impl Function {
             coordinator.cancel(other, CommandError::Superseded);
         }
         coordinator.enqueue(action, target, final_frame);
-        if target.power == Some(false) {
+        if power == Some(false) {
             state.queue.invalidate_light_on();
             self.notify_light_actions();
         }

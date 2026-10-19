@@ -160,9 +160,9 @@ impl Context {
                     .cached
                     .borrow()
                     .device
-                    .functions
+                    .functions()
                     .iter()
-                    .any(|function| function.lighting.is_some())
+                    .any(|function| function.lighting().is_some())
                     .then(|| self.light_writes.for_device(did, self.clock.clone()));
                 Rc::new(DeviceWork::new(
                     record,
@@ -383,16 +383,9 @@ impl Context {
                     .filter(|work| {
                         !work.life.is_closed()
                             && !work.record.life.is_closed()
-                            && work
-                                .record
-                                .cached
-                                .borrow()
-                                .device
-                                .functions
-                                .iter()
-                                .any(|function| {
-                                    function.description.id == "main" && function.lighting.is_some()
-                                })
+                            && work.record.cached.borrow().device.functions().iter().any(
+                                |function| function.id() == "main" && function.lighting().is_some(),
+                            )
                     })
                     .cloned()
             })

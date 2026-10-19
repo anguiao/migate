@@ -584,11 +584,11 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
                 let cached = record.cached.borrow();
                 cached
                     .device
-                    .functions
+                    .functions()
                     .iter()
-                    .find(|function| function.lighting.is_some())
+                    .find(|function| function.lighting().is_some())
                     .unwrap()
-                    .description
+                    .description()
                     .id
                     .clone()
             };

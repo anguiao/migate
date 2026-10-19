@@ -1,11 +1,7 @@
 use migate::{
-    device::{self, Capability, Category, DeviceKey, FunctionDescription},
+    device::{self, DeviceKey},
     storage::{self, CachedPhysicalDevice, CachedScope, Store},
-    xiaomi::{
-        self,
-        capability::{ParsedDevice, ParsedFunction, PropertyBinding},
-        cloud::group_id,
-    },
+    xiaomi::{self, capability::parse_device, cloud::group_id},
 };
 use rusqlite::Connection;
 #[path = "../src/storage/tests/fixtures.rs"]
@@ -13,26 +9,29 @@ mod publication_support;
 use publication_support::{commit, record, scope};
 
 fn cached(uid: &str) -> CachedPhysicalDevice {
+    let instance = serde_json::json!({
+        "type": "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1",
+        "description": "Outlet",
+        "services": [{
+            "iid": 12,
+            "type": "urn:miot-spec-v2:service:switch:0000780C:vendor-v1:1",
+            "description": "Switch",
+            "properties": [{
+                "iid": 9,
+                "type": "urn:miot-spec-v2:property:on:00000006:vendor-v1:1",
+                "description": "Switch Status",
+                "format": "bool",
+                "access": ["read", "write", "notify"]
+            }]
+        }]
+    });
     CachedPhysicalDevice {
         uid: uid.into(),
         home_id: "home".into(),
         group_id: group_id(uid, "home"),
         model: "vendor.plug".into(),
         instance_type: "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1".into(),
-        device: ParsedDevice {
-            key: DeviceKey::new("xiaomi", "did"),
-            functions: vec![ParsedFunction {
-                description: FunctionDescription {
-                    id: "main".into(),
-                    label: "主电源".into(),
-                    category: Category::Outlet,
-                    capabilities: vec![Capability::OnOff],
-                },
-                power: PropertyBinding { siid: 12, piid: 9 },
-                lighting: None,
-            }],
-            refresh_trigger: None,
-        },
+        device: parse_device(DeviceKey::new("xiaomi", "did"), &instance).unwrap(),
     }
 }
 
@@ -89,7 +88,7 @@ fn caches_are_account_scoped_and_identity_survives_restart_and_routing_changes()
     assert_eq!(
         store
             .devices()
-            .load_parsed(&moved.uid, &moved.home_id, &moved.device.key)
+            .load_parsed(&moved.uid, &moved.home_id, moved.device.key())
             .unwrap(),
         Some(moved)
     );

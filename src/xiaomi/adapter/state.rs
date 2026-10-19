@@ -60,11 +60,11 @@ impl DeviceRecord {
         self.cached
             .borrow()
             .device
-            .functions
+            .functions()
             .iter()
-            .find(|function| function.description.id == id)
+            .find(|function| function.id() == id)
             .unwrap()
-            .power
+            .power()
     }
 }
 /// One entry owns all preparation and admission state for a current home member.

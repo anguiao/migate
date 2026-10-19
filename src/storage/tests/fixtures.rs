@@ -16,24 +16,23 @@ pub(crate) fn scope() -> CachedScope {
 
 pub(crate) fn record(description: &PhysicalDeviceDescription, endpoint: u16) -> StoredDevice {
     StoredDevice {
-        key: description.key.clone(),
+        key: description.key().clone(),
         unique_id: uuid::Uuid::new_v4().simple().to_string(),
         endpoint,
-        label: import_label(&description.label),
+        label: import_label(description.label()),
         functions: description
-            .functions
+            .functions()
             .iter()
             .enumerate()
             .map(|(index, function)| StoredFunction {
-                key: FunctionKey::new(description.key.clone(), &function.id),
-                endpoint: if description.functions.len() == 1 {
+                key: FunctionKey::new(description.key().clone(), &function.id),
+                endpoint: if description.functions().len() == 1 {
                     endpoint
                 } else {
                     endpoint + index as u16 + 1
                 },
                 label: import_label(&function.label),
-                category: function.category,
-                capabilities: function.capabilities.clone(),
+                kind: function.kind,
             })
             .collect(),
         published: true,

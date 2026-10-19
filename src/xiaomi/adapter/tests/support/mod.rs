@@ -193,7 +193,7 @@ pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
                                                 .cached
                                                 .borrow()
                                                 .device
-                                                .refresh_trigger
+                                                .refresh_trigger()
                                                 .is_some(),
                                         )
                             })
@@ -215,4 +215,120 @@ pub(super) async fn advance_to(clock: &TestClock, deadline: Duration) {
 }
 pub(super) fn accepted(did: &str, siid: u32, code: i32) -> Value {
     json!({"result":[{"did":did,"siid":siid,"piid":1,"code":code}]})
+}
+
+/// Rebuild a valid native description around an explicit function list.
+pub(super) fn device_with_functions(
+    device: &crate::xiaomi::capability::ParsedDevice,
+    functions: Vec<crate::xiaomi::capability::ParsedFunction>,
+) -> crate::xiaomi::capability::ParsedDevice {
+    crate::xiaomi::capability::ParsedDevice::new(
+        device.key().clone(),
+        functions,
+        device.refresh_trigger(),
+    )
+    .unwrap()
+}
+
+pub(super) fn device_with_key(
+    device: &crate::xiaomi::capability::ParsedDevice,
+    id: &str,
+) -> crate::xiaomi::capability::ParsedDevice {
+    crate::xiaomi::capability::ParsedDevice::new(
+        crate::device::DeviceKey::new(device.key().source.clone(), id),
+        device.functions().to_vec(),
+        device.refresh_trigger(),
+    )
+    .unwrap()
+}
+
+pub(super) fn function_with_power(
+    function: &crate::xiaomi::capability::ParsedFunction,
+    power: crate::xiaomi::capability::PropertyBinding,
+) -> crate::xiaomi::capability::ParsedFunction {
+    match function.lighting() {
+        None => crate::xiaomi::capability::ParsedFunction::outlet(
+            function.id(),
+            function.label(),
+            power,
+        ),
+        Some(lighting) => crate::xiaomi::capability::ParsedFunction::light(
+            function.id(),
+            function.label(),
+            power,
+            *lighting,
+        ),
+    }
+}
+
+/// Rebuild a light description with a different native temperature grid.
+pub(super) fn device_with_temperature_grid(
+    device: &crate::xiaomi::capability::ParsedDevice,
+    grid: crate::device::NumericRange,
+) -> crate::xiaomi::capability::ParsedDevice {
+    use crate::xiaomi::capability::{
+        BrightnessBinding, ColorBinding, LightBindings, ModeBinding, ParsedFunction,
+        TemperatureBinding,
+    };
+    let function = &device.functions()[0];
+    let light = function.lighting().unwrap();
+    let brightness = light.brightness().map(|binding| {
+        BrightnessBinding::new(binding.property(), binding.format(), binding.range()).unwrap()
+    });
+    let temperature = TemperatureBinding::new(
+        light.temperature().unwrap().property(),
+        light.temperature().unwrap().format(),
+        grid,
+    )
+    .unwrap();
+    let color = light
+        .color()
+        .map(|binding| ColorBinding::new(binding.property(), binding.format()).unwrap());
+    let mode = light.mode().map(|binding| {
+        ModeBinding::new(
+            binding.property(),
+            binding.format(),
+            binding.temperature_value(),
+            binding.rgb_value(),
+        )
+        .unwrap()
+    });
+    let lighting = LightBindings::new(brightness, Some(temperature), color, mode).unwrap();
+    let function =
+        ParsedFunction::light(function.id(), function.label(), function.power(), lighting);
+    device_with_functions(device, vec![function])
+}
+
+pub(super) fn device_with_brightness_format(
+    device: &crate::xiaomi::capability::ParsedDevice,
+    format: crate::xiaomi::capability::NumericFormat,
+) -> crate::xiaomi::capability::ParsedDevice {
+    use crate::xiaomi::capability::{
+        BrightnessBinding, ColorBinding, LightBindings, ModeBinding, ParsedFunction,
+        TemperatureBinding,
+    };
+    let function = &device.functions()[0];
+    let light = function.lighting().unwrap();
+    let brightness = light.brightness().map(|binding| {
+        BrightnessBinding::new(binding.property(), format, binding.range()).unwrap()
+    });
+    let temperature = light.temperature().map(|binding| {
+        TemperatureBinding::new(binding.property(), binding.format(), binding.range()).unwrap()
+    });
+    let color = light
+        .color()
+        .map(|binding| ColorBinding::new(binding.property(), binding.format()).unwrap());
+    let mode = light.mode().map(|binding| {
+        ModeBinding::new(
+            binding.property(),
+            binding.format(),
+            binding.temperature_value(),
+            binding.rgb_value(),
+        )
+        .unwrap()
+    });
+    let lighting = LightBindings::new(brightness, temperature, color, mode).unwrap();
+    let function =
+        ParsedFunction::light(function.id(), function.label(), function.power(), lighting);
+    device_with_functions(device, vec![function])
 }

@@ -621,8 +621,8 @@ fn bridge_helper_child() {
             use futures_lite::{future, io::BufReader};
             use migate::{
                 device::{
-                    Availability, Capability, Category, DeviceKey, DeviceRegistry,
-                    FunctionDescription, PhysicalDevice, PhysicalDeviceDescription,
+                    Availability, DeviceKey, DeviceRegistry, FunctionDescription, FunctionKind,
+                    PhysicalDevice, PhysicalDeviceDescription,
                 },
                 runtime::{BridgeOptions, run_prepared_bridge, shutdown_signal},
                 terminal::{self, AuthStatus},
@@ -641,16 +641,18 @@ fn bridge_helper_child() {
                 .local_status()
                 .unwrap();
             let status = AuthStatus::new(report, "/bin/migate".into(), directory.clone());
-            let (physical, mut receivers) = PhysicalDevice::new(PhysicalDeviceDescription {
-                key: DeviceKey::new("xiaomi", "test-outlet"),
-                label: "Test Outlet".into(),
-                functions: vec![FunctionDescription {
-                    id: "main".into(),
-                    label: "Main power".into(),
-                    category: Category::Outlet,
-                    capabilities: vec![Capability::OnOff],
-                }],
-            });
+            let (physical, mut receivers) = PhysicalDevice::new(
+                PhysicalDeviceDescription::new(
+                    DeviceKey::new("xiaomi", "test-outlet"),
+                    "Test Outlet",
+                    vec![FunctionDescription {
+                        id: "main".into(),
+                        label: "Main power".into(),
+                        kind: FunctionKind::Outlet,
+                    }],
+                )
+                .unwrap(),
+            );
             if store
                 .devices()
                 .load_publication(None)

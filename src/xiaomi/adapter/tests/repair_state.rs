@@ -2,7 +2,7 @@ use super::{
     support::{group_instance, group_record, repair_ready, repair_rig},
     *,
 };
-use crate::device::{Capability, LightMode, LightPatch, LightSnapshot, Rgb};
+use crate::device::{LightMode, LightPatch, LightSnapshot, Rgb};
 
 #[test]
 fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
@@ -249,7 +249,7 @@ fn unrepaired_virtual_group_does_not_infer_white_mode_or_clamp_member_feedback()
         .await;
         let group = function(&c.context.registry, "group-1", "main");
         assert!(c.context.group_repair("group-1").is_none());
-        assert!(!group.description().has_capability(Capability::ColorRgb));
+        assert!(!group.description().supports_rgb());
         let a = function(&c.context.registry, "member-a", "main");
         let b = function(&c.context.registry, "member-b", "main");
         a.observe_light(LightPatch {

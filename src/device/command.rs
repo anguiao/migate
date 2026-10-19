@@ -10,7 +10,7 @@ use std::{
 use event_listener::Event;
 
 use super::{
-    model::{Capability, Command, CommandError, FunctionSnapshot},
+    model::{Command, CommandError, FunctionSnapshot},
     state::{Function, RuntimeState},
 };
 
@@ -66,9 +66,6 @@ impl Function {
     /// Dropping the future withdraws a queued command. An adapter that already
     /// received it still owns its result and may update the shared snapshot.
     pub async fn execute(&self, command: Command) -> Result<FunctionSnapshot, CommandError> {
-        if !self.description().capabilities.contains(&Capability::OnOff) {
-            return Err(CommandError::Unsupported);
-        }
         let completion = Arc::new(Completion::default());
         {
             let mut state = self.0.state.lock().unwrap();

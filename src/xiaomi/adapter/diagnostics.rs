@@ -109,9 +109,9 @@ impl Context {
                 .cached
                 .borrow()
                 .device
-                .functions
+                .functions()
                 .iter()
-                .map(|function| function.description.id.clone())
+                .map(|function| function.id().to_owned())
                 .collect::<Vec<_>>();
             let mut commands = self.commands.snapshot(&did, channels.into_iter());
             let record = self.live.borrow().devices[&did]
