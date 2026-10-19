@@ -143,12 +143,15 @@ impl LocalAttachment {
 struct CloudAttachment {
     connection: Option<NotificationHandle>,
     prepare: Prepare,
+    online: Option<Rc<OnlinePreparation>>,
+}
+pub(super) struct OnlinePreparation {
+    condition: u64,
+    failed: Cell<bool>,
 }
 impl CloudAttachment {
-    fn invalidate_prepare(&mut self) {
-        self.prepare.invalidate();
-    }
     fn reset_prepare(&mut self) {
+        self.online = None;
         self.prepare.reset();
     }
 }
@@ -169,7 +172,7 @@ pub(super) struct DeviceWork {
     local: RefCell<LocalAttachment>,
     cloud: RefCell<CloudAttachment>,
     active: RefCell<Option<super::notifications::NotificationSource>>,
-    pub(super) condition_generation: Cell<u64>,
+    condition_generation: Cell<u64>,
     pub(super) refresh: RefCell<RefreshState>,
     pub(super) refresh_changed: Rc<Event>,
     pub(super) light_frames: RefCell<LightFrames>,
@@ -310,6 +313,57 @@ impl DeviceWork {
             .connection
             .as_ref()
             .is_some_and(|current| current.same_connection(handle))
+    }
+    pub(super) fn begin_online(
+        &self,
+        handle: &NotificationHandle,
+    ) -> Option<Rc<OnlinePreparation>> {
+        if self.life.is_closed() || !self.cloud_attached(handle) {
+            return None;
+        }
+        let mut cloud = self.cloud.borrow_mut();
+        if cloud.online.as_ref().is_some_and(|state| {
+            !state.failed.get() || state.condition == self.condition_generation.get()
+        }) {
+            return None;
+        }
+        let state = Rc::new(OnlinePreparation {
+            condition: self.condition_generation.get(),
+            failed: Cell::new(false),
+        });
+        cloud.online = Some(state.clone());
+        Some(state)
+    }
+    pub(super) fn online_current(
+        &self,
+        handle: &NotificationHandle,
+        state: &Rc<OnlinePreparation>,
+    ) -> bool {
+        !self.life.is_closed()
+            && self.cloud_attached(handle)
+            && self
+                .cloud
+                .borrow()
+                .online
+                .as_ref()
+                .is_some_and(|current| Rc::ptr_eq(current, state))
+    }
+    pub(super) fn online_failed(&self, handle: &NotificationHandle, state: &Rc<OnlinePreparation>) {
+        if self.online_current(handle, state) {
+            state.failed.set(true);
+        }
+    }
+    pub(super) fn retire_online(&self) {
+        let mut cloud = self.cloud.borrow_mut();
+        if cloud.online.take().is_some() {
+            drop(
+                cloud
+                    .connection
+                    .as_ref()
+                    .unwrap()
+                    .unsubscribe_online(&self.key.id),
+            );
+        }
     }
     fn local_source_retired(&self) {
         let active = matches!(
@@ -639,7 +693,7 @@ impl DeviceWork {
         self.local.borrow_mut().invalidate_prepare();
     }
     pub(super) fn retire_cloud_preparation(&self) {
-        self.cloud.borrow_mut().invalidate_prepare();
+        self.cloud.borrow_mut().prepare.invalidate();
     }
     pub(super) fn retire_local_notifications(&self) {
         let handle = self.local.borrow().connection.clone();
@@ -686,6 +740,7 @@ impl DeviceWork {
             }
         }
         self.retire_local_preparation();
+        self.cloud.borrow_mut().online.take();
         let cloud = self.cloud.borrow_mut().connection.take();
         if let Some(cloud) = cloud {
             drop(cloud.unsubscribe_device(&self.key.id));

@@ -3,7 +3,7 @@ use super::{
     routing::PathPriority,
     state::{Backoff, Context, Lifetime},
     tasks::TaskSet,
-    work::DeviceWork,
+    work::{DeviceWork, OnlinePreparation},
 };
 use crate::{
     storage::XiaomiRecord,
@@ -15,12 +15,7 @@ use crate::{
 };
 use event_listener::Event;
 use futures_lite::future;
-use std::{
-    cell::{Cell, RefCell},
-    collections::BTreeMap,
-    rc::Rc,
-    time::Duration,
-};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 #[cfg(test)]
 mod tests;
@@ -62,7 +57,6 @@ pub(super) struct CloudSession {
     pub(super) handle: NotificationHandle,
     key: ConnectionKey,
     pub(super) tasks: TaskSet,
-    online: RefCell<BTreeMap<String, Rc<OnlinePreparation>>>,
     pub(super) subscriptions: Rc<SubscriptionBudget>,
 }
 
@@ -102,10 +96,6 @@ impl Drop for SubscriptionPermit<'_> {
         // A retired waiter must not consume the only wakeup for an available slot.
         self.0.released.notify(usize::MAX);
     }
-}
-struct OnlinePreparation {
-    condition: u64,
-    failed: Cell<bool>,
 }
 #[derive(Clone, Eq, PartialEq)]
 struct ConnectionKey {
@@ -399,74 +389,43 @@ fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
         .live
         .borrow()
         .devices
-        .keys()
-        .filter_map(|did| online_work(context, did).map(|work| (did.clone(), work)))
-        .collect::<BTreeMap<_, _>>();
-    session.online.borrow_mut().retain(|did, _| {
-        if works.contains_key(did) {
-            true
-        } else {
-            // Only online ownership is reconciled here; exact property
-            // member subscriptions have their own retirement lifecycles.
-            drop(session.handle.unsubscribe_online(did));
-            false
-        }
-    });
-    for (did, work) in works {
-        let state = session.online.borrow().get(&did).cloned();
-        if state.as_ref().is_some_and(|state| {
-            !state.failed.get() || state.condition == work.condition_generation.get()
-        }) {
+        .values()
+        .filter_map(|slot| slot.admitted.clone())
+        .collect::<Vec<_>>();
+    for work in works {
+        let did = &work.key.id;
+        if online_work(context, did).is_none() {
+            work.retire_online();
             continue;
         }
-        let state = Rc::new(OnlinePreparation {
-            condition: work.condition_generation.get(),
-            failed: Cell::new(false),
-        });
-        session
-            .online
-            .borrow_mut()
-            .insert(did.clone(), state.clone());
-        let context = context.clone();
-        let handle = session.handle.clone();
-        let token = session.key.token.clone();
+        let Some(state) = work.begin_online(&session.handle) else {
+            continue;
+        };
         session.tasks.spawn(prepare_online(
-            context,
+            context.clone(),
             work,
-            handle,
-            token,
-            did,
+            session.clone(),
             state,
-            session.subscriptions.clone(),
         ));
     }
 }
+
 async fn prepare_online(
     context: Rc<Context>,
     work: Rc<DeviceWork>,
-    handle: NotificationHandle,
-    token: String,
-    did: String,
+    session: Rc<CloudSession>,
     state: Rc<OnlinePreparation>,
-    subscriptions: Rc<SubscriptionBudget>,
 ) -> Result<(), AdapterError> {
+    let handle = &session.handle;
+    let did = &work.key.id;
     let current = || {
-        context.current_notifications(&handle)
-            && online_work(&context, &did).is_some_and(|current| Rc::ptr_eq(&current, &work))
-            && context
-                .notifications
-                .borrow()
-                .as_ref()
-                .is_some_and(|session| {
-                    session
-                        .online
-                        .borrow()
-                        .get(&did)
-                        .is_some_and(|current| Rc::ptr_eq(current, &state))
-                })
+        context.current_notifications(handle)
+            && online_work(&context, did).is_some_and(|current| Rc::ptr_eq(&current, &work))
+            && work.online_current(handle, &state)
     };
     for attempt in 0..4 {
-        let Some(permit) = subscriptions
+        let Some(permit) = session
+            .subscriptions
             .acquire(&context.changed, &work.life, &current)
             .await
         else {
@@ -475,7 +434,7 @@ async fn prepare_online(
         if !current() {
             break;
         }
-        let result = handle.subscribe_online(&did).await;
+        let result = handle.subscribe_online(did).await;
         drop(permit);
         if !current() {
             break;
@@ -484,7 +443,7 @@ async fn prepare_online(
             Ok(()) => return Ok(()),
             Err(NotificationError::Unauthorized) => {
                 context.token_rejected(
-                    &token,
+                    &session.key.token,
                     FailureReason::CloudNotification(NotificationError::Unauthorized),
                 )?;
                 break;
@@ -500,7 +459,7 @@ async fn prepare_online(
             }
         }
     }
-    state.failed.set(true);
+    work.online_failed(handle, &state);
     Ok(())
 }
 async fn prepare_properties(
@@ -638,7 +597,6 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     handle: handle.clone(),
                     key: key.clone(),
                     tasks: TaskSet::default(),
-                    online: RefCell::new(BTreeMap::new()),
                     subscriptions: Rc::new(SubscriptionBudget::default()),
                 });
                 *context.notifications.borrow_mut() = Some(session.clone());

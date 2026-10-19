@@ -31,6 +31,80 @@ async fn ready(c: &Control) {
 }
 
 #[test]
+fn a_successful_native_replacement_restores_cloud_online_notifications() {
+    let rig = Rig::lights(&[
+        ("one", "xiaomi.light.ceil04"),
+        ("two", "xiaomi.light.ceil04"),
+    ]);
+    rig.cloud
+        .lock()
+        .unwrap()
+        .online
+        .extend(["one".into(), "two".into()]);
+    let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
+    rig.source.context.notification_connector.set(
+        crate::xiaomi::adapter::notifications::NotificationConnector::Plaintext(
+            listener.get_ref().local_addr().unwrap(),
+        ),
+    );
+    let peer = Rc::new(CloudPeer::default());
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| {
+                cloud_active(&c, "one")
+                    && cloud_active(&c, "two")
+                    && peer.count("device/one/state/#") == 1
+            })
+            .await;
+            c.clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let old = c.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let two = function(&c.context.registry, "two", "main");
+            peer.property("two", 2, true);
+            until(|| two.snapshot().power == Power::On).await;
+            let urn = "urn:miot-spec-v2:device:light:0000A001:xiaomi-ceil04:2:0000C802";
+            let mut instance = ceil04_instance();
+            instance["type"] = json!(urn);
+            set_temperature_range(&mut instance, 2700, 6500);
+            {
+                let mut cloud = c.cloud.lock().unwrap();
+                cloud.instance_types.insert("one".into(), urn.into());
+                cloud.catalog_instances.insert(urn.into(), instance);
+            }
+            c.context.request_sync();
+            until(|| old.life.is_closed() && cloud_active(&c, "one")).await;
+            let one = function(&c.context.registry, "one", "main");
+            peer.online("one", false);
+            peer.property("two", 2, false);
+            until(|| two.snapshot().power == Power::Off).await;
+            assert!(
+                !c.context.live.borrow().devices["one"]
+                    .cloud_access
+                    .as_ref()
+                    .unwrap()
+                    .online,
+                "the replacement must receive offline events on the existing cloud connection"
+            );
+            assert!(matches!(
+                one.snapshot().availability,
+                Availability::Unavailable(_)
+            ));
+            peer.online("one", true);
+            peer.property("two", 2, true);
+            until(|| two.snapshot().power == Power::On).await;
+            until(|| one.snapshot().availability == Availability::Available).await;
+            assert_eq!(peer.count("device/one/state/#"), 2);
+            assert_eq!(peer.state.borrow().connects.len(), 1);
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn a_failed_description_update_preserves_cloud_online_notifications() {
     let (rig, listener, peer) = with_cloud_peer(&["one", "two"]);
     block_on(rig.run(|c| async move {
