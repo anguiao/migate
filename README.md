@@ -8,6 +8,8 @@ MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（X
 
 每个有效原生灯组在 Apple Home 中显示为一盏普通灯，成员保留米家单控，在 Home 中隐藏。原生功能使用组 DID，`devcea.light.ls2307` 成员的 RGB 与模式缺口由来源适配补齐；状态采用实际反馈。关系和能力变化自动应用，必要时短暂重启 Matter 服务，保留身份、端点与配对。
 
+目录发现设备描述的新 URN／版本时，MiGate 自动加载受支持的新描述。加载或保存失败时继续使用上次完整配置；只有元数据变化时保留当前实例，实际控制能力变化时整体更新。
+
 单路插座在同一端点承载 Bridged Node 与 On/Off Plug-in Unit（`0x010A`，revision 3）；多路插座使用一个物理父节点和三个独立开关子节点，总控只触发内部状态刷新。灯具按真实能力采用 On/Off Light（`0x0100`）、Dimmable Light（`0x0101`）、Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`）。彩灯提供 CT + XY + HS（色相／饱和度）。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的实际呈现、固件模式联动及基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
 
 ```sh
@@ -26,6 +28,7 @@ cargo run --locked
 - [云端接入与统一选路方案](docs/specs/2026-10-06-cloud-access-routing/spec.md)
 - [单灯照明方案](docs/specs/2026-10-08-single-light-control/spec.md)
 - [原生灯组与能力修复方案](docs/specs/2026-10-10-native-light-groups-and-capability-repair/spec.md)
+- [结构整理方案](docs/specs/2026-10-19-architecture-restructuring/spec.md)
 
 米家认证协议参考[小米官方 Home Assistant 集成](https://github.com/XiaoMi/ha_xiaomi_home)，使用该集成的 OAuth 应用配置。MiGate 是个人爱好项目，该授权归属于 HA 应用，不代表小米为 MiGate 提供独立授权或官方支持。参考来源与使用前提见[米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md#认证方案与云端依赖)；注明来源不会扩大[上游许可证](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/LICENSE.md)的授权范围。
 
@@ -37,18 +40,19 @@ cargo run --locked
 
 | 目录 | 职责 |
 | --- | --- |
-| `src/device/` | 通用设备模型、共享状态与通知、命令队列及其生命周期。 |
-| `src/lighting/` | 灯光目标、每维度轨迹、接管、停止及剩余时间。 |
-| `src/publication.rs` | 已生效发布配置、完整配置提交与固定描述比较。 |
-| `src/runtime/` | 网桥启动与任务生命周期、进程退出信号。 |
-| `src/matter/` | Matter 服务、端点与处理器、配对及协议存储适配。 |
-| `src/storage/` | 当前 SQLite 格式、目录和进程锁、配置整体提交及各类持久化记录。 |
+| `src/device/` | 有效逻辑模型、状态与通知、每个功能的命令顺序、动作与回执生命周期。 |
+| `src/configuration/` | 纯配置计划、身份与端点分配、配置比较及已提交群组规则的派生。 |
+| `src/app/` | 应用组装、生效配置、事务提交与激活、来源和 Matter 的运行生命周期。 |
+| `src/lighting/` | 灯光轨迹、颜色数学、时间推进与原始动作进度。 |
+| `src/matter/` | 显式发布形状、协议命令规划、单位换算、属性投影、版本与报告、配对。 |
+| `src/storage/` | 完整配置的私有编码与事务、独立撤权记录、认证、桥接身份及协议数据存储。 |
 | `src/xiaomi/auth/` | 认证服务、登录、检查与刷新、状态报告。 |
 | `src/xiaomi/cloud/` | HTTP 请求、响应解析、云端目录、OAuth 与 MQTT 通知。 |
 | `src/xiaomi/capability/`、`src/xiaomi/catalog/` | MIoT 能力解析与当前本地家庭的设备描述加载。 |
 | `src/xiaomi/discovery/` | mDNS 浏览、公告解析与合并、网关路由选择。 |
 | `src/xiaomi/central/session/` | 中枢握手、传输驱动、MQTT 处理、请求分派与业务响应。 |
-| `src/xiaomi/adapter/` | 设备成员与生命周期、路径选择与恢复、通知来源、状态观察及凭据协调。 |
+| `src/xiaomi/mqtt/` | 两套驱动共用的帧、握手、发送进度、保活和入站 QoS2 机制。 |
+| `src/xiaomi/adapter/` | 最新来源事实、不可变原生运行对象、路径与订阅、已提交群组的控制和反馈。 |
 
 模块测试及辅助代码放在所属模块的 `tests/` 目录；公开接口、存储和进程集成测试位于根目录 `tests/`。
 
