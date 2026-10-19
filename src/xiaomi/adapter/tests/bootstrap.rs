@@ -167,7 +167,7 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
                     ["one", "multi", "two"].iter().all(|did| {
                         let live = control.context.live.borrow();
                         let work = live.devices[*did].admitted.as_ref().unwrap();
-                        work.active.borrow().is_some()
+                        work.observer().is_some()
                     })
                 })
                 .await;

@@ -116,42 +116,26 @@ impl Context {
     }
     /// Retire one native runtime and its current logical sink.
     pub(super) fn retire_work(&self, did: &str) {
-        let mut live = self.live.borrow_mut();
-        if let Some(work) = live
+        let work = self
+            .live
+            .borrow_mut()
             .devices
             .get_mut(did)
-            .and_then(|slot| slot.admitted.take())
-        {
-            let sink = work.current_sink();
-            sink.physical
-                .set_availability(Availability::Unavailable("source retired".into()));
-            self.registry.remove(sink.physical.key());
-            work.life.close();
-            sink.close();
-        }
-        if let Some(work) = live
-            .session
-            .as_mut()
-            .and_then(|session| session.devices.remove(did))
-        {
-            let sink = work.current_sink();
-            sink.physical
-                .set_availability(Availability::Unavailable("source retired".into()));
-            work.life.close();
-            sink.close();
+            .and_then(|slot| slot.admitted.take());
+        if let Some(work) = work {
+            let physical = work.physical();
+            physical.set_availability(Availability::Unavailable("source retired".into()));
+            self.registry.remove(physical.key());
+            work.retire();
         }
     }
     pub(super) fn remove_source_slot(&self, did: &str) {
         self.registry.remove(&DeviceKey::new("xiaomi", did));
         self.retire_work(did);
-        if let Some(slot) = self.live.borrow_mut().devices.remove(did) {
-            if let Some(loading) = slot.loading {
-                loading.life.close();
-            }
-            if let Some(work) = slot.admitted {
-                work.life.close();
-                work.current_sink().close();
-            }
+        if let Some(slot) = self.live.borrow_mut().devices.remove(did)
+            && let Some(loading) = slot.loading
+        {
+            loading.life.close();
         }
         self.problem(did, None);
         self.commands.remove(did);
@@ -168,30 +152,9 @@ impl Context {
             return self.remove_group(did);
         }
         self.revoke(did, "device removed from the selected home")?;
-        let handle = {
-            let live = self.live.borrow();
-            let light = live.devices[did].admitted.as_ref().is_some_and(|work| {
-                work.native
-                    .device
-                    .functions()
-                    .iter()
-                    .any(|function| function.lighting().is_some())
-            });
-            live.session
-                .as_ref()
-                .map(|session| (session.handle.clone(), light))
-        };
         self.remove_source_slot(did);
         if let Some(session) = self.notifications.borrow().as_ref() {
             drop(session.handle.unsubscribe_device(did));
-        }
-        if let Some((handle, light)) = handle {
-            if light {
-                // Retire delivery and unsent guards while the original sent receipt keeps its gate.
-                drop(handle.unsubscribe_properties(did));
-            } else {
-                drop(handle.unsubscribe_device(did));
-            }
         }
         self.changed.notify(usize::MAX);
         Ok(())

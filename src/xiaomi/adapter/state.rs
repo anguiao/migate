@@ -171,7 +171,6 @@ impl DeviceSlot {
 pub(super) struct Session {
     pub(super) handle: SessionHandle,
     pub(super) access: Rc<AccessRefresh>,
-    pub(super) devices: BTreeMap<String, Rc<DeviceWork>>,
     pub(super) tasks: Rc<TaskSet>,
 }
 impl Session {
@@ -179,7 +178,6 @@ impl Session {
         Self {
             handle,
             access: Rc::new(AccessRefresh::default()),
-            devices: BTreeMap::new(),
             tasks: Rc::new(TaskSet::default()),
         }
     }

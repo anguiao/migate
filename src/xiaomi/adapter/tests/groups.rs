@@ -252,9 +252,10 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
             assert!(live.devices["member-a"].admitted.is_none());
             // Native group commands use cloud access; its state needs known members.
             assert!(
-                live.session
+                live.devices["group-1"]
+                    .admitted
                     .as_ref()
-                    .is_none_or(|session| !session.devices.contains_key("group-1"))
+                    .is_none_or(|work| !work.test_local_attached())
             );
         }
         assert!(matches!(
@@ -709,8 +710,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
                     .admitted
                     .as_ref()
                     .unwrap()
-                    .active
-                    .borrow()
+                    .observer()
                     .is_none()
             })
             .await;

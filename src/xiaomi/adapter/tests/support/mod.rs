@@ -69,12 +69,6 @@ pub(super) fn force_unavailable(context: &super::super::state::Context, did: &st
             .set_availability(Availability::Unavailable(reason.clone()));
     }
     context.retire_work(did);
-    if let Some(session) = context.live.borrow().session.as_ref() {
-        drop(session.handle.unsubscribe_properties(did));
-    }
-    if let Some(session) = context.notifications.borrow().as_ref() {
-        drop(session.handle.unsubscribe_properties(did));
-    }
     context.changed.notify(usize::MAX);
     context.refresh_group_states(did);
     context.problem(did, Some(reason));
@@ -257,13 +251,13 @@ pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
                         && c.context
                             .live
                             .borrow()
-                            .session
-                            .as_ref()
-                            .and_then(|session| session.devices.get(*did))
+                            .devices
+                            .get(*did)
+                            .and_then(|slot| slot.admitted.as_ref())
                             .is_some_and(|work| {
                                 // Every function owns one or more native
                                 // property bindings, not one per channel.
-                                work.subscribed.borrow().len() == work.bindings().len()
+                                work.test_local_subscribed_len() == work.bindings().len()
                             })
                 })
         }) && peer

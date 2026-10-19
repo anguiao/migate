@@ -242,7 +242,7 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
             })
             .await;
             let work = device_work(control, "one");
-            assert!(!work.subscribed.borrow().is_empty());
+            assert!(!work.test_local_subscribed_empty());
             function(&control.context.registry, "one", "main")
                 .execute(Command::On)
                 .await
@@ -257,7 +257,7 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
         let after = device_work(&c, "one");
         assert!(Rc::ptr_eq(&before, &after));
         assert!(!after.life.is_closed());
-        assert!(after.subscribed.borrow().is_empty());
+        assert!(after.test_local_subscribed_empty());
         assert!(c.context.live.borrow().devices["one"].access.is_none());
         let one = function(&c.context.registry, "one", "main");
         assert_eq!(one.snapshot().availability, Availability::Available);
@@ -347,7 +347,7 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                 })
                 .await;
                 let current = device_work(control, "one");
-                assert!(!current.subscribed.borrow().contains(&(2, 3)));
+                assert!(!current.test_local_subscribed_pair(2, 3));
 
                 until(|| {
                     peer.state
@@ -364,7 +364,7 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                         vec![SubscribeReasonCode::QoS2],
                     )));
                 }
-                until(|| current.subscribed.borrow().len() == current.bindings().len()).await;
+                until(|| current.test_local_subscribed_len() == current.bindings().len()).await;
             })
             .await;
         }),

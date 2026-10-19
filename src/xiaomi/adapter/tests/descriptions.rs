@@ -89,7 +89,7 @@ fn a_native_replacement_clears_its_previous_subscription_failure() {
                     })
             );
             let current = device_work(control, "one");
-            until(|| current.subscribed.borrow().len() == current.bindings().len()).await;
+            until(|| current.test_local_subscribed_len() == current.bindings().len()).await;
         })
         .await;
     }));

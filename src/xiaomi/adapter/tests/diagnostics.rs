@@ -47,8 +47,7 @@ fn diagnostics_keep_current_control_and_valid_notification_conditions_separate()
                         .admitted
                         .as_ref()
                         .unwrap()
-                        .active
-                        .borrow()
+                        .observer()
                         .is_some()
             })
             .await;

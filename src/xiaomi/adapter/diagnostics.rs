@@ -155,7 +155,7 @@ impl Context {
         }
         let work = self.live.borrow().devices[did].admitted.clone();
         if let Some(work) = work {
-            if work.subscribe_running.get() || work.cloud_running.get() {
+            if work.notifications_preparing() {
                 return "notification subscriptions preparing".into();
             }
             if let Some(reason) = work.subscription_problem() {

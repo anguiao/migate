@@ -50,12 +50,7 @@ fn local_active(c: &Control, did: &str) -> bool {
     c.context.live.borrow().devices[did]
         .admitted
         .as_ref()
-        .is_some_and(|work| {
-            matches!(
-                *work.active.borrow(),
-                Some(super::super::notifications::NotificationSource::Local(_))
-            )
-        })
+        .is_some_and(|work| work.test_observer_is_local())
 }
 
 fn startup_paths(members: &[&str]) -> Vec<String> {
@@ -138,17 +133,14 @@ fn waiting_cloud_startup_subscriptions_are_revoked_and_replaced_before_sending()
                 .admitted
                 .clone()
                 .unwrap();
-            replaced
-                .cloud_generation
-                .set(replaced.cloud_generation.get() + 1);
-            replaced.cloud_running.set(false);
+            replaced.test_retire_cloud_preparation();
             c.context.changed.notify(usize::MAX);
             release_startup_subscriptions(&peer, paths.len() - 2).await;
             until(|| members[..79].iter().all(|did| cloud_active(&c, did))).await;
             assert_eq!(peer.count("device/device79/up/properties_changed/2/1"), 0);
             assert_eq!(peer.count("device/device79/state/#"), 0);
             assert_eq!(peer.count("device/device78/up/properties_changed/2/1"), 1);
-            assert!(!replaced.cloud_running.get());
+            assert!(!replaced.test_cloud_preparing());
         })
         .await;
     }));
@@ -590,8 +582,7 @@ fn exhausted_local_preparation_uses_cloud_and_diagnostic_wakes_do_not_restart_it
                         .admitted
                         .as_ref()
                         .unwrap()
-                        .local_exhausted
-                        .get()
+                        .test_local_exhausted()
                 );
                 assert_eq!(local.count("subscribe", "multi", 3), 1);
                 // A real information update opens one new bounded preparation window.
@@ -637,15 +628,10 @@ fn new_and_restored_pushless_devices_read_and_control_without_local_notification
                 assert_eq!(local.count("rpcReq", "one", 2), 1);
                 assert!(control.context.local_candidate("one", true).is_err());
                 assert!(
-                    !control
-                        .context
-                        .live
-                        .borrow()
-                        .session
+                    !control.context.live.borrow().devices["one"]
+                        .admitted
                         .as_ref()
-                        .unwrap()
-                        .devices
-                        .contains_key("one")
+                        .is_some_and(|work| work.test_local_attached())
                 );
             })
             .await;
@@ -945,8 +931,7 @@ fn a_real_cloud_online_recovery_reopens_one_exhausted_subscription_window() {
                         .admitted
                         .as_ref()
                         .unwrap()
-                        .cloud_exhausted
-                        .get()
+                        .test_cloud_exhausted()
             })
             .await;
             c.clock
@@ -996,8 +981,7 @@ fn losing_cloud_connection_reopens_the_exhausted_local_fallback_window() {
                             .admitted
                             .as_ref()
                             .unwrap()
-                            .local_exhausted
-                            .get()
+                            .test_local_exhausted()
                 })
                 .await;
                 assert_eq!(
@@ -1019,8 +1003,7 @@ fn losing_cloud_connection_reopens_the_exhausted_local_fallback_window() {
                         .admitted
                         .as_ref()
                         .unwrap()
-                        .local_exhausted
-                        .get(),
+                        .test_local_exhausted(),
                     "removing the cloud candidate must reopen one local fallback window"
                 );
                 let due = control.clock.now() + Duration::from_millis(10);
@@ -1073,9 +1056,7 @@ fn losing_local_connection_reopens_cloud_without_another_priority_change() {
                         && control.context.live.borrow().devices["one"]
                             .admitted
                             .as_ref()
-                            .unwrap()
-                            .cloud_exhausted
-                            .get()
+                            .unwrap().test_cloud_exhausted()
                 })
                 .await;
                 assert_eq!(
@@ -1101,9 +1082,7 @@ fn losing_local_connection_reopens_cloud_without_another_priority_change() {
                 !c.context.live.borrow().devices["one"]
                     .admitted
                     .as_ref()
-                    .unwrap()
-                    .cloud_exhausted
-                    .get(),
+                    .unwrap().test_cloud_exhausted(),
                 "removing local must reopen the eligible cloud source even when priority is unchanged"
             );
             until(|| cloud_active(&c, "one")).await;
@@ -1141,8 +1120,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                             .admitted
                             .as_ref()
                             .unwrap()
-                            .local_exhausted
-                            .get()
+                            .test_local_exhausted()
                 })
                 .await;
                 control
@@ -1161,8 +1139,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                         .admitted
                         .as_ref()
                         .unwrap()
-                        .local_exhausted
-                        .get()
+                        .test_local_exhausted()
                 );
 
                 cloud.online("one", false);
@@ -1180,8 +1157,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                         .admitted
                         .as_ref()
                         .unwrap()
-                        .local_exhausted
-                        .get(),
+                        .test_local_exhausted(),
                     "a real cloud online change must reopen the still-eligible local source"
                 );
                 for attempt in 5..=8 {
@@ -1195,8 +1171,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                         .admitted
                         .as_ref()
                         .unwrap()
-                        .local_exhausted
-                        .get()
+                        .test_local_exhausted()
                 })
                 .await;
                 for _ in 0..20 {
@@ -1211,8 +1186,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                         .admitted
                         .as_ref()
                         .unwrap()
-                        .local_exhausted
-                        .get()
+                        .test_local_exhausted()
                 );
 
                 local.state.borrow_mut().sub_reject.clear();
@@ -1231,8 +1205,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                         .admitted
                         .as_ref()
                         .unwrap()
-                        .local_exhausted
-                        .get()
+                        .test_local_exhausted()
                 );
                 let due = control.clock.now() + Duration::from_millis(10);
                 advance_to(&control.clock, due).await;
@@ -1309,9 +1282,7 @@ fn held_online_subscription_cannot_retry_after_device_access_is_revoked() {
                     .admitted
                     .as_ref()
                     .unwrap()
-                    .cloud_subscribed
-                    .borrow()
-                    .is_empty()
+                    .test_cloud_subscribed_empty()
             );
         })
         .await;
@@ -1330,14 +1301,10 @@ fn same_value_notification_invalidates_an_inflight_read() {
             let two = function(&control.context.registry, "two", "main");
             peer.state.borrow_mut().hold_reads = true;
             let reads = peer.count("get", "one", 2);
-            control
-                .context
-                .live
-                .borrow()
-                .session
+            control.context.live.borrow().devices["one"]
+                .admitted
                 .as_ref()
                 .unwrap()
-                .devices["one"]
                 .refresh();
             until(|| peer.count("get", "one", 2) == reads + 1).await;
             let before = one.snapshot();
@@ -1555,11 +1522,11 @@ fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail()
                 .admitted
                 .clone()
                 .unwrap();
-            until(|| member.cloud_exhausted.get()).await;
+            until(|| member.test_cloud_exhausted()).await;
             c.clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            assert!(member.active.borrow().is_none());
+            assert!(member.observer().is_none());
             let group = function(&c.context.registry, "group-1", "main");
             assert_eq!(group.snapshot().power, Power::Off);
             let key = ("member-a".to_string(), 2, 1);
@@ -1588,9 +1555,9 @@ fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail()
             c.clock
                 .automatic
                 .store(true, std::sync::atomic::Ordering::Relaxed);
-            until(|| peer.count(property) > subscriptions && member.cloud_exhausted.get()).await;
+            until(|| peer.count(property) > subscriptions && member.test_cloud_exhausted()).await;
             until(|| reads() > before && group.snapshot().power == Power::On).await;
-            assert!(member.active.borrow().is_none());
+            assert!(member.observer().is_none());
             assert_eq!(group.snapshot().availability, Availability::Available);
             assert!(
                 c.context

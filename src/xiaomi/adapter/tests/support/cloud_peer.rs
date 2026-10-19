@@ -245,10 +245,5 @@ pub(in super::super) fn cloud_active(c: &Control, did: &str) -> bool {
     c.context.live.borrow().devices[did]
         .admitted
         .as_ref()
-        .is_some_and(|work| {
-            matches!(
-                *work.active.borrow(),
-                Some(crate::xiaomi::adapter::notifications::NotificationSource::Cloud(_))
-            )
-        })
+        .is_some_and(|work| work.test_observer_is_cloud())
 }

@@ -1727,8 +1727,8 @@ fn rgb_notification_source_requires_all_five_property_subscriptions() {
                 .admitted
                 .clone()
                 .unwrap();
-            until(|| work.local_exhausted.get()).await;
-            assert!(!work.subscribed.borrow().contains(&(MODE.siid, MODE.piid)));
+            until(|| work.test_local_exhausted()).await;
+            assert!(!work.test_local_subscribed_pair(MODE.siid, MODE.piid));
             assert_eq!(control.context.active_notification("one"), None);
             let light = function(&control.context.registry, "one", "main");
             assert_eq!(light.snapshot().availability, Availability::Available);

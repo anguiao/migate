@@ -23,12 +23,12 @@ async fn subscriptions_ready(c: &Control, dids: &[&str]) {
     until(|| {
         let live = c.context.live.borrow();
         dids.iter().all(|did| {
-            live.session
-                .as_ref()
-                .and_then(|session| session.devices.get(*did))
+            live.devices
+                .get(*did)
+                .and_then(|slot| slot.admitted.as_ref())
                 .is_some_and(|work| {
                     let cached = &work.native;
-                    work.subscribed.borrow().len()
+                    work.test_local_subscribed_len()
                         == cached.device.functions().len()
                             + usize::from(cached.device.refresh_trigger().is_some())
                 })

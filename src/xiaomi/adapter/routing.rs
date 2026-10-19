@@ -141,26 +141,29 @@ impl Context {
     }
     pub(super) fn install_work(self: &Rc<Self>, did: &str) {
         let mut live = self.live.borrow_mut();
-        let slot = live.devices.get_mut(did).unwrap();
-        let Some(work) = slot.admitted.clone() else {
+        let work = live.devices.get(did).and_then(|slot| slot.admitted.clone());
+        let Some(work) = work else {
             return;
         };
-        if !slot.access.as_ref().is_some_and(|access| {
-            access
-                .as_ref()
-                .is_ok_and(|access| access.spec_v2_access && access.push_available)
+        if let Some(session) = self.notifications.borrow().as_ref() {
+            work.attach_cloud(session.handle.clone());
+        }
+        if !live.devices.get(did).is_some_and(|slot| {
+            slot.access.as_ref().is_some_and(|access| {
+                access
+                    .as_ref()
+                    .is_ok_and(|access| access.spec_v2_access && access.push_available)
+            })
         }) {
             return;
         }
         let Some(session) = live.session.as_mut() else {
             return;
         };
-        if session.devices.contains_key(did) {
+        let handle = session.handle.clone();
+        if !work.attach_local(handle.clone()) {
             return;
         }
-        work.local_connected();
-        let handle = session.handle.clone();
-        session.devices.insert(did.into(), work.clone());
         session
             .tasks
             .spawn(super::work::run(work, handle, self.clone()));
@@ -396,9 +399,17 @@ impl Context {
     pub(super) fn disconnect(&self, reason: String) {
         let priority_changed =
             self.priority.replace(PathPriority::CloudFirst) != PathPriority::CloudFirst;
-        let disconnected = if let Some(session) = self.live.borrow_mut().session.take() {
-            for work in session.devices.values() {
-                work.local_disconnected();
+        let session = self.live.borrow_mut().session.take();
+        let disconnected = if let Some(session) = session {
+            let works = self
+                .live
+                .borrow()
+                .devices
+                .values()
+                .filter_map(|slot| slot.admitted.clone())
+                .collect::<Vec<_>>();
+            for work in works {
+                work.detach_local(&session.handle);
             }
             session.handle.close();
             true
@@ -427,8 +438,7 @@ impl Context {
             if let Some(work) = &slot.admitted {
                 work.physical()
                     .set_availability(Availability::Unavailable("Xiaomi adapter stopped".into()));
-                work.life.close();
-                work.current_sink().close();
+                work.retire();
             }
         }
     }

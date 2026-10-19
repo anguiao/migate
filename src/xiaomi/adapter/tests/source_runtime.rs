@@ -116,11 +116,10 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
                 .clone()
                 .expect("the physical group has a native runtime");
             until(|| {
-                let subscribed = runtime.subscribed.borrow();
                 runtime
                     .bindings()
                     .iter()
-                    .all(|binding| subscribed.contains(&(binding.siid, binding.piid)))
+                    .all(|binding| runtime.test_local_subscribed_contains(*binding))
             })
             .await;
             assert_eq!(

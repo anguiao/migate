@@ -32,7 +32,7 @@ pub(super) enum NotificationSource {
     Cloud(NotificationHandle),
 }
 impl NotificationSource {
-    fn same(&self, other: &Self) -> bool {
+    pub(super) fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Local(a), Self::Local(b)) => a.same_connection(b),
             (Self::Cloud(a), Self::Cloud(b)) => a.same_connection(b),
@@ -49,13 +49,11 @@ impl NotificationSource {
         match self {
             Self::Local(handle) => {
                 drop(handle.unsubscribe_properties(did));
-                work.local_generation.set(work.local_generation.get() + 1);
-                work.subscribed.borrow_mut().clear();
+                work.retire_local_preparation();
             }
             Self::Cloud(handle) => {
                 drop(handle.unsubscribe_properties(did));
-                work.cloud_generation.set(work.cloud_generation.get() + 1);
-                work.cloud_subscribed.borrow_mut().clear();
+                work.retire_cloud_preparation();
             }
         }
     }
@@ -160,8 +158,8 @@ impl Context {
             .devices
             .get(did)
             .and_then(|slot| slot.admitted.clone())?;
-        let active = work.active.borrow();
-        let source = active
+        let source = work.observer();
+        let source = source
             .as_ref()
             .filter(|source| self.source_valid(did, source))?;
         Some(match source {
@@ -180,27 +178,35 @@ impl Context {
         if self.is_virtual_group(did) {
             return None;
         }
-        let local = self
-            .local_candidate(did, true)
-            .ok()
-            .map(NotificationSource::Local);
-        let cloud = if self.cloud_candidate(did, false).is_ok() {
-            self.notifications
-                .borrow()
-                .as_ref()
-                .filter(|session| self.current_notifications(&session.handle))
-                .map(|session| NotificationSource::Cloud(session.handle.clone()))
-        } else {
-            None
-        };
         let work = self
             .live
             .borrow()
             .devices
             .get(did)
             .and_then(|slot| slot.admitted.clone());
-        let local_failed = work.as_ref().is_some_and(|work| work.local_exhausted.get());
-        let cloud_failed = work.as_ref().is_some_and(|work| work.cloud_exhausted.get());
+        let local = self
+            .local_candidate(did, true)
+            .ok()
+            .filter(|handle| {
+                work.as_ref()
+                    .is_some_and(|work| work.local_attached(handle))
+            })
+            .map(NotificationSource::Local);
+        let cloud = if self.cloud_candidate(did, false).is_ok() {
+            self.notifications
+                .borrow()
+                .as_ref()
+                .filter(|session| self.current_notifications(&session.handle))
+                .and_then(|session| {
+                    work.as_ref()
+                        .filter(|work| work.cloud_attached(&session.handle))
+                        .map(|_| NotificationSource::Cloud(session.handle.clone()))
+                })
+        } else {
+            None
+        };
+        let local_failed = work.as_ref().is_some_and(|work| work.local_exhausted());
+        let cloud_failed = work.as_ref().is_some_and(|work| work.cloud_exhausted());
         let local = local.filter(|_| !local_failed);
         let cloud = cloud.filter(|_| !cloud_failed);
         match self.priority() {
@@ -212,12 +218,26 @@ impl Context {
         if self.is_virtual_group(did) {
             return false;
         }
+        let work = self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.admitted.clone());
         match source {
-            NotificationSource::Local(handle) => self
-                .local_candidate(did, true)
-                .is_ok_and(|candidate| candidate.same_connection(handle)),
+            NotificationSource::Local(handle) => {
+                self.local_candidate(did, true)
+                    .is_ok_and(|candidate| candidate.same_connection(handle))
+                    && work
+                        .as_ref()
+                        .is_some_and(|work| work.local_attached(handle))
+            }
             NotificationSource::Cloud(handle) => {
-                self.cloud_candidate(did, false).is_ok() && self.current_notifications(handle)
+                self.cloud_candidate(did, false).is_ok()
+                    && self.current_notifications(handle)
+                    && work
+                        .as_ref()
+                        .is_some_and(|work| work.cloud_attached(handle))
             }
         }
     }
@@ -239,11 +259,7 @@ impl Context {
             .get(did)
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = work
-            && work
-                .active
-                .borrow()
-                .as_ref()
-                .is_some_and(|active| active.same(source))
+            && work.observer_is(source)
             && work.notify_value(
                 binding,
                 value,
@@ -294,49 +310,34 @@ impl Context {
         else {
             return;
         };
-        let active = work.active.borrow_mut().take();
-        let local_done = matches!(active, Some(NotificationSource::Local(_)));
-        let cloud_done = matches!(active, Some(NotificationSource::Cloud(_)));
-        if let Some(active) = &active {
-            // `NotificationSource::retire` already unsubscribes properties and
-            // advances that source's generation with a receipt gate.
-            active.retire(&work, did);
+        let local = self
+            .live
+            .borrow()
+            .session
+            .as_ref()
+            .map(|session| session.handle.clone());
+        if let Some(local) = local {
+            // Retire property preparation including queued SUBACKs, then
+            // advance the attachment generation so none can be reinstated.
+            drop(local.unsubscribe_properties(did));
         }
-        if !local_done && let Some(session) = self.live.borrow().session.as_ref() {
-            // Retire local properties including Preparing registrations, then
-            // advance the generation so a late SUBACK cannot reinstate them.
-            drop(session.handle.unsubscribe_properties(did));
-            work.local_generation.set(work.local_generation.get() + 1);
-            work.subscribed.borrow_mut().clear();
-        }
+        work.retire_local_preparation();
         if let Some(session) = self.notifications.borrow().as_ref() {
             // The cloud session also owns online notifications for this DID;
             // both are retired through the existing device-level unsubscribe.
             drop(session.handle.unsubscribe_device(did));
-            if !cloud_done {
-                work.cloud_generation.set(work.cloud_generation.get() + 1);
-                work.cloud_subscribed.borrow_mut().clear();
-            }
         }
+        work.retire_cloud_preparation();
+        work.take_observer();
     }
-}
-fn ready(work: &DeviceWork, source: &NotificationSource) -> bool {
-    let subscribed = match source {
-        NotificationSource::Local(_) => work.subscribed.borrow(),
-        NotificationSource::Cloud(_) => work.cloud_subscribed.borrow(),
-    };
-    work.bindings()
-        .iter()
-        .all(|b| subscribed.contains(&(b.siid, b.piid)))
 }
 fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
     let did = &work.key.id;
     // Invalidate received QoS2 values before granting delivery; keep handshakes and ready SUBACKs.
     source.invalidate(did);
-    if let Some(old) = work.active.borrow_mut().take() {
+    if let Some(old) = work.replace_observer(source) {
         old.retire(work, did);
     }
-    *work.active.borrow_mut() = Some(source);
     work.source_changed();
     context.refresh_group_states(did);
     context.note_notification_switch(did, "notification subscriptions ready; source activated");
@@ -365,12 +366,12 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     if work.life.is_closed() {
         return;
     }
-    let old = work.active.borrow().clone();
+    let old = work.observer();
     if let Some(old) = old
         && !context.source_valid(&did, &old)
     {
         old.retire(&work, &did);
-        work.active.borrow_mut().take();
+        work.take_observer();
         work.source_changed();
         context.refresh_group_states(&did);
         context.update_routing("notification source access conditions invalidated");
@@ -378,35 +379,21 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     let desired = context.notification_source(&did);
     // Keep the desired preparation and the active source while handing over to it.
     let keep_local = matches!(desired, Some(NotificationSource::Local(_)))
-        || (desired.is_some()
-            && matches!(*work.active.borrow(), Some(NotificationSource::Local(_))));
+        || (desired.is_some() && matches!(work.observer(), Some(NotificationSource::Local(_))));
     let keep_cloud = matches!(desired, Some(NotificationSource::Cloud(_)))
-        || (desired.is_some()
-            && matches!(*work.active.borrow(), Some(NotificationSource::Cloud(_))));
-    if !keep_local
-        && (!work.subscribed.borrow().is_empty() || work.subscribe_running.get())
-        && let Some(session) = context.live.borrow().session.as_ref()
-    {
-        NotificationSource::Local(session.handle.clone()).retire(&work, &did);
+        || (desired.is_some() && matches!(work.observer(), Some(NotificationSource::Cloud(_))));
+    if !keep_local && work.local_preparation_active() {
+        work.retire_local_notifications();
     }
-    if !keep_cloud
-        && (!work.cloud_subscribed.borrow().is_empty() || work.cloud_running.get())
-        && let Some(session) = context.notifications.borrow().as_ref()
-    {
-        NotificationSource::Cloud(session.handle.clone()).retire(&work, &did);
-        work.cloud_running.set(false);
+    if !keep_cloud && work.cloud_preparation_active() {
+        work.retire_cloud_notifications();
     }
     let Some(desired) = desired else { return };
 
-    if work
-        .active
-        .borrow()
-        .as_ref()
-        .is_some_and(|active| active.same(&desired))
-    {
+    if work.observer_is(&desired) {
         return;
     }
-    if ready(&work, &desired) {
+    if work.source_ready(&desired) {
         activate(context, &work, desired);
         return;
     }
@@ -415,7 +402,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
             work.request_local_subscriptions();
         }
         NotificationSource::Cloud(handle) => {
-            if !work.cloud_running.replace(true) {
+            if let Some(preparation) = work.begin_cloud_preparation(&handle) {
                 let session = context.notifications.borrow().as_ref().unwrap().clone();
                 session.tasks.spawn(prepare_properties(
                     context.clone(),
@@ -423,7 +410,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
                     handle,
                     session.key.token.clone(),
                     session.subscriptions.clone(),
-                    work.cloud_generation.get(),
+                    preparation,
                 ));
             }
         }
@@ -564,21 +551,14 @@ async fn prepare_properties(
 ) -> Result<(), AdapterError> {
     let did = work.key.id.clone();
     let current = || {
-        !work.life.is_closed()
-            && work.cloud_generation.get() == preparation
+        work.cloud_current(&handle, preparation)
             && context.current_notifications(&handle)
             && context.cloud_candidate(&did, false).is_ok()
     };
-    let mut pending = work
-        .bindings()
-        .into_iter()
-        .filter(|binding| {
-            !work
-                .cloud_subscribed
-                .borrow()
-                .contains(&(binding.siid, binding.piid))
-        })
-        .collect::<Vec<_>>();
+    let Some(mut pending) = work.cloud_pending(&handle, preparation) else {
+        work.cloud_abandoned(&handle, preparation);
+        return Ok(());
+    };
     'attempts: for attempt in 0..4 {
         let mut failed = Vec::new();
         let mut problem = None;
@@ -598,11 +578,7 @@ async fn prepare_properties(
                 break 'attempts;
             }
             match result {
-                Ok(()) => {
-                    work.cloud_subscribed
-                        .borrow_mut()
-                        .insert((binding.siid, binding.piid));
-                }
+                Ok(()) => work.cloud_subscribed(&handle, preparation, binding),
                 Err(NotificationError::Unauthorized) => {
                     context.token_rejected(
                         &token,
@@ -620,8 +596,7 @@ async fn prepare_properties(
             }
         }
         if failed.is_empty() || attempt == 3 {
-            work.cloud_exhausted.set(problem.is_some());
-            *work.cloud_problem.borrow_mut() = problem;
+            work.cloud_finished(&handle, preparation, problem);
             work.report(&context, &did);
             break;
         }
@@ -631,9 +606,7 @@ async fn prepare_properties(
             .wait_until(context.clock.now() + Duration::from_secs(1))
             .await;
     }
-    if work.cloud_generation.get() == preparation {
-        work.cloud_running.set(false);
-    }
+    work.cloud_abandoned(&handle, preparation);
     context.changed.notify(usize::MAX);
     Ok(())
 }
@@ -712,13 +685,13 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.admitted.as_ref())
+                    .filter_map(|slot| slot.admitted.clone())
                 {
-                    work.cloud_disconnected();
+                    work.attach_cloud(handle.clone());
                     work.retry_subscriptions();
                     // HTTP feedback must also recover when property
                     // subscriptions never became active in the old session.
-                    if work.active.borrow().is_none() && !context.is_virtual_group(&work.key.id) {
+                    if work.observer().is_none() && !context.is_virtual_group(&work.key.id) {
                         work.refresh();
                     }
                 }
@@ -782,9 +755,9 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.admitted.as_ref())
+                    .filter_map(|slot| slot.admitted.clone())
                 {
-                    work.cloud_disconnected();
+                    work.detach_cloud(&handle);
                     work.retry_subscriptions();
                 }
                 context.update_all_availability();

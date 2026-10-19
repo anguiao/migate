@@ -8,7 +8,7 @@ use super::{
 use crate::{
     configuration::NativeDescription,
     device::{ActionToken, DeviceKey, LightDimension, PhysicalDevice},
-    xiaomi::{capability::PropertyBinding, central::SessionHandle},
+    xiaomi::{capability::PropertyBinding, central::SessionHandle, cloud::NotificationHandle},
 };
 use event_listener::Event;
 use futures_lite::future;
@@ -18,6 +18,11 @@ use std::{
     rc::Rc,
     time::Duration,
 };
+
+#[cfg(test)]
+#[path = "tests/work_access.rs"]
+mod test_access;
+
 /// One captured source runtime and its logical sink. A repaired action keeps
 /// the member universe captured at its first frame; the group itself uses the
 /// same pair.
@@ -81,6 +86,73 @@ impl LightFrames {
     }
 }
 
+/// All preparation state for one source connection. A failed preparation
+/// remains exhausted until an actual condition change reopens it.
+#[derive(Default)]
+struct Prepare {
+    subscribed: BTreeSet<(u32, u32)>,
+    running: bool,
+    exhausted: bool,
+    problem: Option<String>,
+    generation: u64,
+}
+impl Prepare {
+    /// Withdraw this preparation receipt while retaining its diagnostic and
+    /// exhausted condition until an actual access change reopens it.
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.subscribed.clear();
+        self.running = false;
+    }
+    /// Start a fresh connection preparation, including a new retry window.
+    fn reset(&mut self) {
+        self.invalidate();
+        self.exhausted = false;
+        self.problem = None;
+    }
+    fn ready(&self, bindings: &[PropertyBinding]) -> bool {
+        bindings
+            .iter()
+            .all(|binding| self.subscribed.contains(&(binding.siid, binding.piid)))
+    }
+    fn missing(&self, bindings: &[PropertyBinding]) -> Vec<PropertyBinding> {
+        bindings
+            .iter()
+            .copied()
+            .filter(|binding| !self.subscribed.contains(&(binding.siid, binding.piid)))
+            .collect()
+    }
+}
+#[derive(Default)]
+struct LocalAttachment {
+    connection: Option<SessionHandle>,
+    prepare: Prepare,
+    requested: bool,
+}
+impl LocalAttachment {
+    fn invalidate_prepare(&mut self) {
+        self.requested = false;
+        self.prepare.invalidate();
+    }
+    fn reset_prepare(&mut self) {
+        self.requested = false;
+        self.prepare.reset();
+    }
+}
+#[derive(Default)]
+struct CloudAttachment {
+    connection: Option<NotificationHandle>,
+    prepare: Prepare,
+}
+impl CloudAttachment {
+    fn invalidate_prepare(&mut self) {
+        self.prepare.invalidate();
+    }
+    fn reset_prepare(&mut self) {
+        self.prepare.reset();
+    }
+}
+
 /// One installed native runtime: the immutable native control description and
 /// the subscription/refresh/observation state attached to it. The logical
 /// sink below is only the current delivery target and is swapped by a
@@ -94,23 +166,14 @@ pub(super) struct DeviceWork {
     pub(super) light_write: Option<Rc<LightWriteGate>>,
     /// Current logical delivery target; logical-only replacement swaps it.
     pub(super) sink: RefCell<Rc<LogicalSink>>,
-    pub(super) subscribed: RefCell<BTreeSet<(u32, u32)>>,
-    pub(super) active: RefCell<Option<super::notifications::NotificationSource>>,
-    pub(super) local_generation: Cell<u64>,
-    pub(super) local_exhausted: Cell<bool>,
-    pub(super) cloud_subscribed: RefCell<BTreeSet<(u32, u32)>>,
-    pub(super) cloud_generation: Cell<u64>,
-    pub(super) cloud_running: Cell<bool>,
-    pub(super) cloud_exhausted: Cell<bool>,
-    pub(super) cloud_problem: RefCell<Option<String>>,
+    local: RefCell<LocalAttachment>,
+    cloud: RefCell<CloudAttachment>,
+    active: RefCell<Option<super::notifications::NotificationSource>>,
     pub(super) condition_generation: Cell<u64>,
-    subscribe_requested: Cell<bool>,
-    pub(super) subscribe_running: Cell<bool>,
     pub(super) refresh: RefCell<RefreshState>,
     pub(super) refresh_changed: Rc<Event>,
     pub(super) light_frames: RefCell<LightFrames>,
     changed: Event,
-    subscribe_problem: RefCell<Option<String>>,
 }
 impl DeviceWork {
     pub(super) fn new(
@@ -127,23 +190,14 @@ impl DeviceWork {
             observations: Observations::default(),
             light_write,
             sink: RefCell::new(sink),
-            subscribed: RefCell::new(BTreeSet::new()),
+            local: RefCell::new(LocalAttachment::default()),
+            cloud: RefCell::new(CloudAttachment::default()),
             active: RefCell::new(None),
-            local_generation: Cell::new(0),
-            local_exhausted: Cell::new(false),
-            cloud_subscribed: RefCell::new(BTreeSet::new()),
-            cloud_generation: Cell::new(0),
-            cloud_running: Cell::new(false),
-            cloud_exhausted: Cell::new(false),
-            cloud_problem: RefCell::new(None),
             condition_generation: Cell::new(0),
-            subscribe_requested: Cell::new(false),
-            subscribe_running: Cell::new(false),
             refresh: RefCell::new(RefreshState::default()),
             refresh_changed,
             light_frames: RefCell::new(LightFrames::default()),
             changed: Event::new(),
-            subscribe_problem: RefCell::new(None),
         }
     }
     pub(super) fn current_sink(&self) -> Rc<LogicalSink> {
@@ -165,48 +219,143 @@ impl DeviceWork {
             .unwrap()
             .power()
     }
-    pub(super) fn local_connected(&self) {
-        self.local_disconnected();
-        self.subscribe_requested.set(false);
+    fn is_light(&self) -> bool {
+        self.native
+            .device
+            .functions()
+            .iter()
+            .any(|function| function.lighting().is_some())
+    }
+
+    /// Attach one local connection. Repeating the same connection is
+    /// idempotent; a different connection supersedes the old preparation
+    /// receipt without touching the cloud attachment or observer.
+    pub(super) fn attach_local(&self, handle: SessionHandle) -> bool {
+        let mut local = self.local.borrow_mut();
+        if local
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(&handle))
+        {
+            return false;
+        }
+        let previous = local.connection.replace(handle);
+        local.reset_prepare();
+        drop(local);
+        if let Some(previous) = previous {
+            drop(previous.unsubscribe_properties(&self.key.id));
+        }
+        self.local_source_retired();
+        true
+    }
+    /// Withdraw only this local attachment. A cloud observer remains valid.
+    pub(super) fn detach_local(&self, handle: &SessionHandle) -> bool {
+        let mut local = self.local.borrow_mut();
+        if !local
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+        {
+            return false;
+        }
+        local.connection.take();
+        local.reset_prepare();
+        drop(local);
+        self.local_source_retired();
+        true
+    }
+    pub(super) fn local_attached(&self, handle: &SessionHandle) -> bool {
+        self.local
+            .borrow()
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+    }
+    /// Attach one cloud notification connection. Repeating the same connection
+    /// is idempotent; a new connection starts a fresh preparation generation.
+    pub(super) fn attach_cloud(&self, handle: NotificationHandle) -> bool {
+        let mut cloud = self.cloud.borrow_mut();
+        if cloud
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(&handle))
+        {
+            return false;
+        }
+        cloud.connection.replace(handle);
+        cloud.reset_prepare();
+        drop(cloud);
+        self.cloud_source_retired();
+        true
+    }
+    /// Withdraw only this cloud attachment. A local observer remains valid.
+    pub(super) fn detach_cloud(&self, handle: &NotificationHandle) -> bool {
+        let mut cloud = self.cloud.borrow_mut();
+        if !cloud
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+        {
+            return false;
+        }
+        cloud.connection.take();
+        cloud.reset_prepare();
+        drop(cloud);
+        self.cloud_source_retired();
+        true
+    }
+    pub(super) fn cloud_attached(&self, handle: &NotificationHandle) -> bool {
+        self.cloud
+            .borrow()
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+    }
+    fn local_source_retired(&self) {
+        let active = matches!(
+            *self.active.borrow(),
+            Some(super::notifications::NotificationSource::Local(_))
+        );
+        if active {
+            self.active.borrow_mut().take();
+            self.source_changed();
+        }
         self.changed.notify(usize::MAX);
+    }
+    fn cloud_source_retired(&self) {
+        let active = matches!(
+            *self.active.borrow(),
+            Some(super::notifications::NotificationSource::Cloud(_))
+        );
+        if active {
+            self.active.borrow_mut().take();
+            self.source_changed();
+        }
+        self.changed.notify(usize::MAX);
+    }
+    pub(super) fn observer(&self) -> Option<super::notifications::NotificationSource> {
+        self.active.borrow().clone()
+    }
+    pub(super) fn observer_is(&self, source: &super::notifications::NotificationSource) -> bool {
+        self.active
+            .borrow()
+            .as_ref()
+            .is_some_and(|active| active.same(source))
+    }
+    pub(super) fn replace_observer(
+        &self,
+        source: super::notifications::NotificationSource,
+    ) -> Option<super::notifications::NotificationSource> {
+        self.active.borrow_mut().replace(source)
+    }
+    pub(super) fn take_observer(&self) -> Option<super::notifications::NotificationSource> {
+        self.active.borrow_mut().take()
     }
     pub(super) fn source_changed(&self) {
         self.observations.source_changed();
         self.physical().clear_light_state();
         super::refresh::cancel(self);
         self.refresh();
-    }
-    pub(super) fn local_disconnected(&self) {
-        if matches!(
-            *self.active.borrow(),
-            Some(super::notifications::NotificationSource::Local(_))
-        ) {
-            self.active.borrow_mut().take();
-            self.source_changed();
-        }
-        self.local_generation.set(self.local_generation.get() + 1);
-        self.local_exhausted.set(false);
-        self.subscribed.borrow_mut().clear();
-        self.subscribe_running.set(false);
-        *self.subscribe_problem.borrow_mut() = None;
-    }
-    pub(super) fn cloud_disconnected(&self) {
-        if matches!(
-            *self.active.borrow(),
-            Some(super::notifications::NotificationSource::Cloud(_))
-        ) {
-            self.active.borrow_mut().take();
-            self.source_changed();
-        }
-        self.cloud_generation.set(self.cloud_generation.get() + 1);
-        self.cloud_subscribed.borrow_mut().clear();
-        self.cloud_running.set(false);
-        self.cloud_exhausted.set(false);
-        self.cloud_problem.borrow_mut().take();
-    }
-    #[cfg(test)]
-    pub(super) fn notify(&self, binding: PropertyBinding, value: bool) {
-        self.notify_value(binding, &serde_json::Value::Bool(value), false, true);
     }
     pub(super) fn notify_value(
         &self,
@@ -254,16 +403,297 @@ impl DeviceWork {
         }
     }
     pub(super) fn request_local_subscriptions(&self) {
-        if !self.subscribe_running.get() && !self.local_exhausted.get() {
-            self.subscribe_requested.set(true);
+        let mut local = self.local.borrow_mut();
+        if local.connection.is_none() || local.prepare.running || local.prepare.exhausted {
+            return;
+        }
+        if !local.requested {
+            local.requested = true;
+            drop(local);
             self.changed.notify(usize::MAX);
         }
+    }
+    async fn local_preparation_request(&self) -> (SessionHandle, u64) {
+        loop {
+            let listener = self.changed.listen();
+            let request = {
+                let mut local = self.local.borrow_mut();
+                let connection = local.connection.clone();
+                if let Some(connection) = connection
+                    && local.requested
+                    && !local.prepare.running
+                    && !local.prepare.exhausted
+                {
+                    local.requested = false;
+                    local.prepare.running = true;
+                    Some((connection, local.prepare.generation))
+                } else {
+                    None
+                }
+            };
+            if let Some(request) = request {
+                return request;
+            }
+            listener.await;
+        }
+    }
+    fn local_current(&self, handle: &SessionHandle, generation: u64) -> bool {
+        !self.life.is_closed()
+            && self
+                .local
+                .borrow()
+                .connection
+                .as_ref()
+                .is_some_and(|current| {
+                    current.same_connection(handle)
+                        && self.local.borrow().prepare.generation == generation
+                })
+    }
+    fn local_pending(
+        &self,
+        handle: &SessionHandle,
+        generation: u64,
+    ) -> Option<Vec<PropertyBinding>> {
+        let local = self.local.borrow();
+        let current = local
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && local.prepare.generation == generation
+            && !self.life.is_closed();
+        current.then(|| local.prepare.missing(&self.bindings()))
+    }
+    pub(super) fn local_subscribed(
+        &self,
+        handle: &SessionHandle,
+        generation: u64,
+        binding: PropertyBinding,
+    ) {
+        let mut local = self.local.borrow_mut();
+        if local
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && local.prepare.generation == generation
+            && !self.life.is_closed()
+        {
+            local
+                .prepare
+                .subscribed
+                .insert((binding.siid, binding.piid));
+        }
+    }
+    pub(super) fn local_finished(
+        &self,
+        handle: &SessionHandle,
+        generation: u64,
+        problem: Option<String>,
+    ) {
+        let mut local = self.local.borrow_mut();
+        if local
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && local.prepare.generation == generation
+        {
+            local.prepare.running = false;
+            local.prepare.exhausted = problem.is_some();
+            local.prepare.problem = problem;
+        }
+    }
+    fn local_abandoned(&self, handle: &SessionHandle, generation: u64) {
+        let mut local = self.local.borrow_mut();
+        if local
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && local.prepare.generation == generation
+        {
+            local.prepare.running = false;
+        }
+    }
+    pub(super) fn begin_cloud_preparation(&self, handle: &NotificationHandle) -> Option<u64> {
+        let mut cloud = self.cloud.borrow_mut();
+        if !cloud
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            || cloud.prepare.running
+            || cloud.prepare.exhausted
+            || self.life.is_closed()
+        {
+            return None;
+        }
+        cloud.prepare.running = true;
+        Some(cloud.prepare.generation)
+    }
+    pub(super) fn cloud_current(&self, handle: &NotificationHandle, generation: u64) -> bool {
+        !self.life.is_closed()
+            && self
+                .cloud
+                .borrow()
+                .connection
+                .as_ref()
+                .is_some_and(|current| {
+                    current.same_connection(handle)
+                        && self.cloud.borrow().prepare.generation == generation
+                })
+    }
+    pub(super) fn cloud_pending(
+        &self,
+        handle: &NotificationHandle,
+        generation: u64,
+    ) -> Option<Vec<PropertyBinding>> {
+        let cloud = self.cloud.borrow();
+        let current = cloud
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && cloud.prepare.generation == generation
+            && !self.life.is_closed();
+        current.then(|| cloud.prepare.missing(&self.bindings()))
+    }
+    pub(super) fn cloud_subscribed(
+        &self,
+        handle: &NotificationHandle,
+        generation: u64,
+        binding: PropertyBinding,
+    ) {
+        let mut cloud = self.cloud.borrow_mut();
+        if cloud
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && cloud.prepare.generation == generation
+            && !self.life.is_closed()
+        {
+            cloud
+                .prepare
+                .subscribed
+                .insert((binding.siid, binding.piid));
+        }
+    }
+    pub(super) fn cloud_finished(
+        &self,
+        handle: &NotificationHandle,
+        generation: u64,
+        problem: Option<String>,
+    ) {
+        let mut cloud = self.cloud.borrow_mut();
+        if cloud
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && cloud.prepare.generation == generation
+        {
+            cloud.prepare.running = false;
+            cloud.prepare.exhausted = problem.is_some();
+            cloud.prepare.problem = problem;
+        }
+    }
+    pub(super) fn cloud_abandoned(&self, handle: &NotificationHandle, generation: u64) {
+        let mut cloud = self.cloud.borrow_mut();
+        if cloud
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && cloud.prepare.generation == generation
+        {
+            cloud.prepare.running = false;
+        }
+    }
+    pub(super) fn source_ready(&self, source: &super::notifications::NotificationSource) -> bool {
+        let bindings = self.bindings();
+        match source {
+            super::notifications::NotificationSource::Local(handle) => {
+                let local = self.local.borrow();
+                !self.life.is_closed()
+                    && local
+                        .connection
+                        .as_ref()
+                        .is_some_and(|current| current.same_connection(handle))
+                    && local.prepare.ready(&bindings)
+            }
+            super::notifications::NotificationSource::Cloud(handle) => {
+                let cloud = self.cloud.borrow();
+                !self.life.is_closed()
+                    && cloud
+                        .connection
+                        .as_ref()
+                        .is_some_and(|current| current.same_connection(handle))
+                    && cloud.prepare.ready(&bindings)
+            }
+        }
+    }
+    pub(super) fn local_preparation_active(&self) -> bool {
+        let local = self.local.borrow();
+        local.connection.is_some()
+            && (!local.prepare.subscribed.is_empty() || local.prepare.running)
+    }
+    pub(super) fn cloud_preparation_active(&self) -> bool {
+        let cloud = self.cloud.borrow();
+        cloud.connection.is_some()
+            && (!cloud.prepare.subscribed.is_empty() || cloud.prepare.running)
+    }
+    pub(super) fn retire_local_preparation(&self) {
+        self.local.borrow_mut().invalidate_prepare();
+    }
+    pub(super) fn retire_cloud_preparation(&self) {
+        self.cloud.borrow_mut().invalidate_prepare();
+    }
+    pub(super) fn retire_local_notifications(&self) {
+        let handle = self.local.borrow().connection.clone();
+        if let Some(handle) = handle {
+            drop(handle.unsubscribe_properties(&self.key.id));
+        }
+        self.retire_local_preparation();
+    }
+    pub(super) fn retire_cloud_notifications(&self) {
+        let handle = self.cloud.borrow().connection.clone();
+        if let Some(handle) = handle {
+            drop(handle.unsubscribe_properties(&self.key.id));
+        }
+        self.retire_cloud_preparation();
+    }
+    pub(super) fn local_exhausted(&self) -> bool {
+        self.local.borrow().prepare.exhausted
+    }
+    pub(super) fn cloud_exhausted(&self) -> bool {
+        self.cloud.borrow().prepare.exhausted
+    }
+    pub(super) fn notifications_preparing(&self) -> bool {
+        self.local.borrow().prepare.running || self.cloud.borrow().prepare.running
     }
     pub(super) fn retry_subscriptions(&self) {
         self.condition_generation
             .set(self.condition_generation.get() + 1);
-        self.local_exhausted.set(false);
-        self.cloud_exhausted.set(false);
+        self.local.borrow_mut().prepare.exhausted = false;
+        self.cloud.borrow_mut().prepare.exhausted = false;
+        self.changed.notify(usize::MAX);
+    }
+    /// End this runtime's authority and notification preparation. Sent
+    /// requests keep their own receipt task; only unsent reads and queued
+    /// notification handshakes are retired.
+    pub(super) fn retire(&self) {
+        self.life.close();
+        self.current_sink().close();
+        let local = self.local.borrow_mut().connection.take();
+        if let Some(local) = local {
+            if self.is_light() {
+                drop(local.unsubscribe_properties(&self.key.id));
+            } else {
+                drop(local.unsubscribe_device(&self.key.id));
+            }
+        }
+        self.retire_local_preparation();
+        let cloud = self.cloud.borrow_mut().connection.take();
+        if let Some(cloud) = cloud {
+            drop(cloud.unsubscribe_device(&self.key.id));
+        }
+        self.retire_cloud_preparation();
+        self.take_observer();
+        super::refresh::cancel(self);
+        self.light_frames.borrow_mut().cancel_all();
         self.changed.notify(usize::MAX);
     }
     pub(super) fn refresh(&self) {
@@ -348,21 +778,24 @@ impl DeviceWork {
         values
     }
     pub(super) fn diagnostic(&self) -> Option<String> {
-        let values = self
-            .subscribe_problem
-            .borrow()
+        let local = self.local.borrow();
+        let values = local
+            .prepare
+            .problem
             .clone()
             .into_iter()
-            .chain(self.cloud_problem.borrow().clone())
+            .chain(self.cloud.borrow().prepare.problem.clone())
             .chain(self.refresh.borrow().problems())
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
     }
     pub(super) fn subscription_problem(&self) -> Option<String> {
-        self.subscribe_problem
+        self.local
             .borrow()
+            .prepare
+            .problem
             .clone()
-            .or_else(|| self.cloud_problem.borrow().clone())
+            .or_else(|| self.cloud.borrow().prepare.problem.clone())
     }
     pub(super) fn report(&self, context: &Context, did: &str) {
         if self.life.is_closed() {
@@ -408,36 +841,28 @@ async fn subscriptions(
 ) -> Result<(), AdapterError> {
     let did = work.key.id.clone();
     loop {
-        let listener = work.changed.listen();
-        if !work.subscribe_requested.replace(false) {
-            listener.await;
+        let (connection, preparation) = work.local_preparation_request().await;
+        if !connection.same_connection(handle) {
+            work.local_abandoned(handle, preparation);
             continue;
         }
-        if !matches!(context.notification_source(&did), Some(super::notifications::NotificationSource::Local(selected)) if selected.same_connection(handle))
-        {
+        if !context.current_local(handle) || !work.local_current(handle, preparation) {
+            work.local_abandoned(handle, preparation);
             continue;
         }
-        work.subscribe_running.set(true);
-        let preparation = work.local_generation.get();
-        // Retiring the connection, bindings, or preparation advances this generation.
-        let current =
-            || context.current_local(handle) && work.local_generation.get() == preparation;
         context
             .clock
             .wait_until(context.clock.now() + Duration::from_millis(10))
             .await;
-        let mut pending = work
-            .bindings()
-            .into_iter()
-            .filter(|b| !work.subscribed.borrow().contains(&(b.siid, b.piid)))
-            .collect::<Vec<_>>();
+        let current = || context.current_local(handle) && work.local_current(handle, preparation);
+        let Some(mut pending) = work.local_pending(handle, preparation) else {
+            continue;
+        };
         'attempts: for attempt in 0..4 {
             let mut failed = Vec::new();
             let mut problem = None;
             for binding in pending {
-                if !current()
-                    || !matches!(context.notification_source(&did), Some(super::notifications::NotificationSource::Local(selected)) if selected.same_connection(handle))
-                {
+                if !current() {
                     break 'attempts;
                 }
                 let result = handle.subscribe_property(&did, binding).await;
@@ -445,11 +870,7 @@ async fn subscriptions(
                     break 'attempts;
                 }
                 match result {
-                    Ok(()) => {
-                        work.subscribed
-                            .borrow_mut()
-                            .insert((binding.siid, binding.piid));
-                    }
+                    Ok(()) => work.local_subscribed(handle, preparation, binding),
                     Err(error) => {
                         problem = Some(work.problem("subscribe", binding, &error));
                         failed.push(binding);
@@ -457,8 +878,7 @@ async fn subscriptions(
                 }
             }
             if failed.is_empty() || attempt == 3 {
-                work.local_exhausted.set(problem.is_some());
-                *work.subscribe_problem.borrow_mut() = problem;
+                work.local_finished(handle, preparation, problem);
                 work.report(context, &did);
                 break;
             }
@@ -468,7 +888,7 @@ async fn subscriptions(
                 .wait_until(context.clock.now() + Duration::from_millis(100))
                 .await;
         }
-        work.subscribe_running.set(false);
+        work.local_abandoned(handle, preparation);
         context.changed.notify(usize::MAX);
     }
 }

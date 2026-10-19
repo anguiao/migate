@@ -85,17 +85,13 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 }
                 peer.list_changed(&["multi"]);
                 until(|| {
-                    control
-                        .context
-                        .live
-                        .borrow()
-                        .session
+                    control.context.live.borrow().devices["multi"]
+                        .admitted
                         .as_ref()
                         .unwrap()
-                        .devices["multi"]
-                        .subscribed
-                        .borrow()
-                        .contains(&(9, 1))
+                        .test_local_subscribed_contains(
+                            crate::xiaomi::capability::PropertyBinding { siid: 9, piid: 1 },
+                        )
                 })
                 .await;
                 if timeout {

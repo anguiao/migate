@@ -245,7 +245,7 @@ fn write_observation_capture_occurs_at_first_socket_bytes() {
                     let mut command = Box::pin(one.execute(Command::On));
                     assert!(poll_once(command.as_mut()).await.is_none());
                     until(|| wire.polls.get() > 0).await;
-                    work.notify(
+                    work.test_notify(
                         crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
                         false,
                     );
@@ -253,7 +253,7 @@ fn write_observation_capture_occurs_at_first_socket_bytes() {
                     until(|| wire.written.borrow().len() == 1).await;
                     if after_send {
                         // The same value still counts as a notification after the write.
-                        work.notify(
+                        work.test_notify(
                             crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
                             false,
                         );
