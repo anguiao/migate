@@ -99,17 +99,6 @@ impl PhysicalDevice {
     pub fn set_label(&self, label: String) {
         *self.label.lock().unwrap() = label;
     }
-    pub fn description(&self) -> PhysicalDeviceDescription {
-        PhysicalDeviceDescription::new(
-            self.key.clone(),
-            self.label(),
-            self.functions
-                .iter()
-                .map(|function| function.description().clone())
-                .collect(),
-        )
-        .expect("a live device keeps a valid description")
-    }
     pub fn functions(&self) -> &[Function] {
         &self.functions
     }

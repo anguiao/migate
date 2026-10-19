@@ -1,6 +1,6 @@
 //! Source parsers use static, bounded function labels for Matter FixedLabel.
 
-use crate::{device::DeviceKey, xiaomi::capability::parse_device};
+use crate::{device::DeviceKey, xiaomi::capability::tests::parse_device};
 
 #[test]
 fn parsed_source_function_labels_are_bounded() {

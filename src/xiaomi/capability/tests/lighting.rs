@@ -1,9 +1,8 @@
 use super::key;
+use super::parse_device;
 use crate::{
     device::{FunctionKind, LightProfile, NumericRange, TemperatureInterval},
-    xiaomi::capability::{
-        PropertyBinding, TemperatureBinding, parse_device, parse_device_for_model,
-    },
+    xiaomi::capability::{PropertyBinding, TemperatureBinding, parse_device_for_model},
 };
 use serde_json::{Value, json};
 

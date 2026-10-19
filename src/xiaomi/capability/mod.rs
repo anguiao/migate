@@ -90,12 +90,6 @@ pub(crate) fn validate_model_topology(
     Err("Stored Xiaomi device type is unsupported")
 }
 
-pub fn parse_device(
-    key: crate::device::DeviceKey,
-    instance: &serde_json::Value,
-) -> Result<ParsedDevice, CapabilityError> {
-    parse_device_for_model(key, "", instance)
-}
 pub fn parse_device_for_model(
     key: crate::device::DeviceKey,
     model: &str,

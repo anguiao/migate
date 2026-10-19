@@ -69,15 +69,14 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
 fn registry_publishes_whole_devices_and_removal_cancels_only_their_commands() {
     block_on(async {
         let registry = DeviceRegistry::new();
-        let mut changes = registry.subscribe();
         let (first, mut first_receivers) = PhysicalDevice::new(description("first"));
         let (second, mut second_receivers) = PhysicalDevice::new(description("second"));
         first.set_availability(Availability::Available);
         second.set_availability(Availability::Available);
         registry.insert(first.clone());
-        let snapshot = changes.changed().await;
-        assert_eq!(snapshot.devices.len(), 1);
-        assert_eq!(snapshot.devices[0].functions().len(), 3);
+        let devices = registry.list();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].functions().len(), 3);
         registry.insert(second.clone());
         let function = first.function("usb").unwrap();
         let other = second.function("usb").unwrap();
@@ -94,7 +93,7 @@ fn registry_publishes_whole_devices_and_removal_cancels_only_their_commands() {
             Err(CommandError::Cancelled)
         );
         assert!(registry.get(first.key()).is_none());
-        assert_eq!(changes.changed().await.devices.len(), 1);
+        assert_eq!(registry.list().len(), 1);
         second.function("usb").unwrap().observe(false);
         next_power(&mut second_receivers[2])
             .await

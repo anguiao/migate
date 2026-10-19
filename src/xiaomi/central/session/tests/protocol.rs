@@ -53,14 +53,18 @@ fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
                     .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
                     .await
                     .unwrap();
-                assert!(
-                    !handle
-                        .read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
-                            outcome.result.unwrap();
-                        })
+                assert_eq!(
+                    handle
+                        .read_property_value(
+                            "target",
+                            PropertyBinding { siid: 2, piid: 1 },
+                            |outcome| {
+                                assert_eq!(outcome.result, Ok(json!(false)));
+                            }
+                        )
                         .await
-                        .result
-                        .unwrap()
+                        .result,
+                    Ok(json!(false))
                 );
                 async_io::Timer::after(Duration::from_millis(10)).await;
                 handle.close();
@@ -212,12 +216,10 @@ fn rejected_acknowledgements_and_wrong_packet_ids_never_accept_writes() {
 fn strict_business_values_and_returned_identity_are_required() {
     let binding = PropertyBinding { siid: 2, piid: 1 };
     let read = RequestKind::Read {
-        format: super::super::request::ReadFormat::Boolean,
         did: "target".into(),
         binding,
     };
     for value in [
-        json!({"value":1}),
         json!({"value":"false"}),
         json!({"did":"other","value":true}),
         json!({"siid":3,"piid":1,"value":true}),
@@ -227,6 +229,10 @@ fn strict_business_values_and_returned_identity_are_required() {
             Err(CentralError::Protocol)
         ));
     }
+    assert!(matches!(
+        parse_response(&read, &json!({"value":1})),
+        Ok(Response::PropertyValue(value)) if value == json!(1)
+    ));
     let write = RequestKind::Write {
         did: "target".into(),
         binding,
@@ -339,12 +345,12 @@ fn invalid_device_messages_do_not_disconnect_the_shared_session() {
                 let work = async {
                     handle.subscribe_property("target", binding).await.unwrap();
                     handle.subscribe_property("other", binding).await.unwrap();
-                    assert!(
+                    assert_eq!(
                         handle
-                            .read_property("other", binding, |_| {})
+                            .read_property_value("other", binding, |_| {})
                             .await
-                            .result
-                            .unwrap()
+                            .result,
+                        Ok(json!(true))
                     );
                     handle.close();
                 };

@@ -1,7 +1,7 @@
 mod labels;
 pub(crate) mod model_fixture;
 
-use super::{CapabilityError, PropertyBinding, parse_device};
+use super::{CapabilityError, PropertyBinding};
 use crate::device::{DeviceKey, FunctionKind};
 use serde_json::{Value, json};
 
@@ -466,3 +466,11 @@ mod group;
 mod lighting;
 mod repair;
 mod validity;
+
+/// Parse generic fixture descriptions through the real model-aware boundary.
+pub(crate) fn parse_device(
+    key: crate::device::DeviceKey,
+    instance: &serde_json::Value,
+) -> Result<super::ParsedDevice, CapabilityError> {
+    super::parse_device_for_model(key, "", instance)
+}

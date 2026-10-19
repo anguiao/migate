@@ -1,9 +1,11 @@
 //! Valid-model boundary tests: invalid ranges, targets and topologies cannot
 //! be constructed at all, so invalid states are unrepresentable by type.
 
+use crate::device::model::RangeError;
+
 use crate::device::{
     DeviceKey, FunctionDescription, FunctionKind, LightColorTarget, LightDimension, LightProfile,
-    LightTarget, NumericRange, PhysicalDeviceDescription, RangeError, Rgb, TemperatureInterval,
+    LightTarget, NumericRange, PhysicalDeviceDescription, Rgb, TemperatureInterval,
 };
 
 #[test]

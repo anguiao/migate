@@ -96,7 +96,7 @@ impl FunctionKind {
             Self::Outlet => None,
         }
     }
-    /// Derived only for diagnostics and the temporary legacy storage columns.
+    /// Derived only for diagnostics.
     pub fn capabilities(self) -> Vec<Capability> {
         match self {
             Self::Outlet => vec![Capability::OnOff],
@@ -126,7 +126,7 @@ pub struct FunctionDescription {
     pub kind: FunctionKind,
 }
 impl FunctionDescription {
-    /// Derived for diagnostics and the temporary legacy storage columns only.
+    /// Derived for diagnostics only.
     pub fn capabilities(&self) -> Vec<Capability> {
         self.kind.capabilities()
     }
@@ -194,11 +194,6 @@ impl PhysicalDeviceDescription {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DescriptionError(&'static str);
-impl DescriptionError {
-    pub fn message(self) -> &'static str {
-        self.0
-    }
-}
 impl fmt::Display for DescriptionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.0)

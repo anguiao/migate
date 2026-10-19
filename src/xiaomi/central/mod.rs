@@ -1,12 +1,14 @@
 mod session;
 mod tls;
 mod wire;
+#[cfg(test)]
+pub(crate) use session::SessionDriver;
 pub use session::{
     CentralEvent, DeviceAccess, DeviceEntry, RequestOutcome, RequestStage, RequestTimeout,
-    SendDecision, SendHooks, SessionDriver, SessionHandle, connect,
+    SendDecision, SendHooks, SessionHandle, connect,
 };
-pub use tls::connect_tls;
-pub use wire::{MipsMessage, decode_mips, encode_mips};
+#[cfg(test)]
+pub(crate) use wire::{decode_mips, encode_mips};
 
 use std::{error::Error, fmt};
 

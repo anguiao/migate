@@ -206,9 +206,9 @@ fn stopping_a_dequeued_unsent_frame_prevents_transmission_and_preserves_the_stop
         let function = &physical.functions()[0];
         let action = begin(function, 20.0, false);
         let dequeued = frame(&mut receiver).await;
-        assert!(dequeued.is_current());
+        assert!(dequeued.current_result().is_ok());
         function.stop_light(LightDimension::Brightness).unwrap();
-        assert!(!dequeued.is_current());
+        assert!(dequeued.current_result().is_err());
         assert_eq!(dequeued.mark_sent(), Err(CommandError::Stopped));
         assert_eq!(action.accepted().await, Err(CommandError::Stopped));
         dequeued.reject(CommandError::Cancelled);
@@ -600,7 +600,7 @@ fn external_off_withdraws_dequeued_unsent_power_but_owns_sent_power_receipt() {
             DeviceRequest::Light(_) => panic!("expected power"),
         };
         function.take_over_light_all().unwrap();
-        assert!(!request.is_current());
+        assert!(request.current_result().is_err());
         assert_eq!(request.mark_sent(), Err(CommandError::Superseded));
         assert_eq!(on.await, Err(CommandError::Superseded));
         request.reject(CommandError::Cancelled);
@@ -668,7 +668,7 @@ fn a_new_valid_off_withdraws_older_pending_and_dequeued_unsent_light_power_on() 
         };
         let mut off = Box::pin(function.execute(Command::Off));
         assert!(poll_once(off.as_mut()).await.is_none());
-        assert!(!request.is_current());
+        assert!(request.current_result().is_err());
         assert_eq!(request.mark_sent(), Err(CommandError::Superseded));
         assert_eq!(on.await, Err(CommandError::Superseded));
         request.reject(CommandError::Cancelled);
@@ -903,7 +903,7 @@ fn newer_ticks_withdraw_dequeued_unsent_frames_without_ending_the_action() {
                     true,
                 )
                 .unwrap();
-            assert!(!old.is_current());
+            assert!(old.current_result().is_err());
             assert_eq!(old.mark_sent(), Err(CommandError::Superseded));
             assert!(function.light_action_current(action.token()));
             assert!(poll_once(action.accepted()).await.is_none());

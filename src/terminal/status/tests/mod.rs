@@ -1,3 +1,5 @@
+mod logging;
+
 use super::*;
 
 use crate::terminal::bridge::tests::support;

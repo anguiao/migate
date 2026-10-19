@@ -1,32 +1,25 @@
 use super::*;
 
 #[test]
-fn boolean_reads_validate_the_type_before_classifying_the_business_result() {
+fn value_reads_validate_and_classify_the_business_result() {
     block_on(async {
         for value in [json!(true), json!(42)] {
             let (handle, mut driver, budget, _) = rig();
             let completed = Rc::new(RefCell::new(None));
             let callback = completed.clone();
-            let read = handle.read_property("target", BINDING, move |outcome| {
+            let read = handle.read_property_value("target", BINDING, move |outcome| {
                 *callback.borrow_mut() = Some(outcome);
             });
             driver.drain_requests().unwrap();
             let mid = *driver.pending.keys().next().unwrap();
             write_ready(&mut driver, &budget, usize::MAX).await;
+            let expected_value = value.clone();
             reply(&mut driver, mid, json!({"value":value}));
             let outcome = read.await;
-            let expected = if value.is_boolean() {
-                RequestOutcome {
-                    result: Ok(true),
-                    stage: RequestStage::BusinessResult,
-                    timeout: None,
-                }
-            } else {
-                RequestOutcome {
-                    result: Err(CentralError::Protocol),
-                    stage: RequestStage::MayHaveBeenSent,
-                    timeout: None,
-                }
+            let expected = RequestOutcome {
+                result: Ok(expected_value),
+                stage: RequestStage::BusinessResult,
+                timeout: None,
             };
             assert_eq!(outcome, expected);
             assert_eq!(*completed.borrow(), Some(expected));

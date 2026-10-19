@@ -24,7 +24,7 @@ use std::{
 
 /// Connect to a currently discovered local endpoint using the saved client
 /// identity. Cloud authentication status does not replace mutual TLS access.
-pub async fn connect_tls(
+pub(super) async fn connect_tls(
     address: SocketAddr,
     record: &XiaomiRecord,
 ) -> Result<TlsStream<Async<TcpStream>>, CentralError> {

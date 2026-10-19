@@ -1,5 +1,5 @@
-//! Public logging behavior runs in its own process to isolate the global logger.
-use migate::{
+//! Run logging assertions in a child test process to isolate the global logger.
+use crate::{
     storage::Store,
     terminal::AuthStatus,
     xiaomi::{auth::AuthService, cloud::CloudClient},
@@ -7,7 +7,25 @@ use migate::{
 
 #[test]
 fn startup_login_command_is_a_single_prefixed_log_record() {
-    use migate::xiaomi::adapter::*;
+    if std::env::var_os("MIGATE_TEST_LOGGER_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "terminal::status::tests::logging::startup_login_command_is_a_single_prefixed_log_record",
+                "--nocapture",
+            ])
+            .env("MIGATE_TEST_LOGGER_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "logger child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use crate::xiaomi::adapter::*;
     let capture = tempfile::NamedTempFile::new().unwrap();
     env_logger::Builder::new()
         .filter_module("migate::terminal::status", log::LevelFilter::Info)
@@ -61,10 +79,10 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
     status.update_adapter(adapter.clone());
     adapter.devices[0].commands[0].last = Some(CommandStatus {
         id: 1,
-        binding: migate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-        target: migate::xiaomi::adapter::CommandTarget::Power(true),
+        binding: crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+        target: crate::xiaomi::adapter::CommandTarget::Power(true),
         properties: vec![(
-            migate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
             true.into(),
         )],
         actual_path: Some(PathKind::Local),

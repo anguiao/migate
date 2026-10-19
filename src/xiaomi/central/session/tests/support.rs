@@ -1,4 +1,11 @@
 use super::*;
+use crate::xiaomi::{
+    capability::PropertyBinding,
+    central::{CentralError, RequestOutcome, SendDecision, SendHooks},
+    property::PropertyResults,
+};
+use serde_json::Value;
+use std::{future::Future, time::Duration};
 
 pub(super) fn queued_handle(timing: Timing) -> SessionHandle {
     SessionHandle {
@@ -373,4 +380,60 @@ pub(super) fn notification(client_id: &str, did: &str, value: bool) -> Packet {
         QoS::AtMostOnce,
         wire::encode_mips(1, None, &json!({"did":did,"siid":2,"piid":1,"value":value})),
     ))
+}
+
+impl SessionHandle {
+    pub(crate) fn read_property_value<F: FnOnce(RequestOutcome<Value>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
+        self.read_property_value_with_timeout(did, binding, self.timing.request, on_result)
+    }
+    pub(crate) fn read_property_value_with_timeout<F: FnOnce(RequestOutcome<Value>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        timeout: Duration,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
+        self.read_property_value_with_timeout_guarded(
+            did,
+            binding,
+            timeout,
+            SendHooks::new(|| SendDecision::Send, || {}),
+            on_result,
+        )
+    }
+    pub(crate) fn set_property<F: FnOnce(RequestOutcome<()>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        value: bool,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<()>> + use<F> {
+        self.set_property_guarded(
+            did,
+            binding,
+            value,
+            SendHooks::new(|| SendDecision::Send, || {}),
+            on_result,
+        )
+    }
+    pub(crate) fn set_properties<
+        F: FnOnce(RequestOutcome<PropertyResults<(), CentralError>>) + 'static,
+    >(
+        &self,
+        did: &str,
+        properties: &[(PropertyBinding, Value)],
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<PropertyResults<(), CentralError>>> + use<F> {
+        self.set_properties_guarded(
+            did,
+            properties,
+            SendHooks::new(|| SendDecision::Send, || {}),
+            on_result,
+        )
+    }
 }

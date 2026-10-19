@@ -1,16 +1,9 @@
-use migate::{
-    config::Config,
-    device::{
-        DeviceKey, FunctionDescription, FunctionKind, PhysicalDevice, PhysicalDeviceDescription,
-        Power,
-    },
-    storage::Store,
-};
+use migate::{config::Config, storage::Store};
 use rusqlite::Connection;
 use std::{error::Error as _, fs};
 
 #[test]
-fn initializes_and_restores_identity_without_power() {
+fn initializes_and_restores_independent_identities() {
     let root = tempfile::tempdir().unwrap();
     for dir in [root.path().join("new"), root.path().join("empty")] {
         if dir.ends_with("empty") {
@@ -35,28 +28,10 @@ fn initializes_and_restores_identity_without_power() {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(columns, ["id", "bridge_id"]);
-        let description = PhysicalDeviceDescription::new(
-            DeviceKey::new("xiaomi", "test-outlet"),
-            "Test Outlet",
-            vec![FunctionDescription {
-                id: "main".into(),
-                label: "Main power".into(),
-                kind: FunctionKind::Outlet,
-            }],
-        )
-        .unwrap();
-        let (device, _receiver) = PhysicalDevice::new(description.clone());
-        device.functions()[0].observe(true);
         drop(store);
         assert_eq!(
             Store::open(&dir).unwrap().load_identity().unwrap(),
             identity
-        );
-        assert_eq!(
-            PhysicalDevice::new(description).0.functions()[0]
-                .snapshot()
-                .power,
-            Power::Unknown
         );
     }
     assert_ne!(

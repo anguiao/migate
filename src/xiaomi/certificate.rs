@@ -30,9 +30,6 @@ AKUv+c8v98vypkGMTzMwckGjjVqTef8xodsy6PhcSCq+AiA/n9mDs62hAo5zXyJy\n\
 Bs1s7mqXPf1XgieoxIvs1MqyiA==\n\
 -----END CERTIFICATE-----\n";
 
-pub const XIAOMI_CA_SHA256: &str =
-    "8b7bf306be3632e08b0ead308249e5f2b2520dc921ad143872d5fcc7c68d6759";
-
 pub struct ClientIdentity {
     pub virtual_did: String,
     pub private_key_pem: String,

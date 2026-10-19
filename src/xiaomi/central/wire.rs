@@ -2,12 +2,12 @@ use super::CentralError;
 use serde_json::Value;
 
 #[derive(Debug)]
-pub struct MipsMessage {
+pub(crate) struct MipsMessage {
     pub id: u32,
     pub payload: Value,
 }
 
-pub fn encode_mips(id: u32, reply_topic: Option<&str>, payload: &Value) -> Vec<u8> {
+pub(crate) fn encode_mips(id: u32, reply_topic: Option<&str>, payload: &Value) -> Vec<u8> {
     let mut bytes = Vec::new();
     field(&mut bytes, 0, &id.to_le_bytes());
     string_field(&mut bytes, 3, "local");
@@ -31,7 +31,7 @@ fn string_field(bytes: &mut Vec<u8>, tag: u8, value: &str) {
     bytes.push(0);
 }
 
-pub fn decode_mips(mut bytes: &[u8]) -> Result<MipsMessage, CentralError> {
+pub(crate) fn decode_mips(mut bytes: &[u8]) -> Result<MipsMessage, CentralError> {
     let mut id = None;
     let mut payload = None;
     let mut seen = [false; 4];

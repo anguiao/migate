@@ -9,7 +9,7 @@ pub(super) use crate::{
     device::{Availability, DeviceKey, Power},
     storage::Store,
     xiaomi::{
-        capability::parse_device,
+        capability::tests::parse_device,
         central::test_support::TlsFixture,
         cloud::{CloudClient, group_id},
         discovery::Discovery,

@@ -590,11 +590,6 @@ impl CommandRequest {
         self.queued_at
     }
 
-    /// Lighting power writes use the same actual-send guard as numeric frames.
-    /// Outlet request ownership continues to transfer on dequeue.
-    pub fn is_current(&self) -> bool {
-        self.current_result().is_ok()
-    }
     /// Inspect a lighting power cancellation without marking it sent.
     pub fn current_result(&self) -> Result<(), CommandError> {
         if let Some(error) = self.flight.invalid.lock().unwrap().as_ref() {

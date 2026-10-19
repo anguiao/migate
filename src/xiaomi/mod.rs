@@ -1,13 +1,13 @@
 pub mod adapter;
 pub mod auth;
-pub mod capability;
-pub mod catalog;
-pub mod central;
-pub mod certificate;
+pub(crate) mod capability;
+pub(crate) mod catalog;
+pub(crate) mod central;
+pub(crate) mod certificate;
 pub mod cloud;
 pub mod discovery;
 mod mqtt;
-pub mod property;
+pub(crate) mod property;
 
 #[cfg(test)]
 mod tests;

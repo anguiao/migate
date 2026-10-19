@@ -118,16 +118,6 @@ impl Function {
         Ok(())
     }
 
-    /// Validate before taking over the dimension; the first frame shares the
-    /// action's acceptance waiter with every subsequent controller tick.
-    pub fn begin_light_action(
-        &self,
-        target: LightTarget,
-        final_frame: bool,
-    ) -> Result<LightAction, CommandError> {
-        self.begin_light_action_with_unchanged_startup(target, final_frame, false)
-    }
-
     /// A physically constant trajectory can accept a source-confirmed no-write startup.
     pub(crate) fn begin_light_action_with_unchanged_startup(
         &self,

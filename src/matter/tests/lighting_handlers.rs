@@ -838,7 +838,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
         include_str!("../../../tests/fixtures/miot/xiaomi-light-ceil04.json"),
     ] {
         let instance = serde_json::from_str(fixture).unwrap();
-        let parsed = crate::xiaomi::capability::parse_device(
+        let parsed = crate::xiaomi::capability::tests::parse_device(
             crate::device::DeviceKey::new("xiaomi", "precision-light"),
             &instance,
         )

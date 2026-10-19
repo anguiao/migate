@@ -122,6 +122,6 @@ fn validity_states_cover_future_expired_and_three_day_boundary() {
 fn bundled_ca_matches_upstream_fingerprint() {
     assert_eq!(
         hex(&Sha256::digest(XIAOMI_CA_PEM.as_bytes())),
-        XIAOMI_CA_SHA256
+        "8b7bf306be3632e08b0ead308249e5f2b2520dc921ad143872d5fcc7c68d6759"
     );
 }

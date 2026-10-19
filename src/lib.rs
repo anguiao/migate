@@ -1,7 +1,7 @@
 pub mod app;
 pub mod config;
 mod configuration;
-pub mod device;
+mod device;
 mod lighting;
 pub mod matter;
 pub mod storage;
