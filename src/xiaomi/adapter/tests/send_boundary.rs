@@ -116,23 +116,23 @@ fn response_timeout() -> RequestOutcome<()> {
 
 #[test]
 fn stale_local_device_errors_cannot_revoke_current_access() {
-    for stale in 0..4 {
+    for stale in 0..2 {
         block_on(Rig::new(true, &["one"]).run(|c| async move {
             let (handle, _) = local(&c, Rc::new(Wire::default()));
-            let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
-            let generation = work.record.binding_generation.get();
+            let work = c.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
             match stale {
                 0 => {
+                    // A different current connection makes the captured one stale.
                     local(&c, Rc::new(Wire::default()));
                 }
-                1 => work.record.binding_generation.set(generation + 1),
-                2 => work.life.close(),
-                _ => work.record.life.close(),
+                _ => work.life.close(),
             }
             c.context.local_device_outcome(
                 &handle,
                 &work,
-                generation,
                 &RequestOutcome::<()> {
                     result: Err(CentralError::Rejected(-704_042_011)),
                     stage: RequestStage::BusinessResult,
@@ -232,7 +232,10 @@ fn write_observation_capture_occurs_at_first_socket_bytes() {
             let wire = Rc::new(Wire::default());
             let (_, driver) = local(&c, wire.clone());
             let one = function(&c.context.registry, "one", "main");
-            let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+            let work = c.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
             future::or(
                 async {
                     driver.run(|_| {}).await.unwrap();
@@ -336,7 +339,10 @@ fn a_cancelled_zero_byte_refresh_keeps_one_demand_until_shared_recovery() {
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
         let one = function(&c.context.registry, "one", "main");
-        let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+        let work = c.context.live.borrow().devices["one"]
+            .admitted
+            .clone()
+            .unwrap();
         let reads = crate::xiaomi::adapter::refresh::local(c.context.clone(), handle.clone());
         future::or(
             async {
@@ -402,7 +408,10 @@ fn dropping_a_zero_byte_refresh_task_retires_its_operation_and_returns_the_deman
     block_on(Rig::new(true, &["one"]).run(|c| async move {
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
-        let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+        let work = c.context.live.borrow().devices["one"]
+            .admitted
+            .clone()
+            .unwrap();
         let mut reads = Box::pin(crate::xiaomi::adapter::refresh::local(
             c.context.clone(),
             handle,
@@ -472,7 +481,10 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
                     )
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
-                let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+                let work = c.context.live.borrow().devices["one"]
+                    .admitted
+                    .clone()
+                    .unwrap();
                 work.notify_value(PropertyBinding { siid: 4, piid: 2 }, &json!(0), true, true);
                 work.notify_value(
                     PropertyBinding { siid: 2, piid: 1 },
@@ -648,7 +660,10 @@ fn an_unsent_light_target_is_not_own_feedback() {
                     )
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
-                let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+                let work = c.context.live.borrow().devices["one"]
+                    .admitted
+                    .clone()
+                    .unwrap();
                 work.notify_value(
                     PropertyBinding { siid: 2, piid: 2 },
                     &json!(60),

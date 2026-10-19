@@ -1,6 +1,6 @@
 use super::{
     lighting::{Origin, PropertyKey, key},
-    state::DeviceRecord,
+    work::DeviceWork,
 };
 use crate::device::{CommandError, CommandRequest};
 use crate::xiaomi::capability::PropertyBinding;
@@ -24,14 +24,12 @@ pub(super) struct Observations {
 }
 #[derive(Clone)]
 pub(super) struct ReadStamp {
-    binding: u64,
     source: u64,
     observed: u64,
     refresh: u64,
 }
 #[derive(Clone)]
 pub(super) struct WriteStamp {
-    binding: u64,
     notified: u64,
 }
 impl Observations {
@@ -57,70 +55,51 @@ impl Observations {
             .or_default()
             .refresh += 1;
     }
-    pub(super) fn read_stamp(
-        &self,
-        record: &DeviceRecord,
-        id: &str,
-        binding: PropertyBinding,
-    ) -> ReadStamp {
+    pub(super) fn read_stamp(&self, id: &str, binding: PropertyBinding) -> ReadStamp {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         ReadStamp {
-            binding: record.binding_generation.get(),
             source: self.source_epoch.get(),
             observed: counts.observed,
             refresh: counts.refresh,
         }
     }
-    pub(super) fn observe_read(
-        &self,
-        record: &DeviceRecord,
-        id: &str,
-        stamp: &ReadStamp,
-        value: bool,
-    ) {
-        let binding = record.binding(id);
-        if self.read_is_current(record, id, binding, stamp) {
+    pub(super) fn observe_read(&self, work: &DeviceWork, id: &str, stamp: &ReadStamp, value: bool) {
+        let binding = work.binding(id);
+        if self.read_is_current(work, id, binding, stamp) {
             let mut channels = self.channels.borrow_mut();
             let counts = channels.entry(key(id, binding)).or_default();
             counts.observed += 1;
-            record.physical.function(id).unwrap().observe(value);
+            work.physical().function(id).unwrap().observe(value);
         }
     }
     pub(super) fn read_is_current(
         &self,
-        record: &DeviceRecord,
+        work: &DeviceWork,
         id: &str,
         binding: PropertyBinding,
         stamp: &ReadStamp,
     ) -> bool {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
-        !record.life.is_closed()
-            && record.binding_generation.get() == stamp.binding
+        !work.life.is_closed()
             && self.source_epoch.get() == stamp.source
             && counts.observed == stamp.observed
             && counts.refresh == stamp.refresh
     }
-    pub(super) fn notify(&self, record: &DeviceRecord, id: &str, value: bool) {
-        let binding = record.binding(id);
-        if record.life.is_closed() {
+    pub(super) fn notify(&self, work: &DeviceWork, id: &str, value: bool) {
+        let binding = work.binding(id);
+        if work.life.is_closed() {
             return;
         }
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         counts.observed += 1;
         counts.notified += 1;
-        record.physical.function(id).unwrap().observe(value);
+        work.physical().function(id).unwrap().observe(value);
     }
-    pub(super) fn write_stamp(
-        &self,
-        record: &DeviceRecord,
-        id: &str,
-        binding: PropertyBinding,
-    ) -> WriteStamp {
+    pub(super) fn write_stamp(&self, id: &str, binding: PropertyBinding) -> WriteStamp {
         WriteStamp {
-            binding: record.binding_generation.get(),
             notified: self
                 .channels
                 .borrow_mut()
@@ -131,13 +110,14 @@ impl Observations {
     }
     pub(super) fn accept_write(
         &self,
-        record: &DeviceRecord,
+        work: &DeviceWork,
+        sink: &super::state::LogicalSink,
         id: &str,
         stamp: &WriteStamp,
         request: CommandRequest,
     ) -> Result<(), CommandError> {
-        let binding = record.binding(id);
-        if record.life.is_closed() || record.binding_generation.get() != stamp.binding {
+        let binding = work.binding(id);
+        if work.life.is_closed() || sink.life.is_closed() {
             request.reject(CommandError::Cancelled);
             return Err(CommandError::Cancelled);
         }
@@ -152,19 +132,19 @@ impl Observations {
         let counts = channels.entry(key(id, binding)).or_default();
         counts.observed += 1;
         if counts.notified == stamp.notified {
-            record.physical.function(id).unwrap().observe(target);
+            sink.physical.function(id).unwrap().observe(target);
         }
         request.accept().map(|_| ())
     }
 
     pub(super) fn observed(
         &self,
-        record: &DeviceRecord,
+        work: &DeviceWork,
         id: &str,
         binding: PropertyBinding,
         origin: Origin,
     ) {
-        if record.life.is_closed() {
+        if work.life.is_closed() {
             return;
         }
         let mut channels = self.channels.borrow_mut();

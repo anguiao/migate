@@ -3,12 +3,14 @@
 //! consumed once by installation after the complete configuration commits.
 //!
 //! Preparation and installation consume the explicit plan operations; no
-//! second inference of reuse, replacement or removal happens here. The
-//! source-internal immutable-object handoff is completed by a later slice.
+//! second inference of reuse, replacement or removal happens here. A
+//! logical-only replacement swaps the delivery sink on the unchanged native
+//! runtime, so native subscriptions and observations are never rebuilt.
 
 use super::{
     model::AdapterError,
-    state::{Context, DeviceRecord, DeviceSlot, GroupSource, Lifetime},
+    state::{Context, DeviceSlot, GroupSource, LogicalSink},
+    work::DeviceWork,
 };
 use crate::{
     configuration::{
@@ -16,11 +18,7 @@ use crate::{
     },
     device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
 };
-use std::{
-    cell::{Cell, RefCell},
-    collections::BTreeMap,
-    rc::Rc,
-};
+use std::{collections::BTreeMap, rc::Rc};
 
 /// The live Xiaomi source continues running while Matter instances restart.
 #[derive(Clone)]
@@ -45,9 +43,8 @@ pub(crate) struct SourceSnapshot {
 pub(crate) struct PreparedSource {
     key: DeviceKey,
     kind: OperationKind,
-    native: NativeDescription,
-    record: Rc<DeviceRecord>,
-    physical: PhysicalDevice,
+    work: Rc<DeviceWork>,
+    sink: Rc<LogicalSink>,
     receivers: Option<Vec<CommandReceiver>>,
 }
 
@@ -66,10 +63,8 @@ impl SourceHandle {
     pub(crate) fn stop_actions(&self) {
         let live = self.0.live.borrow();
         for slot in live.devices.values() {
-            if let Some(record) = &slot.admitted {
-                record.physical.reset_actions();
-            }
-            if let Some(work) = &slot.work {
+            if let Some(work) = &slot.admitted {
+                work.physical().reset_actions();
                 work.light_frames.borrow_mut().cancel_all();
             }
         }
@@ -95,11 +90,7 @@ impl SourceHandle {
                         .as_ref()
                         .map(|(candidate, _)| candidate.clone())
                 })
-                .or_else(|| {
-                    slot.admitted
-                        .as_ref()
-                        .map(|record| record.cached.borrow().clone())
-                });
+                .or_else(|| slot.admitted.as_ref().map(|work| work.native.clone()));
             let Some(native) = native else {
                 continue;
             };
@@ -110,10 +101,10 @@ impl SourceHandle {
                 name,
                 fresh: slot.confirmed,
             });
-            if let Some(record) = &slot.admitted {
+            if let Some(work) = &slot.admitted {
                 entries.push(Rc::new(SourceEntry {
-                    native: record.cached.borrow().clone(),
-                    physical: record.physical.clone(),
+                    native: work.native.clone(),
+                    physical: work.physical(),
                     problem: slot.blocked.clone(),
                 }));
             }
@@ -162,9 +153,10 @@ impl SourceHandle {
         }
     }
 
-    /// Prepare resources for the explicit plan operations. Reused instances
-    /// are shared; added and replaced ones own their one-time receivers until
-    /// installation.
+    /// Prepare resources for the explicit plan operations. A reused native
+    /// runtime is shared; a logical-only replacement prepares only the new
+    /// delivery sink. Added or authority/native replacements prepare the new
+    /// native runtime and its sink once.
     pub(crate) fn prepare(&self, plan: &Plan) -> PreparedSources {
         let mut installed = Vec::new();
         let mut removed = Vec::new();
@@ -173,29 +165,41 @@ impl SourceHandle {
             match operation.kind {
                 OperationKind::Removed => removed.push(key),
                 OperationKind::Reused => {
-                    let record = self.0.live.borrow().devices[&key.id]
+                    let work = self.0.live.borrow().devices[&key.id]
                         .admitted
                         .clone()
-                        .expect("a reused device keeps its admitted instance");
-                    let native = plan
-                        .configuration
-                        .device(&key)
-                        .and_then(|device| device.native.clone())
-                        .expect("a reused device keeps its native facts");
-                    let physical = record.physical.clone();
+                        .expect("a reused device keeps its native runtime");
+                    let sink = work.current_sink();
                     installed.push(PreparedSource {
                         key,
                         kind: operation.kind,
-                        native,
-                        record,
-                        physical,
+                        work,
+                        sink,
                         receivers: None,
+                    });
+                }
+                OperationKind::ReplacedLogical => {
+                    let work = self.0.live.borrow().devices[&key.id]
+                        .admitted
+                        .clone()
+                        .expect("a logical replacement keeps its native runtime");
+                    let served = plan
+                        .derived
+                        .served
+                        .get(&key)
+                        .expect("a planned device has a served description");
+                    let (physical, receivers) = PhysicalDevice::new(served.description.clone());
+                    installed.push(PreparedSource {
+                        key,
+                        kind: operation.kind,
+                        work,
+                        sink: Rc::new(LogicalSink::new(physical)),
+                        receivers: Some(receivers),
                     });
                 }
                 OperationKind::Added
                 | OperationKind::ReplacedNative
-                | OperationKind::ReplacedAuthority
-                | OperationKind::ReplacedLogical => {
+                | OperationKind::ReplacedAuthority => {
                     let native = plan
                         .configuration
                         .device(&key)
@@ -207,18 +211,28 @@ impl SourceHandle {
                         .get(&key)
                         .expect("a planned device has a served description");
                     let (physical, receivers) = PhysicalDevice::new(served.description.clone());
-                    let record = Rc::new(DeviceRecord {
-                        life: Lifetime::default(),
-                        binding_generation: Cell::new(0),
-                        cached: RefCell::new(native.clone()),
-                        physical: physical.clone(),
-                    });
+                    let sink = Rc::new(LogicalSink::new(physical));
+                    let light_write = native
+                        .device
+                        .functions()
+                        .iter()
+                        .any(|function| function.lighting().is_some())
+                        .then(|| {
+                            self.0
+                                .light_writes
+                                .for_device(&key.id, self.0.clock.clone())
+                        });
+                    let work = Rc::new(DeviceWork::new(
+                        native.clone(),
+                        sink.clone(),
+                        self.0.refresh_changed.clone(),
+                        light_write,
+                    ));
                     installed.push(PreparedSource {
                         key,
                         kind: operation.kind,
-                        native,
-                        record,
-                        physical,
+                        work,
+                        sink,
                         receivers: Some(receivers),
                     });
                 }
@@ -227,10 +241,11 @@ impl SourceHandle {
         PreparedSources { installed, removed }
     }
 
-    /// Install the committed configuration in two phases: first retire removed
-    /// and replaced instances and install every prepared member and group, then
-    /// start consumers, work, refreshes and group recomputation. The caller
-    /// guarantees that no await happens between prepare, commit and install.
+    /// Install the committed configuration in two phases: first retire removed,
+    /// replaced and logical delivery targets and install every prepared member
+    /// and group, then start consumers, work, refreshes and group
+    /// recomputation. The caller guarantees that no await happens between
+    /// prepare, commit and install.
     pub(crate) fn install(&self, plan: &Plan, prepared: PreparedSources) -> Vec<Rc<SourceEntry>> {
         for key in &prepared.removed {
             self.retire_instance(key);
@@ -238,38 +253,63 @@ impl SourceHandle {
         let mut started = Vec::new();
         for source in prepared.installed {
             let did = source.key.id.clone();
-            let replaced = !matches!(source.kind, OperationKind::Reused);
-            if replaced {
-                self.retire_instance(&source.key);
+            match source.kind {
+                OperationKind::Reused => {
+                    if let Some(device) = plan.configuration.device(&source.key) {
+                        source.sink.physical.set_label(device.label.clone());
+                    }
+                }
+                OperationKind::ReplacedLogical => {
+                    let old = source.work.replace_sink(source.sink.clone());
+                    old.physical.set_availability(Availability::Unavailable(
+                        "logical instance replaced".into(),
+                    ));
+                    old.close();
+                    self.0.registry.remove(old.physical.key());
+                    if let Some(device) = plan.configuration.device(&source.key) {
+                        source.sink.physical.set_label(device.label.clone());
+                    }
+                    self.0.registry.insert(source.sink.physical.clone());
+                }
+                OperationKind::Added
+                | OperationKind::ReplacedNative
+                | OperationKind::ReplacedAuthority => {
+                    self.retire_instance(&source.key);
+                    if let Some(device) = plan.configuration.device(&source.key) {
+                        source.sink.physical.set_label(device.label.clone());
+                    }
+                    self.0.registry.insert(source.sink.physical.clone());
+                    // Binding feedback history is retired only when the real
+                    // control bindings changed; authority and logical
+                    // replacements keep the same DID's raw receipts.
+                    if matches!(source.kind, OperationKind::ReplacedNative) {
+                        self.0.light_writes.clear_authority(&did);
+                    }
+                    if matches!(
+                        source.kind,
+                        OperationKind::ReplacedNative | OperationKind::ReplacedAuthority
+                    ) {
+                        self.0.retire_device_notifications(&did);
+                    }
+                }
+                OperationKind::Removed => unreachable!("removed operations are retired above"),
             }
-            *source.record.cached.borrow_mut() = source.native.clone();
-            if let Some(device) = plan.configuration.device(&source.key) {
-                source.physical.set_label(device.label.clone());
-            }
+            // Relation facts are part of the committed configuration, even
+            // when the logical shape itself was reused.
             let group = plan.derived.groups.get(&did).map(group_source);
+            let repair = plan
+                .derived
+                .served
+                .get(&source.key)
+                .and_then(|served| served.repair.clone())
+                .map(Rc::new);
             {
                 let mut live = self.0.live.borrow_mut();
                 let slot: &mut DeviceSlot = live.devices.get_mut(&did).unwrap();
-                slot.admitted = Some(source.record.clone());
+                slot.admitted = Some(source.work.clone());
                 slot.effective_group = group;
-                slot.effective_repair = plan
-                    .derived
-                    .served
-                    .get(&source.key)
-                    .and_then(|served| served.repair.clone())
-                    .map(Rc::new);
+                slot.effective_repair = repair;
                 slot.candidate = None;
-            }
-            self.0.registry.insert(source.physical.clone());
-            if replaced {
-                self.0.retire_device_notifications(&did);
-                self.0.retire_work(&did);
-                // Binding feedback history is retired only when the real
-                // control bindings changed; an added or logical-only
-                // replacement keeps the same DID's raw receipts.
-                if matches!(source.kind, OperationKind::ReplacedNative) {
-                    self.0.light_writes.clear_authority(&did);
-                }
             }
             started.push(source);
         }
@@ -279,11 +319,12 @@ impl SourceHandle {
         for source in started {
             let did = source.key.id.clone();
             if let Some(receivers) = source.receivers {
-                self.0.add_consumers(source.record.clone(), receivers);
+                self.0
+                    .add_consumers(source.work.clone(), source.sink.clone(), receivers);
             }
             self.0.install_work(&did);
             self.0.update_availability(&did);
-            if let Some(work) = self.0.live.borrow().devices[&did].work.as_ref() {
+            if let Some(work) = self.0.live.borrow().devices[&did].admitted.as_ref() {
                 work.report(&self.0, &did);
             }
             refreshed.push(did);
@@ -308,7 +349,7 @@ impl SourceHandle {
     }
 
     pub(crate) fn set_label(&self, key: &DeviceKey, label: &str) {
-        if let Some(record) = self
+        if let Some(work) = self
             .0
             .live
             .borrow()
@@ -316,7 +357,7 @@ impl SourceHandle {
             .get(&key.id)
             .and_then(|slot| slot.admitted.as_ref())
         {
-            record.physical.set_label(label.into());
+            work.physical().set_label(label.into());
         }
     }
 
@@ -324,22 +365,26 @@ impl SourceHandle {
         self.0.problem(&key.id, Some(reason));
     }
 
-    /// Retire one serving instance without touching its committed identity.
+    /// Retire one serving native runtime without touching its committed identity.
     fn retire_instance(&self, key: &DeviceKey) {
-        let admitted = self
+        let work = self
             .0
             .live
             .borrow()
             .devices
             .get(&key.id)
             .and_then(|slot| slot.admitted.clone());
-        if let Some(record) = admitted {
-            record
-                .physical
+        if let Some(work) = work {
+            let sink = work.current_sink();
+            sink.physical
                 .set_availability(Availability::Unavailable("source replaced".into()));
-            record.life.close();
-            self.0.registry.remove(record.physical.key());
+            work.life.close();
+            sink.close();
+            self.0.registry.remove(sink.physical.key());
         }
+        // Drop the retired runtime from the connection attachment so the
+        // replacement starts its own local subscription work.
+        self.0.retire_work(&key.id);
     }
 
     fn serving_entries(&self) -> Vec<Rc<SourceEntry>> {
@@ -348,10 +393,10 @@ impl SourceHandle {
             .devices
             .values()
             .filter_map(|slot| {
-                let record = slot.admitted.as_ref()?;
+                let work = slot.admitted.as_ref()?;
                 Some(Rc::new(SourceEntry {
-                    native: record.cached.borrow().clone(),
-                    physical: record.physical.clone(),
+                    native: work.native.clone(),
+                    physical: work.physical(),
                     problem: slot.blocked.clone(),
                 }))
             })
@@ -399,11 +444,11 @@ impl Context {
             .devices
             .get(did)
             .and_then(|slot| slot.admitted.clone());
-        if let Some(record) = &admitted {
-            record
-                .physical
+        if let Some(work) = &admitted {
+            let sink = work.current_sink();
+            sink.physical
                 .set_availability(Availability::Unavailable(reason.into()));
-            record.physical.close();
+            sink.physical.close();
         }
         if admitted.is_some() {
             self.store

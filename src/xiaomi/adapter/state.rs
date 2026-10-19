@@ -11,7 +11,7 @@ use crate::{
     storage::{Store, XiaomiRecord},
     xiaomi::{
         auth::{AuthenticationState, CertificateUpdate},
-        capability::{PropertyBinding, RepairPlan},
+        capability::RepairPlan,
         central::{CentralError, DeviceAccess, SessionHandle},
         certificate::CertificateValidity,
         cloud::{CloudClient, CloudDeviceInfo},
@@ -49,23 +49,23 @@ impl Lifetime {
         }
     }
 }
-/// The physical-device lifetime owns consumers; binding work may be replaced independently.
-pub(super) struct DeviceRecord {
-    pub(super) life: Lifetime,
-    pub(super) binding_generation: Cell<u64>,
-    pub(super) cached: RefCell<NativeDescription>,
+/// The current logical delivery target of one native runtime. It owns the
+/// physical device and the command-consumer lifetime; replacing it retires
+/// only logical delivery, never the native control or its subscriptions.
+pub(super) struct LogicalSink {
     pub(super) physical: PhysicalDevice,
+    pub(super) life: Lifetime,
 }
-impl DeviceRecord {
-    pub(super) fn binding(&self, id: &str) -> PropertyBinding {
-        self.cached
-            .borrow()
-            .device
-            .functions()
-            .iter()
-            .find(|function| function.id() == id)
-            .unwrap()
-            .power()
+impl LogicalSink {
+    pub(super) fn new(physical: PhysicalDevice) -> Self {
+        Self {
+            physical,
+            life: Lifetime::default(),
+        }
+    }
+    pub(super) fn close(&self) {
+        self.physical.close();
+        self.life.close();
     }
 }
 /// One entry owns all preparation and admission state for a current home member.
@@ -81,8 +81,8 @@ pub(super) struct DeviceSlot {
     pub(super) confirmed: bool,
     /// A description awaiting admission; accepted descriptions live only in the record.
     pub(super) candidate: Option<(NativeDescription, Option<String>)>,
-    pub(super) admitted: Option<Rc<DeviceRecord>>,
-    pub(super) work: Option<Rc<DeviceWork>>,
+    /// The installed native runtime; native control and subscriptions live here.
+    pub(super) admitted: Option<Rc<DeviceWork>>,
     pub(super) cloud_access: Option<CloudDeviceInfo>,
     pub(super) cloud_forbidden: bool,
     pub(super) loading: Option<Rc<Lifetime>>,
@@ -103,14 +103,9 @@ pub(super) struct GroupSource {
     pub(super) is_physical: bool,
 }
 impl DeviceSlot {
-    pub(super) fn restored(cached: NativeDescription, physical: PhysicalDevice) -> Self {
+    pub(super) fn restored(work: Rc<DeviceWork>) -> Self {
         Self {
-            admitted: Some(Rc::new(DeviceRecord {
-                life: Lifetime::default(),
-                binding_generation: Cell::new(0),
-                cached: RefCell::new(cached),
-                physical,
-            })),
+            admitted: Some(work),
             ..Self::default()
         }
     }
@@ -124,7 +119,7 @@ impl DeviceSlot {
             })
         };
         match &self.admitted {
-            Some(record) => self.blocked.is_some() || differs(&record.cached.borrow()),
+            Some(work) => self.blocked.is_some() || differs(&work.native),
             None => self
                 .candidate
                 .as_ref()

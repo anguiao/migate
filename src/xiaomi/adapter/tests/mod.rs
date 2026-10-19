@@ -24,6 +24,7 @@ mod repair_restart;
 mod repair_state;
 mod repair_takeover;
 mod send_boundary;
+mod source_runtime;
 mod subscriptions;
 mod support;
 

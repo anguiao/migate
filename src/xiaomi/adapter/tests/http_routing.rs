@@ -32,7 +32,7 @@ fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
             .admitted
             .clone()
             .unwrap();
-        record.physical.close();
+        record.physical().close();
         release.send(()).unwrap();
         assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
         // The closed future settles first; wait for the late HTTP receipt to
@@ -514,8 +514,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_binding() {
                 .admitted
                 .as_ref()
                 .unwrap()
-                .cached
-                .borrow()
+                .native
                 .clone();
             changed.device = {
                 let function = changed.device.functions()[0].clone();

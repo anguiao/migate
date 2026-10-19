@@ -229,7 +229,7 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
             let live = c.context.live.borrow();
             let slot = &live.devices["group-1"];
             let record = slot.admitted.as_ref().unwrap();
-            let cached = record.cached.borrow();
+            let cached = record.native.clone();
             assert_eq!(cached.model, "mijia.light.group3");
             let light = cached
                 .device
@@ -264,8 +264,8 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
             .admitted
             .clone()
             .unwrap();
-        assert_eq!(first.physical.label(), "Native group");
-        let light = first.physical.functions()[0].clone();
+        assert_eq!(first.physical().label(), "Native group");
+        let light = first.physical().functions()[0].clone();
         assert_eq!(light.snapshot().power, Power::Unknown);
         let state = light.snapshot().lighting.unwrap();
         assert_eq!(state.brightness_percent, None);
@@ -334,7 +334,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
         let (id, power) = {
             let live = c.context.live.borrow();
             let record = live.devices["group-1"].admitted.as_ref().unwrap();
-            let cached = record.cached.borrow();
+            let cached = record.native.clone();
             let function = cached
                 .device
                 .functions()
@@ -363,7 +363,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
         }
         // A genuine gated HTTP read is already in flight before the write.
         let work = c.context.live.borrow().devices["group-1"]
-            .work
+            .admitted
             .clone()
             .unwrap();
         work.request_dirty_read(&id, power);
@@ -455,7 +455,7 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
         let (id, power, brightness) = {
             let live = c.context.live.borrow();
             let record = live.devices["group-1"].admitted.as_ref().unwrap();
-            let cached = record.cached.borrow();
+            let cached = record.native.clone();
             let light = cached
                 .device
                 .functions()
@@ -497,7 +497,7 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
         // All properties accepted while the readback is held: acceptance is
         // independent of actual fields, which are never optimistic targets.
         let work = c.context.live.borrow().devices["group-1"]
-            .work
+            .admitted
             .clone()
             .unwrap();
         until(|| {
@@ -561,13 +561,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
             let live = c.context.live.borrow();
             let slot = &live.devices["group-1"];
             (
-                slot.admitted
-                    .as_ref()
-                    .unwrap()
-                    .cached
-                    .borrow()
-                    .device
-                    .functions()[0]
+                slot.admitted.as_ref().unwrap().native.device.functions()[0]
                     .description()
                     .id
                     .clone(),
@@ -693,8 +687,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
                     .admitted
                     .as_ref()
                     .unwrap()
-                    .cached
-                    .borrow()
+                    .native
                     .device
                     .functions()[0]
                     .description()
@@ -712,7 +705,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             until(|| control.context.is_virtual_group("group-p")).await;
             until(|| {
                 control.context.live.borrow().devices["group-p"]
-                    .work
+                    .admitted
                     .as_ref()
                     .unwrap()
                     .active
@@ -1014,9 +1007,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                                 .clone()
                                 .map(|(cached, _)| cached)
                                 .or_else(|| {
-                                    slot.admitted
-                                        .as_ref()
-                                        .map(|record| record.cached.borrow().clone())
+                                    slot.admitted.as_ref().map(|record| record.native.clone())
                                 })
                                 .unwrap();
                             let grid = crate::device::NumericRange::new(2700, 6500, 1).unwrap();
@@ -1092,7 +1083,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             let (id, _) = {
                 let live = c.context.live.borrow();
                 let record = live.devices["group-1"].admitted.as_ref().unwrap();
-                let cached = record.cached.borrow();
+                let cached = record.native.clone();
                 let light = cached
                     .device
                     .functions()
@@ -1822,7 +1813,7 @@ fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.work.as_ref())
+                    .filter_map(|slot| slot.admitted.as_ref())
                     .all(|work| {
                         work.refresh.borrow().snapshot().pending.is_empty()
                             && work.refresh.borrow().snapshot().inflight.is_empty()

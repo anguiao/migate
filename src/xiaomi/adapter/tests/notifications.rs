@@ -48,7 +48,7 @@ fn cloud_notifications_activate_after_subscription_and_update_cloud_only_device(
 
 fn local_active(c: &Control, did: &str) -> bool {
     c.context.live.borrow().devices[did]
-        .work
+        .admitted
         .as_ref()
         .is_some_and(|work| {
             matches!(
@@ -136,7 +136,7 @@ fn waiting_cloud_startup_subscriptions_are_revoked_and_replaced_before_sending()
             c.context
                 .block_device("device79", "test removal while queued".into());
             let replaced = c.context.live.borrow().devices["device78"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             replaced
@@ -588,7 +588,7 @@ fn exhausted_local_preparation_uses_cloud_and_diagnostic_wakes_do_not_restart_it
                 .await;
                 assert!(
                     control.context.live.borrow().devices["multi"]
-                        .work
+                        .admitted
                         .as_ref()
                         .unwrap()
                         .local_exhausted
@@ -890,7 +890,7 @@ fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
                     })
                     .await;
                     let work = control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .clone()
                         .unwrap();
                     until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
@@ -943,7 +943,7 @@ fn a_real_cloud_online_recovery_reopens_one_exhausted_subscription_window() {
             until(|| {
                 peer.count(property) == 4
                     && c.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .as_ref()
                         .unwrap()
                         .cloud_exhausted
@@ -994,7 +994,7 @@ fn losing_cloud_connection_reopens_the_exhausted_local_fallback_window() {
                     local.count("subscribe", "one", 2) == 4
                         && cloud_active(control, "one")
                         && control.context.live.borrow().devices["one"]
-                            .work
+                            .admitted
                             .as_ref()
                             .unwrap()
                             .local_exhausted
@@ -1017,7 +1017,7 @@ fn losing_cloud_connection_reopens_the_exhausted_local_fallback_window() {
                 async_io::Timer::after(Duration::from_millis(20)).await;
                 assert!(
                     !control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .as_ref()
                         .unwrap()
                         .local_exhausted
@@ -1072,7 +1072,7 @@ fn losing_local_connection_reopens_cloud_without_another_priority_change() {
                     cloud.count(property) == 4
                         && local_active(control, "one")
                         && control.context.live.borrow().devices["one"]
-                            .work
+                            .admitted
                             .as_ref()
                             .unwrap()
                             .cloud_exhausted
@@ -1100,7 +1100,7 @@ fn losing_local_connection_reopens_cloud_without_another_priority_change() {
             );
             assert!(
                 !c.context.live.borrow().devices["one"]
-                    .work
+                    .admitted
                     .as_ref()
                     .unwrap()
                     .cloud_exhausted
@@ -1139,7 +1139,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                     local.count("subscribe", "one", 2) == 4
                         && cloud_active(control, "one")
                         && control.context.live.borrow().devices["one"]
-                            .work
+                            .admitted
                             .as_ref()
                             .unwrap()
                             .local_exhausted
@@ -1159,7 +1159,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                 assert_eq!(local.count("subscribe", "one", 2), 4);
                 assert!(
                     control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .as_ref()
                         .unwrap()
                         .local_exhausted
@@ -1178,7 +1178,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                 async_io::Timer::after(Duration::from_millis(20)).await;
                 assert!(
                     !control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .as_ref()
                         .unwrap()
                         .local_exhausted
@@ -1193,7 +1193,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                 }
                 until(|| {
                     control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .as_ref()
                         .unwrap()
                         .local_exhausted
@@ -1209,7 +1209,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                 assert_eq!(local.count("subscribe", "one", 2), 8);
                 assert!(
                     control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .as_ref()
                         .unwrap()
                         .local_exhausted
@@ -1229,7 +1229,7 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
                 async_io::Timer::after(Duration::from_millis(20)).await;
                 assert!(
                     !control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .as_ref()
                         .unwrap()
                         .local_exhausted
@@ -1307,7 +1307,7 @@ fn held_online_subscription_cannot_retry_after_device_access_is_revoked() {
             assert!(c.context.notifications.borrow().is_some());
             assert!(
                 c.context.live.borrow().devices["one"]
-                    .work
+                    .admitted
                     .as_ref()
                     .unwrap()
                     .cloud_subscribed
@@ -1553,7 +1553,7 @@ fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail()
         future::or(peer.run(&listener), async {
             super::support::repair_ready(&c).await;
             let member = c.context.live.borrow().devices["member-a"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             until(|| member.cloud_exhausted.get()).await;

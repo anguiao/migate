@@ -1,6 +1,12 @@
 //! Controlled source resources for application lifecycle tests.
 
-use super::super::{SourceHandle, XiaomiAdapter, state::DeviceSlot};
+use std::rc::Rc;
+
+use super::super::{
+    SourceHandle, XiaomiAdapter,
+    state::{DeviceSlot, LogicalSink},
+    work::DeviceWork,
+};
 use crate::{
     configuration::NativeDescription,
     device::{CommandReceiver, DeviceKey, PhysicalDevice, PhysicalDeviceDescription},
@@ -69,10 +75,26 @@ impl AppSource {
                     PhysicalDevice::new(derived.served[&device.key].description.clone());
                 receivers.extend(inputs);
                 adapter.context.registry.insert(instance.clone());
-                live.devices.insert(
-                    device.key.id,
-                    DeviceSlot::restored(native, instance.clone()),
-                );
+                let sink = Rc::new(LogicalSink::new(instance.clone()));
+                let light_write = native
+                    .device
+                    .functions()
+                    .iter()
+                    .any(|function| function.lighting().is_some())
+                    .then(|| {
+                        adapter
+                            .context
+                            .light_writes
+                            .for_device(&device.key.id, adapter.context.clock.clone())
+                    });
+                let work = Rc::new(DeviceWork::new(
+                    native,
+                    sink,
+                    adapter.context.refresh_changed.clone(),
+                    light_write,
+                ));
+                live.devices
+                    .insert(device.key.id, DeviceSlot::restored(work));
                 physical = Some(instance);
             }
         }
@@ -88,7 +110,7 @@ impl AppSource {
     pub(crate) fn directory_name(&self, key: &DeviceKey, name: &str) {
         let mut live = self.handle.0.live.borrow_mut();
         let slot = live.devices.get_mut(&key.id).unwrap();
-        let native = slot.admitted.as_ref().unwrap().cached.borrow().clone();
+        let native = slot.admitted.as_ref().unwrap().native.clone();
         slot.candidate = Some((native, Some(name.to_owned())));
     }
 }

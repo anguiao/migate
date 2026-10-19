@@ -23,7 +23,7 @@ fn published_cloud_only_device_is_refreshed_without_a_local_subscription() {
 
 fn work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
     c.context.live.borrow().devices[did]
-        .work
+        .admitted
         .as_ref()
         .unwrap()
         .clone()

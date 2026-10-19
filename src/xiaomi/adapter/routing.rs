@@ -42,14 +42,9 @@ impl Context {
         &self,
         handle: &SessionHandle,
         work: &DeviceWork,
-        generation: u64,
         outcome: &RequestOutcome<T>,
     ) {
-        if work.life.is_closed()
-            || work.record.life.is_closed()
-            || work.record.binding_generation.get() != generation
-            || !self.current_local(handle)
-        {
+        if work.life.is_closed() || !self.current_local(handle) {
             return;
         }
         self.local_outcome(handle, outcome);
@@ -64,7 +59,7 @@ impl Context {
         {
             return;
         }
-        let did = &work.record.physical.key().id;
+        let did = &work.key.id;
         {
             let mut live = self.live.borrow_mut();
             if let Some(Ok(access)) = &mut live.devices.get_mut(did).unwrap().access {
@@ -103,7 +98,7 @@ impl Context {
                 .borrow()
                 .devices
                 .values()
-                .filter_map(|slot| slot.work.as_ref())
+                .filter_map(|slot| slot.admitted.as_ref())
             {
                 work.retry_subscriptions();
             }
@@ -132,11 +127,11 @@ impl Context {
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.work.clone())
+                    .filter_map(|slot| slot.admitted.clone())
                     .collect::<Vec<_>>();
                 for work in works {
                     work.retry_subscriptions();
-                    self.refresh_source(&work.record.physical.key().id);
+                    self.refresh_source(&work.key.id);
                 }
                 self.refresh_changed.notify(usize::MAX);
                 self.changed.notify(usize::MAX);
@@ -147,38 +142,13 @@ impl Context {
     pub(super) fn install_work(self: &Rc<Self>, did: &str) {
         let mut live = self.live.borrow_mut();
         let slot = live.devices.get_mut(did).unwrap();
-        let record = slot.admitted.as_ref().unwrap().clone();
-        let created = slot.work.is_none();
-        let virtual_group = slot
-            .effective_group
-            .as_ref()
-            .is_some_and(|group| !group.is_physical);
-        let work = slot
-            .work
-            .get_or_insert_with(|| {
-                let light_write = record
-                    .cached
-                    .borrow()
-                    .device
-                    .functions()
-                    .iter()
-                    .any(|function| function.lighting().is_some())
-                    .then(|| self.light_writes.for_device(did, self.clock.clone()));
-                Rc::new(DeviceWork::new(
-                    record,
-                    self.refresh_changed.clone(),
-                    light_write,
-                ))
-            })
-            .clone();
-        if created && !virtual_group {
-            work.refresh();
-        }
+        let Some(work) = slot.admitted.clone() else {
+            return;
+        };
         if !slot.access.as_ref().is_some_and(|access| {
             access.as_ref().is_ok_and(|access| {
-                let cached = work.record.cached.borrow();
-                access.model == cached.model
-                    && access.instance_type == cached.instance_type
+                access.model == work.native.model
+                    && access.instance_type == work.native.instance_type
                     && access.spec_v2_access
                     && access.push_available
             })
@@ -224,11 +194,11 @@ impl Context {
         {
             return Err("virtual group has no local route".into());
         }
-        let record = slot
+        let work = slot
             .admitted
             .as_ref()
             .ok_or("device description or binding unavailable")?;
-        if record.life.is_closed() {
+        if work.life.is_closed() {
             return Err("device source retired".into());
         }
         let access = slot
@@ -246,8 +216,7 @@ impl Context {
         if push && !access.push_available {
             return Err("notification access unavailable".into());
         }
-        let cached = record.cached.borrow();
-        if access.model != cached.model || access.instance_type != cached.instance_type {
+        if access.model != work.native.model || access.instance_type != work.native.instance_type {
             return Err("device description or binding unavailable".into());
         }
         Ok(session.handle.clone())
@@ -318,14 +287,14 @@ impl Context {
             .devices
             .get(did)
             .ok_or("device description unavailable")?;
-        let record = slot
+        let work = slot
             .admitted
             .as_ref()
             .ok_or("device description or binding unavailable")?;
         if let Some(reason) = &slot.blocked {
             return Err(reason.clone());
         }
-        if record.life.is_closed() {
+        if work.life.is_closed() {
             return Err("device source retired".into());
         }
         if slot.cloud_forbidden {
@@ -338,8 +307,7 @@ impl Context {
         if !access.online {
             return Err("device offline".into());
         }
-        let cached = record.cached.borrow();
-        if access.model != cached.model || access.instance_type != cached.instance_type {
+        if access.model != work.native.model || access.instance_type != work.native.instance_type {
             return Err("device description or binding unavailable".into());
         }
         Ok(())
@@ -378,14 +346,13 @@ impl Context {
             .filter_map(|member| {
                 live.devices
                     .get(member)?
-                    .work
+                    .admitted
                     .as_ref()
                     .filter(|work| {
                         !work.life.is_closed()
-                            && !work.record.life.is_closed()
-                            && work.record.cached.borrow().device.functions().iter().any(
-                                |function| function.id() == "main" && function.lighting().is_some(),
-                            )
+                            && work.native.device.functions().iter().any(|function| {
+                                function.id() == "main" && function.lighting().is_some()
+                            })
                     })
                     .cloned()
             })
@@ -402,23 +369,24 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.work.as_ref())
+            .and_then(|slot| slot.admitted.as_ref())
         {
             work.refresh();
         }
     }
     pub(super) fn update_availability(&self, did: &str) {
         let available = self.control_path(did).is_some();
-        let (record, blocked) = {
+        let (work, blocked) = {
             let live = self.live.borrow();
             let slot = &live.devices[did];
             (slot.admitted.clone(), slot.blocked.clone())
         };
-        let Some(record) = record else {
+        let Some(work) = work else {
             return;
         };
-        let was_available = record.physical.availability() == Availability::Available;
-        record.physical.set_availability(if available {
+        let physical = work.physical();
+        let was_available = physical.availability() == Availability::Available;
+        physical.set_availability(if available {
             Availability::Available
         } else {
             Availability::Unavailable(blocked.unwrap_or_else(|| "no usable control path".into()))
@@ -455,7 +423,7 @@ impl Context {
         for slot in self.live.borrow_mut().devices.values_mut() {
             slot.access = None;
             if (disconnected || priority_changed)
-                && let Some(work) = &slot.work
+                && let Some(work) = &slot.admitted
             {
                 work.retry_subscriptions();
             }
@@ -471,14 +439,11 @@ impl Context {
         }
         self.disconnect("Xiaomi adapter stopped".into());
         for slot in self.live.borrow().devices.values() {
-            if let Some(record) = &slot.admitted {
-                record.life.close();
-                record
-                    .physical
+            if let Some(work) = &slot.admitted {
+                work.physical()
                     .set_availability(Availability::Unavailable("Xiaomi adapter stopped".into()));
-            }
-            if let Some(work) = &slot.work {
                 work.life.close();
+                work.current_sink().close();
             }
         }
     }

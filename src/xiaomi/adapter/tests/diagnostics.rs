@@ -44,7 +44,7 @@ fn diagnostics_keep_current_control_and_valid_notification_conditions_separate()
             until(|| {
                 control.context.cloud_scope_valid.get()
                     && control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .as_ref()
                         .unwrap()
                         .active

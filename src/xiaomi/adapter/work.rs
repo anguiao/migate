@@ -3,10 +3,13 @@ use super::{
     model::AdapterError,
     observations::Observations,
     refresh::RefreshState,
-    state::{Context, DeviceRecord, Lifetime},
+    state::{Context, Lifetime, LogicalSink},
 };
-use crate::device::{ActionToken, LightDimension};
-use crate::xiaomi::{capability::PropertyBinding, central::SessionHandle};
+use crate::{
+    configuration::NativeDescription,
+    device::{ActionToken, DeviceKey, LightDimension, PhysicalDevice},
+    xiaomi::{capability::PropertyBinding, central::SessionHandle},
+};
 use event_listener::Event;
 use futures_lite::future;
 use std::{
@@ -15,18 +18,19 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-/// One committed repaired-group member handle, so an action keeps the member
-/// universe captured at its first frame.
+/// One captured source runtime and its logical sink. A repaired action keeps
+/// the member universe captured at its first frame; the group itself uses the
+/// same pair.
 #[derive(Clone)]
-pub(super) struct RepairMemberRef {
-    pub(super) record: Rc<DeviceRecord>,
+pub(super) struct SourceRef {
     pub(super) work: Rc<DeviceWork>,
+    pub(super) sink: Rc<LogicalSink>,
 }
 
 struct FrameOwnership {
     token: ActionToken,
     epoch: u64,
-    members: Rc<Vec<RepairMemberRef>>,
+    members: Rc<Vec<SourceRef>>,
 }
 
 /// The newest RGB frame on a group function. A slow member checks ownership
@@ -40,8 +44,8 @@ impl LightFrames {
     pub(super) fn next_light(
         &mut self,
         token: ActionToken,
-        snapshot: impl FnOnce() -> Vec<RepairMemberRef>,
-    ) -> (u64, Rc<Vec<RepairMemberRef>>) {
+        snapshot: impl FnOnce() -> Vec<SourceRef>,
+    ) -> (u64, Rc<Vec<SourceRef>>) {
         if let Some(frame) = self.light.as_mut()
             && frame.token == token
         {
@@ -77,12 +81,19 @@ impl LightFrames {
     }
 }
 
+/// One installed native runtime: the immutable native control description and
+/// the subscription/refresh/observation state attached to it. The logical
+/// sink below is only the current delivery target and is swapped by a
+/// logical-only installation without touching this native state.
 pub(super) struct DeviceWork {
-    // Binding work ends on incompatibility, while the physical device keeps its consumers.
+    pub(super) key: DeviceKey,
+    pub(super) native: NativeDescription,
+    /// Native authority; retiring or replacing it ends this runtime.
     pub(super) life: Lifetime,
     pub(super) observations: Observations,
     pub(super) light_write: Option<Rc<LightWriteGate>>,
-    pub(super) record: Rc<DeviceRecord>,
+    /// Current logical delivery target; logical-only replacement swaps it.
+    pub(super) sink: RefCell<Rc<LogicalSink>>,
     pub(super) subscribed: RefCell<BTreeSet<(u32, u32)>>,
     pub(super) active: RefCell<Option<super::notifications::NotificationSource>>,
     pub(super) local_generation: Cell<u64>,
@@ -103,15 +114,19 @@ pub(super) struct DeviceWork {
 }
 impl DeviceWork {
     pub(super) fn new(
-        record: Rc<DeviceRecord>,
+        native: NativeDescription,
+        sink: Rc<LogicalSink>,
         refresh_changed: Rc<Event>,
         light_write: Option<Rc<LightWriteGate>>,
     ) -> Self {
+        let key = native.device.key().clone();
         Self {
+            key,
+            native,
             life: Lifetime::default(),
             observations: Observations::default(),
             light_write,
-            record,
+            sink: RefCell::new(sink),
             subscribed: RefCell::new(BTreeSet::new()),
             active: RefCell::new(None),
             local_generation: Cell::new(0),
@@ -131,6 +146,25 @@ impl DeviceWork {
             subscribe_problem: RefCell::new(None),
         }
     }
+    pub(super) fn current_sink(&self) -> Rc<LogicalSink> {
+        self.sink.borrow().clone()
+    }
+    /// Swap the logical delivery target and return the retired one.
+    pub(super) fn replace_sink(&self, sink: Rc<LogicalSink>) -> Rc<LogicalSink> {
+        std::mem::replace(&mut *self.sink.borrow_mut(), sink)
+    }
+    pub(super) fn physical(&self) -> PhysicalDevice {
+        self.current_sink().physical.clone()
+    }
+    pub(super) fn binding(&self, id: &str) -> PropertyBinding {
+        self.native
+            .device
+            .functions()
+            .iter()
+            .find(|function| function.id() == id)
+            .unwrap()
+            .power()
+    }
     pub(super) fn local_connected(&self) {
         self.local_disconnected();
         self.subscribe_requested.set(false);
@@ -138,7 +172,7 @@ impl DeviceWork {
     }
     pub(super) fn source_changed(&self) {
         self.observations.source_changed();
-        self.record.physical.clear_light_state();
+        self.physical().clear_light_state();
         super::refresh::cancel(self);
         self.refresh();
     }
@@ -184,13 +218,12 @@ impl DeviceWork {
         if self.life.is_closed() {
             return false;
         }
-        let cached = self.record.cached.borrow();
-        if cached.device.refresh_trigger() == Some(binding) && value.as_bool().is_some() {
-            drop(cached);
+        if self.native.device.refresh_trigger() == Some(binding) && value.as_bool().is_some() {
             self.refresh();
             return false;
         }
-        let Some(function) = cached
+        let Some(function) = self
+            .native
             .device
             .functions()
             .iter()
@@ -200,7 +233,6 @@ impl DeviceWork {
         };
         let id = function.id().to_owned();
         let light = function.lighting().is_some();
-        drop(cached);
         if light {
             let origin = if cached_report {
                 super::lighting::Origin::Cache
@@ -216,7 +248,7 @@ impl DeviceWork {
             }
         } else {
             if let Some(value) = value.as_bool() {
-                self.observations.notify(&self.record, &id, value);
+                self.observations.notify(self, &id, value);
             }
             false
         }
@@ -235,8 +267,7 @@ impl DeviceWork {
         self.changed.notify(usize::MAX);
     }
     pub(super) fn refresh(&self) {
-        let cached = self.record.cached.borrow();
-        for function in cached.device.functions() {
+        for function in self.native.device.functions() {
             for binding in super::lighting::bindings(function) {
                 self.refresh_property(function.id(), binding);
             }
@@ -260,15 +291,9 @@ impl DeviceWork {
         }
     }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
-        self.record
-            .cached
-            .borrow()
-            .device
-            .functions()
-            .iter()
-            .any(|function| {
-                function.id() == id && super::lighting::bindings(function).contains(&binding)
-            })
+        self.native.device.functions().iter().any(|function| {
+            function.id() == id && super::lighting::bindings(function).contains(&binding)
+        })
     }
     pub(super) fn observe_read(
         &self,
@@ -277,16 +302,11 @@ impl DeviceWork {
         stamp: &super::observations::ReadStamp,
         value: &serde_json::Value,
     ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
-        if !self
-            .observations
-            .read_is_current(&self.record, id, binding, stamp)
-        {
+        if !self.observations.read_is_current(self, id, binding, stamp) {
             return Ok(());
         }
         let light = self
-            .record
-            .cached
-            .borrow()
+            .native
             .device
             .functions()
             .iter()
@@ -310,22 +330,19 @@ impl DeviceWork {
                     .ok_or(crate::xiaomi::capability::CapabilityError::InvalidValue(
                         "boolean",
                     ))?;
-            self.observations
-                .observe_read(&self.record, id, stamp, value);
+            self.observations.observe_read(self, id, stamp, value);
         }
         Ok(())
     }
     pub(super) fn bindings(&self) -> Vec<PropertyBinding> {
         let mut values = self
-            .record
-            .cached
-            .borrow()
+            .native
             .device
             .functions()
             .iter()
             .flat_map(super::lighting::bindings)
             .collect::<Vec<_>>();
-        if let Some(trigger) = self.record.cached.borrow().device.refresh_trigger() {
+        if let Some(trigger) = self.native.device.refresh_trigger() {
             values.push(trigger);
         }
         values
@@ -363,9 +380,7 @@ impl DeviceWork {
     ) -> String {
         let message = format!(
             "{} {operation} {}.{}: {error}",
-            self.record.cached.borrow().device.key().id,
-            binding.siid,
-            binding.piid
+            self.key.id, binding.siid, binding.piid
         );
         log::warn!("{message}");
         message
@@ -391,7 +406,7 @@ async fn subscriptions(
     handle: &SessionHandle,
     context: &Context,
 ) -> Result<(), AdapterError> {
-    let did = work.record.cached.borrow().device.key().id.clone();
+    let did = work.key.id.clone();
     loop {
         let listener = work.changed.listen();
         if !work.subscribe_requested.replace(false) {

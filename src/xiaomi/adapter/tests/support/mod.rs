@@ -235,12 +235,7 @@ pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
                                 work.subscribed.borrow().len()
                                     == physical.functions().len()
                                         + usize::from(
-                                            work.record
-                                                .cached
-                                                .borrow()
-                                                .device
-                                                .refresh_trigger()
-                                                .is_some(),
+                                            work.native.device.refresh_trigger().is_some(),
                                         )
                             })
                 })

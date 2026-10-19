@@ -64,16 +64,15 @@ pub(super) fn encode(
     target: Option<LightTarget>,
     force: bool,
 ) -> Result<Vec<(PropertyBinding, Value)>, CommandError> {
-    let record = &work.record;
-    let cached = record.cached.borrow();
-    let function = cached
+    let function = work
+        .native
         .device
         .functions()
         .iter()
         .find(|function| function.id() == id)
         .unwrap();
     let light = function.lighting().unwrap();
-    let snapshot = record.physical.function(id).unwrap().snapshot();
+    let snapshot = work.physical().function(id).unwrap().snapshot();
     let state = snapshot.lighting.unwrap();
     let mut values = Vec::new();
     if let Some(power) = power {
@@ -181,15 +180,14 @@ pub(super) fn refresh_missing_active(
     previous_mode: Option<LightMode>,
 ) {
     let state = work
-        .record
-        .physical
+        .physical()
         .function(id)
         .unwrap()
         .snapshot()
         .lighting
         .unwrap();
-    let cached = work.record.cached.borrow();
-    let light = cached
+    let light = work
+        .native
         .device
         .functions()
         .iter()
@@ -206,7 +204,6 @@ pub(super) fn refresh_missing_active(
         }
         _ => None,
     };
-    drop(cached);
     if let Some(binding) = binding {
         if previous_mode != state.mode {
             work.refresh_property(id, binding);
@@ -225,17 +222,15 @@ pub(super) fn observe(
     origin: Origin,
     takeover: bool,
 ) -> Result<(), CapabilityError> {
-    let record = &work.record;
-    let cached = record.cached.borrow();
-    let description = cached
+    let description = work
+        .native
         .device
         .functions()
         .iter()
         .find(|function| function.id() == id)
         .unwrap();
     let mut patch = decode(description, binding, value)?;
-    drop(cached);
-    let function = record.physical.function(id).unwrap();
+    let function = work.physical().function(id).unwrap();
     let before = function.snapshot();
     let state = before.lighting.unwrap();
     let changed = patch
@@ -283,7 +278,7 @@ pub(super) fn observe(
                 .expect("light");
         }
     }
-    work.observations.observed(record, id, binding, origin);
+    work.observations.observed(work, id, binding, origin);
     function
         .observe_light(patch)
         .expect("validated light report");
@@ -340,18 +335,14 @@ impl Context {
                     {
                         return None;
                     }
-                    Some((
-                        slot.admitted.as_ref()?.physical.function("main")?,
-                        slot.work.clone(),
-                    ))
+                    let work = slot.admitted.as_ref()?;
+                    Some((work.physical().function("main")?, work.clone()))
                 })
                 .collect::<Vec<_>>()
         };
         for (function, work) in groups {
             if off {
-                if let Some(work) = &work {
-                    work.light_frames.borrow_mut().cancel_all();
-                }
+                work.light_frames.borrow_mut().cancel_all();
                 function.take_over_light_all().expect("native light group");
                 continue;
             }
@@ -364,9 +355,7 @@ impl Context {
                     }
                 };
                 if supported {
-                    if let Some(work) = &work {
-                        work.light_frames.borrow_mut().cancel_dimension(*dimension);
-                    }
+                    work.light_frames.borrow_mut().cancel_dimension(*dimension);
                     function
                         .take_over_light(*dimension)
                         .expect("supported group dimension");
@@ -418,17 +407,18 @@ impl Context {
         if group.is_physical && slot.effective_repair.is_none() {
             return;
         }
-        let Some(record) = &slot.admitted else {
+        let Some(work) = &slot.admitted else {
             return;
         };
-        let function = record.physical.function("main").unwrap();
+        let physical = work.physical();
+        let function = physical.function("main").unwrap();
         let mut state = LightSnapshot {
             brightness_percent: None,
             temperature_kelvin: None,
             color: None,
             mode: None,
         };
-        if record.life.is_closed() || record.physical.availability() != Availability::Available {
+        if work.life.is_closed() || physical.availability() != Availability::Available {
             if group.is_physical {
                 function.replace_light_color(None, None);
             } else {
@@ -441,14 +431,15 @@ impl Context {
             .iter()
             .filter_map(|did| {
                 let slot = live.devices.get(did)?;
-                let record = slot.admitted.as_ref()?;
-                if record.life.is_closed()
-                    || record.physical.availability() != Availability::Available
-                    || slot.work.as_ref().is_none_or(|work| work.life.is_closed())
-                {
+                let work = slot.admitted.as_ref()?;
+                if work.life.is_closed() {
                     return None;
                 }
-                let function = record.physical.function("main")?;
+                let physical = work.physical();
+                if physical.availability() != Availability::Available {
+                    return None;
+                }
+                let function = physical.function("main")?;
                 let snapshot = function.snapshot();
                 let light = snapshot.lighting?;
                 let description = function.description();

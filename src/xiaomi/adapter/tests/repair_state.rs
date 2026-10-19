@@ -20,7 +20,7 @@ fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
         .await;
         let light = function(&c.context.registry, "group-1", "main");
         let work = c.context.live.borrow().devices["member-a"]
-            .work
+            .admitted
             .clone()
             .unwrap();
         let color = crate::xiaomi::capability::PropertyBinding { siid: 4, piid: 1 };
@@ -239,9 +239,9 @@ fn unrepaired_virtual_group_does_not_infer_white_mode_or_clamp_member_feedback()
                     .devices
                     .get(*did)
                     .is_some_and(|slot| {
-                        slot.work.is_some()
+                        slot.admitted.is_some()
                             && slot.admitted.as_ref().is_some_and(|record| {
-                                record.physical.availability() == Availability::Available
+                                record.physical().availability() == Availability::Available
                             })
                     })
             })

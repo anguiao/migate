@@ -243,7 +243,7 @@ pub(in super::super) fn with_cloud_peer(
 }
 pub(in super::super) fn cloud_active(c: &Control, did: &str) -> bool {
     c.context.live.borrow().devices[did]
-        .work
+        .admitted
         .as_ref()
         .is_some_and(|work| {
             matches!(

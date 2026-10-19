@@ -25,8 +25,7 @@ fn replacing_a_binding_clears_its_previous_subscription_failure() {
                 .admitted
                 .as_ref()
                 .unwrap()
-                .cached
-                .borrow()
+                .native
                 .clone();
             replacement.device = {
                 let function = replacement.device.functions()[0].clone();
@@ -120,8 +119,7 @@ fn compatible_binding_updates_keep_identity_ignore_old_reads_and_use_the_new_com
                 .admitted
                 .as_ref()
                 .unwrap()
-                .cached
-                .borrow()
+                .native
                 .clone();
             changed.device = {
                 let function = changed.device.functions()[0].clone();

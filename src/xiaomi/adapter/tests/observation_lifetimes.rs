@@ -8,7 +8,7 @@ fn observation_rig(members: &[&str]) -> Rig {
 
 fn device_work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
     c.context.live.borrow().devices[did]
-        .work
+        .admitted
         .as_ref()
         .unwrap()
         .clone()
@@ -156,13 +156,12 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
             freeze_initialized(control, &peer, &["multi"]).await;
             let outlet = function(&control.context.registry, "multi", "outlet_1");
             let work = device_work(control, "multi");
-            let generation = work.record.binding_generation.get();
             peer.state.borrow_mut().hold_writes = true;
             let mut command = Box::pin(outlet.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "multi", 3) == 1).await;
 
-            let duplicate = work.record.cached.borrow().clone();
+            let duplicate = work.native.clone();
             control
                 .context
                 .live
@@ -172,7 +171,6 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
                 .unwrap()
                 .candidate = Some((duplicate, None));
             control.context.reconcile("multi").unwrap();
-            assert_eq!(work.record.binding_generation.get(), generation);
             assert!(Rc::ptr_eq(&work, &device_work(control, "multi")));
             release_operation(&peer, "rpcReq", "multi", 3, accepted("multi", 3, 0)).await;
             assert_eq!(command.await.unwrap().power, Power::On);
@@ -229,7 +227,6 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
         let after = device_work(&c, "one");
         assert!(Rc::ptr_eq(&before, &after));
         assert!(!after.life.is_closed());
-        assert!(!after.record.life.is_closed());
         assert!(after.subscribed.borrow().is_empty());
         assert!(c.context.live.borrow().devices["one"].access.is_none());
         let one = function(&c.context.registry, "one", "main");
@@ -254,7 +251,7 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
             until(|| !peer.state.borrow().held_subs.is_empty()).await;
             let old = peer.state.borrow_mut().held_subs.remove(0);
             let work = device_work(control, "two");
-            let original = work.record.cached.borrow().clone();
+            let original = work.native.clone();
             let outlet_function = original.device.functions()[0].clone();
             let mut changed = original.clone();
             changed.device = super::support::device_with_functions(
@@ -327,10 +324,7 @@ fn a_suback_from_a_previous_binding_generation_cannot_restore_subscription_readi
             until(|| current_work.subscribed.borrow().len() == 1).await;
             assert!(current_work.subscribed.borrow().contains(&(2, 1)));
             assert!(
-                !work
-                    .record
-                    .physical
-                    .same_instance(&current_work.record.physical),
+                !work.physical().same_instance(&current_work.physical()),
                 "each binding change replaces the whole serving instance"
             );
         })

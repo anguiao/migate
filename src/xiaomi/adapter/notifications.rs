@@ -159,7 +159,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.work.clone())?;
+            .and_then(|slot| slot.admitted.clone())?;
         let active = work.active.borrow();
         let source = active
             .as_ref()
@@ -198,7 +198,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.work.clone());
+            .and_then(|slot| slot.admitted.clone());
         let local_failed = work.as_ref().is_some_and(|work| work.local_exhausted.get());
         let cloud_failed = work.as_ref().is_some_and(|work| work.cloud_exhausted.get());
         let local = local.filter(|_| !local_failed);
@@ -237,7 +237,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.work.clone());
+            .and_then(|slot| slot.admitted.clone());
         if let Some(work) = work
             && work
                 .active
@@ -262,7 +262,7 @@ impl Context {
         if let Some(slot) = self.live.borrow_mut().devices.get_mut(did) {
             if let Some(access) = &mut slot.cloud_access {
                 if online != access.online
-                    && let Some(work) = &slot.work
+                    && let Some(work) = &slot.admitted
                 {
                     work.retry_subscriptions();
                 }
@@ -290,7 +290,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.work.clone())
+            .and_then(|slot| slot.admitted.clone())
         else {
             return;
         };
@@ -330,7 +330,7 @@ fn ready(work: &DeviceWork, source: &NotificationSource) -> bool {
         .all(|b| subscribed.contains(&(b.siid, b.piid)))
 }
 fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
-    let did = &work.record.physical.key().id;
+    let did = &work.key.id;
     // Invalidate received QoS2 values before granting delivery; keep handshakes and ready SUBACKs.
     source.invalidate(did);
     if let Some(old) = work.active.borrow_mut().take() {
@@ -349,7 +349,7 @@ async fn selections(context: Rc<Context>) -> Result<(), AdapterError> {
             .borrow()
             .devices
             .values()
-            .filter_map(|slot| slot.work.clone())
+            .filter_map(|slot| slot.admitted.clone())
             .collect::<Vec<_>>();
         for work in works {
             reconcile_source(&context, work);
@@ -361,7 +361,7 @@ async fn selections(context: Rc<Context>) -> Result<(), AdapterError> {
     }
 }
 fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
-    let did = work.record.physical.key().id.clone();
+    let did = work.key.id.clone();
     if work.life.is_closed() {
         return;
     }
@@ -439,18 +439,15 @@ fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
     {
         return None;
     }
-    let record = slot.admitted.as_ref()?;
-    if record.life.is_closed()
+    let work = slot.admitted.as_ref()?;
+    if work.life.is_closed()
         || slot.blocked.is_some()
         || slot.cloud_forbidden
         || slot.cloud_access.is_none()
     {
         return None;
     }
-    slot.work
-        .as_ref()
-        .filter(|work| !work.life.is_closed())
-        .cloned()
+    Some(work.clone())
 }
 fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
     let works = context
@@ -569,7 +566,7 @@ async fn prepare_properties(
     subscriptions: Rc<SubscriptionBudget>,
     preparation: u64,
 ) -> Result<(), AdapterError> {
-    let did = work.record.physical.key().id.clone();
+    let did = work.key.id.clone();
     let current = || {
         !work.life.is_closed()
             && work.cloud_generation.get() == preparation
@@ -719,15 +716,13 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.work.as_ref())
+                    .filter_map(|slot| slot.admitted.as_ref())
                 {
                     work.cloud_disconnected();
                     work.retry_subscriptions();
                     // HTTP feedback must also recover when property
                     // subscriptions never became active in the old session.
-                    if work.active.borrow().is_none()
-                        && !context.is_virtual_group(&work.record.physical.key().id)
-                    {
+                    if work.active.borrow().is_none() && !context.is_virtual_group(&work.key.id) {
                         work.refresh();
                     }
                 }
@@ -791,7 +786,7 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.work.as_ref())
+                    .filter_map(|slot| slot.admitted.as_ref())
                 {
                     work.cloud_disconnected();
                     work.retry_subscriptions();

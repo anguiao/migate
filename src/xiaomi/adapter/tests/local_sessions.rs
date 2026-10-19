@@ -596,7 +596,7 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
             let id = {
                 let live = control.context.live.borrow();
                 let record = live.devices["group-1"].admitted.as_ref().unwrap();
-                let cached = record.cached.borrow();
+                let cached = record.native.clone();
                 cached
                     .device
                     .functions()

@@ -115,8 +115,7 @@ fn a_late_success_for_an_obsolete_write_binding_does_not_override_the_current_va
                 .admitted
                 .as_ref()
                 .unwrap()
-                .cached
-                .borrow()
+                .native
                 .clone();
             let power = changed.device.functions()[0].power();
             changed.device = super::support::device_with_functions(

@@ -160,7 +160,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "main");
         let work = c.context.live.borrow().devices["member-a"]
-            .work
+            .admitted
             .clone()
             .unwrap();
         work.notify_value(MEMBER_COLOR, &json!(0x00ff00), false, false);
@@ -309,7 +309,7 @@ fn queued_rgb_rechecks_action_and_member_power_before_sending() {
                     Change::Rebuild => c.publication.stop_actions(),
                     Change::MemberOff => {
                         let work = c.context.live.borrow().devices["member-b"]
-                            .work
+                            .admitted
                             .clone()
                             .unwrap();
                         work.notify_value(
@@ -473,7 +473,7 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
             .raw_values
             .insert(("group-1".into(), 2, 3), json!(6500));
         let work = c.context.live.borrow().devices["group-1"]
-            .work
+            .admitted
             .clone()
             .unwrap();
         work.request_dirty_read(
@@ -744,7 +744,10 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                     .unwrap()
                     .raw_values
                     .insert((did.into(), 2, 1), json!(powers[index]));
-                let work = c.context.live.borrow().devices[did].work.clone().unwrap();
+                let work = c.context.live.borrow().devices[did]
+                    .admitted
+                    .clone()
+                    .unwrap();
                 work.source_changed();
                 c.context.refresh_group_states(did);
             }
@@ -782,7 +785,10 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                 assert!(member_writes(&c, did, 4, 2).is_empty());
                 assert!(member_writes(&c, did, 2, 1).is_empty());
                 if powers[index] != Some(true) {
-                    let work = c.context.live.borrow().devices[did].work.clone().unwrap();
+                    let work = c.context.live.borrow().devices[did]
+                        .admitted
+                        .clone()
+                        .unwrap();
                     work.notify_value(
                         crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
                         &json!(true),

@@ -27,7 +27,7 @@ async fn subscriptions_ready(c: &Control, dids: &[&str]) {
                 .as_ref()
                 .and_then(|session| session.devices.get(*did))
                 .is_some_and(|work| {
-                    let cached = work.record.cached.borrow();
+                    let cached = &work.native;
                     work.subscribed.borrow().len()
                         == cached.device.functions().len()
                             + usize::from(cached.device.refresh_trigger().is_some())

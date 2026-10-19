@@ -195,7 +195,7 @@ fn works(context: &Context) -> Vec<Rc<DeviceWork>> {
         .borrow()
         .devices
         .values()
-        .filter_map(|slot| slot.work.clone())
+        .filter_map(|slot| slot.admitted.clone())
         .collect()
 }
 pub(super) fn cancel(work: &DeviceWork) {
@@ -206,7 +206,7 @@ pub(super) fn cancel(work: &DeviceWork) {
 }
 fn retire(context: &Context) {
     for work in works(context) {
-        let did = &work.record.physical.key().id;
+        let did = &work.key.id;
         for flight in work.refresh.borrow().inflight.values() {
             if work.life.is_closed() || !flight.current(context, did) {
                 flight.life.close();
@@ -222,7 +222,7 @@ fn reserve(
     if work.life.is_closed() {
         return None;
     }
-    let path = context.read_path(&work.record.physical.key().id)?;
+    let path = context.read_path(&work.key.id)?;
     if matches!(path, ControlPath::Local(_)) != local {
         return None;
     }
@@ -237,7 +237,7 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
         let candidates = works(&context);
         let ready = candidates
             .iter()
-            .filter(|work| context.local_reads_allowed(&work.record.physical.key().id, &handle))
+            .filter(|work| context.local_reads_allowed(&work.key.id, &handle))
             .filter_map(|work| work.refresh.borrow().next_due())
             .min();
         let Some(ready) = ready else {
@@ -288,12 +288,7 @@ pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
         }
         let due = works(&context)
             .iter()
-            .filter(|work| {
-                matches!(
-                    context.read_path(&work.record.physical.key().id),
-                    Some(ControlPath::Cloud(_))
-                )
-            })
+            .filter(|work| matches!(context.read_path(&work.key.id), Some(ControlPath::Cloud(_))))
             .filter_map(|work| work.refresh.borrow().next_due())
             .min();
         let wake = future::or(
@@ -320,7 +315,6 @@ struct ReadCleanup {
     work: Rc<DeviceWork>,
     flight: Rc<ReadFlight>,
     read: Refresh,
-    generation: u64,
     retry: bool,
 }
 impl Drop for ReadCleanup {
@@ -335,10 +329,7 @@ impl Drop for ReadCleanup {
             state.inflight.remove(&self.read.key());
         }
         let dirty = state.finish_dirty(&self.read.id, self.read.binding);
-        if self.retry
-            && !self.work.life.is_closed()
-            && self.work.record.binding_generation.get() == self.generation
-        {
+        if self.retry && !self.work.life.is_closed() {
             state.requeue(self.read.clone());
         }
         drop(state);
@@ -361,25 +352,18 @@ fn read_one(
         work: work.clone(),
         flight: flight.clone(),
         read: read.clone(),
-        generation: work.record.binding_generation.get(),
         retry: true,
     };
     async move {
         let mut cleanup = cleanup;
-        let did = work.record.physical.key().id.clone();
-        let generation = work.record.binding_generation.get();
+        let did = work.key.id.clone();
         let lighting = work
-            .record
-            .cached
-            .borrow()
+            .native
             .device
             .functions()
             .iter()
             .any(|function| function.id() == read.id && function.lighting().is_some());
-        let stamp = Rc::new(
-            work.observations
-                .read_stamp(&work.record, &read.id, read.binding),
-        );
+        let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
         let reading = async {
             if flight.life.is_closed() || !flight.current(&context, &did) {
                 return Ok(ReadResult::Retired);
@@ -410,15 +394,13 @@ fn read_one(
                                 move || {
                                     if guard_flight.life.is_closed()
                                         || guard_work.life.is_closed()
-                                        || guard_work.record.life.is_closed()
-                                        || guard_work.record.binding_generation.get() != generation
                                         || !guard_context.current_local(&guard_handle)
                                     {
                                         SendDecision::Cancel
                                     } else if !guard_context
                                         .local_reads_allowed(&guard_did, &guard_handle)
                                         || !guard_work.observations.read_is_current(
-                                            &guard_work.record,
+                                            &guard_work,
                                             &guard_id,
                                             read.binding,
                                             &guard_stamp,
@@ -437,16 +419,12 @@ fn read_one(
                                     result_context.local_device_outcome(
                                         &result_handle,
                                         &observing,
-                                        generation,
                                         &outcome,
                                     );
                                 }
                                 if !result_flight.life.is_closed()
                                     && !observing.life.is_closed()
-                                    && result_flight.current(
-                                        &result_context,
-                                        &observing.record.physical.key().id,
-                                    )
+                                    && result_flight.current(&result_context, &observing.key.id)
                                     && let Ok(value) = outcome.result
                                 {
                                     *observed_validation.borrow_mut() = observing.observe_read(
@@ -456,9 +434,7 @@ fn read_one(
                                         &value,
                                     );
                                     if observed_validation.borrow().is_ok() {
-                                        result_context.refresh_group_states(
-                                            &observing.record.physical.key().id,
-                                        );
+                                        result_context.refresh_group_states(&observing.key.id);
                                     }
                                 }
                             },
@@ -541,17 +517,14 @@ fn read_one(
         )
         .await;
         cleanup.retry = false;
-        if !work.life.is_closed()
-            && work.record.binding_generation.get() == generation
-            && work.contains(&read.id, read.binding)
-        {
+        if !work.life.is_closed() && work.contains(&read.id, read.binding) {
             let result = result?;
             // A stale failure cannot consume demand queued after that read began.
             if !matches!(result, ReadResult::Failed(_))
                 || !lighting
                 || work
                     .observations
-                    .read_is_current(&work.record, &read.id, read.binding, &stamp)
+                    .read_is_current(&work, &read.id, read.binding, &stamp)
             {
                 work.refresh.borrow_mut().complete(
                     read,

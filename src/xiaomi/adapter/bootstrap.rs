@@ -1,8 +1,9 @@
 use super::{
     model::{AdapterError, AdapterStatus, GatewayStatus, Ready, TopologyReady},
     runner::XiaomiAdapter,
-    state::{Backoff, Context, DeviceSlot, GroupSource, Live},
+    state::{Backoff, Context, DeviceSlot, GroupSource, Live, LogicalSink},
     tasks::TaskSet,
+    work::DeviceWork,
 };
 use crate::{
     device::{Availability, DeviceRegistry, PhysicalDevice},
@@ -57,8 +58,7 @@ impl XiaomiAdapter {
             .and_then(|record| stored.scope.clone().filter(|scope| scope.uid == record.uid));
         let revocations = store.devices().load_revocations()?;
         let registry = DeviceRegistry::new();
-        let mut devices = BTreeMap::new();
-        let mut consumers = Vec::new();
+        let mut restored = Vec::new();
         let mut restored_relations = Vec::new();
         if scope.is_some() {
             let derived = stored.derive();
@@ -92,26 +92,13 @@ impl XiaomiAdapter {
                 let (physical, receivers) = PhysicalDevice::new(served.description.clone());
                 physical
                     .set_availability(Availability::Unavailable("restoring Xiaomi access".into()));
-                registry.insert(physical.clone());
-                let did = device.key.id.clone();
-                let mut slot = DeviceSlot::restored(native.clone(), physical);
-                slot.effective_repair = served.repair.clone().map(Rc::new);
-                if let Some(group) = restored_relations
-                    .iter()
-                    .find(|group| group.group_did == did)
-                {
-                    let group = GroupSource {
-                        record_did: group.record_did.clone(),
-                        model: group.model.clone(),
-                        instance_type: group.instance_type.clone(),
-                        members: group.members.clone(),
-                        is_physical: group.is_physical,
-                    };
-                    slot.group = Some(group.clone());
-                    slot.effective_group = Some(group);
-                }
-                consumers.push((slot.admitted.as_ref().unwrap().clone(), receivers));
-                devices.insert(did, slot);
+                restored.push((
+                    device.key.clone(),
+                    native.clone(),
+                    physical,
+                    receivers,
+                    served.repair.clone(),
+                ));
             }
         }
         let relations = scope
@@ -144,7 +131,7 @@ impl XiaomiAdapter {
             live: RefCell::new(Live {
                 credentials,
                 scope,
-                devices,
+                devices: BTreeMap::new(),
                 session: None,
             }),
             registry,
@@ -171,9 +158,48 @@ impl XiaomiAdapter {
             sync_requested: Cell::new(true),
             sync_changed: Event::new(),
         });
-        for (record, receivers) in consumers {
-            context.install_work(&record.physical.key().id);
-            context.add_consumers(record, receivers);
+        for (key, native, physical, receivers, repair) in restored {
+            let did = key.id.clone();
+            let sink = Rc::new(LogicalSink::new(physical));
+            let light_write = native
+                .device
+                .functions()
+                .iter()
+                .any(|function| function.lighting().is_some())
+                .then(|| context.light_writes.for_device(&did, context.clock.clone()));
+            let work = Rc::new(DeviceWork::new(
+                native,
+                sink.clone(),
+                context.refresh_changed.clone(),
+                light_write,
+            ));
+            context.registry.insert(sink.physical.clone());
+            let mut slot = DeviceSlot::restored(work.clone());
+            slot.effective_repair = repair.map(Rc::new);
+            if let Some(group) = restored_relations
+                .iter()
+                .find(|group| group.group_did == did)
+            {
+                let group = GroupSource {
+                    record_did: group.record_did.clone(),
+                    model: group.model.clone(),
+                    instance_type: group.instance_type.clone(),
+                    members: group.members.clone(),
+                    is_physical: group.is_physical,
+                };
+                slot.group = Some(group.clone());
+                slot.effective_group = Some(group);
+            }
+            let virtual_group = slot
+                .effective_group
+                .as_ref()
+                .is_some_and(|group| !group.is_physical);
+            context.live.borrow_mut().devices.insert(did.clone(), slot);
+            if !virtual_group {
+                work.refresh();
+            }
+            context.install_work(&did);
+            context.add_consumers(work, sink, receivers);
         }
         Ok((
             Self {

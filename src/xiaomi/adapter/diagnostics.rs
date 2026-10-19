@@ -102,26 +102,22 @@ impl Context {
             let sync_limited_reason = notification
                 .is_none()
                 .then(|| self.notification_reason(&did));
-            let channels = self.live.borrow().devices[&did]
+            let work = self.live.borrow().devices[&did]
                 .admitted
                 .as_ref()
                 .unwrap()
-                .cached
-                .borrow()
+                .clone();
+            let channels = work
+                .native
                 .device
                 .functions()
                 .iter()
                 .map(|function| function.id().to_owned())
                 .collect::<Vec<_>>();
             let mut commands = self.commands.snapshot(&did, channels.into_iter());
-            let record = self.live.borrow().devices[&did]
-                .admitted
-                .as_ref()
-                .unwrap()
-                .clone();
             for command in &mut commands {
-                command.light_actions = record
-                    .physical
+                command.light_actions = work
+                    .physical()
                     .function(&command.channel)
                     .unwrap()
                     .light_action_diagnostics();
@@ -157,7 +153,7 @@ impl Context {
         if self.is_virtual_group(did) {
             return "member feedback unavailable or subscriptions not ready".into();
         }
-        let work = self.live.borrow().devices[did].work.clone();
+        let work = self.live.borrow().devices[did].admitted.clone();
         if let Some(work) = work {
             if work.subscribe_running.get() || work.cloud_running.get() {
                 return "notification subscriptions preparing".into();

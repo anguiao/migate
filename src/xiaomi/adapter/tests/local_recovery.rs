@@ -98,7 +98,7 @@ fn degraded_local_can_still_accept_explicit_writes_when_cloud_is_ineligible() {
             assert_eq!(peer.count("rpcReq", "one", 2), 2);
             assert_eq!(control.cloud.lock().unwrap().property_writes.len(), 0);
             control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .as_ref()
                 .unwrap()
                 .refresh();

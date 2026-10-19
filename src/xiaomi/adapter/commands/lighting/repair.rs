@@ -6,8 +6,8 @@
 
 use super::super::super::{
     model::{AdapterError, CommandTarget},
-    state::{Context, DeviceRecord},
-    work::{DeviceWork, RepairMemberRef},
+    state::{Context, LogicalSink},
+    work::{DeviceWork, SourceRef},
 };
 use super::{Batch, BatchAttempt, submit_properties};
 use crate::{
@@ -32,19 +32,10 @@ pub(super) async fn send(
     request: LightRequest,
     rgb: Rgb,
     context: Rc<Context>,
-    record: Rc<DeviceRecord>,
+    work: Rc<DeviceWork>,
+    sink: Rc<LogicalSink>,
     plan: Rc<RepairPlan>,
 ) -> Result<(), AdapterError> {
-    let work = context
-        .live
-        .borrow()
-        .devices
-        .get(&record.physical.key().id)
-        .and_then(|slot| slot.work.clone());
-    let Some(work) = work else {
-        request.reject(CommandError::Unavailable("no usable control path".into()));
-        return Ok(());
-    };
     if let Err(error) = request.current_result() {
         request.reject(error);
         return Ok(());
@@ -54,17 +45,21 @@ pub(super) async fn send(
         .light_frames
         .borrow_mut()
         .next_light(token, || snapshot_members(&context, &plan));
+    let group = SourceRef {
+        work: work.clone(),
+        sink: sink.clone(),
+    };
     let pending = Rc::new(RefCell::new(Some(request)));
     let results = Rc::new(MemberResults::default());
     for member in members.iter() {
         let context = context.clone();
         let member = member.clone();
-        let work = work.clone();
+        let group = group.clone();
         let pending = pending.clone();
         let results = results.clone();
         context.clone().tasks.spawn(async move {
             let (result, maintenance) =
-                member_task(&context, member, work, rgb, token, epoch, pending).await;
+                member_task(&context, member, group, rgb, token, epoch, pending).await;
             if result.is_ok() {
                 results.accepted.set(true);
             }
@@ -97,24 +92,22 @@ pub(super) async fn send(
     }
 }
 
-fn snapshot_members(context: &Context, plan: &RepairPlan) -> Vec<RepairMemberRef> {
+fn snapshot_members(context: &Context, plan: &RepairPlan) -> Vec<SourceRef> {
     let live = context.live.borrow();
     plan.members
         .iter()
         .filter_map(|key| {
-            let slot = live.devices.get(&key.id)?;
-            Some(RepairMemberRef {
-                record: slot.admitted.clone()?,
-                work: slot.work.clone()?,
-            })
+            let work = live.devices.get(&key.id)?.admitted.clone()?;
+            let sink = work.current_sink();
+            Some(SourceRef { work, sink })
         })
         .collect()
 }
 
 async fn member_task(
     context: &Rc<Context>,
-    member: RepairMemberRef,
-    group_work: Rc<DeviceWork>,
+    member: SourceRef,
+    group: SourceRef,
     rgb: Rgb,
     token: ActionToken,
     epoch: u64,
@@ -122,7 +115,7 @@ async fn member_task(
 ) -> (Result<(), CommandError>, Option<AdapterError>) {
     let gate = context
         .light_writes
-        .for_device(&member.record.physical.key().id, context.clock.clone());
+        .for_device(&member.work.key.id, context.clock.clone());
     let _permit = gate.acquire().await;
     let current: Rc<dyn Fn() -> Result<(), CommandError>> = {
         let member = member.clone();
@@ -131,18 +124,18 @@ async fn member_task(
             if let Some(request) = pending.borrow().as_ref() {
                 request.current_result()?;
             }
-            if group_work.life.is_closed()
-                || group_work.record.life.is_closed()
+            if group.work.life.is_closed()
+                || group.sink.life.is_closed()
                 || member.work.life.is_closed()
-                || member.record.life.is_closed()
+                || member.sink.life.is_closed()
             {
                 return Err(CommandError::Cancelled);
             }
-            let frames = group_work.light_frames.borrow();
+            let frames = group.work.light_frames.borrow();
             if !frames.current_light(token, epoch)
-                || !group_work
-                    .record
-                    .physical
+                || !group
+                    .work
+                    .physical()
                     .function("main")
                     .unwrap()
                     .light_action_owns_writes(token)
@@ -150,7 +143,7 @@ async fn member_task(
                 return Err(CommandError::Superseded);
             }
             if member
-                .record
+                .sink
                 .physical
                 .function("main")
                 .unwrap()
@@ -167,23 +160,22 @@ async fn member_task(
     if let Err(error) = current() {
         return (Err(error), None);
     }
-    let property = {
-        let cached = member.record.cached.borrow();
-        cached
-            .device
-            .functions()
-            .iter()
-            .find(|function| function.id() == "main")
-            .unwrap()
-            .lighting()
-            .unwrap()
-            .color()
-            .unwrap()
-            .property()
-    };
+    let property = member
+        .work
+        .native
+        .device
+        .functions()
+        .iter()
+        .find(|function| function.id() == "main")
+        .unwrap()
+        .lighting()
+        .unwrap()
+        .color()
+        .unwrap()
+        .property();
     let properties = vec![(property, json!(rgb.packed()))];
     let operation = context.commands.begin_operation(
-        &member.record.physical.key().id,
+        &member.work.key.id,
         "main",
         property,
         CommandTarget::Light(LightTarget::rgb(None, rgb)),
@@ -200,6 +192,7 @@ async fn member_task(
         match submit_properties(
             context,
             &member.work,
+            &member.sink,
             Batch {
                 function_id: "main",
                 properties: properties.clone(),
@@ -223,13 +216,11 @@ async fn member_task(
 
 /// Automatic mode changes still need real feedback when no notification arrives.
 fn refresh_mode(work: &DeviceWork) {
-    if work.life.is_closed() || work.record.life.is_closed() {
+    if work.life.is_closed() {
         return;
     }
     let mode = work
-        .record
-        .cached
-        .borrow()
+        .native
         .device
         .functions()
         .iter()

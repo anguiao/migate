@@ -1,6 +1,7 @@
 use super::{
     model::AdapterError,
-    state::{Context, DeviceRecord},
+    state::{Context, LogicalSink},
+    work::DeviceWork,
 };
 use crate::{
     device::{Availability, CommandReceiver, DeviceKey},
@@ -10,14 +11,15 @@ use std::{collections::BTreeMap, rc::Rc};
 impl Context {
     pub(super) fn add_consumers(
         self: &Rc<Self>,
-        record: Rc<DeviceRecord>,
+        work: Rc<DeviceWork>,
+        sink: Rc<LogicalSink>,
         receivers: Vec<CommandReceiver>,
     ) {
-        for (function, receiver) in record.physical.functions().iter().zip(receivers) {
+        for (function, receiver) in sink.physical.functions().iter().zip(receivers) {
             if function.description().kind.is_light() {
                 let function = function.clone();
                 let context = self.clone();
-                let life = record.clone();
+                let life = sink.clone();
                 self.tasks.spawn(async move {
                     let mut changes = function.subscribe_light_actions().expect("light");
                     futures_lite::future::or(
@@ -38,7 +40,8 @@ impl Context {
             self.tasks.spawn(super::commands::consume(
                 receiver,
                 self.clone(),
-                record.clone(),
+                work.clone(),
+                sink.clone(),
                 function.function_key().id.clone(),
             ));
         }
@@ -98,7 +101,7 @@ impl Context {
         if self.live.borrow().devices[did].admitted.is_some() {
             self.install_work(did);
             self.update_availability(did);
-            if let Some(work) = self.live.borrow().devices[did].work.as_ref() {
+            if let Some(work) = self.live.borrow().devices[did].admitted.as_ref() {
                 work.retry_subscriptions();
             }
         }
@@ -106,23 +109,35 @@ impl Context {
         Ok(())
     }
     pub(super) fn unavailable_device(&self, did: &str, reason: String) {
-        if let Some(record) = &self.live.borrow().devices[did].admitted {
-            record
-                .physical
+        if let Some(work) = &self.live.borrow().devices[did].admitted {
+            work.physical()
                 .set_availability(Availability::Unavailable(reason));
         }
     }
     pub(super) fn retire_work(&self, did: &str) {
         let mut live = self.live.borrow_mut();
-        if let Some(slot) = live.devices.get_mut(did)
-            && let Some(work) = slot.work.take()
+        if let Some(work) = live
+            .devices
+            .get_mut(did)
+            .and_then(|slot| slot.admitted.take())
         {
+            let sink = work.current_sink();
+            sink.physical
+                .set_availability(Availability::Unavailable("source retired".into()));
+            self.registry.remove(sink.physical.key());
             work.life.close();
+            sink.close();
         }
-        if let Some(session) = live.session.as_mut()
-            && let Some(work) = session.devices.remove(did)
+        if let Some(work) = live
+            .session
+            .as_mut()
+            .and_then(|session| session.devices.remove(did))
         {
+            let sink = work.current_sink();
+            sink.physical
+                .set_availability(Availability::Unavailable("source retired".into()));
             work.life.close();
+            sink.close();
         }
     }
     pub(super) fn remove_source_slot(&self, did: &str) {
@@ -132,8 +147,9 @@ impl Context {
             if let Some(life) = slot.loading {
                 life.close();
             }
-            if let Some(record) = slot.admitted {
-                record.life.close();
+            if let Some(work) = slot.admitted {
+                work.life.close();
+                work.current_sink().close();
             }
         }
         self.problem(did, None);
@@ -145,11 +161,6 @@ impl Context {
             let mut live = self.live.borrow_mut();
             let slot = live.devices.get_mut(did).unwrap();
             slot.blocked = Some(reason.clone());
-            if let Some(record) = &slot.admitted {
-                record
-                    .binding_generation
-                    .set(record.binding_generation.get() + 1);
-            }
         }
         self.retire_work(did);
         if let Some(session) = self.live.borrow().session.as_ref() {
@@ -176,10 +187,8 @@ impl Context {
         self.revoke(did, "device removed from the selected home")?;
         let handle = {
             let live = self.live.borrow();
-            let light = live.devices[did].admitted.as_ref().is_some_and(|record| {
-                record
-                    .cached
-                    .borrow()
+            let light = live.devices[did].admitted.as_ref().is_some_and(|work| {
+                work.native
                     .device
                     .functions()
                     .iter()

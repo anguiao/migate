@@ -48,7 +48,7 @@ fn all_light_samples_read_and_subscribe_every_property() {
                 })
                 .await;
                 let work = control.context.live.borrow().devices["one"]
-                    .work
+                    .admitted
                     .clone()
                     .unwrap();
                 assert_eq!(
@@ -138,7 +138,7 @@ fn on_off_and_dimmable_source_io_use_only_real_bindings() {
                     let light = function(&control.context.registry, "one", "main");
                     until(|| light.snapshot().power.value() == Some(true)).await;
                     let work = control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .clone()
                         .unwrap();
                     assert_eq!(work.bindings().len(), 1);
@@ -175,7 +175,7 @@ fn on_off_and_dimmable_source_io_use_only_real_bindings() {
                     until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(50.0))
                         .await;
                     let work = control.context.live.borrow().devices["one"]
-                        .work
+                        .admitted
                         .clone()
                         .unwrap();
                     assert_eq!(work.bindings().len(), 2);
@@ -259,8 +259,7 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 .admitted
                 .as_ref()
                 .unwrap()
-                .cached
-                .borrow()
+                .native
                 .clone();
             let mut narrower = original.clone();
             narrower.device = super::support::device_with_temperature_grid(
@@ -549,7 +548,7 @@ fn brightness_notification_does_not_discard_unrelated_temperature_read() {
             let light = ready_light(control).await;
             peer.state.borrow_mut().hold_reads = true;
             let work = control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             work.refresh();
@@ -612,12 +611,10 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
 
             freeze_light_clock(control);
             let work = control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
-            let old_read = work
-                .observations
-                .read_stamp(&work.record, "main", BRIGHTNESS);
+            let old_read = work.observations.read_stamp("main", BRIGHTNESS);
             light
                 .begin_light_action(brightness(80.0), true)
                 .unwrap()
@@ -734,8 +731,7 @@ fn binding_change_retires_old_feedback_authority() {
                 .admitted
                 .as_ref()
                 .unwrap()
-                .cached
-                .borrow()
+                .native
                 .clone();
             changed.device = super::support::device_with_brightness_format(
                 &changed.device,
@@ -813,7 +809,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
 
             let retired_work = Rc::downgrade(
                 control.context.live.borrow().devices["one"]
-                    .work
+                    .admitted
                     .as_ref()
                     .unwrap(),
             );
@@ -821,8 +817,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
                 .admitted
                 .as_ref()
                 .unwrap()
-                .cached
-                .borrow()
+                .native
                 .clone();
             changed.device = super::support::device_with_brightness_format(
                 &changed.device,
@@ -895,8 +890,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
                 .admitted
                 .as_ref()
                 .unwrap()
-                .cached
-                .borrow()
+                .native
                 .clone();
             let access = control.context.live.borrow().devices["one"].access.clone();
             let cloud_access = control.context.live.borrow().devices["one"]
@@ -996,7 +990,7 @@ fn malformed_light_read_retries_its_property_without_changing_snapshot() {
             })
             .await;
             let work = control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             until(|| !work.refresh.borrow().snapshot().problems.is_empty()).await;
@@ -1091,13 +1085,11 @@ fn local_late_echo_after_two_accepted_frames_does_not_cancel_action() {
                 // Fresh reads update snapshots without discarding the history
                 // that identifies later echoes of either accepted frame.
                 let work = control.context.live.borrow().devices["one"]
-                    .work
+                    .admitted
                     .clone()
                     .unwrap();
                 for value in [20, 40] {
-                    let stamp = work
-                        .observations
-                        .read_stamp(&work.record, "main", BRIGHTNESS);
+                    let stamp = work.observations.read_stamp("main", BRIGHTNESS);
                     work.observe_read("main", BRIGHTNESS, &stamp, &json!(value))
                         .unwrap();
                     assert_eq!(
@@ -1179,7 +1171,10 @@ fn cloud_late_echo_after_two_accepted_frames_does_not_cancel_action() {
 
             // HTTP receipts and notification delivery share the device's
             // feedback ownership; inject at the notification dispatch boundary.
-            let work = c.context.live.borrow().devices["one"].work.clone().unwrap();
+            let work = c.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
             // Cached reports must leave receipt history intact even when they
             // temporarily restore an older accepted frame's value.
             for value in [20, 40] {
@@ -1230,7 +1225,7 @@ fn accepted_numeric_echoes_expire_three_seconds_after_ack_without_renewal() {
             let action = light.begin_light_action(brightness(20.0), false).unwrap();
             action.accepted().await.unwrap();
             let work = control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             light
@@ -1482,7 +1477,7 @@ fn in_flight_feedback_survives_valid_source_epoch_change() {
             let action = light.begin_light_action(brightness(60.0), false).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
             let work = control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             work.source_changed();
@@ -1736,7 +1731,7 @@ fn rgb_notification_source_requires_all_five_property_subscriptions() {
         let control = &c;
         c.peer(peer, |peer| async move {
             let work = control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             until(|| work.local_exhausted.get()).await;
@@ -1767,7 +1762,7 @@ fn new_mode_only_refreshes_its_missing_color_without_retiring_brightness_read() 
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
             let light = function(&control.context.registry, "one", "main");
             let work = control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             until(|| {
@@ -1816,7 +1811,7 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
                 let light = function(&control.context.registry, "one", "main");
                 let work = control.context.live.borrow().devices["one"]
-                    .work
+                    .admitted
                     .clone()
                     .unwrap();
                 let key = super::super::lighting::key("main", active);
@@ -1824,7 +1819,7 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                 peer.state.borrow_mut().hold_reads = true;
                 peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
                 until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
-                let stamp = work.observations.read_stamp(&work.record, "main", active);
+                let stamp = work.observations.read_stamp("main", active);
                 for _ in 0..3 {
                     peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
                 }
@@ -1833,7 +1828,7 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                 }
                 assert!(
                     work.observations
-                        .read_is_current(&work.record, "main", active, &stamp)
+                        .read_is_current(&work, "main", active, &stamp)
                 );
                 assert!(
                     !work
@@ -1875,7 +1870,7 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
             let light = function(&control.context.registry, "one", "main");
             let work = control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             let key = super::super::lighting::key("main", COLOR);
@@ -1883,13 +1878,13 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
             peer.state.borrow_mut().hold_reads = true;
             work.refresh_property("main", COLOR);
             until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
-            let stamp = work.observations.read_stamp(&work.record, "main", COLOR);
+            let stamp = work.observations.read_stamp("main", COLOR);
             peer.notify_value("one", MODE, json!(1), false);
             until(|| light.snapshot().lighting.unwrap().mode == Some(LightMode::Rgb)).await;
             assert!(
                 !work
                     .observations
-                    .read_is_current(&work.record, "main", COLOR, &stamp)
+                    .read_is_current(&work, "main", COLOR, &stamp)
             );
             peer.release_property("one", COLOR, json!({"value":0x456789}))
                 .await;
@@ -1912,7 +1907,7 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
             let light = function(&control.context.registry, "one", "main");
             let work = control.context.live.borrow().devices["one"]
-                .work
+                .admitted
                 .clone()
                 .unwrap();
             let key = super::super::lighting::key("main", COLOR);
@@ -1979,8 +1974,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
             .admitted
             .as_ref()
             .unwrap()
-            .cached
-            .borrow()
+            .native
             .clone();
         changed.device = super::support::device_with_brightness_format(
             &changed.device,
@@ -2030,7 +2024,7 @@ fn unknown_mode_color_values_update_only_cache_until_the_mode_changes() {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
                 let light = function(&control.context.registry, "one", "main");
                 let work = control.context.live.borrow().devices["one"]
-                    .work
+                    .admitted
                     .clone()
                     .unwrap();
                 until(|| {

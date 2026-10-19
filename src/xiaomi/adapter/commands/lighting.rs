@@ -1,7 +1,7 @@
 use super::super::{
     model::{AdapterError, CommandTarget, PathKind},
     routing::ControlPath,
-    state::{Context, DeviceRecord},
+    state::{Context, LogicalSink},
     work::DeviceWork,
 };
 use super::command_error;
@@ -64,10 +64,8 @@ fn cloud_command_error(error: &CloudError) -> CommandError {
         _ => CommandError::SendFailed(error.to_string()),
     }
 }
-fn alive(work: &DeviceWork, generation: u64) -> bool {
-    !work.life.is_closed()
-        && !work.record.life.is_closed()
-        && work.record.binding_generation.get() == generation
+fn alive(work: &DeviceWork, sink: &LogicalSink) -> bool {
+    !work.life.is_closed() && !sink.life.is_closed()
 }
 
 /// One settled property batch: logical result plus a fallible cloud report.
@@ -121,24 +119,24 @@ fn refresh_after_write(
         .live
         .borrow()
         .devices
-        .get(&original.record.physical.key().id)
-        .and_then(|slot| slot.work.clone())
+        .get(&original.key.id)
+        .and_then(|slot| slot.admitted.clone())
     else {
         return;
     };
-    if work.life.is_closed() || work.record.life.is_closed() {
+    if work.life.is_closed() {
         return;
     }
     let mode = {
-        let original = original.record.cached.borrow();
         let original = original
+            .native
             .device
             .functions()
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
-        let cached = work.record.cached.borrow();
-        let Some(function) = cached
+        let Some(function) = work
+            .native
             .device
             .functions()
             .iter()
@@ -150,7 +148,7 @@ fn refresh_after_write(
             return;
         }
         let light = function.lighting().unwrap();
-        if context.is_virtual_group(&work.record.physical.key().id) {
+        if context.is_virtual_group(&work.key.id) {
             let written = |property| properties.iter().any(|(binding, _)| *binding == property);
             let power = written(function.power());
             let brightness = light
@@ -162,9 +160,9 @@ fn refresh_after_write(
             let color = light
                 .color()
                 .is_some_and(|binding| written(binding.property()));
-            for member in context.group_member_work(&work.record.physical.key().id) {
-                let cached = member.record.cached.borrow();
-                let function = cached
+            for member in context.group_member_work(&work.key.id) {
+                let function = member
+                    .native
                     .device
                     .functions()
                     .iter()
@@ -237,6 +235,7 @@ fn refresh_after_write(
 async fn submit_properties(
     context: &Rc<Context>,
     work: &Rc<DeviceWork>,
+    sink: &Rc<LogicalSink>,
     batch: Batch<'_>,
 ) -> BatchAttempt {
     let Batch {
@@ -249,13 +248,12 @@ async fn submit_properties(
         current,
         frame_current,
     } = batch;
-    let did = work.record.physical.key().id.clone();
-    let generation = work.record.binding_generation.get();
+    let did = work.key.id.clone();
     let authority = gate.authority();
     if let Err(error) = current() {
         return settled(Err(error));
     }
-    if !alive(work, generation) {
+    if !alive(work, sink) {
         return settled(Err(CommandError::Cancelled));
     }
     let Some(path) = context.control_path(&did) else {
@@ -267,6 +265,7 @@ async fn submit_properties(
         ControlPath::Local(handle) => {
             let slot = Rc::new(RefCell::new(None::<BatchReceipt>));
             let guard_work = work.clone();
+            let guard_sink = sink.clone();
             let guard_context = context.clone();
             let guard_handle = handle.clone();
             let guard_did = did.clone();
@@ -287,8 +286,7 @@ async fn submit_properties(
             let hooks = SendHooks::new(
                 move || {
                     if guard_work.life.is_closed()
-                        || guard_work.record.life.is_closed()
-                        || guard_work.record.binding_generation.get() != generation
+                        || guard_sink.life.is_closed()
                         || !guard_context.current_local(&guard_handle)
                         || guard_current().is_err()
                     {
@@ -331,12 +329,7 @@ async fn submit_properties(
                             authority,
                         );
                     }
-                    result_context.local_device_outcome(
-                        &result_handle,
-                        &result_work,
-                        generation,
-                        &outcome,
-                    );
+                    result_context.local_device_outcome(&result_handle, &result_work, &outcome);
                     let receipt = match outcome.result {
                         Ok(results) => {
                             result_gate.finish_feedback_for(
@@ -350,7 +343,6 @@ async fn submit_properties(
                                 result_context.local_device_outcome(
                                     &result_handle,
                                     &result_work,
-                                    generation,
                                     &crate::xiaomi::central::RequestOutcome::<()> {
                                         result: Err(error.clone()),
                                         stage: outcome.stage,
@@ -412,7 +404,7 @@ async fn submit_properties(
             let receipt = match &result {
                 Ok(results) => {
                     gate.finish_feedback_for(authority, &properties, results, retain_feedback);
-                    let current = alive(work, generation);
+                    let current = alive(work, sink);
                     let mut maintenance = None;
                     for error in results.items.iter().filter_map(|item| item.as_ref().err()) {
                         if maintenance.is_none() {
@@ -444,7 +436,7 @@ async fn submit_properties(
                     let maintenance = context
                         .cloud_error(
                             &credentials.access_token,
-                            alive(work, generation).then_some(did.as_str()),
+                            alive(work, sink).then_some(did.as_str()),
                             error,
                         )
                         .err();
@@ -463,7 +455,8 @@ async fn submit_properties(
 pub(super) async fn send_owned(
     request: DeviceRequest,
     context: Rc<Context>,
-    record: Rc<DeviceRecord>,
+    work: Rc<DeviceWork>,
+    sink: Rc<LogicalSink>,
     id: &str,
 ) -> Result<(), AdapterError> {
     let completion = Rc::new((Cell::new(false), Event::new()));
@@ -472,10 +465,10 @@ pub(super) async fn send_owned(
     let id = id.to_owned();
     let gate = context
         .light_writes
-        .for_device(&record.physical.key().id, context.clock.clone());
+        .for_device(&work.key.id, context.clock.clone());
     context.tasks.spawn(async move {
         let _permit = gate.acquire().await;
-        let result = send(request, owner, record, &id, gate).await;
+        let result = send(request, owner, work, sink, &id, gate).await;
         complete.0.set(true);
         complete.1.notify(usize::MAX);
         result
@@ -492,11 +485,12 @@ pub(super) async fn send_owned(
 pub(super) async fn send(
     request: DeviceRequest,
     context: Rc<Context>,
-    record: Rc<DeviceRecord>,
+    work: Rc<DeviceWork>,
+    sink: Rc<LogicalSink>,
     id: &str,
     gate: Rc<super::LightWriteGate>,
 ) -> Result<(), AdapterError> {
-    let did = record.physical.key().id.clone();
+    let did = work.key.id.clone();
     let native_group = context.is_group(&did);
     let light_target = match &request {
         DeviceRequest::Power(_) => None,
@@ -516,19 +510,8 @@ pub(super) async fn send(
         let DeviceRequest::Light(request) = request else {
             unreachable!("RGB requests are light requests");
         };
-        return repair::send(request, rgb, context, record, plan).await;
+        return repair::send(request, rgb, context, work, sink, plan).await;
     }
-    let work = context
-        .live
-        .borrow()
-        .devices
-        .get(&did)
-        .and_then(|slot| slot.work.clone());
-    let Some(work) = work else {
-        let error = CommandError::Unavailable("no usable control path".into());
-        reject(request, error);
-        return Ok(());
-    };
     let properties =
         match super::super::lighting::encode(&work, id, power, light_target, native_group) {
             Ok(properties) => properties,
@@ -548,16 +531,15 @@ pub(super) async fn send(
         id,
         properties
             .first()
-            .map_or(record.binding(id), |(binding, _)| *binding),
+            .map_or(work.binding(id), |(binding, _)| *binding),
         diagnostic_target,
         properties.clone(),
         request.queued_at(),
     );
 
-    let generation = record.binding_generation.get();
     let mut request = request;
     loop {
-        if !alive(&work, generation) || !current(&request) {
+        if !alive(&work, &sink) || !current(&request) {
             let error = current_result(&request)
                 .err()
                 .unwrap_or(CommandError::Cancelled);
@@ -606,6 +588,7 @@ pub(super) async fn send(
         match submit_properties(
             &context,
             &work,
+            &sink,
             Batch {
                 function_id: id,
                 properties,
