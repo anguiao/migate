@@ -1472,6 +1472,11 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
                     && second.snapshot().power == Power::Unknown
             })
             .await;
+            let cleared = first.snapshot().lighting.unwrap();
+            assert_eq!(cleared.brightness_percent, None);
+            assert_eq!(cleared.temperature_kelvin, None);
+            assert_eq!(cleared.color, None);
+            assert_eq!(cleared.mode, None);
             c.cloud
                 .lock()
                 .unwrap()
