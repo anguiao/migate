@@ -351,24 +351,28 @@ impl NotificationDriver {
             return Poll::Ready(Err(error));
         }
         let mut progressed = false;
-        let status = match self.output.front_mut() {
-            Some(output) => Some(output.frame.poll_io(cx, &mut self.stream)),
-            None => None,
-        };
-        match status {
-            None => {}
-            Some(Err(_)) => return Poll::Ready(Err(NotificationError::Io)),
-            Some(Ok(mqtt::SendStatus::Pending)) => {}
-            Some(Ok(mqtt::SendStatus::Wrote { complete, .. })) => {
-                progressed = true;
-                if complete && let Err(error) = self.flush_front(cx) {
-                    return Poll::Ready(Err(error));
+        loop {
+            let status = match self.output.front_mut() {
+                Some(output) => Some(output.frame.poll_io(cx, &mut self.stream)),
+                None => None,
+            };
+            match status {
+                None => break,
+                Some(Err(_)) => return Poll::Ready(Err(NotificationError::Io)),
+                Some(Ok(mqtt::SendStatus::Pending)) => break,
+                Some(Ok(mqtt::SendStatus::Wrote { complete, .. })) => {
+                    progressed = true;
+                    if !complete {
+                        break;
+                    }
+                    // Record accepted bytes before flushing in this same poll.
                 }
-            }
-            Some(Ok(mqtt::SendStatus::Flushed)) => {
-                self.output.pop_front();
-                self.keepalive.sent(Instant::now());
-                progressed = true;
+                Some(Ok(mqtt::SendStatus::Flushed)) => {
+                    self.output.pop_front();
+                    self.keepalive.sent(Instant::now());
+                    progressed = true;
+                    break;
+                }
             }
         }
         let mut bytes = [0; 4096];
@@ -387,23 +391,6 @@ impl NotificationDriver {
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
-        }
-    }
-
-    /// Continue a fully written frame with its flush in the same poll.
-    fn flush_front(&mut self, cx: &mut std::task::Context<'_>) -> Result<(), NotificationError> {
-        let flushed = match self.output.front_mut() {
-            Some(output) => output.frame.poll_flush(cx, &mut self.stream),
-            None => return Ok(()),
-        };
-        match flushed {
-            Ok(true) => {
-                self.output.pop_front();
-                self.keepalive.sent(Instant::now());
-                Ok(())
-            }
-            Ok(false) => Ok(()),
-            Err(_) => Err(NotificationError::Io),
         }
     }
 

@@ -120,9 +120,15 @@ fn flush_follows_an_accepted_write_without_another_write() {
         }
     );
     let mut cx = Context::from_waker(Waker::noop());
-    assert!(!frame.poll_flush(&mut cx, &mut stream).unwrap());
+    assert_eq!(
+        frame.poll_io(&mut cx, &mut stream).unwrap(),
+        SendStatus::Pending
+    );
     stream.flush_pending = false;
-    assert!(frame.poll_flush(&mut cx, &mut stream).unwrap());
+    assert_eq!(
+        frame.poll_io(&mut cx, &mut stream).unwrap(),
+        SendStatus::Flushed
+    );
     assert_eq!(stream.written, b"ok", "flush never writes bytes");
 }
 

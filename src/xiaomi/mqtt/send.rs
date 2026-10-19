@@ -73,32 +73,10 @@ impl SendFrame {
                 Poll::Pending => Ok(SendStatus::Pending),
             };
         }
-        Ok(if self.poll_flush(cx, stream)? {
-            SendStatus::Flushed
-        } else {
-            SendStatus::Pending
-        })
-    }
-
-    /// Flush a frame whose bytes are all written. Returns true when the
-    /// transport accepted the flush; it never writes more bytes.
-    pub(in crate::xiaomi) fn poll_flush<S>(
-        &mut self,
-        cx: &mut Context<'_>,
-        stream: &mut S,
-    ) -> io::Result<bool>
-    where
-        S: AsyncWrite + Unpin + ?Sized,
-    {
-        debug_assert_eq!(
-            self.offset,
-            self.bytes.len(),
-            "flush before the frame is written"
-        );
-        match Pin::new(&mut *stream).poll_flush(cx) {
-            Poll::Ready(Ok(())) => Ok(true),
+        match Pin::new(stream).poll_flush(cx) {
+            Poll::Ready(Ok(())) => Ok(SendStatus::Flushed),
             Poll::Ready(Err(error)) => Err(error),
-            Poll::Pending => Ok(false),
+            Poll::Pending => Ok(SendStatus::Pending),
         }
     }
 }

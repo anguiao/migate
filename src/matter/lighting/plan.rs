@@ -595,6 +595,19 @@ pub(super) fn move_to_color_temperature(
     })
 }
 
+fn temperature_bounds(profile: LightProfile, min: u16, max: u16) -> Result<(u16, u16), PlanError> {
+    let (lo, hi) = profile
+        .temperature_interval()
+        .map(mired_bounds)
+        .ok_or(PlanError::InvalidState)?;
+    let lo = if min == 0 { lo } else { min.max(lo) };
+    let hi = if max == 0 { hi } else { max.min(hi) };
+    if lo > hi {
+        return Err(PlanError::InvalidCommand);
+    }
+    Ok((lo, hi))
+}
+
 pub(super) fn move_color_temperature(
     mode: MoveMode,
     rate: u16,
@@ -615,16 +628,7 @@ pub(super) fn move_color_temperature(
     if matches!(mode, MoveMode::Stop) {
         return Ok(Plan::Stop(LightDimension::Color));
     }
-    let (lo, hi) = input
-        .profile
-        .temperature_interval()
-        .map(mired_bounds)
-        .ok_or(PlanError::InvalidState)?;
-    let lo = if min == 0 { lo } else { min.max(lo) };
-    let hi = if max == 0 { hi } else { max.min(hi) };
-    if lo > hi {
-        return Err(PlanError::InvalidCommand);
-    }
+    let (lo, hi) = temperature_bounds(input.profile, min, max)?;
     let start = input.state.temperature.ok_or(PlanError::InvalidState)?;
     let rate_mireds_per_sec = if matches!(mode, MoveMode::Up) {
         rate as i32
@@ -662,16 +666,7 @@ pub(super) fn step_color_temperature(
     if !color_gate(request, input)? {
         return Ok(Plan::Ignore);
     }
-    let (lo, hi) = input
-        .profile
-        .temperature_interval()
-        .map(mired_bounds)
-        .ok_or(PlanError::InvalidState)?;
-    let lo = if min == 0 { lo } else { min.max(lo) };
-    let hi = if max == 0 { hi } else { max.min(hi) };
-    if lo > hi {
-        return Err(PlanError::InvalidCommand);
-    }
+    let (lo, hi) = temperature_bounds(input.profile, min, max)?;
     let start = input.state.temperature.ok_or(PlanError::InvalidState)?;
     let target = if matches!(mode, StepMode::Up) {
         start.saturating_add(size.min(hi.saturating_sub(start)))

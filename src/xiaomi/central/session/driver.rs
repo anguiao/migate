@@ -444,29 +444,33 @@ impl SessionDriver {
             }
         }
         let mut progressed = false;
-        let status = match self.output.front_mut() {
-            Some(output) => Some((
-                output.frame.poll_io(cx, &mut self.stream),
-                output.request,
-                output.pkid,
-            )),
-            None => None,
-        };
-        match status {
-            None => {}
-            Some((Err(_), _, _)) => return Poll::Ready(Err(CentralError::Io)),
-            Some((Ok(mqtt::SendStatus::Pending), _, _)) => {}
-            Some((Ok(mqtt::SendStatus::Wrote { complete, .. }), request, pkid)) => {
-                self.mark_sent(request, pkid);
-                progressed = true;
-                if complete && let Err(error) = self.flush_front(cx) {
-                    return Poll::Ready(Err(error));
+        loop {
+            let status = match self.output.front_mut() {
+                Some(output) => Some((
+                    output.frame.poll_io(cx, &mut self.stream),
+                    output.request,
+                    output.pkid,
+                )),
+                None => None,
+            };
+            match status {
+                None => break,
+                Some((Err(_), _, _)) => return Poll::Ready(Err(CentralError::Io)),
+                Some((Ok(mqtt::SendStatus::Pending), _, _)) => break,
+                Some((Ok(mqtt::SendStatus::Wrote { complete, .. }), request, pkid)) => {
+                    self.mark_sent(request, pkid);
+                    progressed = true;
+                    if !complete {
+                        break;
+                    }
+                    // Record accepted bytes before flushing in this same poll.
                 }
-            }
-            Some((Ok(mqtt::SendStatus::Flushed), _, _)) => {
-                self.output.pop_front();
-                self.keepalive.sent(Instant::now());
-                progressed = true;
+                Some((Ok(mqtt::SendStatus::Flushed), _, _)) => {
+                    self.output.pop_front();
+                    self.keepalive.sent(Instant::now());
+                    progressed = true;
+                    break;
+                }
             }
         }
         let mut bytes = [0; 4096];
@@ -485,23 +489,6 @@ impl SessionDriver {
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
-        }
-    }
-    /// Continue a fully written frame with its flush in the same poll, after
-    /// the send progress was recorded.
-    fn flush_front(&mut self, cx: &mut std::task::Context<'_>) -> Result<(), CentralError> {
-        let flushed = match self.output.front_mut() {
-            Some(output) => output.frame.poll_flush(cx, &mut self.stream),
-            None => return Ok(()),
-        };
-        match flushed {
-            Ok(true) => {
-                self.output.pop_front();
-                self.keepalive.sent(Instant::now());
-                Ok(())
-            }
-            Ok(false) => Ok(()),
-            Err(_) => Err(CentralError::Io),
         }
     }
 

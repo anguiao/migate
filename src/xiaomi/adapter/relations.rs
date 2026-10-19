@@ -107,19 +107,17 @@ impl Relations {
         home: &BTreeSet<String>,
     ) -> RelationUpdate {
         let before: BTreeSet<String> = self.active_keys();
-        let mut present_records = BTreeSet::new();
         let mut confirmations: BTreeMap<String, (CloudGroupMembership, &CloudCatalogDevice)> =
             BTreeMap::new();
         let mut records: BTreeMap<&str, &CloudCatalogDevice> = BTreeMap::new();
         for device in &catalog.devices {
-            present_records.insert(device.did.clone());
             records.insert(device.did.as_str(), device);
             if let CloudGroupStatus::Confirmed(membership) = &device.group {
                 confirmations.insert(membership.group_did.clone(), (membership.clone(), device));
             }
         }
         let retain_previous = |group: &ConfirmedGroup| {
-            present_records.contains(&group.record_did)
+            records.contains_key(group.record_did.as_str())
                 && group.scope.uid == scope.uid
                 && group.scope.home_id == scope.home_id
         };
@@ -136,96 +134,47 @@ impl Relations {
             .map(|(did, _)| did.clone())
             .collect();
         for (group_did, (membership, record)) in &confirmations {
-            let previous = self.groups.get(group_did).cloned();
-            let record_did = &record.did;
-            // The confirmation carries the actual catalog record: no re-find
-            // and no manufactured empty metadata.
-            let model = record.model.clone();
-            let instance_type = record.instance_type.clone();
-            let name = record.name.clone();
-            let online = record.online;
-            if membership.members.is_empty() {
-                // A confirmed empty relation withdraws a previously scoped
-                // group. A first-time empty relation cannot establish scope.
-                let Some(previous) = previous else {
-                    continue;
-                };
-                self.groups.insert(
-                    group_did.clone(),
-                    ConfirmedGroup {
-                        membership: membership.clone(),
-                        scope: previous.scope,
-                        record_did: record_did.clone(),
-                        model,
-                        instance_type,
-                        name,
-                        online,
-                        active: false,
-                        error: None,
-                    },
-                );
+            let previous = self.groups.get(group_did);
+            let empty = membership.members.is_empty();
+            if empty && previous.is_none() {
+                // An empty relation cannot establish a new group's scope.
                 continue;
             }
-            if nested.contains(group_did) {
-                let reason = "nested group members are not supported".to_string();
-                errors.push((group_did.clone(), reason.clone()));
-                self.groups.insert(
-                    group_did.clone(),
-                    ConfirmedGroup {
-                        membership: membership.clone(),
-                        scope: previous
-                            .map(|group| group.scope)
-                            .unwrap_or_else(|| scope.clone()),
-                        record_did: record_did.clone(),
-                        model,
-                        instance_type,
-                        name,
-                        online,
-                        active: false,
-                        error: Some(reason),
-                    },
-                );
-                continue;
-            }
-            if !membership
+            let error = if empty {
+                None
+            } else if nested.contains(group_did) {
+                Some("nested group members are not supported".to_owned())
+            } else if !membership
                 .members
                 .iter()
                 .any(|member| home.contains(member))
             {
-                let reason = "group members are outside the selected home".to_string();
-                errors.push((group_did.clone(), reason.clone()));
-                self.groups.insert(
-                    group_did.clone(),
-                    ConfirmedGroup {
-                        membership: membership.clone(),
-                        scope: previous
-                            .map(|group| group.scope)
-                            .unwrap_or_else(|| scope.clone()),
-                        record_did: record_did.clone(),
-                        model,
-                        instance_type,
-                        name,
-                        online,
-                        active: false,
-                        error: Some(reason),
-                    },
-                );
-                continue;
+                Some("group members are outside the selected home".to_owned())
+            } else {
+                None
+            };
+            if let Some(error) = &error {
+                errors.push((group_did.clone(), error.clone()));
             }
-            // A successful in-home confirmation belongs to the current scope;
-            // a stale previous scope must not suppress the native fetch.
+            let active = !empty && error.is_none();
+            // Only a successful in-home confirmation establishes a new scope.
+            let scope = if active {
+                scope.clone()
+            } else {
+                previous.map(|group| &group.scope).unwrap_or(scope).clone()
+            };
             self.groups.insert(
                 group_did.clone(),
                 ConfirmedGroup {
                     membership: membership.clone(),
-                    scope: scope.clone(),
-                    record_did: record_did.clone(),
-                    model,
-                    instance_type,
-                    name,
-                    online,
-                    active: true,
-                    error: None,
+                    scope,
+                    record_did: record.did.clone(),
+                    model: record.model.clone(),
+                    instance_type: record.instance_type.clone(),
+                    name: record.name.clone(),
+                    online: record.online,
+                    active,
+                    error,
                 },
             );
         }
