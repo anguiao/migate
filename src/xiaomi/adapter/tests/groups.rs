@@ -1,13 +1,13 @@
 use super::*;
 use std::cell::Cell;
 
-use super::repair::group_record;
+use super::support::group_record;
 
 #[test]
 fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
-    let rig = super::repair::repair_rig(1, true);
+    let rig = super::support::repair_rig(1, true);
     block_on(rig.run(|c| async move {
-        super::repair::repair_ready(&c).await;
+        super::support::repair_ready(&c).await;
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1527,9 +1527,9 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
 
 #[test]
 fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
-    let rig = super::repair::repair_rig(1, true);
+    let rig = super::support::repair_rig(1, true);
     block_on(rig.run(|c| async move {
-        super::repair::repair_ready(&c).await;
+        super::support::repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "main");
         // Native control acceptance does not manufacture actual state. Reads
         // must use the members, including mode when a CT command selects white.

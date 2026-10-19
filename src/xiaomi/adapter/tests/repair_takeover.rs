@@ -1,5 +1,5 @@
 use super::{
-    repair::{group_instance, group_record, repair_ready, repair_rig},
+    support::{group_instance, group_record, repair_ready, repair_rig},
     *,
 };
 use crate::device::{LightColorTarget, LightDimension, LightTarget, Rgb};

@@ -37,9 +37,16 @@ pub(super) use std::{
     time::Duration,
 };
 
+mod cloud_peer;
+mod groups;
 mod peer;
 mod rig;
 
+pub(super) use cloud_peer::{CloudBroker, CloudPeer, cloud_active, with_cloud_peer};
+pub(super) use groups::{
+    MEMBER_COLOR, MEMBER_MODE, confirmed_for, group_instance, group_record, ls2307_instance,
+    repair_ready, repair_rig,
+};
 pub(super) use peer::{Peer, peer_run, response, topic_key};
 pub(super) use rig::{Control, Rig};
 

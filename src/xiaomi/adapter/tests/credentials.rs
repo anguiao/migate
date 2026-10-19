@@ -1,4 +1,4 @@
-use super::notifications::{cloud_active, with_cloud_peer};
+use super::support::{cloud_active, with_cloud_peer};
 use super::*;
 
 fn token_deadlines(rig: &Rig, refresh: i64, expiry: i64) {

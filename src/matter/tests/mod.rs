@@ -1,4 +1,4 @@
-pub(in crate::matter) mod handlers;
+mod handlers;
 mod subscriptions;
 pub(crate) mod support;
 

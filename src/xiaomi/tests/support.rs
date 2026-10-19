@@ -90,14 +90,7 @@ pub(crate) fn mock_server(responses: Vec<MockResponse>) -> (String, Receiver<Rec
                 continue;
             };
             let _ = sender.send(request);
-            if let Some(split_at) = response.split_at {
-                let _ = stream.write_all(&response.wire.as_bytes()[..split_at]);
-                thread::sleep(response.delay);
-                let _ = stream.write_all(&response.wire.as_bytes()[split_at..]);
-            } else {
-                thread::sleep(response.delay);
-                let _ = stream.write_all(response.wire.as_bytes());
-            }
+            write_response(stream, response);
         }
     });
     (format!("http://{address}"), receiver)

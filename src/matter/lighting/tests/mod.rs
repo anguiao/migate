@@ -76,7 +76,7 @@ use crate::{
     matter::{
         model,
         storage::StoreAdapter,
-        tests::{handlers::Context, support},
+        tests::support::{self, Context},
     },
     storage::Store,
 };
