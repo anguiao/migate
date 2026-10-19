@@ -3,35 +3,11 @@ use super::{
 };
 use crate::{
     storage::{StorageError, TokenSet},
-    xiaomi::{
-        certificate::CertificateValidity,
-        cloud::{CloudError, HomePage, OwnedHome},
-    },
+    xiaomi::{certificate::CertificateValidity, cloud::CloudError},
 };
 
 impl AuthService {
-    async fn read_check_home(
-        &self,
-        access_token: &str,
-        homes: Option<&mut Vec<OwnedHome>>,
-    ) -> Result<HomePage, CloudError> {
-        match homes {
-            Some(homes) => {
-                let catalog = self.cloud.get_owned_homes(access_token).await?;
-                *homes = catalog.homes;
-                Ok(HomePage {
-                    uid: catalog.uid,
-                    dids: Vec::new(),
-                })
-            }
-            None => self.cloud.get_home(access_token).await,
-        }
-    }
-
-    pub(super) async fn check_mode(
-        &self,
-        mut bridge_homes: Option<&mut Vec<OwnedHome>>,
-    ) -> Result<AuthReport, AuthError> {
+    pub async fn check(&self) -> Result<AuthReport, AuthError> {
         let Some(stored) = self.load_validated()? else {
             return Ok(AuthReport {
                 authentication: AuthenticationState::NotSignedIn,
@@ -56,20 +32,16 @@ impl AuthService {
         }
 
         let home = match session
-            .request(async |token| {
-                self.read_check_home(token, bridge_homes.as_deref_mut())
-                    .await
-            })
+            .request(async |token| self.cloud.get_home(token).await)
             .await
         {
             Ok(home) => home,
             Err(failure) => return failure.auth_report(old_validity, (self.now)()),
         };
 
-        if bridge_homes.is_none()
-            && let Err(failure) = session
-                .request(async |token| self.cloud.get_devices(token, &home.dids).await)
-                .await
+        if let Err(failure) = session
+            .request(async |token| self.cloud.get_devices(token, &home.dids).await)
+            .await
         {
             return failure.auth_report(old_validity, (self.now)());
         }

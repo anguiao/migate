@@ -7,18 +7,6 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 impl CloudClient {
-    pub async fn read_property(
-        &self,
-        access_token: &str,
-        did: &str,
-        binding: PropertyBinding,
-    ) -> Result<bool, CloudError> {
-        self.read_property_value(access_token, did, binding)
-            .await?
-            .as_bool()
-            .ok_or_else(|| CloudError::protocol("read Xiaomi property"))
-    }
-
     pub async fn read_property_value(
         &self,
         access_token: &str,

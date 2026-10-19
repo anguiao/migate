@@ -128,7 +128,10 @@ fn property_requests_use_official_paths_and_correlated_boolean_results() {
         ),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    assert!(!future::block_on(cloud.read_property("access-secret", "target", POWER)).unwrap());
+    assert_eq!(
+        future::block_on(cloud.read_property_value("access-secret", "target", POWER)).unwrap(),
+        json!(false)
+    );
     future::block_on(cloud.set_property("access-secret", "target", POWER, true)).unwrap();
     future::block_on(cloud.set_property("access-secret", "target", POWER, false)).unwrap();
     for (path, body) in [
@@ -157,33 +160,26 @@ fn property_requests_use_official_paths_and_correlated_boolean_results() {
 }
 
 #[test]
-fn property_reads_accept_only_boolean_values_with_successful_item_codes() {
-    for value in [json!(true), json!(false)] {
+fn property_reads_accept_boolean_and_numeric_values_with_successful_item_codes() {
+    for value in [json!(true), json!(false), json!(0), json!(1), json!(2.5)] {
         let body =
             json!({"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":value}]})
                 .to_string();
         let (base, _) = mock_server(vec![MockResponse::json(200, &body)]);
         let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
         assert_eq!(
-            future::block_on(cloud.read_property("token", "target", POWER)).unwrap(),
-            value.as_bool().unwrap()
+            future::block_on(cloud.read_property_value("token", "target", POWER)).unwrap(),
+            value
         );
     }
-    for value in [
-        Value::Null,
-        json!(0),
-        json!(1),
-        json!("true"),
-        json!([]),
-        json!({}),
-    ] {
+    for value in [Value::Null, json!("true"), json!([]), json!({})] {
         let body =
             json!({"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":value}]})
                 .to_string();
         let (base, _) = mock_server(vec![MockResponse::json(200, &body)]);
         let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
         assert_eq!(
-            future::block_on(cloud.read_property("token", "target", POWER))
+            future::block_on(cloud.read_property_value("token", "target", POWER))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -195,7 +191,7 @@ fn property_reads_accept_only_boolean_values_with_successful_item_codes() {
     )]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     assert_eq!(
-        future::block_on(cloud.read_property("token", "target", POWER))
+        future::block_on(cloud.read_property_value("token", "target", POWER))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -206,7 +202,7 @@ fn property_reads_accept_only_boolean_values_with_successful_item_codes() {
     )]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     assert_eq!(
-        future::block_on(cloud.read_property("token", "target", POWER))
+        future::block_on(cloud.read_property_value("token", "target", POWER))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::PropertyRejected(1)
@@ -259,7 +255,7 @@ fn property_operations_reject_invalid_envelopes_and_unassociated_results() {
         ]);
         let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
         let errors = [
-            future::block_on(cloud.read_property("token", "target", POWER)).unwrap_err(),
+            future::block_on(cloud.read_property_value("token", "target", POWER)).unwrap_err(),
             future::block_on(cloud.set_property("token", "target", POWER, true)).unwrap_err(),
         ];
         for error in errors {
@@ -294,7 +290,8 @@ fn property_failures_preserve_official_business_codes_and_failure_scope() {
         ]);
         let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
         for error in [
-            future::block_on(cloud.read_property("access-secret", "target", POWER)).unwrap_err(),
+            future::block_on(cloud.read_property_value("access-secret", "target", POWER))
+                .unwrap_err(),
             future::block_on(cloud.set_property("access-secret", "target", POWER, true))
                 .unwrap_err(),
         ] {
@@ -383,7 +380,7 @@ fn property_timeouts_cover_headers_and_body_and_do_not_replay_writes() {
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_millis(10)).unwrap();
     assert!(
-        future::block_on(cloud.read_property("token", "target", POWER))
+        future::block_on(cloud.read_property_value("token", "target", POWER))
             .unwrap_err()
             .is_timeout()
     );
@@ -401,7 +398,7 @@ fn invalid_property_targets_fail_before_sending_http() {
         ("token", "target", PropertyBinding { siid: 2, piid: 0 }),
     ] {
         for error in [
-            future::block_on(cloud.read_property(token, did, binding)).unwrap_err(),
+            future::block_on(cloud.read_property_value(token, did, binding)).unwrap_err(),
             future::block_on(cloud.set_property(token, did, binding, true)).unwrap_err(),
         ] {
             assert_eq!(error.kind(), &CloudErrorKind::InvalidInput);

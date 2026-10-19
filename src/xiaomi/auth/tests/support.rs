@@ -4,23 +4,6 @@ use crate::storage::XiaomiStore;
 pub(super) const NOW: i64 = 2_000_000_000;
 pub(super) const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
-pub(super) fn cached_bridge_device() -> crate::configuration::NativeDescription {
-    crate::configuration::NativeDescription {
-        model: "vendor.plug".into(),
-        instance_type: "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1".into(),
-        device: crate::xiaomi::capability::ParsedDevice::new(
-            crate::device::DeviceKey::new("xiaomi", "target"),
-            vec![crate::xiaomi::capability::ParsedFunction::outlet(
-                "main",
-                "主电源",
-                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-            )],
-            None,
-        )
-        .unwrap(),
-    }
-}
-
 pub(super) fn now() -> i64 {
     NOW
 }
