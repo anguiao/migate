@@ -1,6 +1,6 @@
 use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler};
 use crate::device::{Function, LightProfileKind, PhysicalDevice};
-use crate::storage::{Identity, StorageError, Store};
+use crate::storage::Identity;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use rand::RngExt as _;
 use rs_matter::{
@@ -483,10 +483,9 @@ pub(super) struct Model {
 
 pub(super) fn handler_from(
     entries: Vec<FrozenEntry>,
-    _store: &Store,
     mut random: impl rand::Rng,
     renamer: Rc<dyn super::bridge::LabelWriter>,
-) -> Result<Model, StorageError> {
+) -> Model {
     let root = endpoints::EthSysHandlerBuilder::new()
         .netif_diag(&SysNetifs)
         .build(&mut random)
@@ -548,10 +547,10 @@ pub(super) fn handler_from(
         }
     }
     built.sort_by_key(|entry| entry.endpoint);
-    Ok(Model {
+    Model {
         root,
         entries: built,
-    })
+    }
 }
 impl Model {
     fn entry(&self, endpoint: u16) -> Result<Rc<Entry>, Error> {

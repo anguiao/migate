@@ -62,7 +62,6 @@ pub(crate) trait LabelWriter {
 
 /// One frozen Matter instance and storage failures that outlive its run future.
 pub(crate) struct Bridge<'a> {
-    storage: Store,
     identity: &'a Identity,
     pub(super) store: StoreAdapter,
     /// Explicit committed published references, identities and root version
@@ -80,7 +79,6 @@ impl<'a> Bridge<'a> {
         renamer: Rc<dyn LabelWriter>,
     ) -> Self {
         Self {
-            storage: store.clone(),
             identity,
             store: StoreAdapter::new(store.matter()),
             frozen: (entries, root_version),
@@ -120,8 +118,7 @@ impl<'a> Bridge<'a> {
         let state: EthInteractionModelState =
             EthInteractionModelState::new(EthNetwork::new_default());
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let handler =
-            model::handler_from(frozen, &self.storage, crypto.rand()?, self.renamer.clone())?;
+        let handler = model::handler_from(frozen, crypto.rand()?, self.renamer.clone());
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         store.with_context("restore Matter model", im.startup().await)?;
         let persist_kv = matter.kv(store.clone());

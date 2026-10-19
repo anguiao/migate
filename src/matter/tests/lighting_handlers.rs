@@ -34,7 +34,7 @@ macro_rules! setup_light {
         let identity = store.load_identity().unwrap();
         let ($device, mut $receiver) = $source;
         let $registry = crate::matter::tests::support::test_registry(&store, &$device);
-        let $handler = model_handler(&$registry, &store, StoreAdapter::new(store.matter()), rand::rng()).unwrap();
+        let $handler = model_handler(&$registry, &store, rand::rng()).unwrap();
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
@@ -664,13 +664,7 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
     let identity = store.load_identity().unwrap();
     let (device, mut receiver) = crate::matter::tests::support::light(false);
     let registry = crate::matter::tests::support::test_registry(&store, &device);
-    let handler = model_handler(
-        &registry,
-        &store,
-        StoreAdapter::new(store.matter()),
-        rand::rng(),
-    )
-    .unwrap();
+    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
@@ -769,13 +763,7 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_sees_committed_bounds
         // catches up through the same pre-startup alignment the bridge uses.
         let settings = model::prepare_basic_info(&kv, configuration.root_version).unwrap();
         matter.with_state(|state| state.basic_info_settings = settings);
-        let replacement_handler = model_handler(
-            &registry,
-            &store,
-            StoreAdapter::new(store.matter()),
-            rand::rng(),
-        )
-        .unwrap();
+        let replacement_handler = model_handler(&registry, &store, rand::rng()).unwrap();
         let replacement_im = InteractionModel::new(
             &matter,
             &crypto,

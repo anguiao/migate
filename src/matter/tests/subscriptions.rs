@@ -267,7 +267,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let rejection = RefCell::new(None::<CommandError>);
     let accepted = Cell::new(0);
     let registry = super::test_registry(&store, &device);
-    let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -475,7 +475,7 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
     device.set_availability(Availability::Available);
     device.functions()[0].observe(false);
     let registry = super::test_registry(&store, &device);
-    let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -1049,7 +1049,7 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
         }
     }
     let single_physical = single_physical.unwrap();
-    let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();
@@ -1282,7 +1282,7 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
                 })
                 .unwrap();
             let registry = super::test_registry(&store, &device);
-            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -1602,7 +1602,7 @@ fn frozen_light_boot(directory: &Path, boot: u16, previous: Option<u32>) -> (u32
     physical.set_availability(Availability::Available);
     let registry = crate::device::DeviceRegistry::new();
     registry.insert(physical);
-    let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();

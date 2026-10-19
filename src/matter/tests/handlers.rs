@@ -37,13 +37,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
     let registry = super::test_registry(&store, &device);
-    let handler = model_handler(
-        &registry,
-        &store,
-        StoreAdapter::new(store.matter()),
-        rand::rng(),
-    )
-    .unwrap();
+    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let mut ctx = Context::new(&im, 6, 0);
     block_on(async {
@@ -175,13 +169,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         &super::support::published_identity(&store, device.key()),
         super::support::renamer(&registry, &store),
     );
-    let handler = model_handler(
-        &registry,
-        &store,
-        StoreAdapter::new(store.matter()),
-        rand::rng(),
-    )
-    .unwrap();
+    let handler = model_handler(&registry, &store, rand::rng()).unwrap();
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let ctx = Context::new(&im, 57, bridged::AttributeId::NodeLabel as _);
     assert!(!bridged.reachable(&ctx).unwrap());
@@ -245,7 +233,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
 
         // An empty committed set serves only the root and aggregator.
         {
-            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -270,7 +258,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         registry.insert(single.clone());
         registry.insert(multi.clone());
         {
-            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -458,7 +446,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         rejoined.functions()[0].observe(false);
         registry.insert(rejoined.clone());
         {
-            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -516,7 +504,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
         assert!(!configuration.derive().published.contains(&stored.key));
         registry.remove(&stored.key);
         {
-            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -545,7 +533,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
             registry.insert(device);
         }
         {
-            let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+            let handler = model_handler(&registry, &store, rand::rng()).unwrap();
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -590,7 +578,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_preserves_names() {
         let second_stored = super::support::add_device(&store, &second.description());
         registry.insert(first.clone());
         registry.insert(second.clone());
-        let handler = model_handler(&registry, &store, protocol.clone(), rand::rng()).unwrap();
+        let handler = model_handler(&registry, &store, rand::rng()).unwrap();
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         write_label(&handler, &im, first_stored.endpoint, "Renamed first")
             .await

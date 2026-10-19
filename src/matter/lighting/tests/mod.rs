@@ -132,13 +132,8 @@ macro_rules! setup {
         device.set_availability(Availability::Available);
 
         let registry = support::test_registry(&store, &device);
-        let handler = crate::matter::tests::support::model_handler(
-            &registry,
-            &store,
-            StoreAdapter::new(store.matter()),
-            rand::rng(),
-        )
-        .unwrap();
+        let handler =
+            crate::matter::tests::support::model_handler(&registry, &store, rand::rng()).unwrap();
 
         let info = model::basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);

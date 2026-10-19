@@ -181,11 +181,14 @@ pub(in crate::matter) fn light_with(profile: LightProfile) -> (PhysicalDevice, C
 pub(in crate::matter) fn model_handler(
     registry: &crate::device::DeviceRegistry,
     store: &Store,
-    _protocol: crate::matter::storage::StoreAdapter,
     random: impl rand::Rng,
 ) -> Result<crate::matter::model::Model, StorageError> {
     let entries = frozen_entries(registry, store)?;
-    crate::matter::model::handler_from(entries, store, random, renamer(registry, store))
+    Ok(crate::matter::model::handler_from(
+        entries,
+        random,
+        renamer(registry, store),
+    ))
 }
 
 pub(super) fn frozen_entries(

@@ -39,7 +39,7 @@ pub(crate) struct LightAttributes {
 impl PublishedLightModel {
     pub(crate) fn new(app: &Rc<App>, store: &Store) -> Self {
         Self {
-            handler: model::handler_from(app.frozen(), store, rand::rng(), app.clone()).unwrap(),
+            handler: model::handler_from(app.frozen(), rand::rng(), app.clone()),
             store: store.clone(),
         }
     }

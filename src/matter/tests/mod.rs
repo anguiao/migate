@@ -40,7 +40,6 @@ fn topology_and_identity_are_fixed() {
         model_handler(
             &test_registry(&store, &test_device().0),
             &store,
-            StoreAdapter::new(store.matter()),
             rand::rng()
         )
         .unwrap()
@@ -56,7 +55,6 @@ fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
     let model = model_handler(
         &test_registry(&store, &test_device().0),
         &store,
-        StoreAdapter::new(store.matter()),
         rand::rng(),
     )
     .unwrap();
@@ -117,13 +115,7 @@ fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
         let (device, _receiver) = support::light(rgb);
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let model = model_handler(
-            &test_registry(&store, &device),
-            &store,
-            StoreAdapter::new(store.matter()),
-            rand::rng(),
-        )
-        .unwrap();
+        let model = model_handler(&test_registry(&store, &device), &store, rand::rng()).unwrap();
         model.access(|node| {
             let endpoint = &node.endpoints[2];
             assert!(
@@ -216,13 +208,7 @@ fn on_off_and_dimmable_light_metadata_use_their_standard_device_types() {
         let (device, _receiver) = support::light_with(profile);
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let model = model_handler(
-            &test_registry(&store, &device),
-            &store,
-            StoreAdapter::new(store.matter()),
-            rand::rng(),
-        )
-        .unwrap();
+        let model = model_handler(&test_registry(&store, &device), &store, rand::rng()).unwrap();
         model.access(|node| {
             let endpoint = &node.endpoints[2];
             assert!(
