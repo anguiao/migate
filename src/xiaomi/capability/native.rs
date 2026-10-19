@@ -53,8 +53,7 @@ impl NativeDescription {
     }
 }
 
-/// Model/URN constraints for one restored device description. Storage uses
-/// this same capability boundary instead of re-deriving supported kinds.
+/// Model/URN constraints shared by network descriptions and stored bindings.
 fn validate_model_topology(
     device: &ParsedDevice,
     model: &str,

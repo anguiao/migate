@@ -110,6 +110,18 @@ impl Prepare {
         self.exhausted = false;
         self.problem = None;
     }
+    fn begin(&mut self) -> Option<u64> {
+        if self.running || self.exhausted {
+            return None;
+        }
+        self.running = true;
+        Some(self.generation)
+    }
+    fn finish(&mut self, problem: Option<String>) {
+        self.running = false;
+        self.exhausted = problem.is_some();
+        self.problem = problem;
+    }
     fn ready(&self, bindings: &[PropertyBinding]) -> bool {
         bindings
             .iter()
@@ -475,12 +487,10 @@ impl DeviceWork {
                 let connection = local.connection.clone();
                 if let Some(connection) = connection
                     && local.requested
-                    && !local.prepare.running
-                    && !local.prepare.exhausted
+                    && let Some(generation) = local.prepare.begin()
                 {
                     local.requested = false;
-                    local.prepare.running = true;
-                    Some((connection, local.prepare.generation))
+                    Some((connection, generation))
                 } else {
                     None
                 }
@@ -550,9 +560,7 @@ impl DeviceWork {
             .is_some_and(|current| current.same_connection(handle))
             && local.prepare.generation == generation
         {
-            local.prepare.running = false;
-            local.prepare.exhausted = problem.is_some();
-            local.prepare.problem = problem;
+            local.prepare.finish(problem);
         }
     }
     fn local_abandoned(&self, handle: &SessionHandle, generation: u64) {
@@ -572,14 +580,11 @@ impl DeviceWork {
             .connection
             .as_ref()
             .is_some_and(|current| current.same_connection(handle))
-            || cloud.prepare.running
-            || cloud.prepare.exhausted
             || self.life.is_closed()
         {
             return None;
         }
-        cloud.prepare.running = true;
-        Some(cloud.prepare.generation)
+        cloud.prepare.begin()
     }
     pub(super) fn cloud_current(&self, handle: &NotificationHandle, generation: u64) -> bool {
         !self.life.is_closed()
@@ -640,9 +645,7 @@ impl DeviceWork {
             .is_some_and(|current| current.same_connection(handle))
             && cloud.prepare.generation == generation
         {
-            cloud.prepare.running = false;
-            cloud.prepare.exhausted = problem.is_some();
-            cloud.prepare.problem = problem;
+            cloud.prepare.finish(problem);
         }
     }
     pub(super) fn cloud_abandoned(&self, handle: &NotificationHandle, generation: u64) {

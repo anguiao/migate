@@ -365,7 +365,7 @@ impl NotificationDriver {
                     if !complete {
                         break;
                     }
-                    // Record accepted bytes before flushing in this same poll.
+                    // Flush the completed frame in this same poll.
                 }
                 Some(Ok(mqtt::SendStatus::Flushed)) => {
                     self.output.pop_front();

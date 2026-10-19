@@ -404,7 +404,9 @@ fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
         session.tasks.spawn(prepare_online(
             context.clone(),
             work,
-            session.clone(),
+            session.handle.clone(),
+            session.key.token.clone(),
+            session.subscriptions.clone(),
             state,
         ));
     }
@@ -413,19 +415,19 @@ fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
 async fn prepare_online(
     context: Rc<Context>,
     work: Rc<DeviceWork>,
-    session: Rc<CloudSession>,
+    handle: NotificationHandle,
+    token: String,
+    subscriptions: Rc<SubscriptionBudget>,
     state: Rc<OnlinePreparation>,
 ) -> Result<(), AdapterError> {
-    let handle = &session.handle;
     let did = &work.key.id;
     let current = || {
-        context.current_notifications(handle)
+        context.current_notifications(&handle)
             && online_work(&context, did).is_some_and(|current| Rc::ptr_eq(&current, &work))
-            && work.online_current(handle, &state)
+            && work.online_current(&handle, &state)
     };
     for attempt in 0..4 {
-        let Some(permit) = session
-            .subscriptions
+        let Some(permit) = subscriptions
             .acquire(&context.changed, &work.life, &current)
             .await
         else {
@@ -443,7 +445,7 @@ async fn prepare_online(
             Ok(()) => return Ok(()),
             Err(NotificationError::Unauthorized) => {
                 context.token_rejected(
-                    &session.key.token,
+                    &token,
                     FailureReason::CloudNotification(NotificationError::Unauthorized),
                 )?;
                 break;
@@ -459,7 +461,7 @@ async fn prepare_online(
             }
         }
     }
-    work.online_failed(handle, &state);
+    work.online_failed(&handle, &state);
     Ok(())
 }
 async fn prepare_properties(
