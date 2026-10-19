@@ -4,6 +4,61 @@ use std::cell::Cell;
 use super::support::group_record;
 
 #[test]
+fn native_group_description_restarts_after_its_loading_token_is_retired() {
+    let rig = Rig::new(true, &["one"]);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let instance = group_instance();
+    let urn = instance["type"].as_str().unwrap().to_string();
+    let (release, gate) = flume::bounded(1);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.catalog_groups = vec![group_record("record", "group-1", &["one"], false)];
+        cloud.catalog_instances.insert(urn.clone(), instance);
+        cloud.instance_gates.insert(urn.clone(), gate);
+    }
+    block_on(rig.run(|c| async move {
+        until(|| c.cloud.lock().unwrap().instance_reads.get(&urn) == Some(&1)).await;
+        let loading = c.context.live.borrow().devices["group-1"]
+            .loading
+            .clone()
+            .unwrap();
+        c.cloud.lock().unwrap().instance_gates.remove(&urn);
+        let mut credentials = c.context.live.borrow().credentials.clone().unwrap();
+        credentials.tokens.access_token = "replacement-access".into();
+        c.store.xiaomi().replace(&credentials).unwrap();
+        c.context.adopt_credentials(credentials);
+        future::or(
+            async {
+                until(|| {
+                    c.context.live.borrow().devices["group-1"]
+                        .loading
+                        .as_ref()
+                        .is_none_or(|current| !Rc::ptr_eq(current, &loading))
+                })
+                .await;
+            },
+            async {
+                async_io::Timer::after(Duration::from_secs(2)).await;
+                panic!("retired group loading still owns its slot");
+            },
+        )
+        .await;
+        release.send(()).unwrap();
+        c.context.request_sync();
+        until(|| {
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "group-1"))
+                .is_some()
+        })
+        .await;
+        assert!(c.cloud.lock().unwrap().instance_reads[&urn] >= 2);
+    }));
+}
+
+#[test]
 fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
     let rig = super::support::repair_rig(1, true);
     block_on(rig.run(|c| async move {

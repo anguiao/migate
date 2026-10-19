@@ -172,17 +172,14 @@ impl Context {
             let scope = group.scope.clone();
             let captured_scope = scope.clone();
             self.tasks.spawn(async move {
-                let Some(result) = future::or(
+                let result = future::or(
                     async { Some(client.get_instance(&instance_type).await) },
                     async {
                         context.token_retired(&token).await;
                         None
                     },
                 )
-                .await
-                else {
-                    return Ok::<(), AdapterError>(());
-                };
+                .await;
                 let cleared = {
                     let mut live = context.live.borrow_mut();
                     let Some(slot) = live.devices.get_mut(&group_did) else {
@@ -202,6 +199,9 @@ impl Context {
                 if !cleared {
                     return Ok::<(), AdapterError>(());
                 }
+                let Some(result) = result else {
+                    return Ok(());
+                };
                 let current = context.current_token(&token)
                     && context.live.borrow().scope.as_ref().is_some_and(|scope| {
                         scope.uid == captured_scope.uid

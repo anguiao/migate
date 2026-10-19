@@ -51,6 +51,8 @@ pub(in super::super) struct CloudState {
     pub(in super::super) catalog_groups: Vec<Value>,
     pub(in super::super) catalog_status: u16,
     pub(in super::super) catalog_instances: BTreeMap<String, Value>,
+    pub(in super::super) instance_gates: BTreeMap<String, flume::Receiver<()>>,
+    pub(in super::super) instance_reads: BTreeMap<String, usize>,
     pub(in super::super) catalogs: usize,
     pub(in super::super) catalog_partial: bool,
     /// Per-DID gates holding that device's property write response.
@@ -392,11 +394,18 @@ impl Rig {
                     .unwrap_or("");
                 let requested_type = url::form_urlencoded::parse(query.as_bytes())
                     .find_map(|(key, value)| (key == "type").then(|| value.into_owned()));
+                if let Some(urn) = &requested_type {
+                    *state.instance_reads.entry(urn.clone()).or_default() += 1;
+                }
                 if let Some(instance) = requested_type
                     .as_ref()
                     .and_then(|urn| state.catalog_instances.get(urn))
                 {
-                    return MockResponse::json(200, &instance.to_string());
+                    let response = MockResponse::json(200, &instance.to_string());
+                    return match state.instance_gates.get(requested_type.as_ref().unwrap()) {
+                        Some(gate) => response.gated(gate.clone()),
+                        None => response,
+                    };
                 }
                 let multi = request.target.contains("cuco-cp7pd");
                 let mut value: Value = serde_json::from_str(
