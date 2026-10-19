@@ -14,6 +14,20 @@ pub(super) struct RuntimeState {
     pub(super) queue: Queue,
     pub(super) light_commands: Option<super::light_command::LightCoordinator>,
 }
+
+impl RuntimeState {
+    /// Cancel queued light work while the original receipt retains every sent gate.
+    pub(super) fn cancel_pending_light(&mut self, error: super::CommandError) {
+        self.light_commands
+            .as_mut()
+            .expect("light function has a coordinator")
+            .cancel_all(error.clone());
+        self.queue.invalidate_light_power(error.clone());
+        for completion in self.queue.drain_pending() {
+            completion.finish(Err(error.clone()));
+        }
+    }
+}
 struct PhysicalState {
     availability: Availability,
     revision: u64,
@@ -141,14 +155,13 @@ impl PhysicalDevice {
             for function in self.functions.iter() {
                 let changed = {
                     let mut state = function.0.state.lock().unwrap();
-                    if let Some(coordinator) = state.light_commands.as_mut() {
-                        coordinator.cancel_all(error.clone());
-                        state.queue.invalidate_light_power(error.clone());
+                    if state.light_commands.is_some() {
+                        state.cancel_pending_light(error.clone());
                         function.notify_light_actions();
-                    }
-                    let completions = state.queue.drain_pending();
-                    for completion in completions {
-                        completion.finish(Err(error.clone()));
+                    } else {
+                        for completion in state.queue.drain_pending() {
+                            completion.finish(Err(error.clone()));
+                        }
                     }
                     clear_light_state(function.description(), &mut state)
                 };
@@ -181,13 +194,8 @@ impl PhysicalDevice {
     pub(crate) fn reset_actions(&self) {
         for function in self.functions.iter() {
             let mut state = function.0.state.lock().unwrap();
-            if let Some(coordinator) = state.light_commands.as_mut() {
-                let error = super::CommandError::Cancelled;
-                coordinator.cancel_all(error.clone());
-                state.queue.invalidate_light_power(error.clone());
-                for completion in state.queue.drain_pending() {
-                    completion.finish(Err(error.clone()));
-                }
+            if state.light_commands.is_some() {
+                state.cancel_pending_light(super::CommandError::Cancelled);
                 function.notify_light_actions();
             }
         }
@@ -374,18 +382,13 @@ impl Function {
     pub(super) fn close(&self) {
         let mut state = self.0.state.lock().unwrap();
         state.queue.closed = true;
-        let completions = if let Some(coordinator) = state.light_commands.as_mut() {
-            coordinator.cancel_all(super::CommandError::Cancelled);
-            state
-                .queue
-                .invalidate_light_power(super::CommandError::Cancelled);
+        if state.light_commands.is_some() {
+            state.cancel_pending_light(super::CommandError::Cancelled);
             self.notify_light_actions();
-            state.queue.drain_pending()
         } else {
-            state.queue.drain_completions()
-        };
-        for completion in completions {
-            completion.finish(Err(super::CommandError::Cancelled));
+            for completion in state.queue.drain_completions() {
+                completion.finish(Err(super::CommandError::Cancelled));
+            }
         }
         self.0.submitted.notify(usize::MAX);
     }

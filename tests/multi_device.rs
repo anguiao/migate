@@ -1,3 +1,6 @@
+mod support;
+use support::next_power;
+
 use futures_lite::future::{block_on, poll_once};
 use migate::device::{
     Availability, Capability, Category, Command, CommandError, DeviceKey, DeviceRegistry,
@@ -36,8 +39,12 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
         let mut second_command = Box::pin(second.execute(Command::Off));
         assert!(poll_once(first_command.as_mut()).await.is_none());
         assert!(poll_once(second_command.as_mut()).await.is_none());
-        let pending = receivers[0].next().await.unwrap();
-        receivers[1].next().await.unwrap().accept().unwrap();
+        let pending = next_power(&mut receivers[0]).await.unwrap();
+        next_power(&mut receivers[1])
+            .await
+            .unwrap()
+            .accept()
+            .unwrap();
         assert_eq!(second_command.await.unwrap().power, Power::Off);
         assert_eq!(second.snapshot().revision, revision + 1);
         assert_eq!(first.snapshot().power, Power::Off);
@@ -77,7 +84,7 @@ fn registry_publishes_whole_devices_and_removal_cancels_only_their_commands() {
         let mut other_command = Box::pin(other.execute(Command::Off));
         poll_once(command.as_mut()).await;
         poll_once(other_command.as_mut()).await;
-        let stale = first_receivers[2].next().await.unwrap();
+        let stale = next_power(&mut first_receivers[2]).await.unwrap();
         registry.remove(first.key()).unwrap();
         assert_eq!(command.await, Err(CommandError::Cancelled));
         assert_eq!(stale.accept(), Err(CommandError::Cancelled));
@@ -87,7 +94,11 @@ fn registry_publishes_whole_devices_and_removal_cancels_only_their_commands() {
         );
         assert!(registry.get(first.key()).is_none());
         assert_eq!(changes.changed().await.devices.len(), 1);
-        second_receivers[2].next().await.unwrap().accept().unwrap();
+        next_power(&mut second_receivers[2])
+            .await
+            .unwrap()
+            .accept()
+            .unwrap();
         assert_eq!(other_command.await.unwrap().power, Power::Off);
     });
 }
@@ -104,8 +115,12 @@ fn cancelling_one_channel_does_not_withdraw_another_channel() {
         poll_once(cancelled.as_mut()).await;
         poll_once(surviving.as_mut()).await;
         drop(cancelled);
-        assert!(poll_once(receivers[0].next()).await.is_none());
-        receivers[1].next().await.unwrap().accept().unwrap();
+        assert!(poll_once(next_power(&mut receivers[0])).await.is_none());
+        next_power(&mut receivers[1])
+            .await
+            .unwrap()
+            .accept()
+            .unwrap();
         assert_eq!(surviving.await.unwrap().power, Power::Off);
     });
 }
@@ -118,10 +133,14 @@ fn registry_removal_wakes_and_ends_waiting_receivers() {
         let (other, mut other_receivers) = PhysicalDevice::new(description("remaining"));
         registry.insert(device.clone());
         registry.insert(other);
-        let mut waiting = Box::pin(receivers[0].next());
+        let mut waiting = Box::pin(next_power(&mut receivers[0]));
         assert!(poll_once(waiting.as_mut()).await.is_none());
         registry.remove(device.key()).unwrap();
         assert!(waiting.await.is_none());
-        assert!(poll_once(other_receivers[0].next()).await.is_none());
+        assert!(
+            poll_once(next_power(&mut other_receivers[0]))
+                .await
+                .is_none()
+        );
     });
 }

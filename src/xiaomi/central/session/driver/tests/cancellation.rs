@@ -10,7 +10,7 @@ fn cancelling_unsent_business_keeps_writes_and_subscriptions() {
             let filtered = handle
                 .get_devices_filtered(&["target".into(), "other".into()], count_result(&callbacks));
             let device = handle.get_devices_filtered(&["target".into()], count_result(&callbacks));
-            let read = handle.read_property("target", BINDING, count_result(&callbacks));
+            let read = handle.read_property_value("target", BINDING, count_result(&callbacks));
             let write = handle.set_property("target", BINDING, true, |_| {});
             let subscription = handle.subscribe_property("target", BINDING);
             if dispatched {
@@ -62,7 +62,7 @@ fn cancelling_unsent_business_keeps_writes_and_subscriptions() {
 fn cancelling_unsent_business_preserves_partial_reads_and_qos2_frames() {
     block_on(async {
         let (handle, mut driver, budget, written) = rig();
-        let read = handle.read_property("target", BINDING, |_| {});
+        let read = handle.read_property_value("target", BINDING, |_| {});
         driver.drain_requests().unwrap();
         let mid = *driver.pending.keys().next().unwrap();
         let pkid = *driver.publications.keys().next().unwrap();
@@ -95,7 +95,7 @@ fn cancelling_unsent_business_preserves_partial_reads_and_qos2_frames() {
             .unwrap();
         assert!(driver.publications.is_empty());
         reply(&mut driver, mid, json!({"value":true}));
-        assert_eq!(read.await.result, Ok(true));
+        assert_eq!(read.await.result, Ok(json!(true)));
         assert!(written.get() > 3);
         assert_eq!(handle.shared.outstanding.get(), 0);
     });
@@ -109,7 +109,7 @@ fn cancelling_unsent_business_releases_capacity_once() {
             let callbacks = Rc::new(Cell::new(0));
             for _ in 0..31 {
                 drop(handle.get_devices(count_result(&callbacks)));
-                drop(handle.read_property("target", BINDING, count_result(&callbacks)));
+                drop(handle.read_property_value("target", BINDING, count_result(&callbacks)));
             }
             let write = handle.set_property("target", BINDING, true, |_| {});
             let subscription = handle.subscribe_property("target", BINDING);
@@ -129,7 +129,7 @@ fn cancelling_unsent_business_releases_capacity_once() {
             driver.drain_cancellations();
             assert_eq!(callbacks.get(), LIMIT - 2);
             assert_eq!(handle.shared.outstanding.get(), 2);
-            let replacement = handle.read_property("fresh", BINDING, |_| {});
+            let replacement = handle.read_property_value("fresh", BINDING, |_| {});
             assert_eq!(handle.shared.outstanding.get(), 3);
             driver.drain_requests().unwrap();
             driver.finish_all(CentralError::Cancelled);

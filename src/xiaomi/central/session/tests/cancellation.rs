@@ -134,7 +134,7 @@ fn cancel_and_unsubscribe_end_target_requests_ignore_late_results_and_keep_other
                 move |outcome| writing.borrow_mut().push(outcome.result),
             );
             let reading = callbacks.clone();
-            let read = handle.read_property(
+            let read = handle.read_property_value(
                 "target",
                 PropertyBinding { siid: 2, piid: 1 },
                 move |outcome| reading.borrow_mut().push(outcome.result.map(|_| ())),
@@ -199,18 +199,20 @@ fn queued_cancellation_only_ends_the_named_device() {
             assert!(broker.next_optional().await.is_none());
         },
         |handle, driver| async move {
-            let cancelled =
-                handle.read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
-                    assert_eq!(outcome.result, Err(CentralError::Cancelled))
-                });
-            let survivor =
-                handle.read_property("other", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
-                    assert_eq!(outcome.result, Ok(false))
-                });
+            let cancelled = handle.read_property_value(
+                "target",
+                PropertyBinding { siid: 2, piid: 1 },
+                |outcome| assert_eq!(outcome.result, Err(CentralError::Cancelled)),
+            );
+            let survivor = handle.read_property_value(
+                "other",
+                PropertyBinding { siid: 2, piid: 1 },
+                |outcome| assert_eq!(outcome.result, Ok(json!(false))),
+            );
             handle.cancel_device("target").unwrap();
             let work = async {
                 assert_eq!(cancelled.await.result, Err(CentralError::Cancelled));
-                assert!(!survivor.await.result.unwrap());
+                assert_eq!(survivor.await.result.unwrap(), json!(false));
                 handle.close();
             };
             let (result, ()) = future::zip(driver.run(|_| {}), work).await;

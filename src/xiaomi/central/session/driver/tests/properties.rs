@@ -6,7 +6,7 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
         let (handle, mut driver, budget, _) = rig();
         ready_property(&handle, &mut driver, "target").await;
         let pending = handle.subscribe_property("target", PropertyBinding { siid: 3, piid: 1 });
-        let read = handle.read_property("target", BINDING, |_| {});
+        let read = handle.read_property_value("target", BINDING, |_| {});
         let write = handle.set_property("target", BINDING, true, |_| {});
         driver.drain_requests().unwrap();
         let subscription_id = *driver.subscriptions.keys().next().unwrap();
@@ -92,7 +92,7 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
             write_id,
             json!({"result":[{"did":"target","code":0}]}),
         );
-        assert!(!read.await.result.unwrap());
+        assert_eq!(read.await.result.unwrap(), json!(false));
         write.await.result.unwrap();
     });
 }
@@ -163,7 +163,7 @@ fn property_unsubscription_keeps_business_writes_and_retires_late_subacks() {
         let mid = *driver.pending.keys().next().unwrap();
         write_ready(&mut driver, &budget, usize::MAX).await;
         write_ready(&mut driver, &budget, usize::MAX).await;
-        let read = handle.read_property("target", BINDING, |_| {});
+        let read = handle.read_property_value("target", BINDING, |_| {});
         let unsubscribe = handle.unsubscribe_properties("target");
         driver.drain_cancellations();
         assert!(driver.property_topics.is_empty());
@@ -197,7 +197,7 @@ fn property_unsubscription_keeps_business_writes_and_retires_late_subacks() {
         assert_eq!(
             read.await,
             RequestOutcome {
-                result: Ok(false),
+                result: Ok(json!(false)),
                 stage: RequestStage::BusinessResult,
                 timeout: None
             }

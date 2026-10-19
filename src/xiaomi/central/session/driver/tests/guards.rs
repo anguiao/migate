@@ -59,7 +59,7 @@ fn guarded_read_rechecks_after_pending_and_withdraws_without_sending() {
         let first_send = Rc::new(Cell::new(0));
         let callbacks = Rc::new(RefCell::new(Vec::new()));
         let observed = callbacks.clone();
-        let read = handle.read_property_with_timeout_guarded(
+        let read = handle.read_property_value_with_timeout_guarded(
             "target",
             BINDING,
             Duration::from_secs(6),
@@ -151,7 +151,7 @@ fn guarded_read_locks_the_decision_after_first_bytes() {
         let checks = Rc::new(Cell::new(0));
         let first_send = Rc::new(Cell::new(0));
         let callbacks = Rc::new(Cell::new(0));
-        let read = handle.read_property_with_timeout_guarded(
+        let read = handle.read_property_value_with_timeout_guarded(
             "target",
             BINDING,
             Duration::from_secs(6),
@@ -176,7 +176,7 @@ fn guarded_read_locks_the_decision_after_first_bytes() {
         assert_eq!(
             read.await,
             RequestOutcome {
-                result: Ok(false),
+                result: Ok(json!(false)),
                 stage: RequestStage::BusinessResult,
                 timeout: None,
             }

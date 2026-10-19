@@ -1,3 +1,6 @@
+mod support;
+use support::next_power;
+
 use migate::{device, storage, xiaomi};
 #[path = "../src/storage/tests/fixtures.rs"]
 mod publication_support;
@@ -106,13 +109,17 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
                 "{invalid}: {result}"
             );
             for receiver in &mut receivers {
-                assert!(poll_once(receiver.next()).await.is_none());
+                assert!(poll_once(next_power(receiver)).await.is_none());
             }
         }
         let (result, ()) = future::zip(
             handle_line(&registry, &store.devices(), &status, "on one", 0),
             async {
-                receivers[0].next().await.unwrap().accept().unwrap();
+                next_power(&mut receivers[0])
+                    .await
+                    .unwrap()
+                    .accept()
+                    .unwrap();
             },
         )
         .await;
@@ -120,7 +127,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
         let (result, ()) = future::zip(
             handle_line(&registry, &store.devices(), &status, "off multi usb", 0),
             async {
-                let request = receivers[4].next().await.unwrap();
+                let request = next_power(&mut receivers[4]).await.unwrap();
                 assert!(!request.target);
                 request.accept().unwrap();
             },
@@ -398,7 +405,11 @@ fn input_recovers_and_returns_at_eof() {
             ),
             async {
                 loop {
-                    receivers[0].next().await.unwrap().accept().unwrap();
+                    next_power(&mut receivers[0])
+                        .await
+                        .unwrap()
+                        .accept()
+                        .unwrap();
                 }
             },
         )

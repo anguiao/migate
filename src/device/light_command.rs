@@ -415,14 +415,10 @@ impl Function {
     /// External off invalidates both dimensions and queued power operations.
     pub fn take_over_light_all(&self) -> Result<FunctionSnapshot, CommandError> {
         let mut state = self.0.state.lock().unwrap();
-        let Some(coordinator) = state.light_commands.as_mut() else {
+        if state.light_commands.is_none() {
             return Err(CommandError::Unsupported);
-        };
-        coordinator.cancel_all(CommandError::Superseded);
-        state.queue.invalidate_light_power(CommandError::Superseded);
-        for completion in state.queue.drain_pending() {
-            completion.finish(Err(CommandError::Superseded));
         }
+        state.cancel_pending_light(CommandError::Superseded);
         self.notify_light_actions();
         Ok(self.snapshot_locked(&state))
     }

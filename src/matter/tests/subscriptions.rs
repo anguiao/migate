@@ -2,6 +2,7 @@ use super::super::{
     model::{self, basic_info},
     storage::StoreAdapter,
 };
+use super::support::next_power;
 use crate::{
     device::{Availability, CommandError},
     storage::Store,
@@ -276,7 +277,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
         let services = async {
             let adapter = async {
                 loop {
-                    let request = receiver.next().await.unwrap();
+                    let request = next_power(&mut receiver).await.unwrap();
                     if let Some(error) = rejection.borrow_mut().take() {
                         request.reject(error);
                     } else {

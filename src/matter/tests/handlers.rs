@@ -3,7 +3,7 @@ use super::super::{
     model::{self, basic_info},
     storage::StoreAdapter,
 };
-use super::support::{Context, attr};
+use super::support::{Context, attr, next_power};
 use crate::{
     device::{Availability, CommandError, Power},
     storage::Store,
@@ -71,7 +71,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
             assert_eq!(device.functions()[0].snapshot(), before);
-            receiver.next().await.unwrap().accept().unwrap();
+            next_power(&mut receiver).await.unwrap().accept().unwrap();
             invoke.await.unwrap();
             assert_eq!(device.functions()[0].snapshot().power.value(), Some(power));
         }
@@ -85,7 +85,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
                 .await
                 .unwrap_err();
             assert_eq!(error.code(), ErrorCode::InvalidCommand);
-            assert!(poll_once(receiver.next()).await.is_none());
+            assert!(poll_once(next_power(&mut receiver)).await.is_none());
         }
         ctx.data = TLVElement::new(&[0x15, 0x18]);
         ctx.command.cmd_id = 1;
@@ -95,8 +95,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
             InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out))
         ));
         assert!(poll_once(invoke.as_mut()).await.is_none());
-        receiver
-            .next()
+        next_power(&mut receiver)
             .await
             .unwrap()
             .reject(CommandError::Rejected("denied".into()));
@@ -391,7 +390,11 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                     InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
                 ));
                 assert!(poll_once(invoke.as_mut()).await.is_none());
-                receivers[index].next().await.unwrap().accept().unwrap();
+                next_power(&mut receivers[index])
+                    .await
+                    .unwrap()
+                    .accept()
+                    .unwrap();
                 invoke.await.unwrap();
                 assert!(
                     report_value(&read_bytes(&handler, &command).await.unwrap())
@@ -455,7 +458,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                     .unwrap()
             );
             assert!(
-                poll_once(single_receivers[0].next())
+                poll_once(next_power(&mut single_receivers[0]))
                     .await
                     .flatten()
                     .is_none()
@@ -471,8 +474,7 @@ fn frozen_topology_channels_and_coalesced_rejoin_share_canonical_state() {
                 InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut out))
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
-            replacement_receivers[0]
-                .next()
+            next_power(&mut replacement_receivers[0])
                 .await
                 .unwrap()
                 .accept()

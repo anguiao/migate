@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn boolean_reads_validate_the_type_before_classifying_the_business_result() {
+    block_on(async {
+        for value in [json!(true), json!(42)] {
+            let (handle, mut driver, budget, _) = rig();
+            let completed = Rc::new(RefCell::new(None));
+            let callback = completed.clone();
+            let read = handle.read_property("target", BINDING, move |outcome| {
+                *callback.borrow_mut() = Some(outcome);
+            });
+            driver.drain_requests().unwrap();
+            let mid = *driver.pending.keys().next().unwrap();
+            write_ready(&mut driver, &budget, usize::MAX).await;
+            reply(&mut driver, mid, json!({"value":value}));
+            let outcome = read.await;
+            let expected = if value.is_boolean() {
+                RequestOutcome {
+                    result: Ok(true),
+                    stage: RequestStage::BusinessResult,
+                    timeout: None,
+                }
+            } else {
+                RequestOutcome {
+                    result: Err(CentralError::Protocol),
+                    stage: RequestStage::MayHaveBeenSent,
+                    timeout: None,
+                }
+            };
+            assert_eq!(outcome, expected);
+            assert_eq!(*completed.borrow(), Some(expected));
+        }
+    });
+}
+
+#[test]
 fn numeric_reads_keep_guarded_send_outcomes() {
     block_on(async {
         let (handle, mut driver, budget, _) = rig();

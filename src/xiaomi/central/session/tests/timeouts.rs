@@ -14,8 +14,13 @@ fn refresh_read_timeout_does_not_shorten_other_requests() {
         });
         let binding = PropertyBinding { siid: 2, piid: 1 };
         let before = Instant::now();
-        drop(handle.read_property_with_timeout("target", binding, Duration::from_secs(6), |_| {}));
-        drop(handle.read_property("target", binding, |_| {}));
+        drop(handle.read_property_value_with_timeout(
+            "target",
+            binding,
+            Duration::from_secs(6),
+            |_| {},
+        ));
+        drop(handle.read_property_value("target", binding, |_| {}));
         drop(handle.set_property("target", binding, true, |_| {}));
         drop(handle.get_devices(|_| {}));
         drop(handle.get_devices_filtered(&["target".into()], |_| {}));
@@ -80,7 +85,7 @@ fn partial_reply_survives_timeout_and_late_ids_do_not_complete_next_request() {
                 let callback = results.clone();
                 assert_eq!(
                     handle
-                        .read_property(
+                        .read_property_value(
                             "target",
                             PropertyBinding { siid: 2, piid: 1 },
                             move |outcome| callback.borrow_mut().push(outcome.result)
@@ -91,14 +96,14 @@ fn partial_reply_survives_timeout_and_late_ids_do_not_complete_next_request() {
                 );
                 assert_eq!(
                     handle
-                        .read_property(
+                        .read_property_value(
                             "target",
                             PropertyBinding { siid: 2, piid: 1 },
                             move |outcome| results.borrow_mut().push(outcome.result)
                         )
                         .await
                         .result,
-                    Ok(false)
+                    Ok(json!(false))
                 );
                 handle.close();
             };
@@ -107,7 +112,10 @@ fn partial_reply_survives_timeout_and_late_ids_do_not_complete_next_request() {
             result.unwrap();
         },
     ));
-    assert_eq!(*callbacks.borrow(), [Err(CentralError::Timeout), Ok(false)]);
+    assert_eq!(
+        *callbacks.borrow(),
+        [Err(CentralError::Timeout), Ok(json!(false))]
+    );
 }
 
 #[test]
@@ -136,15 +144,17 @@ fn keepalive_requires_ping_response_and_does_not_block_requests() {
                         async_io::Timer::after(Duration::from_millis(45)).await;
                         assert!(
                             handle
-                                .read_property(
+                                .read_property_value(
                                     "target",
                                     PropertyBinding { siid: 2, piid: 1 },
                                     |outcome| {
-                                        outcome.result.unwrap();
+                                        outcome.result.unwrap().as_bool().unwrap();
                                     }
                                 )
                                 .await
                                 .result
+                                .unwrap()
+                                .as_bool()
                                 .unwrap()
                         );
                         handle.close();
@@ -224,11 +234,17 @@ fn queued_requests_use_the_network_timeout_and_reject_invalid_bindings() {
                 );
                 assert!(
                     !handle
-                        .read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
-                            outcome.result.unwrap();
-                        })
+                        .read_property_value(
+                            "target",
+                            PropertyBinding { siid: 2, piid: 1 },
+                            |outcome| {
+                                outcome.result.unwrap().as_bool().unwrap();
+                            }
+                        )
                         .await
                         .result
+                        .unwrap()
+                        .as_bool()
                         .unwrap()
                 );
                 handle.close();

@@ -1,3 +1,12 @@
+pub(super) async fn next_power(
+    receiver: &mut crate::device::CommandReceiver,
+) -> Option<crate::device::CommandRequest> {
+    match receiver.next_operation().await? {
+        crate::device::DeviceRequest::Power(request) => Some(request),
+        crate::device::DeviceRequest::Light(_) => panic!("unexpected lighting request"),
+    }
+}
+
 mod context;
 pub(in crate::matter) use context::Context;
 pub(super) use context::attr;

@@ -62,20 +62,6 @@ impl DeviceStore {
         load_cached(self.store.connection(), uid, home_id, key)
             .map_err(|error| self.store.database_error(operation, error))
     }
-    pub fn save_scope(&self, scope: &CachedScope) -> Result<(), StorageError> {
-        let operation = "save current Xiaomi home";
-        validate_scope(&scope.uid, &scope.home_id, &scope.group_id)
-            .map_err(|error| self.invalid(operation, error))?;
-        self.store
-            .connection()
-            .execute(
-                "INSERT INTO xiaomi_scope VALUES (?1, ?2, ?3)
-                 ON CONFLICT(uid) DO UPDATE SET home_id=excluded.home_id, group_id=excluded.group_id",
-                params![scope.uid, scope.home_id, scope.group_id],
-            )
-            .map(|_| ())
-            .map_err(|error| self.store.database_error(operation, error))
-    }
     pub fn load_scope(&self, uid: &str) -> Result<Option<CachedScope>, StorageError> {
         let operation = "load current Xiaomi home";
         validate_text(uid).map_err(|error| self.invalid(operation, error))?;

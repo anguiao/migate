@@ -164,19 +164,25 @@ fn receive_maximum_does_not_block_subscription_control_packets() {
             async_io::Timer::after(Duration::from_millis(20)).await;
         },
         |handle, driver| async move {
-            let first =
-                handle.read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
+            let first = handle.read_property_value(
+                "target",
+                PropertyBinding { siid: 2, piid: 1 },
+                |outcome| {
                     outcome.result.unwrap();
-                });
-            let second =
-                handle.read_property("target", PropertyBinding { siid: 2, piid: 1 }, |outcome| {
+                },
+            );
+            let second = handle.read_property_value(
+                "target",
+                PropertyBinding { siid: 2, piid: 1 },
+                |outcome| {
                     outcome.result.unwrap();
-                });
+                },
+            );
             let sub = handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 });
             let work = async {
                 sub.await.unwrap();
-                assert!(first.await.result.unwrap());
-                assert!(!second.await.result.unwrap());
+                assert_eq!(first.await.result.unwrap(), json!(true));
+                assert_eq!(second.await.result.unwrap(), json!(false));
                 handle.close();
             };
             let (result, ()) = future::zip(driver.run(|_| {}), work).await;

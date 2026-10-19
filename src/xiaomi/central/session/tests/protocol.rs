@@ -227,6 +227,7 @@ fn rejected_acknowledgements_and_wrong_packet_ids_never_accept_writes() {
 fn strict_business_values_and_returned_identity_are_required() {
     let binding = PropertyBinding { siid: 2, piid: 1 };
     let read = RequestKind::Read {
+        format: super::super::request::ReadFormat::Boolean,
         did: "target".into(),
         binding,
     };

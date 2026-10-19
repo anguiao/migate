@@ -232,7 +232,7 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                     let _guard = guard;
                     ready_listening.await;
                     assert!(ready_ref.get());
-                    let _active = receiver.next().await.unwrap();
+                    let _active = receiver.next_operation().await.unwrap();
                     stop_ref.notify(usize::MAX);
                     let _receiver = receiver;
                     future::pending().await

@@ -1,3 +1,6 @@
+mod support;
+use support::next_power;
+
 use migate::{device, storage, xiaomi};
 #[path = "../src/storage/tests/fixtures.rs"]
 mod publication_support;
@@ -688,7 +691,7 @@ fn bridge_helper_child() {
                     "Fake source initial read: {}",
                     if initial { "on" } else { "off" }
                 );
-                while let Some(request) = receiver.next().await {
+                while let Some(request) = next_power(&mut receiver).await {
                     request.accept()?;
                 }
                 Ok::<(), migate::RuntimeError>(())

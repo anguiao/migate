@@ -91,7 +91,6 @@ impl SendHooks {
 
 pub(super) enum Response {
     Devices(Vec<DeviceEntry>),
-    Power(bool),
     PropertyValue(Value),
     Properties(PropertyResults<(), CentralError>),
     Unit,
@@ -109,6 +108,12 @@ pub(super) struct Request {
     pub(super) stage: RequestStage,
     pub(super) hooks: Option<SendHooks>,
 }
+#[derive(Clone, Copy)]
+pub(super) enum ReadFormat {
+    Boolean,
+    Value,
+}
+
 pub(super) enum RequestKind {
     ListAll,
     ListFiltered {
@@ -124,10 +129,7 @@ pub(super) enum RequestKind {
     Read {
         did: String,
         binding: PropertyBinding,
-    },
-    ReadValue {
-        did: String,
-        binding: PropertyBinding,
+        format: ReadFormat,
     },
     Write {
         did: String,
@@ -143,7 +145,7 @@ impl RequestKind {
     pub(super) fn is_read_or_list(&self) -> bool {
         matches!(
             self,
-            Self::ListAll | Self::ListFiltered { .. } | Self::Read { .. } | Self::ReadValue { .. }
+            Self::ListAll | Self::ListFiltered { .. } | Self::Read { .. }
         )
     }
     pub(super) fn publication(&self, id: u32, reply_topic: &str) -> Publish {
@@ -156,7 +158,7 @@ impl RequestKind {
                 "master/proxy/getDevList",
                 json!({"filter":{"did":dids},"info":["name","model","urn","online","specV2Access","pushAvailable"]}),
             ),
-            Self::Read { did, binding } | Self::ReadValue { did, binding } => (
+            Self::Read { did, binding, .. } => (
                 "master/proxy/get",
                 json!({"did":did,"siid":binding.siid,"piid":binding.piid}),
             ),
@@ -182,7 +184,7 @@ impl RequestKind {
             Self::ListAll | Self::ListFiltered { .. } => "getDevList",
             Self::Subscribe { .. } => "subscribe",
             Self::Unsubscribe { .. } => "unsubscribe",
-            Self::Read { .. } | Self::ReadValue { .. } => "get",
+            Self::Read { .. } => "get",
             Self::Write { .. } | Self::WriteProperties { .. } => "set",
         }
     }
@@ -192,7 +194,6 @@ impl RequestKind {
             Self::Subscribe { did, .. }
             | Self::Unsubscribe { did }
             | Self::Read { did, .. }
-            | Self::ReadValue { did, .. }
             | Self::Write { did, .. }
             | Self::WriteProperties { did, .. } => did,
         }
@@ -372,20 +373,9 @@ impl SessionHandle {
         timeout: Duration,
         on_result: F,
     ) -> impl Future<Output = RequestOutcome<bool>> + use<F> {
-        self.submit(
-            RequestKind::Read {
-                did: did.into(),
-                binding,
-            },
-            timeout.min(self.timing.request),
-            None,
-            |response| match response {
-                Response::Power(value) => value,
-                _ => unreachable!("property read returns a power value"),
-            },
-            on_result,
-        )
+        self.read_boolean(did, binding, timeout, None, on_result)
     }
+
     pub fn set_property<F: FnOnce(RequestOutcome<()>) + 'static>(
         &self,
         did: &str,
@@ -433,27 +423,43 @@ impl SessionHandle {
         hooks: SendHooks,
         on_result: F,
     ) -> impl Future<Output = RequestOutcome<bool>> + use<F> {
-        self.submit(
-            RequestKind::Read {
-                did: did.into(),
-                binding,
-            },
-            timeout.min(self.timing.request),
-            Some(hooks),
-            |response| match response {
-                Response::Power(value) => value,
-                _ => unreachable!("property read returns a power value"),
-            },
-            on_result,
-        )
+        self.read_boolean(did, binding, timeout, Some(hooks), on_result)
     }
+    fn read_boolean<F: FnOnce(RequestOutcome<bool>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        timeout: Duration,
+        hooks: Option<SendHooks>,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<bool>> + use<F> {
+        let read = self.read_value(
+            did,
+            binding,
+            timeout,
+            hooks,
+            ReadFormat::Boolean,
+            move |outcome| {
+                on_result(boolean_outcome(outcome));
+            },
+        );
+        async move { boolean_outcome(read.await) }
+    }
+
     pub fn read_property_value<F: FnOnce(RequestOutcome<Value>) + 'static>(
         &self,
         did: &str,
         binding: PropertyBinding,
         on_result: F,
     ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
-        self.read_value(did, binding, self.timing.request, None, on_result)
+        self.read_value(
+            did,
+            binding,
+            self.timing.request,
+            None,
+            ReadFormat::Value,
+            on_result,
+        )
     }
     pub fn read_property_value_with_timeout<F: FnOnce(RequestOutcome<Value>) + 'static>(
         &self,
@@ -462,7 +468,7 @@ impl SessionHandle {
         timeout: Duration,
         on_result: F,
     ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
-        self.read_value(did, binding, timeout, None, on_result)
+        self.read_value(did, binding, timeout, None, ReadFormat::Value, on_result)
     }
     pub fn read_property_value_with_timeout_guarded<F: FnOnce(RequestOutcome<Value>) + 'static>(
         &self,
@@ -472,7 +478,14 @@ impl SessionHandle {
         hooks: SendHooks,
         on_result: F,
     ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
-        self.read_value(did, binding, timeout, Some(hooks), on_result)
+        self.read_value(
+            did,
+            binding,
+            timeout,
+            Some(hooks),
+            ReadFormat::Value,
+            on_result,
+        )
     }
     fn read_value<F: FnOnce(RequestOutcome<Value>) + 'static>(
         &self,
@@ -480,12 +493,14 @@ impl SessionHandle {
         binding: PropertyBinding,
         timeout: Duration,
         hooks: Option<SendHooks>,
+        format: ReadFormat,
         on_result: F,
     ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
         self.submit(
-            RequestKind::ReadValue {
+            RequestKind::Read {
                 did: did.into(),
                 binding,
+                format,
             },
             timeout.min(self.timing.request),
             hooks,
@@ -632,8 +647,7 @@ fn valid_request(kind: &RequestKind) -> bool {
                 && properties.iter().all(|(_, value)| valid_value(value));
         }
         RequestKind::Subscribe { did, binding }
-        | RequestKind::Read { did, binding }
-        | RequestKind::ReadValue { did, binding }
+        | RequestKind::Read { did, binding, .. }
         | RequestKind::Write { did, binding, .. } => (did, Some(binding)),
     };
     valid_identifier(did) && binding.is_none_or(|binding| binding.siid > 0 && binding.piid > 0)
@@ -693,12 +707,19 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
         ));
     }
     match kind {
-        RequestKind::ReadValue { did, binding } => {
+        RequestKind::Read {
+            did,
+            binding,
+            format,
+        } => {
             validate_identity(value, did, *binding, false)?;
             Ok(Response::PropertyValue(
                 value
                     .get("value")
-                    .filter(|value| valid_value(value))
+                    .filter(|value| {
+                        valid_value(value)
+                            && (matches!(format, ReadFormat::Value) || value.is_boolean())
+                    })
                     .cloned()
                     .ok_or(CentralError::Protocol)?,
             ))
@@ -723,15 +744,6 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
                     code => Err(CentralError::Rejected(code)),
                 },
             )))
-        }
-        RequestKind::Read { did, binding } => {
-            validate_identity(value, did, *binding, false)?;
-            Ok(Response::Power(
-                value
-                    .get("value")
-                    .and_then(Value::as_bool)
-                    .ok_or(CentralError::Protocol)?,
-            ))
         }
         RequestKind::Write { did, binding, .. } => {
             let result = value
@@ -813,4 +825,14 @@ fn device_access(did: &str, info: &Value) -> Result<DeviceAccess, CentralError> 
         spec_v2_access: flag("specV2Access")?,
         push_available: flag("pushAvailable")?,
     })
+}
+
+fn boolean_outcome(outcome: RequestOutcome<Value>) -> RequestOutcome<bool> {
+    RequestOutcome {
+        result: outcome
+            .result
+            .map(|value| value.as_bool().expect("validated Boolean response")),
+        stage: outcome.stage,
+        timeout: outcome.timeout,
+    }
 }

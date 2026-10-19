@@ -160,16 +160,21 @@ fn coalesced_read_and_access_callbacks_run_before_later_notifications() {
                 assert_eq!(entries[0].access.as_ref().unwrap().model, "cuco.plug.v3");
                 assert!(
                     !handle
-                        .read_property(
+                        .read_property_value(
                             "target",
                             PropertyBinding { siid: 2, piid: 1 },
                             move |outcome| {
-                                assert!(!outcome.result.unwrap());
+                                assert_eq!(
+                                    outcome.result.unwrap().as_bool().unwrap(),
+                                    json!(false)
+                                );
                                 observations.borrow_mut().push("read false");
                             }
                         )
                         .await
                         .result
+                        .unwrap()
+                        .as_bool()
                         .unwrap()
                 );
                 handle.close();
@@ -269,17 +274,17 @@ fn result_callbacks_can_submit_requests_after_waiters_are_dropped() {
         },
         |handle, driver| async move {
             let next = handle.clone();
-            drop(handle.read_property(
+            drop(handle.read_property_value(
                 "target",
                 PropertyBinding { siid: 2, piid: 1 },
                 move |outcome| {
-                    assert_eq!(outcome.result, Ok(true));
+                    assert_eq!(outcome.result, Ok(json!(true)));
                     let close = next.clone();
-                    drop(next.read_property(
+                    drop(next.read_property_value(
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
                         move |outcome| {
-                            assert_eq!(outcome.result, Ok(false));
+                            assert_eq!(outcome.result, Ok(json!(false)));
                             close.close();
                         },
                     ));

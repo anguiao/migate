@@ -28,7 +28,7 @@ fn disconnect_and_access_denial_finish_every_pending_callback() {
                 async_io::Timer::after(Duration::from_millis(20)).await;
             },
             move |handle, driver| async move {
-                let read = handle.read_property(
+                let read = handle.read_property_value(
                     "target",
                     PropertyBinding { siid: 2, piid: 1 },
                     move |outcome| first.borrow_mut().push(outcome.result.map(|_| ())),
@@ -77,7 +77,7 @@ fn dropping_unpolled_driver_completes_queued_callback_and_closes_handle() {
             assert_eq!(request.await.result, Err(CentralError::Cancelled));
             assert_eq!(
                 handle
-                    .read_property(
+                    .read_property_value(
                         "target",
                         PropertyBinding { siid: 2, piid: 1 },
                         |outcome| assert_eq!(outcome.result, Err(CentralError::Cancelled))
@@ -127,13 +127,15 @@ fn reconnect_never_completes_from_old_session_request_id() {
                     let work = async {
                         assert!(
                             !handle
-                                .read_property(
+                                .read_property_value(
                                     "target",
                                     PropertyBinding { siid: 2, piid: 1 },
-                                    |outcome| assert_eq!(outcome.result, Ok(false))
+                                    |outcome| assert_eq!(outcome.result, Ok(json!(false)))
                                 )
                                 .await
                                 .result
+                                .unwrap()
+                                .as_bool()
                                 .unwrap()
                         );
                         handle.close();

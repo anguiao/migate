@@ -114,7 +114,7 @@ fn refresh_timeout_keeps_the_ten_second_qos2_handshake_deadline() {
         driver.output.clear();
         driver.ready = true;
         let before = Instant::now();
-        let read = handle.read_property_with_timeout(
+        let read = handle.read_property_value_with_timeout(
             "target",
             PropertyBinding { siid: 2, piid: 1 },
             Duration::from_secs(6),

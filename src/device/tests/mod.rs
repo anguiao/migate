@@ -1,3 +1,12 @@
+async fn next_power(
+    receiver: &mut crate::device::CommandReceiver,
+) -> Option<crate::device::CommandRequest> {
+    match receiver.next_operation().await? {
+        crate::device::DeviceRequest::Power(request) => Some(request),
+        crate::device::DeviceRequest::Light(_) => panic!("unexpected lighting request"),
+    }
+}
+
 use futures_lite::future::{block_on, poll_once};
 
 use super::{
@@ -73,7 +82,7 @@ fn commands_change_state_only_after_acceptance_and_repeat_targets_are_allowed() 
         let command = device.execute(Command::On);
         futures_lite::pin!(command);
         assert!(poll_once(command.as_mut()).await.is_none());
-        let request = receiver.next().await.unwrap();
+        let request = next_power(&mut receiver).await.unwrap();
         assert!(request.target);
         assert_eq!(device.snapshot().power, Power::Off);
         request.accept().unwrap();
@@ -83,7 +92,7 @@ fn commands_change_state_only_after_acceptance_and_repeat_targets_are_allowed() 
         let command = device.execute(Command::On);
         futures_lite::pin!(command);
         assert!(poll_once(command.as_mut()).await.is_none());
-        receiver.next().await.unwrap().accept().unwrap();
+        next_power(&mut receiver).await.unwrap().accept().unwrap();
         command.await.unwrap();
         assert!(poll_once(changes.changed()).await.is_none());
     });
@@ -97,8 +106,7 @@ fn rejected_commands_preserve_state_and_later_observations_still_apply() {
         let command = device.execute(Command::On);
         futures_lite::pin!(command);
         poll_once(command.as_mut()).await;
-        receiver
-            .next()
+        next_power(&mut receiver)
             .await
             .unwrap()
             .reject(CommandError::Rejected("access denied".into()));
@@ -124,14 +132,14 @@ fn commands_are_fifo_and_toggle_uses_snapshot_at_execution_time() {
         poll_once(first.as_mut()).await;
         poll_once(second.as_mut()).await;
         let after_queue = std::time::Instant::now();
-        let first_request = receiver.next().await.unwrap();
+        let first_request = next_power(&mut receiver).await.unwrap();
         assert!((before_queue..=after_queue).contains(&first_request.queued_at()));
-        assert!(poll_once(receiver.next()).await.is_none());
+        assert!(poll_once(next_power(&mut receiver)).await.is_none());
         first_request.accept().unwrap();
         first.await.unwrap();
         // A current observation affects Toggle when its turn arrives.
         device.observe(false);
-        let second_request = receiver.next().await.unwrap();
+        let second_request = next_power(&mut receiver).await.unwrap();
         assert!((before_queue..=after_queue).contains(&second_request.queued_at()));
         assert!(second_request.target);
         second_request.accept().unwrap();
@@ -152,7 +160,7 @@ fn toggle_unknown_and_unavailable_commands_fail_without_sending() {
         let command = device.execute(Command::Toggle);
         futures_lite::pin!(command);
         poll_once(command.as_mut()).await;
-        assert!(poll_once(receiver.next()).await.is_none());
+        assert!(poll_once(next_power(&mut receiver)).await.is_none());
         assert_eq!(command.await, Err(CommandError::UnknownState));
         physical.set_availability(Availability::Unavailable("offline".into()));
         assert_eq!(
@@ -174,7 +182,7 @@ fn unsupported_capabilities_fail_without_sending() {
             device.execute(Command::On).await,
             Err(CommandError::Unsupported)
         );
-        assert!(poll_once(receiver.next()).await.is_none());
+        assert!(poll_once(next_power(&mut receiver)).await.is_none());
     });
 }
 
@@ -189,13 +197,13 @@ fn queued_commands_wait_for_the_active_adapter_request() {
         let second = device.execute(Command::Off);
         futures_lite::pin!(first, second);
         poll_once(first.as_mut()).await;
-        let request = receiver.next().await.unwrap();
+        let request = next_power(&mut receiver).await.unwrap();
         poll_once(second.as_mut()).await;
         assert!(poll_once(first.as_mut()).await.is_none());
         assert!(poll_once(second.as_mut()).await.is_none());
         request.accept().unwrap();
         assert_eq!(first.await.unwrap().power, Power::On);
-        let request = receiver.next().await.unwrap();
+        let request = next_power(&mut receiver).await.unwrap();
         assert!(!request.target);
         request.accept().unwrap();
         assert_eq!(second.await.unwrap().power, Power::Off);
@@ -228,7 +236,7 @@ fn receiver_shutdown_cancels_active_commands_without_accepting_stale_results() {
         let command = device.execute(Command::On);
         futures_lite::pin!(command);
         poll_once(command.as_mut()).await;
-        let request = receiver.next().await.unwrap();
+        let request = next_power(&mut receiver).await.unwrap();
         drop(receiver);
         assert_eq!(request.accept(), Err(CommandError::Cancelled));
         assert_eq!(command.await, Err(CommandError::Cancelled));
@@ -263,7 +271,7 @@ fn active_acceptance_survives_an_offline_observation() {
         let device = &physical.functions()[0];
         let mut command = Box::pin(device.execute(Command::On));
         assert!(poll_once(command.as_mut()).await.is_none());
-        let request = receiver.next().await.unwrap();
+        let request = next_power(&mut receiver).await.unwrap();
         physical.set_availability(Availability::Unavailable("offline".into()));
         assert!(poll_once(command.as_mut()).await.is_none());
         let accepted = request.accept().unwrap();
@@ -290,7 +298,7 @@ fn becoming_unavailable_ends_queued_requests_but_preserves_active_acceptance() {
         futures_lite::pin!(first, second);
         poll_once(first.as_mut()).await;
         poll_once(second.as_mut()).await;
-        let stale = receiver.next().await.unwrap();
+        let stale = next_power(&mut receiver).await.unwrap();
         physical.set_availability(Availability::Unavailable("connection lost".into()));
         let error = CommandError::Unavailable("connection lost".into());
         assert!(poll_once(first.as_mut()).await.is_none());
@@ -299,7 +307,7 @@ fn becoming_unavailable_ends_queued_requests_but_preserves_active_acceptance() {
         physical.set_availability(Availability::Available);
         assert_eq!(stale.accept().unwrap().power, Power::On);
         assert_eq!(first.await.unwrap().power, Power::On);
-        assert!(poll_once(receiver.next()).await.is_none());
+        assert!(poll_once(next_power(&mut receiver)).await.is_none());
         assert_eq!(device.snapshot().power, Power::On);
     });
 }
@@ -315,11 +323,11 @@ fn dropping_a_queued_command_withdraws_it_before_the_adapter_can_send() {
 
         let mut next = Box::pin(device.execute(Command::Off));
         assert!(poll_once(next.as_mut()).await.is_none());
-        let request = receiver.next().await.unwrap();
+        let request = next_power(&mut receiver).await.unwrap();
         assert!(!request.target);
         request.accept().unwrap();
         assert_eq!(next.await.unwrap().power, Power::Off);
-        assert!(poll_once(receiver.next()).await.is_none());
+        assert!(poll_once(next_power(&mut receiver)).await.is_none());
     });
 }
 
@@ -330,12 +338,12 @@ fn dropping_a_caller_does_not_discard_an_inflight_adapter_result() {
         let device = &physical.functions()[0];
         let mut command = Box::pin(device.execute(Command::On));
         assert!(poll_once(command.as_mut()).await.is_none());
-        let request = receiver.next().await.unwrap();
+        let request = next_power(&mut receiver).await.unwrap();
         drop(command);
 
         assert_eq!(request.accept().unwrap().power, Power::On);
         assert_eq!(device.snapshot().power, Power::On);
-        assert!(poll_once(receiver.next()).await.is_none());
+        assert!(poll_once(next_power(&mut receiver)).await.is_none());
     });
 }
 
@@ -348,13 +356,13 @@ fn acceptance_can_preserve_a_newer_observation_and_continue_the_fifo() {
         let mut next = Box::pin(device.execute(Command::Toggle));
         assert!(poll_once(first.as_mut()).await.is_none());
         assert!(poll_once(next.as_mut()).await.is_none());
-        let request = receiver.next().await.unwrap();
+        let request = next_power(&mut receiver).await.unwrap();
         assert!(request.target);
         device.observe(false);
         let observed = device.snapshot();
         assert_eq!(request.accept_preserving_state().unwrap(), observed);
         assert_eq!(first.await.unwrap(), observed);
-        let following = receiver.next().await.unwrap();
+        let following = next_power(&mut receiver).await.unwrap();
         assert!(following.target);
         following.accept().unwrap();
         assert_eq!(next.await.unwrap().power, Power::On);
@@ -368,7 +376,7 @@ fn preserving_acceptance_does_not_restore_a_closed_function() {
         let device = &physical.functions()[0];
         let mut command = Box::pin(device.execute(Command::On));
         assert!(poll_once(command.as_mut()).await.is_none());
-        let request = receiver.next().await.unwrap();
+        let request = next_power(&mut receiver).await.unwrap();
         device.observe(false);
         let observed = device.snapshot();
         drop(receiver);

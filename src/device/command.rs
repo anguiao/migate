@@ -235,22 +235,6 @@ impl CommandReceiver {
         }
         None
     }
-    pub async fn next(&mut self) -> Option<CommandRequest> {
-        self.wait_active().await;
-        loop {
-            let listener = self.function.0.submitted.listen();
-            {
-                let mut state = self.function.0.state.lock().unwrap();
-                if let Some(request) = self.take_power(&mut state) {
-                    return Some(request);
-                }
-                if state.queue.closed {
-                    return None;
-                }
-            }
-            listener.await;
-        }
-    }
 }
 
 impl Drop for CommandReceiver {
