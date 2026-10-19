@@ -1,5 +1,9 @@
 use super::*;
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    io,
+    task::{Context as TaskContext, Poll},
+};
 
 use super::support::group_record;
 
@@ -817,6 +821,52 @@ fn runtime_socket_live(port: u16) -> bool {
     .is_err()
 }
 
+struct TerminalOutput {
+    bytes: Vec<u8>,
+    replies: flume::Sender<Vec<u8>>,
+}
+
+impl futures_lite::io::AsyncWrite for TerminalOutput {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _: &mut TaskContext<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.bytes.extend_from_slice(bytes);
+        Poll::Ready(Ok(bytes.len()))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        let bytes = std::mem::take(&mut self.bytes);
+        self.replies.send(bytes).unwrap();
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(cx)
+    }
+}
+
+async fn terminal_command(
+    input: &mut Async<std::net::TcpStream>,
+    replies: &flume::Receiver<Vec<u8>>,
+    command: &str,
+) -> String {
+    use futures_lite::io::AsyncWriteExt;
+    input
+        .write_all(format!("{command}\n").as_bytes())
+        .await
+        .unwrap();
+    future::or(
+        async { String::from_utf8(replies.recv_async().await.unwrap()).unwrap() },
+        async {
+            async_io::Timer::after(Duration::from_secs(5)).await;
+            panic!("runtime terminal did not reply to {command}");
+        },
+    )
+    .await
+}
+
 #[test]
 fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state() {
     let rig = Rig::new(false, &["one", "two"]);
@@ -865,12 +915,23 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             status: &status,
             port,
         };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut terminal_input =
+            Async::new(std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap())
+                .unwrap();
+        let input =
+            futures_lite::io::BufReader::new(Async::new(listener.accept().unwrap().0).unwrap());
+        let (reply, replies) = flume::unbounded();
+        let output = TerminalOutput {
+            bytes: Vec::new(),
+            replies: reply,
+        };
         let runtime = crate::runtime::run_xiaomi_bridge(
             options,
             async move { Ok((handle, registry)) },
             future::pending::<Result<(), crate::RuntimeError>>(),
-            &b""[..],
-            Vec::new(),
+            input,
+            output,
             future::pending::<Result<(), crate::RuntimeError>>(),
             |_| Ok(()),
         );
@@ -884,6 +945,30 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             let root_before = version();
             let group_before = store.devices().load_published(&group).unwrap().unwrap();
             let two_before = c.context.registry.get(&two).unwrap();
+            let device_ids = |report: &str| {
+                report
+                    .lines()
+                    .filter(|line| !line.starts_with(' ') && line.contains("): "))
+                    .filter_map(|line| line.split_once(" ("))
+                    .map(|(did, _)| did.to_string())
+                    .collect::<BTreeSet<_>>()
+            };
+            let report = terminal_command(&mut terminal_input, &replies, "status").await;
+            assert!(
+                report.contains(&format!("Configuration: root version {root_before}.")),
+                "{report}"
+            );
+            assert!(
+                report.contains("Native group (virtual): members one."),
+                "{report}"
+            );
+            let list = terminal_command(&mut terminal_input, &replies, "list").await;
+            assert_eq!(
+                device_ids(&list),
+                BTreeSet::from(["group-1".into(), "one".into(), "two".into()])
+            );
+            assert!(list.contains("one (name one):"), "{list}");
+            assert!(list.contains("Matter: hidden or reserved;"), "{list}");
 
             // A small cfg(test) observer records whether the real UDP socket was
             // free at each snapshot and can inject a late confirmed candidate.
@@ -947,7 +1032,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             }
 
             // Phase 1: a pure relation change rebuilds but must not bump any
-            // configuration version.
+            // configuration version. The unresolved member has no source device.
             // Seed an old subscription slot after startup. The next instance
             // must discard it before attempting to decode or resume it.
             let subscription_key = rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START;
@@ -974,6 +1059,19 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             assert!(!injected.get());
             assert!(observations.borrow().iter().any(|free| *free));
             assert_eq!(version(), root_before);
+            let report = terminal_command(&mut terminal_input, &replies, "status").await;
+            assert!(
+                report.contains(&format!("Configuration: root version {root_before}.")),
+                "{report}"
+            );
+            assert!(
+                report.contains("Native group (virtual): members member-a, one."),
+                "{report}"
+            );
+            assert_eq!(
+                device_ids(&report),
+                BTreeSet::from(["group-1".into(), "one".into(), "two".into()])
+            );
             let group_after_relation = store.devices().load_published(&group).unwrap().unwrap();
             assert!(!store.matter().contains(subscription_key).unwrap());
             assert_eq!(
@@ -1036,21 +1134,38 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             );
             assert_eq!(group_after_bounds.unique_id, group_before.unique_id);
             assert_eq!(group_after_bounds.endpoint, group_before.endpoint);
+            let root_settled = version();
+            let report = terminal_command(&mut terminal_input, &replies, "status group-1").await;
+            assert!(
+                report.contains(&format!("Configuration: root version {root_settled}.")),
+                "{report}"
+            );
+            assert!(
+                report.contains(&format!(
+                    "configuration version {}.",
+                    group_after_bounds.configuration_version
+                )),
+                "{report}"
+            );
+            assert!(
+                report.contains("Native group (virtual): members one."),
+                "{report}"
+            );
+            assert!(
+                report.contains("Effective temperature range: 2700–6500 K."),
+                "{report}"
+            );
+            assert!(!report.contains("Configuration apply failed:"), "{report}");
+            let committed_list = terminal_command(&mut terminal_input, &replies, "list").await;
 
             // The unchanged outlet still accepts real control after the
             // rebuild: an On/Off round trip reaches the source as property
             // writes for did "two".
-            let two_id = {
-                let live = c.context.live.borrow();
-                let record = live.devices["two"].admitted.as_ref().unwrap();
-                record.cached.borrow().device.functions[0]
-                    .description
-                    .id
-                    .clone()
-            };
-            let outlet = function(&c.context.registry, "two", &two_id);
             c.cloud.lock().unwrap().property_writes.clear();
-            outlet.execute(crate::device::Command::On).await.unwrap();
+            assert_eq!(
+                terminal_command(&mut terminal_input, &replies, "on two").await,
+                "two: command accepted\n"
+            );
             until(|| {
                 c.cloud
                     .lock()
@@ -1060,7 +1175,10 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                     .any(|(did, _, _, value, _)| did == "two" && *value)
             })
             .await;
-            outlet.execute(crate::device::Command::Off).await.unwrap();
+            assert_eq!(
+                terminal_command(&mut terminal_input, &replies, "off two").await,
+                "two: command accepted\n"
+            );
             until(|| {
                 c.cloud
                     .lock()
@@ -1073,7 +1191,6 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
 
             // Ordinary state changes do not rebuild or touch the socket.
             let snapshots = observations.borrow().len();
-            let root_settled = version();
             light
                 .observe_light(crate::device::LightPatch {
                     power: Some(true),
@@ -1125,6 +1242,36 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             );
             assert_eq!(group_after_failure.unique_id, group_before.unique_id);
             assert_eq!(group_after_failure.endpoint, group_before.endpoint);
+            let report = terminal_command(&mut terminal_input, &replies, "status group-1").await;
+            assert!(
+                report.contains(&format!(
+                    "Configuration: root version {root_settled}; pending application."
+                )),
+                "{report}"
+            );
+            assert!(report.contains("Configuration apply failed:"), "{report}");
+            assert!(
+                report.contains(&format!(
+                    "configuration version {}.",
+                    group_after_bounds.configuration_version
+                )),
+                "{report}"
+            );
+            assert!(
+                report.contains("Native group (virtual): members one."),
+                "{report}"
+            );
+            assert!(!report.contains("members member-a, one."), "{report}");
+            assert!(
+                report.contains("Effective temperature range: 2700–6500 K."),
+                "{report}"
+            );
+            let list = terminal_command(&mut terminal_input, &replies, "list").await;
+            assert_eq!(device_ids(&list), device_ids(&committed_list));
+            assert!(
+                list.contains("Native group (virtual): members one."),
+                "{list}"
+            );
 
             Ok::<(), crate::RuntimeError>(())
         };

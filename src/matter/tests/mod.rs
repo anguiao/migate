@@ -1,4 +1,5 @@
 mod handlers;
+mod lighting_handlers;
 mod subscriptions;
 pub(crate) mod support;
 

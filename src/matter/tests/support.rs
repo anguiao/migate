@@ -8,8 +8,10 @@ pub(super) async fn next_power(
 }
 
 mod context;
+mod reports;
 pub(in crate::matter) use context::Context;
 pub(super) use context::attr;
+pub(super) use reports::{read_bytes, report_dataver, report_value};
 
 use super::*;
 use crate::storage::tests::fixtures::{commit, record, scope};
