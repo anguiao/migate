@@ -3,6 +3,7 @@ mod cloud;
 mod commands;
 mod credentials;
 mod diagnostics;
+mod group_rules;
 mod groups;
 mod lighting;
 mod local;

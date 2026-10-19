@@ -1,4 +1,8 @@
-use super::{state::Context, work::DeviceWork};
+use super::{
+    group_rules::{Member, aggregate},
+    state::Context,
+    work::DeviceWork,
+};
 use crate::{
     device::{
         Availability, CommandError, LightColorTarget, LightDimension, LightMode, LightPatch,
@@ -412,7 +416,7 @@ impl Context {
         };
         let physical = work.physical();
         let function = physical.function("main").unwrap();
-        let mut state = LightSnapshot {
+        let state = LightSnapshot {
             brightness_percent: None,
             temperature_kelvin: None,
             color: None,
@@ -443,64 +447,20 @@ impl Context {
                 let snapshot = function.snapshot();
                 let light = snapshot.lighting?;
                 let description = function.description();
-                let color = description.supports_color_temperature() || description.supports_rgb();
-                Some((did, snapshot.power, light, color))
+                let supports_color =
+                    description.supports_color_temperature() || description.supports_rgb();
+                Some(Member {
+                    did,
+                    power: snapshot.power,
+                    lighting: light,
+                    supports_color,
+                })
             })
             .collect::<Vec<_>>();
-        let description = function.description();
-        let representative = members
-            .iter()
-            .filter(|(_, _, _, color)| *color)
-            .map(|(did, power, light, _)| {
-                let mut light = *light;
-                light.temperature_kelvin = light.temperature_kelvin.filter(|value| {
-                    description
-                        .temperature_interval()
-                        .is_some_and(|interval| interval.contains(*value))
-                });
-                if !description.supports_rgb() {
-                    light.color = None;
-                }
-                light.mode = light.mode.filter(|mode| match mode {
-                    LightMode::Temperature => description.supports_color_temperature(),
-                    LightMode::Rgb => description.supports_rgb(),
-                });
-                let valid = match light.mode {
-                    Some(LightMode::Temperature) => light.temperature_kelvin.is_some(),
-                    Some(LightMode::Rgb) => light.color.is_some(),
-                    None => false,
-                };
-                let priority = valid && *power == Power::On;
-                (!priority, did, light)
-            })
-            .min_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)))
-            .map(|(_, _, light)| light);
-        if let Some(light) = representative {
-            state.temperature_kelvin = light.temperature_kelvin;
-            state.color = light.color;
-            state.mode = light.mode;
-        }
+        let (power, state) = aggregate(function.description(), &members, group.members.len());
         if group.is_physical {
             function.replace_light_color(state.color, state.mode);
             return;
-        }
-        let power = if members.iter().any(|(_, power, _, _)| *power == Power::On) {
-            Power::On
-        } else if members.len() == group.members.len()
-            && members.iter().all(|(_, power, _, _)| *power == Power::Off)
-        {
-            Power::Off
-        } else {
-            Power::Unknown
-        };
-        if description.supports_brightness() && power != Power::Unknown {
-            let values = members
-                .iter()
-                .filter(|(_, member_power, _, _)| *member_power == power)
-                .filter_map(|(_, _, light, _)| light.brightness_percent);
-            let (sum, count) =
-                values.fold((0.0, 0), |(sum, count), value| (sum + value, count + 1));
-            state.brightness_percent = (count > 0).then(|| sum / f64::from(count));
         }
         function.replace_light_state(power, state);
     }
