@@ -6,6 +6,7 @@ pub(in super::super) struct PeerState {
     pub(in super::super) client_id: String,
     pub(in super::super) seen: Vec<(String, Value)>,
     pub(in super::super) names: BTreeMap<String, String>,
+    pub(in super::super) models: BTreeMap<String, String>,
     pub(in super::super) online: BTreeMap<String, bool>,
     pub(in super::super) bad: BTreeSet<String>,
     pub(in super::super) pushless: BTreeSet<String>,
@@ -271,7 +272,7 @@ pub(in super::super) async fn peer_run(
                         "getDevList" => {
                             let mut list = serde_json::Map::new();
                             for record in &data {
-                                let did = &record.device.key().id;
+                                let did = &record.device().key().id;
                                 if state.omit.contains(did)
                                     || payload["filter"]["did"].as_array().is_some_and(|dids| {
                                         !dids.iter().any(|value| value.as_str() == Some(did))
@@ -279,7 +280,7 @@ pub(in super::super) async fn peer_run(
                                 {
                                     continue;
                                 }
-                                let mut info = json!({"name":state.names.get(did).cloned().unwrap_or_else(||format!("name {did}")),"model":record.model,"urn":record.instance_type,"online":state.online.get(did).copied().unwrap_or(true),"specV2Access":true,"pushAvailable":!state.pushless.contains(did)});
+                                let mut info = json!({"name":state.names.get(did).cloned().unwrap_or_else(||format!("name {did}")),"model":state.models.get(did).map(String::as_str).unwrap_or(record.model()),"urn":record.instance_type(),"online":state.online.get(did).copied().unwrap_or(true),"specV2Access":true,"pushAvailable":!state.pushless.contains(did)});
                                 if state.bad.contains(did) {
                                     info.as_object_mut().unwrap().remove("pushAvailable");
                                 }

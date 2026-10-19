@@ -70,9 +70,13 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         (3, "group.42", "xiaomi.light.ceil04"),
         (4, "43", "mijia.light.group3"),
     ] {
-        let mut group = rig.data[0].clone();
-        group.device = super::support::device_with_key(&group.device, did);
-        group.model = model.into();
+        let native = &rig.data[0];
+        let group = crate::xiaomi::capability::NativeDescription::new(
+            model.into(),
+            native.instance_type().into(),
+            super::support::device_with_key(native.device(), did),
+        )
+        .unwrap();
         let mut device = identity(&group.physical_description("Saved group"), endpoint);
         device.native = Some(group.clone());
         state.devices.push(device);
@@ -105,14 +109,14 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
             3
         );
         for group in &groups {
-            assert!(registry.get(group.device.key()).is_some());
-            assert!(!source.context.live.borrow().devices[&group.device.key().id].group);
+            assert!(registry.get(group.device().key()).is_some());
+            assert!(!source.context.live.borrow().devices[&group.device().key().id].group);
             assert_eq!(
                 rig.store
                     .devices()
                     .load_configuration()
                     .unwrap()
-                    .device(group.device.key())
+                    .device(group.device().key())
                     .unwrap()
                     .native
                     .clone(),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::xiaomi::capability::NativeDescription;
 use crate::xiaomi::{
     adapter::state::{AccessRefresh, AccessRequest, Backoff},
     central::{DeviceAccess, DeviceEntry},
@@ -173,12 +174,12 @@ fn initial_list_waits_for_baseline_suback_and_preserves_its_timeout() {
 
 pub(super) fn observation(record: &NativeDescription, online: bool) -> DeviceEntry {
     DeviceEntry {
-        did: record.device.key().id.clone(),
+        did: record.device().key().id.clone(),
         access: Ok(DeviceAccess {
-            did: record.device.key().id.clone(),
-            name: Some(format!("name {}", record.device.key().id)),
-            model: record.model.clone(),
-            instance_type: record.instance_type.clone(),
+            did: record.device().key().id.clone(),
+            name: Some(format!("name {}", record.device().key().id)),
+            model: record.model().to_owned(),
+            instance_type: record.instance_type().to_owned(),
             online,
             spec_v2_access: true,
             push_available: true,

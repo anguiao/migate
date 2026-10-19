@@ -1207,7 +1207,7 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<(u32, String)>) ->
 fn commit_presence(
     store: &Store,
     id: &str,
-    native: Option<crate::configuration::NativeDescription>,
+    native: Option<crate::xiaomi::capability::NativeDescription>,
     version: u32,
     root: u32,
 ) {

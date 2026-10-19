@@ -8,8 +8,8 @@
 
 use super::{model::AdapterError, relations::ConfirmedGroup, state::Context};
 use crate::{
-    configuration::NativeDescription,
     device::DeviceKey,
+    xiaomi::capability::NativeDescription,
     xiaomi::{
         capability::parse_group,
         cloud::{CloudClient, CloudDeviceInfo},
@@ -200,13 +200,10 @@ impl Context {
                             DeviceKey::new("xiaomi", group_did.clone()),
                             &model,
                             &instance,
-                        ) {
-                            Ok(device) => {
-                                let cached = NativeDescription {
-                                    model,
-                                    instance_type,
-                                    device,
-                                };
+                        )
+                        .and_then(|device| NativeDescription::new(model, instance_type, device))
+                        {
+                            Ok(cached) => {
                                 if let Some(slot) =
                                     context.live.borrow_mut().devices.get_mut(&group_did)
                                 {

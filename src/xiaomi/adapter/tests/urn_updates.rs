@@ -386,7 +386,7 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
                 .configuration
                 .device(&key)
                 .and_then(|device| device.native.as_ref())
-                .is_some_and(|native| native.instance_type == new_urn)
+                .is_some_and(|native| native.instance_type() == new_urn)
         })
         .await;
         {
@@ -455,9 +455,12 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
         assert_eq!((updated.minimum_mireds, updated.maximum_mireds), (154, 370));
         assert_eq!(updated.current_mireds, Some(167));
         assert_eq!(updated.configuration_version, saved.configuration_version);
-        assert_eq!(saved.native.as_ref().unwrap().model, "xiaomi.light.ceil04");
         assert_eq!(
-            saved.native.as_ref().unwrap().device.functions()[0]
+            saved.native.as_ref().unwrap().model(),
+            "xiaomi.light.ceil04"
+        );
+        assert_eq!(
+            saved.native.as_ref().unwrap().device().functions()[0]
                 .lighting()
                 .unwrap()
                 .temperature()
@@ -543,7 +546,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
             .unwrap();
         let matter = PublishedLightModel::new(&c.publication, &c.store);
         let attributes = matter.read(committed.endpoint).await;
-        let model = committed.native.as_ref().unwrap().model.clone();
+        let model = committed.native.as_ref().unwrap().model().to_owned();
 
         // The control description is byte-identical except for the top-level
         // type URN, so only configuration metadata may change.
@@ -571,7 +574,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
                 .configuration
                 .device(&key)
                 .and_then(|device| device.native.as_ref())
-                .is_some_and(|native| native.instance_type == new_urn)
+                .is_some_and(|native| native.instance_type() == new_urn)
         })
         .await;
 
@@ -610,8 +613,8 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
             c.publication.current().configuration.root_version,
             root_version
         );
-        assert_eq!(saved.native.as_ref().unwrap().model, model);
-        assert_eq!(saved.native.as_ref().unwrap().instance_type, new_urn);
+        assert_eq!(saved.native.as_ref().unwrap().model(), model);
+        assert_eq!(saved.native.as_ref().unwrap().instance_type(), new_urn);
 
         assert!(Rc::ptr_eq(
             &native_runtime,
@@ -622,7 +625,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
         ));
         assert_eq!(matter.read(committed.endpoint).await, attributes);
         assert_eq!(
-            c.publication.current().entries[0].native.instance_type,
+            c.publication.current().entries[0].native.instance_type(),
             new_urn
         );
         let catalogs = c.cloud.lock().unwrap().catalogs;
@@ -646,7 +649,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
                 .configuration
                 .device(&key)
                 .and_then(|device| device.native.as_ref())
-                .map(|native| native.instance_type.as_str()),
+                .map(|native| native.instance_type()),
             Some(new_urn)
         );
     }));
@@ -687,7 +690,7 @@ fn a_new_directory_urn_supersedes_a_held_description_load() {
                 .configuration
                 .device(&key)
                 .and_then(|device| device.native.as_ref())
-                .is_some_and(|native| native.instance_type == new_urn)
+                .is_some_and(|native| native.instance_type() == new_urn)
         })
         .await;
         release.send(()).unwrap();
@@ -703,7 +706,7 @@ fn a_new_directory_urn_supersedes_a_held_description_load() {
         }
         let current = c.publication.current();
         let device = current.configuration.device(&key).unwrap();
-        assert_eq!(device.native.as_ref().unwrap().instance_type, new_urn);
+        assert_eq!(device.native.as_ref().unwrap().instance_type(), new_urn);
         assert_eq!(current.configuration.root_version, root + 1);
         let matter = PublishedLightModel::new(&c.publication, &c.store);
         assert_eq!(matter.read(device.endpoint).await.minimum_mireds, 143);

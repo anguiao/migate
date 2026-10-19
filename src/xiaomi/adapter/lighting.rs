@@ -70,7 +70,7 @@ pub(super) fn encode(
 ) -> Result<Vec<(PropertyBinding, Value)>, CommandError> {
     let function = work
         .native
-        .device
+        .device()
         .functions()
         .iter()
         .find(|function| function.id() == id)
@@ -192,7 +192,7 @@ pub(super) fn refresh_missing_active(
         .unwrap();
     let light = work
         .native
-        .device
+        .device()
         .functions()
         .iter()
         .find(|function| function.id() == id)
@@ -228,7 +228,7 @@ pub(super) fn observe(
 ) -> Result<(), CapabilityError> {
     let description = work
         .native
-        .device
+        .device()
         .functions()
         .iter()
         .find(|function| function.id() == id)

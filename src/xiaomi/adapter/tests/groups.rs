@@ -238,9 +238,9 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
             let slot = &live.devices["group-1"];
             let record = slot.admitted.as_ref().unwrap();
             let cached = record.native.clone();
-            assert_eq!(cached.model, "mijia.light.group3");
+            assert_eq!(cached.model(), "mijia.light.group3");
             let light = cached
-                .device
+                .device()
                 .functions()
                 .iter()
                 .find(|function| function.lighting().is_some())
@@ -345,7 +345,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
             let record = live.devices["group-1"].admitted.as_ref().unwrap();
             let cached = record.native.clone();
             let function = cached
-                .device
+                .device()
                 .functions()
                 .iter()
                 .find(|function| function.lighting().is_some())
@@ -466,7 +466,7 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
             let record = live.devices["group-1"].admitted.as_ref().unwrap();
             let cached = record.native.clone();
             let light = cached
-                .device
+                .device()
                 .functions()
                 .iter()
                 .find(|function| function.lighting().is_some())
@@ -570,7 +570,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
             let live = c.context.live.borrow();
             let slot = &live.devices["group-1"];
             (
-                slot.admitted.as_ref().unwrap().native.device.functions()[0]
+                slot.admitted.as_ref().unwrap().native.device().functions()[0]
                     .description()
                     .id
                     .clone(),
@@ -654,13 +654,15 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             cloud.raw_values.insert(("group-p".into(), 2, piid), value);
         }
     }
-    let mut record = cached("account", "group-p", false);
-    record.model = "mijia.light.group3".into();
-    record.instance_type = urn;
-    record.device = crate::xiaomi::capability::parse_group(
-        DeviceKey::new("xiaomi", "group-p"),
-        &record.model,
-        &instance,
+    let record = crate::xiaomi::capability::NativeDescription::new(
+        "mijia.light.group3".into(),
+        urn,
+        crate::xiaomi::capability::parse_group(
+            DeviceKey::new("xiaomi", "group-p"),
+            "mijia.light.group3",
+            &instance,
+        )
+        .unwrap(),
     )
     .unwrap();
     rig.data.push(record);
@@ -703,7 +705,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
                     .as_ref()
                     .unwrap()
                     .native
-                    .device
+                    .device()
                     .functions()[0]
                     .description()
                     .id
@@ -1022,8 +1024,12 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                                 .or_else(|| slot.admitted.as_ref().map(|work| work.native.clone()))
                                 .unwrap();
                             let grid = crate::device::NumericRange::new(2700, 6500, 1).unwrap();
-                            cached.device =
-                                super::support::device_with_temperature_grid(&cached.device, grid);
+                            cached = crate::xiaomi::capability::NativeDescription::new(
+                                cached.model().into(),
+                                cached.instance_type().into(),
+                                super::support::device_with_temperature_grid(cached.device(), grid),
+                            )
+                            .unwrap();
                             slot.latest = Some(cached);
                             slot.confirmed = true;
                         }
@@ -1096,7 +1102,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 let record = live.devices["group-1"].admitted.as_ref().unwrap();
                 let cached = record.native.clone();
                 let light = cached
-                    .device
+                    .device()
                     .functions()
                     .iter()
                     .find(|function| function.lighting().is_some())

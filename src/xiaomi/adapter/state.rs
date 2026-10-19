@@ -5,8 +5,9 @@ use super::{
     tasks::TaskSet,
     work::DeviceWork,
 };
+use crate::xiaomi::capability::NativeDescription;
 use crate::{
-    configuration::{DerivedConfiguration, NativeDescription, Scope},
+    configuration::{DerivedConfiguration, Scope},
     device::{DeviceRegistry, PhysicalDevice},
     storage::{Store, XiaomiRecord},
     xiaomi::{
@@ -150,7 +151,7 @@ impl DeviceSlot {
             return true;
         };
         self.cloud_access.as_ref().is_some_and(|access| {
-            access.model != latest.model || access.instance_type != latest.instance_type
+            access.model != latest.model() || access.instance_type != latest.instance_type()
         })
     }
 }

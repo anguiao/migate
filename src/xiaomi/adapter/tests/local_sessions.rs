@@ -508,14 +508,6 @@ fn reconnect_keeps_command_consumers_cancels_old_writes_and_rebuilds_only_regist
 #[test]
 fn new_physical_group_discovers_own_local_access_after_member_session() {
     let mut rig = Rig::new(true, &["one"]);
-    let uid = rig
-        .store
-        .devices()
-        .load_configuration()
-        .unwrap()
-        .scope
-        .unwrap()
-        .uid;
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/group3-instance.json"
     ))
@@ -547,13 +539,15 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
             cloud.raw_values.insert(("group-1".into(), 2, siid), value);
         }
     }
-    let mut record = cached(&uid, "group-1", false);
-    record.model = "mijia.light.group3".into();
-    record.instance_type = urn.clone();
-    record.device = crate::xiaomi::capability::parse_device_for_model(
-        DeviceKey::new("xiaomi", "group-1"),
-        "mijia.light.group3",
-        &instance,
+    let record = crate::xiaomi::capability::NativeDescription::new(
+        "mijia.light.group3".into(),
+        urn.clone(),
+        crate::xiaomi::capability::parse_device_for_model(
+            DeviceKey::new("xiaomi", "group-1"),
+            "mijia.light.group3",
+            &instance,
+        )
+        .unwrap(),
     )
     .unwrap();
     rig.data.push(record);
@@ -598,7 +592,7 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
                 let record = live.devices["group-1"].admitted.as_ref().unwrap();
                 let cached = record.native.clone();
                 cached
-                    .device
+                    .device()
                     .functions()
                     .iter()
                     .find(|function| function.lighting().is_some())
@@ -633,23 +627,15 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
     .unwrap();
     let urn = instance["type"].as_str().unwrap().to_owned();
     for (did, physical) in [("group-p", true), ("group-v", false)] {
-        let mut record = cached(
-            &rig.store
-                .devices()
-                .load_configuration()
-                .unwrap()
-                .scope
-                .unwrap()
-                .uid,
-            did,
-            false,
-        );
-        record.model = "mijia.light.group3".into();
-        record.instance_type = urn.clone();
-        record.device = crate::xiaomi::capability::parse_group(
-            DeviceKey::new("xiaomi", did),
-            &record.model,
-            &instance,
+        let record = crate::xiaomi::capability::NativeDescription::new(
+            "mijia.light.group3".into(),
+            urn.clone(),
+            crate::xiaomi::capability::parse_group(
+                DeviceKey::new("xiaomi", did),
+                "mijia.light.group3",
+                &instance,
+            )
+            .unwrap(),
         )
         .unwrap();
         rig.data.push(record);

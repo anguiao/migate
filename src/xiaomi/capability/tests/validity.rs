@@ -4,8 +4,8 @@
 use super::key;
 use crate::device::{LightProfile, NumericRange, TemperatureInterval};
 use crate::xiaomi::capability::{
-    BrightnessBinding, ColorBinding, LightBindings, ModeBinding, NumericFormat, ParsedDevice,
-    ParsedFunction, PropertyBinding, TemperatureBinding, validate_model_topology,
+    BrightnessBinding, ColorBinding, LightBindings, ModeBinding, NativeDescription, NumericFormat,
+    ParsedDevice, ParsedFunction, PropertyBinding, TemperatureBinding,
 };
 
 fn property(siid: u32, piid: u32) -> PropertyBinding {
@@ -242,7 +242,7 @@ fn parsed_devices_require_non_empty_unique_functions_and_supported_topologies() 
 }
 
 #[test]
-fn model_topology_rejects_kind_and_cp7pd_recovery_mismatches() {
+fn native_description_rejects_kind_and_cp7pd_recovery_mismatches() {
     let outlet_type = "urn:miot-spec-v2:device:outlet:0000A002:test:1";
     let cp7pd_type = "urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:1";
 
@@ -254,7 +254,12 @@ fn model_topology_rejects_kind_and_cp7pd_recovery_mismatches() {
     );
     let light_device = ParsedDevice::new(key(), vec![light], None).unwrap();
     assert!(
-        validate_model_topology(&light_device, "vendor.plug", outlet_type).is_err(),
+        NativeDescription::new(
+            "vendor.plug".into(),
+            outlet_type.into(),
+            light_device.clone()
+        )
+        .is_err(),
         "a light kind cannot hide behind an outlet instance type"
     );
 
@@ -269,13 +274,20 @@ fn model_topology_rejects_kind_and_cp7pd_recovery_mismatches() {
         Some(property(2, 1)),
     )
     .unwrap();
-    assert!(validate_model_topology(&valid, "cuco.plug.cp7pd", cp7pd_type).is_ok());
-    assert!(validate_model_topology(&valid, "vendor.plug", outlet_type).is_err());
     assert!(
-        validate_model_topology(&valid, "cuco.plug.cp7pd", outlet_type).is_err(),
+        NativeDescription::new("cuco.plug.cp7pd".into(), cp7pd_type.into(), valid.clone()).is_ok()
+    );
+    assert!(
+        NativeDescription::new("vendor.plug".into(), outlet_type.into(), valid.clone()).is_err()
+    );
+    assert!(
+        NativeDescription::new("cuco.plug.cp7pd".into(), outlet_type.into(), valid.clone())
+            .is_err(),
         "the cp7pd model needs its cp7pd instance type"
     );
-    assert!(validate_model_topology(&valid, "vendor.plug", cp7pd_type).is_err());
+    assert!(
+        NativeDescription::new("vendor.plug".into(), cp7pd_type.into(), valid.clone()).is_err()
+    );
 
     let wrong_trigger = ParsedDevice::new(
         key(),
@@ -288,7 +300,12 @@ fn model_topology_rejects_kind_and_cp7pd_recovery_mismatches() {
     )
     .unwrap();
     assert!(
-        validate_model_topology(&wrong_trigger, "cuco.plug.cp7pd", cp7pd_type).is_err(),
+        NativeDescription::new(
+            "cuco.plug.cp7pd".into(),
+            cp7pd_type.into(),
+            wrong_trigger.clone()
+        )
+        .is_err(),
         "the master trigger must match the real binding"
     );
 
@@ -303,7 +320,12 @@ fn model_topology_rejects_kind_and_cp7pd_recovery_mismatches() {
     )
     .unwrap();
     assert!(
-        validate_model_topology(&wrong_channel, "cuco.plug.cp7pd", cp7pd_type).is_err(),
+        NativeDescription::new(
+            "cuco.plug.cp7pd".into(),
+            cp7pd_type.into(),
+            wrong_channel.clone()
+        )
+        .is_err(),
         "cp7pd channels own exact bindings"
     );
 }

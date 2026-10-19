@@ -569,16 +569,16 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
             .devices
             .iter()
             .filter_map(|device| device.native.as_ref())
-            .find(|native| native.device.key().id == "member-a")
+            .find(|native| native.device().key().id == "member-a")
             .expect("member native input restored from the committed configuration");
         let stored_a = saved
             .devices
             .iter()
             .find(|record| record.key.id == "member-a")
             .expect("member logical identity restored");
-        assert_eq!(native_a.model, "yeelink.light.light3");
+        assert_eq!(native_a.model(), "yeelink.light.light3");
         assert!(
-            native_a.device.functions()[0]
+            native_a.device().functions()[0]
                 .lighting()
                 .unwrap()
                 .color()

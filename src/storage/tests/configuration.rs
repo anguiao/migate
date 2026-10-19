@@ -1,10 +1,10 @@
 //! Configuration persistence through the private codec and real transaction.
 //! Historical endpoint reservations are independent from current native facts.
 
+use crate::xiaomi::capability::NativeDescription;
 use crate::{
     configuration::{
-        self, CommittedConfiguration, NativeDescription, Plan, PlanInput, Revocation, Scope,
-        SourceDevice, SourceFacts,
+        self, CommittedConfiguration, Plan, PlanInput, Revocation, Scope, SourceDevice, SourceFacts,
     },
     device::{DeviceKey, FunctionKind, LightProfile},
     matter,
@@ -28,11 +28,12 @@ fn scope(uid: &str, home: &str) -> Scope {
 }
 
 fn native(id: &str, model: &str, instance: Value) -> NativeDescription {
-    NativeDescription {
-        instance_type: instance["type"].as_str().unwrap().into(),
-        device: parse_device_for_model(DeviceKey::new("xiaomi", id), model, &instance).unwrap(),
-        model: model.into(),
-    }
+    NativeDescription::new(
+        model.into(),
+        instance["type"].as_str().unwrap().into(),
+        parse_device_for_model(DeviceKey::new("xiaomi", id), model, &instance).unwrap(),
+    )
+    .unwrap()
 }
 
 fn fixture(id: &str, model: &str, data: &str) -> NativeDescription {
@@ -45,8 +46,8 @@ fn next(current: &CommittedConfiguration, scope: Scope, natives: Vec<NativeDescr
         devices: natives
             .into_iter()
             .map(|native| SourceDevice {
-                key: native.device.key().clone(),
-                name: Some(native.model.clone()),
+                key: native.device().key().clone(),
+                name: Some(native.model().to_owned()),
                 native,
                 fresh: true,
             })
@@ -258,7 +259,7 @@ fn on_off_and_dimmable_profiles_persist_static_capabilities() {
                 .native
                 .as_ref()
                 .unwrap()
-                .device
+                .device()
                 .functions()[0]
                 .kind(),
             FunctionKind::Light(profile)
@@ -464,7 +465,7 @@ fn stored_identity_names_and_endpoints_survive_withdrawal_and_republication() {
     let withdrawn = next(&original, scope("account", "home"), vec![other.clone()]).configuration;
     save(&store, &withdrawn);
     assert!(withdrawn.devices[0].native.is_none());
-    assert!(!withdrawn.derive().published.contains(multi.device.key()));
+    assert!(!withdrawn.derive().published.contains(multi.device().key()));
     drop(store);
     let store = Store::open(dir.path()).unwrap();
     assert_eq!(load(&store), withdrawn);

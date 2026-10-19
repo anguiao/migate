@@ -1,8 +1,8 @@
 //! Valid native fixtures shared by module tests that construct logical devices.
 
 use crate::{
-    configuration::NativeDescription,
     device::{FunctionKind, LightProfile},
+    xiaomi::capability::NativeDescription,
     xiaomi::capability::{
         BrightnessBinding, ColorBinding, LightBindings, NumericFormat, ParsedDevice,
         ParsedFunction, PropertyBinding, TemperatureBinding,
@@ -67,32 +67,33 @@ pub(crate) fn native_for(
         .collect::<Vec<_>>();
     let key = description.key().clone();
     if multiple {
-        return NativeDescription {
-            model: "cuco.plug.cp7pd".into(),
-            instance_type: "urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:1".into(),
-            device: ParsedDevice::new(key, functions, Some(PropertyBinding { siid: 2, piid: 1 }))
-                .unwrap(),
-        };
+        return NativeDescription::new(
+            "cuco.plug.cp7pd".into(),
+            "urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:1".into(),
+            ParsedDevice::new(key, functions, Some(PropertyBinding { siid: 2, piid: 1 })).unwrap(),
+        )
+        .unwrap();
     }
     let is_light = description
         .functions()
         .iter()
         .any(|function| function.kind.is_light());
-    NativeDescription {
-        model: if is_light {
+    NativeDescription::new(
+        if is_light {
             "test.light"
         } else {
             "test.outlet"
         }
         .into(),
-        instance_type: if is_light {
+        if is_light {
             "urn:miot-spec-v2:device:light:0000A001:test-v1:1"
         } else {
             "urn:miot-spec-v2:device:outlet:0000A002:test-v1:1"
         }
         .into(),
-        device: ParsedDevice::new(key, functions, None).unwrap(),
-    }
+        ParsedDevice::new(key, functions, None).unwrap(),
+    )
+    .unwrap()
 }
 
 fn brightness_binding() -> BrightnessBinding {

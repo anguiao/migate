@@ -3,10 +3,12 @@
 
 #![allow(dead_code)]
 
+use crate::xiaomi::capability::NativeDescription;
+
 use crate::{
     configuration::{
-        self, CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation,
-        NativeDescription, PlanInput, Scope, SourceDevice, SourceFacts,
+        self, CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation, PlanInput,
+        Scope, SourceDevice, SourceFacts,
     },
     device::{DeviceKey, PhysicalDeviceDescription},
     matter,
@@ -91,11 +93,12 @@ pub(crate) fn save(store: &Store, configuration: &CommittedConfiguration) {
 }
 
 pub(crate) fn native(id: &str, model: &str, instance: serde_json::Value) -> NativeDescription {
-    NativeDescription {
-        instance_type: instance["type"].as_str().unwrap().into(),
-        device: parse_device_for_model(DeviceKey::new("xiaomi", id), model, &instance).unwrap(),
-        model: model.into(),
-    }
+    NativeDescription::new(
+        model.into(),
+        instance["type"].as_str().unwrap().into(),
+        parse_device_for_model(DeviceKey::new("xiaomi", id), model, &instance).unwrap(),
+    )
+    .unwrap()
 }
 
 /// Plan and commit an empty-to-one configuration for real native facts.
@@ -113,8 +116,8 @@ pub(crate) fn planned_from(
         devices: natives
             .into_iter()
             .map(|native| SourceDevice {
-                key: native.device.key().clone(),
-                name: Some(native.model.clone()),
+                key: native.device().key().clone(),
+                name: Some(native.model().to_owned()),
                 native,
                 fresh: true,
             })

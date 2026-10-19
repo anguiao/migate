@@ -57,7 +57,7 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
         let device = match identities.remove(&key) {
             Some(previous) => {
                 let mut device = previous;
-                for function in source.native.device.functions() {
+                for function in source.native.device().functions() {
                     if !device
                         .functions
                         .iter()
@@ -77,10 +77,10 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
                 let unique_id = new_identities
                     .remove(&key)
                     .ok_or_else(|| PlanError::MissingIdentity { key: key.clone() })?;
-                let single = source.native.device.functions().len() == 1;
+                let single = source.native.device().functions().len() == 1;
                 let endpoint = allocator.allocate(&key)?;
                 let mut functions = Vec::new();
-                for function in source.native.device.functions() {
+                for function in source.native.device().functions() {
                     let endpoint = if single {
                         endpoint
                     } else {

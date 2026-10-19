@@ -69,13 +69,15 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.catalog_groups[0]["extra"]["member_list"]["is_physical"] = json!(true);
     }
-    let mut record = cached("account", "group-1", false);
-    record.model = "mijia.light.group3".into();
-    record.instance_type = urn;
-    record.device = crate::xiaomi::capability::parse_group(
-        DeviceKey::new("xiaomi", "group-1"),
-        &record.model,
-        &instance,
+    let record = crate::xiaomi::capability::NativeDescription::new(
+        "mijia.light.group3".into(),
+        urn,
+        crate::xiaomi::capability::parse_group(
+            DeviceKey::new("xiaomi", "group-1"),
+            "mijia.light.group3",
+            &instance,
+        )
+        .unwrap(),
     )
     .unwrap();
     rig.data.push(record);

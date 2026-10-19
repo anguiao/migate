@@ -148,19 +148,22 @@ impl Rig {
             cached(&uid, "two", false),
         ];
         for did in members {
-            if !data.iter().any(|record| record.device.key().id == *did) {
+            if !data.iter().any(|record| record.device().key().id == *did) {
                 data.push(cached(&uid, did, false));
             }
         }
         if let Some(model) = light {
             let instance: Value =
                 custom.unwrap_or_else(|| serde_json::from_str(light_fixture(model)).unwrap());
-            data[0].model = model.into();
-            data[0].instance_type = instance["type"].as_str().unwrap().into();
-            data[0].device = crate::xiaomi::capability::parse_device_for_model(
-                DeviceKey::new("xiaomi", "one"),
-                model,
-                &instance,
+            data[0] = crate::xiaomi::capability::NativeDescription::new(
+                model.into(),
+                instance["type"].as_str().unwrap().into(),
+                crate::xiaomi::capability::parse_device_for_model(
+                    DeviceKey::new("xiaomi", "one"),
+                    model,
+                    &instance,
+                )
+                .unwrap(),
             )
             .unwrap();
         }
@@ -168,14 +171,17 @@ impl Rig {
         for (did, model, instance) in lights {
             let record = data
                 .iter_mut()
-                .find(|record| record.device.key().id == *did)
+                .find(|record| record.device().key().id == *did)
                 .unwrap_or_else(|| panic!("missing light DID {did}"));
-            record.model = (*model).into();
-            record.instance_type = instance["type"].as_str().unwrap().into();
-            record.device = crate::xiaomi::capability::parse_device_for_model(
-                DeviceKey::new("xiaomi", *did),
-                model,
-                instance,
+            *record = crate::xiaomi::capability::NativeDescription::new(
+                (*model).into(),
+                instance["type"].as_str().unwrap().into(),
+                crate::xiaomi::capability::parse_device_for_model(
+                    DeviceKey::new("xiaomi", *did),
+                    model,
+                    instance,
+                )
+                .unwrap(),
             )
             .unwrap();
             light_instances.push((
@@ -186,7 +192,7 @@ impl Rig {
         if restore {
             let natives = data
                 .iter()
-                .filter(|record| members.contains(&record.device.key().id.as_str()))
+                .filter(|record| members.contains(&record.device().key().id.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
             commit_natives(&store, &uid, &natives);
@@ -258,8 +264,8 @@ impl Rig {
                 });
                 let light = native_group
                     || records.iter().any(|record| {
-                        record.device.key().id == did
-                            && record.device.functions()[0].lighting().is_some()
+                        record.device().key().id == did
+                            && record.device().functions()[0].lighting().is_some()
                     });
                 if light {
                     state
@@ -337,7 +343,7 @@ impl Rig {
                     }
                     let mut list = records
                         .iter()
-                        .filter(|record| state.members.contains(&record.device.key().id))
+                        .filter(|record| state.members.contains(&record.device().key().id))
                         .map(|record| cloud_record(&state, record))
                         .collect::<Vec<_>>();
                     list.extend(state.catalog_groups.iter().cloned());
@@ -350,7 +356,7 @@ impl Rig {
                     .all(|did| info_dids.contains(did.as_str().unwrap()))
                 {
                     state.infos += 1;
-                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key().id)).map(|record|cloud_record(&state, record)).collect::<Vec<_>>(),"has_more":state.info_partial}});
+                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device().key().id)).map(|record|cloud_record(&state, record)).collect::<Vec<_>>(),"has_more":state.info_partial}});
                     let mut response = MockResponse::json(state.info_status, &value.to_string());
                     if let Some(gate) = state.info_gate.clone() {
                         response = response.gated(gate);
@@ -367,7 +373,7 @@ impl Rig {
                     }
                     return response;
                 }
-                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device.key().id)).map(|record|cloud_record(&state, record)).collect::<Vec<_>>()}})
+                json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device().key().id)).map(|record|cloud_record(&state, record)).collect::<Vec<_>>()}})
             } else if request.target.starts_with("/miot-spec-v2/instance?") {
                 let query = request
                     .target
@@ -402,8 +408,8 @@ impl Rig {
                         && !multi
                     {
                         instance.as_str()
-                    } else if records[0].device.functions()[0].lighting().is_some() && !multi {
-                        light_fixture(&records[0].model)
+                    } else if records[0].device().functions()[0].lighting().is_some() && !multi {
+                        light_fixture(records[0].model())
                     } else if multi {
                         include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
                     } else {
@@ -620,12 +626,12 @@ impl Control {
 }
 
 fn cloud_record(state: &CloudState, record: &NativeDescription) -> Value {
-    let did = &record.device.key().id;
+    let did = &record.device().key().id;
     json!({
         "did": did,
         "name": state.names.get(did).cloned().unwrap_or_else(|| format!("name {did}")),
-        "model": record.model,
-        "spec_type": state.instance_types.get(did).unwrap_or(&record.instance_type),
+        "model": record.model(),
+        "spec_type": state.instance_types.get(did).map(String::as_str).unwrap_or(record.instance_type()),
         "isOnline": state.online.contains(did),
     })
 }

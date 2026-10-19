@@ -12,10 +12,10 @@ use super::{
     state::{Context, LogicalSink},
     work::DeviceWork,
 };
+use crate::xiaomi::capability::NativeDescription;
 use crate::{
     configuration::{
-        CommittedConfiguration, GroupRelation, NativeDescription, OperationKind, Plan,
-        SourceDevice, SourceFacts,
+        CommittedConfiguration, GroupRelation, OperationKind, Plan, SourceDevice, SourceFacts,
     },
     device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
 };
@@ -80,7 +80,7 @@ impl SourceHandle {
                 continue;
             };
             devices.push(SourceDevice {
-                key: native.device.key().clone(),
+                key: native.device().key().clone(),
                 native,
                 name: slot.latest_name.clone(),
                 fresh: slot.confirmed,
@@ -196,7 +196,7 @@ impl SourceHandle {
                     let (physical, receivers) = PhysicalDevice::new(served.description.clone());
                     let sink = Rc::new(LogicalSink::new(physical));
                     let light_write = native
-                        .device
+                        .device()
                         .functions()
                         .iter()
                         .any(|function| function.lighting().is_some())

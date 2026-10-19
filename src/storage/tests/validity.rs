@@ -336,10 +336,15 @@ fn in_memory_native_key_mismatch_is_rejected() {
         serde_json::from_str(OUTLET).unwrap(),
     );
     let mut other = native.clone();
-    other.device = crate::xiaomi::capability::parse_device_for_model(
-        DeviceKey::new("xiaomi", "other"),
-        "cuco.plug.v3",
-        &serde_json::from_str(OUTLET).unwrap(),
+    other = crate::xiaomi::capability::NativeDescription::new(
+        other.model().to_owned(),
+        other.instance_type().to_owned(),
+        crate::xiaomi::capability::parse_device_for_model(
+            DeviceKey::new("xiaomi", "other"),
+            "cuco.plug.v3",
+            &serde_json::from_str(OUTLET).unwrap(),
+        )
+        .unwrap(),
     )
     .unwrap();
     let configuration = CommittedConfiguration {

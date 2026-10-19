@@ -334,7 +334,7 @@ impl Context {
                     .as_ref()
                     .filter(|work| {
                         !work.life.is_closed()
-                            && work.native.device.functions().iter().any(|function| {
+                            && work.native.device().functions().iter().any(|function| {
                                 function.id() == "main" && function.lighting().is_some()
                             })
                     })

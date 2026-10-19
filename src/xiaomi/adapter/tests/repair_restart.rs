@@ -72,9 +72,9 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
             .iter()
             .filter_map(|device| device.native.as_ref())
         {
-            if native.device.key() == &key {
+            if native.device().key() == &key {
                 assert!(
-                    native.device.functions()[0]
+                    native.device().functions()[0]
                         .lighting()
                         .unwrap()
                         .color()

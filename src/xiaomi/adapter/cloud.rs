@@ -336,7 +336,7 @@ pub(super) async fn run(
                 match result {
                     Ok((native, name)) => {
                         let matches_target = target.as_ref().is_none_or(|(model, urn)| {
-                            *model == native.model && *urn == native.instance_type
+                            *model == native.model() && *urn == native.instance_type()
                         });
                         if matches_target {
                             if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {

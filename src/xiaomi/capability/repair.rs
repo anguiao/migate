@@ -7,7 +7,7 @@
 //! shared with the native group. No group RGB MIoT binding is invented and the
 //! genuine native binding grid stays untouched.
 
-use super::{ParsedDevice, ls2307};
+use super::{NativeDescription, ParsedDevice, ls2307};
 
 use crate::device::{DeviceKey, FunctionKind, LightProfile, TemperatureInterval};
 
@@ -48,7 +48,7 @@ pub(crate) fn effective_temperature_range(
 /// carries the reason the native group stays unrepaired.
 pub(crate) fn plan_rgb_repair<'a>(
     group: &'a ParsedDevice,
-    members: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'a ParsedDevice)>,
+    members: impl IntoIterator<Item = &'a NativeDescription>,
 ) -> Result<Option<RepairPlan>, String> {
     let function = &group.functions()[0];
     let light = function
@@ -64,34 +64,14 @@ pub(crate) fn plan_rgb_repair<'a>(
         return Err("native group is not a color-temperature light".into());
     }
     let mut keys = Vec::new();
-    for (did, model, instance_type, device) in members {
-        let member_function = &device.functions()[0];
-        let member = member_function
-            .lighting()
-            .ok_or_else(|| format!("member {did} is not a supported light"))?;
-        if model != ls2307::MODEL || !ls2307::is_type(instance_type) {
-            return Err(format!("member {did} is not the ls2307 adapter"));
-        }
-        if !matches!(
-            member_function.kind(),
-            FunctionKind::Light(LightProfile::ExtendedColor(_))
-        ) {
-            return Err(format!("member {did} is not an extended color light"));
-        }
-        let (Some(color), Some(mode)) = (member.color(), member.mode()) else {
+    for member in members {
+        if member.model() != ls2307::MODEL {
             return Err(format!(
-                "member {did} lacks genuine RGB and color-mode bindings"
-            ));
-        };
-        if !ls2307::is_color(color) {
-            return Err(format!("member {did} has an incompatible RGB binding"));
-        }
-        if !ls2307::is_mode(mode) {
-            return Err(format!(
-                "member {did} has an incompatible color mode binding"
+                "member {} is not the ls2307 adapter",
+                member.device().key().id
             ));
         }
-        keys.push(DeviceKey::new("xiaomi", did));
+        keys.push(member.device().key().clone());
     }
     if keys.is_empty() {
         return Err("native group has no effective members".into());

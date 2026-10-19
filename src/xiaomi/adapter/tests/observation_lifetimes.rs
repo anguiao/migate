@@ -140,10 +140,15 @@ fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
             let old_work = device_work(control, "one");
 
             let mut changed = old_work.native.clone();
-            changed.device = super::support::device_with_temperature_grid(
-                &changed.device,
-                crate::device::NumericRange::new(3000, 5500, 1).unwrap(),
-            );
+            changed = crate::xiaomi::capability::NativeDescription::new(
+                changed.model().to_owned(),
+                changed.instance_type().to_owned(),
+                super::support::device_with_temperature_grid(
+                    changed.device(),
+                    crate::device::NumericRange::new(3000, 5500, 1).unwrap(),
+                ),
+            )
+            .unwrap();
             control
                 .context
                 .live
@@ -293,10 +298,15 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                 let first = device_work(control, "one");
                 let original = first.native.clone();
                 let mut narrowed = original.clone();
-                narrowed.device = super::support::device_with_temperature_grid(
-                    &narrowed.device,
-                    crate::device::NumericRange::new(3000, 5500, 1).unwrap(),
-                );
+                narrowed = crate::xiaomi::capability::NativeDescription::new(
+                    narrowed.model().to_owned(),
+                    narrowed.instance_type().to_owned(),
+                    super::support::device_with_temperature_grid(
+                        narrowed.device(),
+                        crate::device::NumericRange::new(3000, 5500, 1).unwrap(),
+                    ),
+                )
+                .unwrap();
                 control
                     .context
                     .live

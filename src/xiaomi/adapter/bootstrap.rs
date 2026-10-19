@@ -165,7 +165,7 @@ impl XiaomiAdapter {
             let did = key.id.clone();
             let sink = Rc::new(LogicalSink::new(physical));
             let light_write = native
-                .device
+                .device()
                 .functions()
                 .iter()
                 .any(|function| function.lighting().is_some())

@@ -29,8 +29,8 @@ async fn subscriptions_ready(c: &Control, dids: &[&str]) {
                 .is_some_and(|work| {
                     let cached = &work.native;
                     work.test_local_subscribed_len()
-                        == cached.device.functions().len()
-                            + usize::from(cached.device.refresh_trigger().is_some())
+                        == cached.device().functions().len()
+                            + usize::from(cached.device().refresh_trigger().is_some())
                 })
         })
     })

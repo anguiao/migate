@@ -1,7 +1,8 @@
+use crate::xiaomi::capability::NativeDescription;
 use std::{error::Error, fmt};
 
 use crate::{
-    configuration::{NativeDescription, Scope},
+    configuration::Scope,
     device::DeviceKey,
     storage::XiaomiRecord,
     xiaomi::{
@@ -102,11 +103,8 @@ pub(crate) async fn load_device(
     let device = parse_device_for_model(DeviceKey::new("xiaomi", did), &details.model, &instance)
         .map_err(CatalogError::Capability)?;
     Ok((
-        NativeDescription {
-            model: details.model,
-            instance_type: details.instance_type,
-            device,
-        },
+        NativeDescription::new(details.model, details.instance_type, device)
+            .map_err(CatalogError::Capability)?,
         details.name,
     ))
 }

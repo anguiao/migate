@@ -8,9 +8,9 @@ use super::super::{
     work::DeviceWork,
 };
 use crate::{
-    configuration::NativeDescription,
     device::{CommandReceiver, DeviceKey, PhysicalDevice, PhysicalDeviceDescription},
     storage::{Store, tests::fixtures},
+    xiaomi::capability::NativeDescription,
     xiaomi::{
         adapter::publication::SourceEntry, capability::tests::model_fixture::native_for,
         cloud::CloudClient, discovery::Discovery,
@@ -73,7 +73,7 @@ impl AppSource {
                 adapter.context.registry.insert(instance.clone());
                 let sink = Rc::new(LogicalSink::new(instance.clone()));
                 let light_write = native
-                    .device
+                    .device()
                     .functions()
                     .iter()
                     .any(|function| function.lighting().is_some())

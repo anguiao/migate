@@ -109,7 +109,7 @@ impl Context {
                 .clone();
             let channels = work
                 .native
-                .device
+                .device()
                 .functions()
                 .iter()
                 .map(|function| function.id().to_owned())

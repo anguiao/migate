@@ -6,10 +6,11 @@
 //! configuration values.
 
 use super::{StorageError, device::DeviceStore};
+use crate::xiaomi::capability::NativeDescription;
 use crate::{
     configuration::{
-        CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation,
-        NativeDescription, Revocation, Scope,
+        CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation, Revocation,
+        Scope,
     },
     device::{DeviceKey, NumericRange},
     xiaomi::capability::{
@@ -454,11 +455,11 @@ impl WireGroup {
 impl WireNative {
     fn from_native(native: &NativeDescription) -> Self {
         Self {
-            model: native.model.clone(),
-            instance_type: native.instance_type.clone(),
-            refresh_trigger: native.device.refresh_trigger().map(WireBinding::from),
+            model: native.model().to_owned(),
+            instance_type: native.instance_type().to_owned(),
+            refresh_trigger: native.device().refresh_trigger().map(WireBinding::from),
             functions: native
-                .device
+                .device()
                 .functions()
                 .iter()
                 .map(WireFunction::from_parsed)
@@ -467,8 +468,6 @@ impl WireNative {
     }
 
     fn into_native(self, key: &DeviceKey) -> Result<NativeDescription, &'static str> {
-        validate_text(&self.model)?;
-        validate_text(&self.instance_type)?;
         let refresh_trigger = self.refresh_trigger.map(PropertyBinding::from);
         let functions = self
             .functions
@@ -477,11 +476,8 @@ impl WireNative {
             .collect::<Result<Vec<_>, _>>()?;
         let device = ParsedDevice::new(key.clone(), functions, refresh_trigger)
             .map_err(|_| "Stored native description is invalid")?;
-        Ok(NativeDescription {
-            model: self.model,
-            instance_type: self.instance_type,
-            device,
-        })
+        NativeDescription::new(self.model, self.instance_type, device)
+            .map_err(|_| "Stored native description is invalid")
     }
 }
 

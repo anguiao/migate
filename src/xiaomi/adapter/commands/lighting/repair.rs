@@ -163,7 +163,7 @@ async fn member_task(
     let property = member
         .work
         .native
-        .device
+        .device()
         .functions()
         .iter()
         .find(|function| function.id() == "main")
@@ -221,7 +221,7 @@ fn refresh_mode(work: &DeviceWork) {
     }
     let mode = work
         .native
-        .device
+        .device()
         .functions()
         .iter()
         .find(|function| function.id() == "main")

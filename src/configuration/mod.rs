@@ -7,7 +7,7 @@
 
 use crate::{
     device::{DeviceKey, FunctionKind, PhysicalDeviceDescription},
-    xiaomi::capability::{ParsedDevice, RepairPlan},
+    xiaomi::capability::{NativeDescription, RepairPlan},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,23 +24,6 @@ pub(crate) struct Scope {
 impl Scope {
     pub(crate) fn group_id(&self) -> String {
         crate::xiaomi::cloud::group_id(&self.uid, &self.home_id)
-    }
-}
-
-/// The pure native description of one Xiaomi device: the valid model and the
-/// real bindings. The home scope is carried once by the configuration.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct NativeDescription {
-    pub model: String,
-    pub instance_type: String,
-    pub device: ParsedDevice,
-}
-impl NativeDescription {
-    pub(crate) fn physical_description(
-        &self,
-        label: impl Into<String>,
-    ) -> PhysicalDeviceDescription {
-        self.device.physical_description(label)
     }
 }
 
@@ -297,10 +280,10 @@ impl CommittedConfiguration {
             }
             reserve_endpoint(&mut endpoints, device.endpoint, &device.key)?;
             if let Some(native) = &device.native {
-                if native.device.key() != &device.key {
+                if native.device().key() != &device.key {
                     return Err("Committed native facts belong to another device");
                 }
-                for function in native.device.functions() {
+                for function in native.device().functions() {
                     if !device
                         .functions
                         .iter()
@@ -309,13 +292,6 @@ impl CommittedConfiguration {
                         return Err("Committed native function has no reserved identity");
                     }
                 }
-                validate_text(&native.model)?;
-                validate_text(&native.instance_type)?;
-                crate::xiaomi::capability::validate_model_topology(
-                    &native.device,
-                    &native.model,
-                    &native.instance_type,
-                )?;
             }
         }
         let mut groups = BTreeSet::new();
@@ -391,7 +367,7 @@ pub(crate) fn device_label(device: &SourceDevice) -> String {
         .as_deref()
         .map(import_label)
         .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| default_device_label(&device.native.model, &device.key.id))
+        .unwrap_or_else(|| default_device_label(device.native.model(), &device.key.id))
 }
 
 struct DerivationDevice<'a> {
@@ -497,7 +473,7 @@ fn derive_served(
             repair_reason: None,
         };
     };
-    let native_interval = native.device.functions()[0]
+    let native_interval = native.device().functions()[0]
         .lighting()
         .and_then(|lighting| lighting.temperature())
         .map(|temperature| temperature.interval());
@@ -525,7 +501,7 @@ fn derive_served(
     let logical = members
         .iter()
         .map(|member| {
-            member.device.functions()[0]
+            member.device().functions()[0]
                 .lighting()
                 .and_then(|lighting| lighting.temperature())
                 .map(|temperature| temperature.interval())
@@ -535,21 +511,14 @@ fn derive_served(
             crate::xiaomi::capability::effective_temperature_range(native_interval, &intervals)
         })
         .unwrap_or(native_interval);
-    let function = &native.device.functions()[0];
+    let function = &native.device().functions()[0];
     let native_profile = function
         .lighting()
         .expect("a color-temperature group function has light bindings")
         .profile();
     let (repair, repair_reason, profile) = match crate::xiaomi::capability::plan_rgb_repair(
-        &native.device,
-        members.iter().map(|member| {
-            (
-                member.device.key().id.as_str(),
-                member.model.as_str(),
-                member.instance_type.as_str(),
-                &member.device,
-            )
-        }),
+        native.device(),
+        members.iter().copied(),
     ) {
         Ok(Some(plan)) => (
             Some(plan),
@@ -591,12 +560,12 @@ fn with_light_kind(
 /// Model and instance type are metadata: a URN-only change reuses the served
 /// instance.
 pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescription) -> bool {
-    a.device.refresh_trigger() == b.device.refresh_trigger()
-        && a.device.functions().len() == b.device.functions().len()
-        && a.device
+    a.device().refresh_trigger() == b.device().refresh_trigger()
+        && a.device().functions().len() == b.device().functions().len()
+        && a.device()
             .functions()
             .iter()
-            .zip(b.device.functions())
+            .zip(b.device().functions())
             .all(|(left, right)| {
                 left.id() == right.id()
                     && left.power() == right.power()

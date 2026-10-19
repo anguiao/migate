@@ -147,14 +147,15 @@ pub(in super::super) fn confirmed_for(
     instance: &Value,
 ) -> NativeDescription {
     let _ = c;
-    NativeDescription {
-        model: model.into(),
-        instance_type: instance["type"].as_str().unwrap().into(),
-        device: crate::xiaomi::capability::parse_device_for_model(
+    NativeDescription::new(
+        model.into(),
+        instance["type"].as_str().unwrap().into(),
+        crate::xiaomi::capability::parse_device_for_model(
             DeviceKey::new("xiaomi", did),
             model,
             instance,
         )
         .unwrap(),
-    }
+    )
+    .unwrap()
 }

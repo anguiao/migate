@@ -1,7 +1,7 @@
 use crate::device::{DeviceKey, LightProfile, LightProfileKind, NumericRange, TemperatureInterval};
 use crate::xiaomi::capability::{
-    ParsedDevice, effective_temperature_range, parse_device_for_model, parse_group,
-    plan_rgb_repair, repaired_profile,
+    NativeDescription, ParsedDevice, effective_temperature_range, parse_device_for_model,
+    parse_group, plan_rgb_repair, repaired_profile,
 };
 use serde_json::{Value, json};
 
@@ -36,8 +36,13 @@ fn parse_group3() -> ParsedDevice {
     .unwrap()
 }
 
-fn parse_model(did: &str, model: &str, instance: &Value) -> ParsedDevice {
-    parse_device_for_model(DeviceKey::new("xiaomi", did), model, instance).unwrap()
+fn parse_model(did: &str, model: &str, instance: &Value) -> NativeDescription {
+    NativeDescription::new(
+        model.into(),
+        instance["type"].as_str().unwrap().into(),
+        parse_device_for_model(DeviceKey::new("xiaomi", did), model, instance).unwrap(),
+    )
+    .unwrap()
 }
 
 fn member_temperature(device: &ParsedDevice) -> TemperatureInterval {
@@ -54,16 +59,9 @@ fn ls2307_members_extend_group_profile_and_narrow_temperature() {
     let group = parse_group3();
     let a = parse_model("member-a", "devcea.light.ls2307", &ls2307());
     let b = parse_model("member-b", "devcea.light.ls2307", &ls2307());
-    let urn = ls2307()["type"].as_str().unwrap().to_string();
-    let plan = plan_rgb_repair(
-        &group,
-        [
-            ("member-a", "devcea.light.ls2307", urn.as_str(), &a),
-            ("member-b", "devcea.light.ls2307", urn.as_str(), &b),
-        ],
-    )
-    .unwrap()
-    .expect("repair applies");
+    let plan = plan_rgb_repair(&group, [&a, &b])
+        .unwrap()
+        .expect("repair applies");
     assert_eq!(
         plan.members,
         [
@@ -73,7 +71,10 @@ fn ls2307_members_extend_group_profile_and_narrow_temperature() {
     );
     let logical = effective_temperature_range(
         member_temperature(&group),
-        &[member_temperature(&a), member_temperature(&b)],
+        &[
+            member_temperature(a.device()),
+            member_temperature(b.device()),
+        ],
     );
     assert_eq!(logical, TemperatureInterval::new(2700, 6500).unwrap());
     let profile = repaired_profile(logical);
@@ -86,48 +87,30 @@ fn ls2307_members_extend_group_profile_and_narrow_temperature() {
 fn repair_requires_every_member_to_be_the_concrete_ls2307_adapter() {
     let group = parse_group3();
     let ls = parse_model("member-a", "devcea.light.ls2307", &ls2307());
-    let urn = ls2307()["type"].as_str().unwrap().to_string();
     assert!(
-        plan_rgb_repair(
-            &group,
-            std::iter::empty::<(&str, &str, &str, &ParsedDevice)>(),
-        )
-        .is_err(),
+        plan_rgb_repair(&group, []).is_err(),
         "a group without members cannot be repaired"
     );
     let obct = parse_model("member-b", "yeelink.light.light3", &light3());
+    assert!(plan_rgb_repair(&group, [&ls, &obct]).is_err());
+    let other_model = NativeDescription::new(
+        "not.light.ls2307".into(),
+        ls.instance_type().into(),
+        ls.device().clone(),
+    )
+    .unwrap();
     assert!(
-        plan_rgb_repair(
-            &group,
-            [(
-                "member-b",
-                "yeelink.light.light3",
-                "urn:miot-spec-v2:device:light:0000A001:yeelink-light3:1",
-                &obct,
-            )],
-        )
-        .is_err()
-    );
-    assert!(
-        plan_rgb_repair(
-            &group,
-            [("member-a", "not.light.ls2307", urn.as_str(), &ls)],
-        )
-        .is_err(),
+        plan_rgb_repair(&group, [&other_model]).is_err(),
         "a non-ls2307 model must not be planned"
     );
     assert!(
-        plan_rgb_repair(
-            &group,
-            [(
-                "member-a",
-                "devcea.light.ls2307",
-                "urn:miot-spec-v2:device:light:0000A001:other:1",
-                &ls
-            )],
+        NativeDescription::new(
+            "devcea.light.ls2307".into(),
+            "urn:miot-spec-v2:device:light:0000A001:other:1".into(),
+            ls.device().clone()
         )
         .is_err(),
-        "an ls2307 model with a different instance type must not be planned"
+        "an incompatible native description is rejected before planning"
     );
 }
 
@@ -141,28 +124,14 @@ fn native_rgb_is_not_repaired_and_scene_mode_is_not_rgb() {
     )
     .unwrap();
     assert!(
-        matches!(
-            plan_rgb_repair(
-                &native,
-                std::iter::empty::<(&str, &str, &str, &ParsedDevice)>(),
-            ),
-            Ok(None)
-        ),
+        matches!(plan_rgb_repair(&native, [],), Ok(None)),
         "native RGB needs no repair"
     );
     // group3 carries a scene mode property; it is not an RGB binding, so
     // repair planning still applies.
     let group = parse_group3();
     let ls = parse_model("member-a", "devcea.light.ls2307", &ls2307());
-    let urn = ls2307()["type"].as_str().unwrap().to_string();
-    assert!(
-        plan_rgb_repair(
-            &group,
-            [("member-a", "devcea.light.ls2307", urn.as_str(), &ls)]
-        )
-        .unwrap()
-        .is_some()
-    );
+    assert!(plan_rgb_repair(&group, [&ls]).unwrap().is_some());
 }
 
 #[test]

@@ -516,10 +516,15 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
                 .unwrap()
                 .native
                 .clone();
-            changed.device = super::support::device_with_temperature_grid(
-                &changed.device,
-                crate::device::NumericRange::new(2700, 6500, 1).unwrap(),
-            );
+            changed = crate::xiaomi::capability::NativeDescription::new(
+                changed.model().to_owned(),
+                changed.instance_type().to_owned(),
+                super::support::device_with_temperature_grid(
+                    changed.device(),
+                    crate::device::NumericRange::new(2700, 6500, 1).unwrap(),
+                ),
+            )
+            .unwrap();
             {
                 let mut live = c.context.live.borrow_mut();
                 let slot = live.devices.get_mut("one").unwrap();

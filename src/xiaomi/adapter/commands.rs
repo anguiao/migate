@@ -478,7 +478,7 @@ pub(super) async fn consume(
                     crate::device::DeviceRequest::Power(request)
                         if work
                             .native
-                            .device
+                            .device()
                             .functions()
                             .iter()
                             .find(|function| function.id() == function_id)

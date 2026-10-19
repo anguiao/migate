@@ -86,15 +86,15 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
 fn stale_local_metadata_does_not_block_local_control_after_cloud_admission() {
     let rig = Rig::new(false, &["multi"]);
     rig.cloud.lock().unwrap().online.insert("multi".into());
-    block_on(rig.run(|mut c| async move {
-        c.data
-            .iter_mut()
-            .find(|record| record.device.key().id == "multi")
-            .unwrap()
-            .model = "stale.local.model".into();
+    block_on(rig.run(|c| async move {
         c.announce();
         let control = &c;
-        c.peer(Rc::new(Peer::default()), |peer| async move {
+        let peer = Rc::new(Peer::default());
+        peer.state
+            .borrow_mut()
+            .models
+            .insert("multi".into(), "stale.local.model".into());
+        c.peer(peer, |peer| async move {
             until(|| {
                 peer.lists() > 0
                     && control.context.cloud_candidate("multi", true).is_ok()

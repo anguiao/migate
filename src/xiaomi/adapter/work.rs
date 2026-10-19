@@ -6,8 +6,8 @@ use super::{
     state::{Context, Lifetime, LogicalSink},
 };
 use crate::{
-    configuration::NativeDescription,
     device::{ActionToken, DeviceKey, LightDimension, PhysicalDevice},
+    xiaomi::capability::NativeDescription,
     xiaomi::{capability::PropertyBinding, central::SessionHandle, cloud::NotificationHandle},
 };
 use event_listener::Event;
@@ -185,7 +185,7 @@ impl DeviceWork {
         refresh_changed: Rc<Event>,
         light_write: Option<Rc<LightWriteGate>>,
     ) -> Self {
-        let key = native.device.key().clone();
+        let key = native.device().key().clone();
         Self {
             key,
             native,
@@ -215,7 +215,7 @@ impl DeviceWork {
     }
     pub(super) fn binding(&self, id: &str) -> PropertyBinding {
         self.native
-            .device
+            .device()
             .functions()
             .iter()
             .find(|function| function.id() == id)
@@ -224,7 +224,7 @@ impl DeviceWork {
     }
     fn is_light(&self) -> bool {
         self.native
-            .device
+            .device()
             .functions()
             .iter()
             .any(|function| function.lighting().is_some())
@@ -421,13 +421,13 @@ impl DeviceWork {
         if self.life.is_closed() {
             return false;
         }
-        if self.native.device.refresh_trigger() == Some(binding) && value.as_bool().is_some() {
+        if self.native.device().refresh_trigger() == Some(binding) && value.as_bool().is_some() {
             self.refresh();
             return false;
         }
         let Some(function) = self
             .native
-            .device
+            .device()
             .functions()
             .iter()
             .find(|function| super::lighting::bindings(function).contains(&binding))
@@ -752,7 +752,7 @@ impl DeviceWork {
         self.changed.notify(usize::MAX);
     }
     pub(super) fn refresh(&self) {
-        for function in self.native.device.functions() {
+        for function in self.native.device().functions() {
             for binding in super::lighting::bindings(function) {
                 self.refresh_property(function.id(), binding);
             }
@@ -776,7 +776,7 @@ impl DeviceWork {
         }
     }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
-        self.native.device.functions().iter().any(|function| {
+        self.native.device().functions().iter().any(|function| {
             function.id() == id && super::lighting::bindings(function).contains(&binding)
         })
     }
@@ -792,7 +792,7 @@ impl DeviceWork {
         }
         let light = self
             .native
-            .device
+            .device()
             .functions()
             .iter()
             .find(|function| function.id() == id)
@@ -822,12 +822,12 @@ impl DeviceWork {
     pub(super) fn bindings(&self) -> Vec<PropertyBinding> {
         let mut values = self
             .native
-            .device
+            .device()
             .functions()
             .iter()
             .flat_map(super::lighting::bindings)
             .collect::<Vec<_>>();
-        if let Some(trigger) = self.native.device.refresh_trigger() {
+        if let Some(trigger) = self.native.device().refresh_trigger() {
             values.push(trigger);
         }
         values

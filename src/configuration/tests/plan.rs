@@ -6,8 +6,8 @@ use crate::{
     device::{DeviceKey, NumericRange},
     matter::{self, FixedShape},
     xiaomi::capability::{
-        BrightnessBinding, LightBindings, NumericFormat, ParsedFunction, PropertyBinding,
-        TemperatureBinding,
+        BrightnessBinding, LightBindings, NumericFormat, ParsedDevice, ParsedFunction,
+        PropertyBinding, TemperatureBinding,
     },
 };
 
@@ -48,11 +48,7 @@ fn native(
     refresh_trigger: Option<PropertyBinding>,
 ) -> NativeDescription {
     let device = ParsedDevice::new(key(id), functions, refresh_trigger).expect("valid native");
-    NativeDescription {
-        model: model.into(),
-        instance_type: instance_type.into(),
-        device,
-    }
+    NativeDescription::new(model.into(), instance_type.into(), device).unwrap()
 }
 
 fn outlet_native(id: &str, siid: u32) -> NativeDescription {
@@ -124,9 +120,9 @@ fn committed_at(
     configuration_version: u32,
     endpoint: u16,
 ) -> CommittedDevice {
-    let single = native.device.functions().len() == 1;
+    let single = native.device().functions().len() == 1;
     let functions = native
-        .device
+        .device()
         .functions()
         .iter()
         .enumerate()
@@ -322,7 +318,12 @@ fn hidden_member_republishes_with_a_version_bump() {
 fn urn_only_change_is_reused_without_rebuild_or_a_version_bump() {
     let before = outlet_native("outlet", 2);
     let mut metadata_only = before.clone();
-    metadata_only.instance_type = "urn:miot-spec-v2:device:outlet:0000A002:vendor-v2:2".into();
+    metadata_only = crate::xiaomi::capability::NativeDescription::new(
+        metadata_only.model().to_owned(),
+        "urn:miot-spec-v2:device:outlet:0000A002:vendor-v2:2".into(),
+        metadata_only.device().clone(),
+    )
+    .unwrap();
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
@@ -347,7 +348,7 @@ fn urn_only_change_is_reused_without_rebuild_or_a_version_bump() {
     let device = plan.configuration.device(&key("outlet")).unwrap();
     assert_eq!(device.configuration_version, 1);
     assert_eq!(
-        device.native.as_ref().unwrap().instance_type,
+        device.native.as_ref().unwrap().instance_type(),
         "urn:miot-spec-v2:device:outlet:0000A002:vendor-v2:2"
     );
     assert_eq!(plan.configuration.root_version, 2);

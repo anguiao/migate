@@ -16,7 +16,7 @@ fn all_light_samples_read_and_subscribe_every_property() {
         block_on(Rig::light(model).run(|c| async move {
             c.announce();
             let peer = Rc::new(Peer::default());
-            let bindings = c.data[0].device.functions()[0].lighting().unwrap();
+            let bindings = c.data[0].device().functions()[0].lighting().unwrap();
             let brightness = bindings.brightness().unwrap();
             let temperature = bindings.temperature().unwrap();
             peer.value(
@@ -262,10 +262,15 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 .native
                 .clone();
             let mut narrower = original.clone();
-            narrower.device = super::support::device_with_temperature_grid(
-                &narrower.device,
-                crate::device::NumericRange::new(2700, 5600, 1).unwrap(),
-            );
+            narrower = crate::xiaomi::capability::NativeDescription::new(
+                narrower.model().to_owned(),
+                narrower.instance_type().to_owned(),
+                super::support::device_with_temperature_grid(
+                    narrower.device(),
+                    crate::device::NumericRange::new(2700, 5600, 1).unwrap(),
+                ),
+            )
+            .unwrap();
             control
                 .context
                 .live
@@ -302,7 +307,7 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 before.configuration_version + 1
             );
             assert_eq!(
-                saved.native.as_ref().unwrap().device.functions()[0]
+                saved.native.as_ref().unwrap().device().functions()[0]
                     .lighting()
                     .unwrap()
                     .temperature()
@@ -324,7 +329,7 @@ const MODE: PropertyBinding = PropertyBinding { siid: 4, piid: 2 };
 const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
 fn peer_values(c: &Control) -> Rc<Peer> {
     let peer = Rc::new(Peer::default());
-    let bindings = c.data[0].device.functions()[0].lighting().unwrap();
+    let bindings = c.data[0].device().functions()[0].lighting().unwrap();
     let brightness = bindings.brightness().unwrap();
     let temperature = bindings.temperature().unwrap();
     peer.value("one", POWER, json!(true));
@@ -354,7 +359,7 @@ async fn ready_light(c: &Control) -> crate::device::Function {
             && light.brightness_percent.is_some()
             && light.temperature_kelvin.is_some()
             && light.mode.is_some()
-            && (c.data[0].device.functions()[0]
+            && (c.data[0].device().functions()[0]
                 .lighting()
                 .unwrap()
                 .color()
@@ -737,10 +742,15 @@ fn binding_change_retires_old_feedback_authority() {
                 .unwrap()
                 .native
                 .clone();
-            changed.device = super::support::device_with_brightness_format(
-                &changed.device,
-                crate::xiaomi::capability::NumericFormat::Uint16,
-            );
+            changed = crate::xiaomi::capability::NativeDescription::new(
+                changed.model().to_owned(),
+                changed.instance_type().to_owned(),
+                super::support::device_with_brightness_format(
+                    changed.device(),
+                    crate::xiaomi::capability::NumericFormat::Uint16,
+                ),
+            )
+            .unwrap();
             control
                 .context
                 .live
@@ -817,10 +827,15 @@ fn retired_work_replacement_retires_old_feedback_authority() {
                 .unwrap();
             let retired_work = Rc::downgrade(&old_work);
             let mut changed = old_work.native.clone();
-            changed.device = super::support::device_with_temperature_grid(
-                &changed.device,
-                crate::device::NumericRange::new(3000, 5500, 1).unwrap(),
-            );
+            changed = crate::xiaomi::capability::NativeDescription::new(
+                changed.model().to_owned(),
+                changed.instance_type().to_owned(),
+                super::support::device_with_temperature_grid(
+                    changed.device(),
+                    crate::device::NumericRange::new(3000, 5500, 1).unwrap(),
+                ),
+            )
+            .unwrap();
             drop(old_work);
             peer.value("one", TEMPERATURE, json!(4000));
             control
@@ -1969,10 +1984,15 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
             .unwrap()
             .native
             .clone();
-        changed.device = super::support::device_with_brightness_format(
-            &changed.device,
-            crate::xiaomi::capability::NumericFormat::Uint16,
-        );
+        changed = crate::xiaomi::capability::NativeDescription::new(
+            changed.model().to_owned(),
+            changed.instance_type().to_owned(),
+            super::support::device_with_brightness_format(
+                changed.device(),
+                crate::xiaomi::capability::NumericFormat::Uint16,
+            ),
+        )
+        .unwrap();
         let before = c
             .context
             .registry

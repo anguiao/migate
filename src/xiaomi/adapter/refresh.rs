@@ -359,7 +359,7 @@ fn read_one(
         let did = work.key.id.clone();
         let lighting = work
             .native
-            .device
+            .device()
             .functions()
             .iter()
             .any(|function| function.id() == read.id && function.lighting().is_some());

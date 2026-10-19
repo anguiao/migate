@@ -31,7 +31,7 @@ fn native_rgb_group_uses_member_temperature_interval_without_repair() {
             .find(|entry| entry.physical.key().id == "group-1")
             .unwrap()
             .native;
-        let bindings = cached.device.functions()[0].lighting().unwrap();
+        let bindings = cached.device().functions()[0].lighting().unwrap();
         assert!(bindings.color().is_some(), "RGB must stay genuinely native");
         assert_eq!(bindings.temperature().as_ref().unwrap().range().min(), 2000);
         assert_eq!(bindings.temperature().as_ref().unwrap().range().max(), 8000);

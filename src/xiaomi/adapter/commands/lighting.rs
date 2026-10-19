@@ -130,14 +130,14 @@ fn refresh_after_write(
     let mode = {
         let original = original
             .native
-            .device
+            .device()
             .functions()
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
         let Some(function) = work
             .native
-            .device
+            .device()
             .functions()
             .iter()
             .find(|function| function.id() == id)
@@ -163,7 +163,7 @@ fn refresh_after_write(
             for member in context.group_member_work(&work.key.id) {
                 let function = member
                     .native
-                    .device
+                    .device()
                     .functions()
                     .iter()
                     .find(|function| function.id() == "main")

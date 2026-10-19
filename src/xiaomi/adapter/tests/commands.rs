@@ -137,10 +137,15 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 .unwrap()
                 .native
                 .clone();
-            changed.device = super::support::device_with_temperature_grid(
-                &changed.device,
-                crate::device::NumericRange::new(2700, 6500, 1).unwrap(),
-            );
+            changed = crate::xiaomi::capability::NativeDescription::new(
+                changed.model().to_owned(),
+                changed.instance_type().to_owned(),
+                super::support::device_with_temperature_grid(
+                    changed.device(),
+                    crate::device::NumericRange::new(2700, 6500, 1).unwrap(),
+                ),
+            )
+            .unwrap();
             control
                 .context
                 .live
@@ -229,7 +234,7 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
                 .map(|function| function.function_key().id.clone())
                 .collect::<Vec<_>>();
             let cached_order = stable
-                .device
+                .device()
                 .functions()
                 .iter()
                 .map(|function| function.id().to_owned())

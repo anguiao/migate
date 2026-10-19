@@ -59,10 +59,15 @@ fn a_native_replacement_clears_its_previous_subscription_failure() {
             peer.state.borrow_mut().sub_reject.clear();
             let before = device_work(control, "one");
             let mut replacement = before.native.clone();
-            replacement.device = super::support::device_with_temperature_grid(
-                &replacement.device,
-                NumericRange::new(3000, 5500, 1).unwrap(),
-            );
+            replacement = crate::xiaomi::capability::NativeDescription::new(
+                replacement.model().to_owned(),
+                replacement.instance_type().to_owned(),
+                super::support::device_with_temperature_grid(
+                    replacement.device(),
+                    NumericRange::new(3000, 5500, 1).unwrap(),
+                ),
+            )
+            .unwrap();
             control
                 .context
                 .live
@@ -132,10 +137,15 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
             device_work(control, "one").refresh_property("main", TEMPERATURE);
             until(|| !peer.state.borrow().held.is_empty()).await;
             let mut changed = device_work(control, "one").native.clone();
-            changed.device = super::support::device_with_temperature_grid(
-                &changed.device,
-                NumericRange::new(2700, 6500, 1).unwrap(),
-            );
+            changed = crate::xiaomi::capability::NativeDescription::new(
+                changed.model().to_owned(),
+                changed.instance_type().to_owned(),
+                super::support::device_with_temperature_grid(
+                    changed.device(),
+                    NumericRange::new(2700, 6500, 1).unwrap(),
+                ),
+            )
+            .unwrap();
             peer.value("one", TEMPERATURE, json!(6000));
             control
                 .context
@@ -195,7 +205,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
             assert_eq!(after.endpoint, before.endpoint);
             assert_eq!(after.label, "Controller saved name");
             assert_eq!(
-                after.native.as_ref().unwrap().device.functions()[0]
+                after.native.as_ref().unwrap().device().functions()[0]
                     .lighting()
                     .unwrap()
                     .temperature()
@@ -214,7 +224,7 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().members = vec!["one".into(), "multi".into()];
     let mut configuration = rig.store.devices().load_configuration().unwrap();
-    let historical = super::support::device_with_key(&rig.data[0].device, "history");
+    let historical = super::support::device_with_key(rig.data[0].device(), "history");
     configuration
         .devices
         .push(crate::storage::tests::fixtures::identity(

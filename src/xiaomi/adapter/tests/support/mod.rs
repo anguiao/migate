@@ -1,11 +1,12 @@
 use super::*;
 pub(super) use crate::device::{Command, DeviceRegistry};
+use crate::xiaomi::capability::NativeDescription;
 pub(super) use crate::xiaomi::{
     central::{decode_mips, encode_mips, test_support::Broker},
     discovery::SERVICE_TYPE,
 };
 pub(super) use crate::{
-    configuration::{NativeDescription, Scope},
+    configuration::Scope,
     device::{Availability, DeviceKey, Power},
     storage::Store,
     xiaomi::{
@@ -81,16 +82,17 @@ pub(super) fn cached(_uid: &str, did: &str, multi: bool) -> NativeDescription {
         include_str!("../../../../../tests/fixtures/miot/outlet.json")
     })
     .unwrap();
-    NativeDescription {
-        model: if multi {
+    NativeDescription::new(
+        if multi {
             "cuco.plug.cp7pd"
         } else {
             "cuco.plug.v3"
         }
         .into(),
-        instance_type: instance["type"].as_str().unwrap().into(),
-        device: parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap(),
-    }
+        instance["type"].as_str().unwrap().into(),
+        parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap(),
+    )
+    .unwrap()
 }
 
 pub(super) fn scope(uid: &str) -> Scope {
@@ -110,10 +112,10 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
     };
     let mut endpoint = 2u16;
     for native in natives {
-        let id = native.device.key().id.clone();
-        let single = native.device.functions().len() == 1;
+        let id = native.device().key().id.clone();
+        let single = native.device().functions().len() == 1;
         let functions = native
-            .device
+            .device()
             .functions()
             .iter()
             .enumerate()
@@ -127,7 +129,7 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
             })
             .collect();
         configuration.devices.push(CommittedDevice {
-            key: native.device.key().clone(),
+            key: native.device().key().clone(),
             unique_id: crate::storage::tests::fixtures::unique(&id),
             endpoint,
             label: format!("name {id}"),
@@ -138,7 +140,7 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
         endpoint += if single {
             1
         } else {
-            native.device.functions().len() as u16 + 1
+            native.device().functions().len() as u16 + 1
         };
     }
     configuration.devices.sort_by(|a, b| a.key.cmp(&b.key));

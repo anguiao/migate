@@ -71,7 +71,7 @@ fn configuration_lines(view: &View, did: &str) -> Vec<String> {
             .iter()
             .find(|entry| entry.physical.key() == &key)
         {
-            let native = entry.native.device.functions()[0].description();
+            let native = entry.native.device().functions()[0].description();
             let logical = entry.physical.functions()[0].description();
             let repaired = logical.supports_rgb() && !native.supports_rgb();
             lines.push(format!(
