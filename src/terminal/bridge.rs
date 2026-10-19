@@ -1,3 +1,7 @@
+mod context;
+pub(crate) use context::Context;
+use context::View;
+
 use super::{AuthStatus, current_time};
 use crate::{
     RuntimeError,
@@ -5,14 +9,16 @@ use crate::{
     storage::{DeviceStore, StorageError, StoredRelation},
 };
 pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID [channel], off DID [channel], help\nUse list to find stable channel keys. A single-channel device may omit channel; channel is required for a multi-channel device.";
-fn invalid(status: &AuthStatus, now: i64, reason: &str) -> String {
-    format!("{reason}\n{COMMAND_HELP}\n{}", status.render(now))
+fn invalid(view: &View<'_>, status: &AuthStatus, now: i64, reason: &str) -> String {
+    format!(
+        "{reason}\n{COMMAND_HELP}\n{}",
+        view.render_status(status, now)
+    )
 }
-fn configuration_lines(status: &AuthStatus, did: &str) -> Vec<String> {
-    let Some(publication) = status.publication() else {
+fn configuration_lines(view: &View<'_>, did: &str) -> Vec<String> {
+    let Some(view) = view.configuration() else {
         return Vec::new();
     };
-    let view = publication.current();
     let key = DeviceKey::new("xiaomi", did);
     let mut lines = Vec::new();
     if let Some(record) = view.records.iter().find(|record| record.key == key) {
@@ -39,7 +45,7 @@ fn configuration_lines(status: &AuthStatus, did: &str) -> Vec<String> {
         let state = if view.published.get(&group_key).is_some() {
             "published".to_string()
         } else {
-            format!("not published ({})", unpublished_reason(&view, relation))
+            format!("not published ({})", unpublished_reason(view, relation))
         };
         lines.push(format!(
             "  Group {} ({}): {state}.",
@@ -107,7 +113,7 @@ fn configuration_lines(status: &AuthStatus, did: &str) -> Vec<String> {
         } else {
             lines.push(format!(
                 "  Not published: {}.",
-                unpublished_reason(&view, group)
+                unpublished_reason(view, group)
             ));
         }
         if let Some(error) = &group.error {
@@ -160,10 +166,9 @@ fn unpublished_reason(
     }
 }
 
-fn render(registry: &DeviceRegistry, did: Option<&str>, status: &AuthStatus) -> String {
+fn render(registry: &View<'_>, did: Option<&str>) -> String {
     let mut lines = Vec::new();
-    if let Some(publication) = status.publication() {
-        let view = publication.current();
+    if let Some(view) = registry.configuration() {
         for relation in &view.source.relations {
             if did.is_some_and(|did| did != relation.group_did) {
                 continue;
@@ -175,7 +180,7 @@ fn render(registry: &DeviceRegistry, did: Option<&str>, status: &AuthStatus) -> 
             lines.push(format!(
                 "{} (native group): not published ({}).",
                 relation.group_did,
-                unpublished_reason(&view, relation)
+                unpublished_reason(view, relation)
             ));
         }
     }
@@ -191,7 +196,7 @@ fn render(registry: &DeviceRegistry, did: Option<&str>, status: &AuthStatus) -> 
             Availability::Unavailable(reason) => format!("unavailable ({reason})"),
         };
         lines.push(format!("{} ({}): {availability}", key.id, physical.label()));
-        lines.extend(configuration_lines(status, &key.id));
+        lines.extend(configuration_lines(registry, &key.id));
         for function in physical.functions() {
             let id = &function.function_key().id;
             let label = &function.description().label;
@@ -266,118 +271,144 @@ pub async fn handle_line(
     line: &str,
     now: i64,
 ) -> Result<Option<String>, StorageError> {
-    let configured = status
-        .publication()
-        .map(|publication| publication.current().registry());
-    let registry = configured.as_ref().unwrap_or(registry);
-    let words = line.split_whitespace().collect::<Vec<_>>();
-    let text = match words.as_slice() {
-        [] => return Ok(None),
-        ["help"] => format!("{COMMAND_HELP}\n{}", status.render(now)),
-        ["list"] => {
-            let mut text = render(registry, None, status);
-            for pending in status.pending() {
-                let key = DeviceKey::new("xiaomi", &pending.did);
-                let name = match registry.get(&key) {
-                    Some(physical) => physical.label(),
-                    None => store
-                        .load_published(&key)?
-                        .map(|stored| stored.label)
-                        .unwrap_or_else(|| pending.name.clone()),
-                };
-                text.push_str(&format!(
-                    "\n{} ({}): pending ({})",
-                    pending.did, name, pending.reason
-                ));
+    Context::fixed(registry, store, status)
+        .handle_line(line, now)
+        .await
+}
+
+impl Context<'_> {
+    pub(crate) async fn handle_line(
+        &self,
+        line: &str,
+        now: i64,
+    ) -> Result<Option<String>, StorageError> {
+        let view = self.view();
+        let registry = &view;
+        let store = &self.store;
+        let status = self.status;
+        let words = line.split_whitespace().collect::<Vec<_>>();
+        let text = match words.as_slice() {
+            [] => return Ok(None),
+            ["help"] => format!("{COMMAND_HELP}\n{}", view.render_status(status, now)),
+            ["list"] => {
+                let mut text = render(registry, None);
+                for pending in status.pending() {
+                    let key = DeviceKey::new("xiaomi", &pending.did);
+                    let name = match registry.get(&key) {
+                        Some(physical) => physical.label(),
+                        None => store
+                            .load_published(&key)?
+                            .map(|stored| stored.label)
+                            .unwrap_or_else(|| pending.name.clone()),
+                    };
+                    text.push_str(&format!(
+                        "\n{} ({}): pending ({})",
+                        pending.did, name, pending.reason
+                    ));
+                }
+                text
             }
-            text
-        }
-        ["status"] => format!(
-            "{}\n{}",
-            render(registry, None, status),
-            status.render_devices(now, None)
-        ),
-        ["status", did] => {
-            if registry.get(&DeviceKey::new("xiaomi", *did)).is_none() {
-                let details = configuration_lines(status, did);
-                if details.is_empty() {
-                    invalid(status, now, "Unknown device DID.")
+            ["status"] => format!(
+                "{}\n{}",
+                render(registry, None),
+                view.render_devices(status, now, None)
+            ),
+            ["status", did] => {
+                if registry.get(&DeviceKey::new("xiaomi", *did)).is_none() {
+                    let details = configuration_lines(registry, did);
+                    if details.is_empty() {
+                        invalid(registry, status, now, "Unknown device DID.")
+                    } else {
+                        format!(
+                            "{did}: not published\n{}\n{}",
+                            details.join("\n"),
+                            view.render_devices(status, now, Some(did))
+                        )
+                    }
                 } else {
                     format!(
-                        "{did}: not published\n{}\n{}",
-                        details.join("\n"),
-                        status.render_devices(now, Some(did))
+                        "{}\n{}",
+                        render(registry, Some(did)),
+                        view.render_devices(status, now, Some(did))
                     )
                 }
-            } else {
-                format!(
-                    "{}\n{}",
-                    render(registry, Some(did), status),
-                    status.render_devices(now, Some(did))
-                )
             }
-        }
-        [verb @ ("on" | "off"), did, channel @ ..] if channel.len() <= 1 => {
-            let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
-                return Ok(Some(invalid(status, now, "Unknown device DID.")));
-            };
-            let function = if let Some(channel) = channel.first() {
-                physical.function(channel)
-            } else if let [function] = physical.functions() {
-                Some(function.clone())
-            } else {
-                return Ok(Some(invalid(
-                    status,
-                    now,
-                    "A channel is required for this device.",
-                )));
-            };
-            let Some(function) = function else {
-                return Ok(Some(invalid(status, now, "Unknown channel.")));
-            };
-            let target = if physical.functions().len() == 1 {
-                did.to_string()
-            } else {
-                format!("{did}/{}", function.function_key().id)
-            };
-            match function
-                .execute(if *verb == "on" {
-                    Command::On
+            [verb @ ("on" | "off"), did, channel @ ..] if channel.len() <= 1 => {
+                let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
+                    return Ok(Some(invalid(registry, status, now, "Unknown device DID.")));
+                };
+                let function = if let Some(channel) = channel.first() {
+                    physical.function(channel)
+                } else if let [function] = physical.functions() {
+                    Some(function.clone())
                 } else {
-                    Command::Off
-                })
-                .await
-            {
-                Ok(_) => {
-                    log::info!("terminal {target} {verb}: accepted");
-                    format!("{target}: command accepted")
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        now,
+                        "A channel is required for this device.",
+                    )));
+                };
+                let Some(function) = function else {
+                    return Ok(Some(invalid(registry, status, now, "Unknown channel.")));
+                };
+                let target = if physical.functions().len() == 1 {
+                    did.to_string()
+                } else {
+                    format!("{did}/{}", function.function_key().id)
+                };
+                match function
+                    .execute(if *verb == "on" {
+                        Command::On
+                    } else {
+                        Command::Off
+                    })
+                    .await
+                {
+                    Ok(_) => {
+                        log::info!("terminal {target} {verb}: accepted");
+                        format!("{target}: command accepted")
+                    }
+                    Err(error) => format!("{target}: {error}"),
                 }
-                Err(error) => format!("{target}: {error}"),
             }
-        }
-        _ => invalid(status, now, "Invalid command usage."),
-    };
-    Ok(Some(text))
+            _ => invalid(registry, status, now, "Invalid command usage."),
+        };
+        Ok(Some(text))
+    }
 }
+
 /// EOF ends input while the caller continues polling every bridge service.
 pub async fn run_input(
     registry: &DeviceRegistry,
     store: &DeviceStore,
     status: &AuthStatus,
-    mut input: impl futures_lite::io::AsyncBufRead + Unpin,
-    mut output: impl futures_lite::io::AsyncWrite + Unpin,
+    input: impl futures_lite::io::AsyncBufRead + Unpin,
+    output: impl futures_lite::io::AsyncWrite + Unpin,
 ) -> Result<(), RuntimeError> {
-    use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt};
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if input.read_line(&mut line).await? == 0 {
-            return Ok(());
-        }
-        if let Some(result) = handle_line(registry, store, status, &line, current_time()).await? {
-            output.write_all(result.as_bytes()).await?;
-            output.write_all(b"\n").await?;
-            output.flush().await?;
+    Context::fixed(registry, store, status)
+        .run_input(input, output)
+        .await
+}
+
+impl Context<'_> {
+    pub(crate) async fn run_input(
+        &self,
+        mut input: impl futures_lite::io::AsyncBufRead + Unpin,
+        mut output: impl futures_lite::io::AsyncWrite + Unpin,
+    ) -> Result<(), RuntimeError> {
+        use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt};
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if input.read_line(&mut line).await? == 0 {
+                return Ok(());
+            }
+            if let Some(result) = self.handle_line(&line, current_time()).await? {
+                output.write_all(result.as_bytes()).await?;
+                output.write_all(b"\n").await?;
+                output.flush().await?;
+            }
         }
     }
 }

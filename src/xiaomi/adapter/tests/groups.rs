@@ -135,6 +135,19 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
         c.context.request_sync();
         until(|| c.context.relations.borrow().snapshot().iter().any(|group| group.membership.members.iter().any(|member| member == "member-new"))).await;
         until(|| c.publication.failure().is_some()).await;
+        let status = crate::terminal::AuthStatus::new(
+            c.context.status.borrow().authentication.clone(),
+            "/bin/migate".into(),
+            "/data".into(),
+        );
+        let terminal = crate::terminal::bridge::Context::configured(
+            c.publication.clone(),
+            &c.store.devices(),
+            &status,
+        );
+        let report = terminal.handle_line("status", 0).await.unwrap().unwrap();
+        assert!(report.contains("pending application"));
+        assert!(report.contains("Configuration apply failed:"));
         assert_eq!(c.context.live.borrow().devices["group-1"].effective_group.as_ref().unwrap().members, ["one"]);
         let saved = c.store.devices().load_publication(Some(&scope)).unwrap();
         assert_eq!(saved.root_version, old.root_version);
@@ -867,10 +880,10 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             until(|| store.devices().load_published(&group).unwrap().is_some()).await;
             until(|| store.devices().load_published(&two).unwrap().is_some()).await;
             until(|| runtime_socket_live(port)).await;
-            let publication = status.publication().expect("runtime publication");
-            let root_before = publication.current().root_version;
+            let version = || store.devices().load_publication(None).unwrap().root_version;
+            let root_before = version();
             let group_before = store.devices().load_published(&group).unwrap().unwrap();
-            let two_before = publication.current().published.get(&two).unwrap();
+            let two_before = c.context.registry.get(&two).unwrap();
 
             // A small cfg(test) observer records whether the real UDP socket was
             // free at each snapshot and can inject a late confirmed candidate.
@@ -960,7 +973,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             until(|| runtime_socket_live(port)).await;
             assert!(!injected.get());
             assert!(observations.borrow().iter().any(|free| *free));
-            assert_eq!(publication.current().root_version, root_before);
+            assert_eq!(version(), root_before);
             let group_after_relation = store.devices().load_published(&group).unwrap().unwrap();
             assert!(!store.matter().contains(subscription_key).unwrap());
             assert_eq!(
@@ -968,7 +981,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 group_before.configuration_version
             );
             // The unchanged outlet keeps serving through the rebuild.
-            let two_after_relation = publication.current().published.get(&two).unwrap();
+            let two_after_relation = c.context.registry.get(&two).unwrap();
             assert!(two_before.same_instance(&two_after_relation));
             assert_eq!(two_before.label(), two_after_relation.label());
 
@@ -1008,15 +1021,14 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             c.cloud.lock().unwrap().catalog_groups =
                 vec![group_record("record-1", "group-1", &["one"], false)];
             c.context.request_sync();
-            until(|| publication.current().root_version > root_before).await;
+            until(|| version() > root_before).await;
             assert!(
                 !light.light_action_current(token),
                 "the rebuild cancelled the active light action"
             );
             until(|| runtime_socket_live(port)).await;
             assert!(injected.get());
-            assert!(publication.failure().is_none());
-            assert_eq!(publication.current().root_version, root_before + 1);
+            assert_eq!(version(), root_before + 1);
             let group_after_bounds = store.devices().load_published(&group).unwrap().unwrap();
             assert_eq!(
                 group_after_bounds.configuration_version,
@@ -1061,7 +1073,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
 
             // Ordinary state changes do not rebuild or touch the socket.
             let snapshots = observations.borrow().len();
-            let root_settled = publication.current().root_version;
+            let root_settled = version();
             light
                 .observe_light(crate::device::LightPatch {
                     power: Some(true),
@@ -1071,7 +1083,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             c.context.changed.notify(usize::MAX);
             async_io::Timer::after(Duration::from_millis(20)).await;
             assert_eq!(observations.borrow().len(), snapshots);
-            assert_eq!(publication.current().root_version, root_settled);
+            assert_eq!(version(), root_settled);
             assert!(runtime_socket_live(port));
 
             // A failed save keeps the whole committed configuration and only
@@ -1082,6 +1094,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                  BEGIN SELECT RAISE(ABORT, 'injected'); END;",
             )
             .unwrap();
+            let before_failure = observations.borrow().len();
             c.cloud.lock().unwrap().catalog_groups = vec![group_record(
                 "record-1",
                 "group-1",
@@ -1089,8 +1102,22 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 false,
             )];
             c.context.request_sync();
-            until(|| publication.failure().is_some()).await;
-            assert_eq!(publication.current().root_version, root_settled);
+            until(|| {
+                observations.borrow()[before_failure..]
+                    .iter()
+                    .any(|free| *free)
+            })
+            .await;
+            until(|| runtime_socket_live(port)).await;
+            assert_eq!(version(), root_settled);
+            assert_eq!(
+                c.context.live.borrow().devices["group-1"]
+                    .effective_group
+                    .as_ref()
+                    .unwrap()
+                    .members,
+                ["one"]
+            );
             let group_after_failure = store.devices().load_published(&group).unwrap().unwrap();
             assert_eq!(
                 group_after_failure.configuration_version,
@@ -1427,17 +1454,17 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             "/bin/migate".into(),
             "/data".into(),
         );
-        status.set_publication(c.publication.clone());
-        let list = crate::terminal::bridge::handle_line(
-            &crate::device::DeviceRegistry::new(),
+        let terminal = crate::terminal::bridge::Context::configured(
+            c.publication.clone(),
             &store.devices(),
             &status,
-            "list",
-            0,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        );
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
+        let help = terminal.handle_line("help", 0).await.unwrap().unwrap();
+        assert!(help.contains(&format!(
+            "Configuration: root version {}.",
+            c.publication.current().root_version
+        )));
         // The effective registry keeps every real source ref; a hidden member
         // is a normal row marked hidden with its confirmed memberships.
         assert!(list.contains("one (name one):"), "{list}");
@@ -1446,16 +1473,11 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             list.contains("Group group-1 (virtual): published."),
             "{list}"
         );
-        let detail = crate::terminal::bridge::handle_line(
-            &crate::device::DeviceRegistry::new(),
-            &store.devices(),
-            &status,
-            "status one",
-            0,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let detail = terminal
+            .handle_line("status one", 0)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             detail.contains("Group group-1 (virtual): published."),
             "{detail}"
@@ -1483,16 +1505,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             group_before.configuration_version
         );
         until(|| c.publication.current().published.get(&one).is_some()).await;
-        let list = crate::terminal::bridge::handle_line(
-            &crate::device::DeviceRegistry::new(),
-            &store.devices(),
-            &status,
-            "list",
-            0,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains("group-1 (native group): not published (confirmed empty relation)."),
             "{list}"
@@ -1567,17 +1580,12 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             "/bin/migate".into(),
             "/data".into(),
         );
-        status.set_publication(Rc::new(opened));
-        let list = crate::terminal::bridge::handle_line(
-            &crate::device::DeviceRegistry::new(),
+        let terminal = crate::terminal::bridge::Context::configured(
+            Rc::new(opened),
             &store.devices(),
             &status,
-            "list",
-            0,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        );
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
         assert!(
             list.contains("group-1 (native group): not published (native group withdrawn)."),
             "{list}"

@@ -209,7 +209,7 @@ fn parse_ls2307(
     let incompatible = || CapabilityError::IncompatibleModel(ls2307::MODEL);
     let exact = ls2307::exact_urn;
     if !exact(&instance.urn)
-        || main.iid != 2
+        || main.iid != ls2307::POWER.siid
         || !exact(&main.urn)
         || !ls2307::main_bindings(power, brightness, temperature)
     {
@@ -218,21 +218,25 @@ fn parse_ls2307(
     let ambient = instance
         .services
         .iter()
-        .find(|service| service.iid == 4)
+        .find(|service| service.iid == ls2307::COLOR.property.siid)
         .ok_or_else(incompatible)?;
     if !ambient.urn.standard("service", "ambient-light", 0x0000789d) || !exact(&ambient.urn) {
         return Err(incompatible());
     }
     let color_property = standard_property(ambient, "color", 0x0e)?;
     let mode_property = standard_property(ambient, "mode", 8)?;
-    if color_property.iid != 1
-        || mode_property.iid != 2
+    if color_property.iid != ls2307::COLOR.property.piid
+        || mode_property.iid != ls2307::MODE.property.piid
         || !exact(&color_property.urn)
         || !exact(&mode_property.urn)
     {
         return Err(incompatible());
     }
-    let color = numeric_binding(4, color_property, NumericUnit::Rgb)?;
+    let color = numeric_binding(
+        ls2307::COLOR.property.siid,
+        color_property,
+        NumericUnit::Rgb,
+    )?;
     if color != ls2307::COLOR {
         return Err(incompatible());
     }

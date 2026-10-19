@@ -71,20 +71,22 @@ pub(super) async fn run_lifecycle(
         registry,
         publication,
     } = prepared;
-    if let Some(publication) = &publication {
-        options.status.set_publication(publication.clone());
-    }
-    log::info!("MiGate bridge_id={}", options.identity.bridge_id);
-    let mut input = Box::pin(async {
-        terminal::bridge::run_input(
-            &registry,
+    let terminal = match &publication {
+        Some(publication) => terminal::bridge::Context::configured(
+            publication.clone(),
             &options.store.devices(),
             options.status,
-            input,
-            output,
-        )
-        .await
-        .map_err(|error| format!("Terminal I/O failed: {error}"))?;
+        ),
+        None => {
+            terminal::bridge::Context::fixed(&registry, &options.store.devices(), options.status)
+        }
+    };
+    log::info!("MiGate bridge_id={}", options.identity.bridge_id);
+    let mut input = Box::pin(async {
+        terminal
+            .run_input(input, output)
+            .await
+            .map_err(|error| format!("Terminal I/O failed: {error}"))?;
         log::info!("Terminal input ended; bridge is still running");
         future::pending::<Result<(), RuntimeError>>().await
     });

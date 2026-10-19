@@ -28,14 +28,6 @@ impl EffectiveConfiguration {
             .map(|entry| entry.physical.clone())
             .collect()
     }
-
-    pub(crate) fn registry(&self) -> DeviceRegistry {
-        let registry = DeviceRegistry::new();
-        for device in self.devices() {
-            registry.insert(device);
-        }
-        registry
-    }
 }
 
 pub(crate) struct Prepared {

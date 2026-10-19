@@ -10,7 +10,6 @@ use std::{
     cell::RefCell,
     fmt::Write as _,
     path::{Path, PathBuf},
-    rc::Rc,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -27,7 +26,6 @@ pub struct AuthStatus {
     executable: PathBuf,
     data_dir: PathBuf,
     adapter: RefCell<Option<BridgeDiagnostics>>,
-    publication: RefCell<Option<Rc<crate::publication::Publication>>>,
 }
 
 impl AuthStatus {
@@ -37,16 +35,7 @@ impl AuthStatus {
             executable,
             data_dir,
             adapter: RefCell::new(None),
-            publication: RefCell::new(None),
         }
-    }
-
-    pub(crate) fn set_publication(&self, publication: Rc<crate::publication::Publication>) {
-        *self.publication.borrow_mut() = Some(publication);
-    }
-
-    pub(crate) fn publication(&self) -> Option<Rc<crate::publication::Publication>> {
-        self.publication.borrow().clone()
     }
 
     pub fn replace(&self, report: AuthReport) -> bool {
@@ -76,26 +65,16 @@ impl AuthStatus {
         {
             report.push_str("\nStop MiGate, sign in with the same data directory, then restart.");
         }
-        if let Some(publication) = self.publication() {
-            let _ = write!(
-                report,
-                "\nConfiguration: root version {}{}.",
-                publication.current().root_version,
-                if publication.pending() {
-                    "; pending application"
-                } else {
-                    ""
-                }
-            );
-            if let Some(failure) = publication.failure() {
-                let _ = write!(report, "\nConfiguration apply failed: {failure}.");
-            }
-        }
         report
     }
 
     pub fn render_devices(&self, now: i64, did: Option<&str>) -> String {
         let mut report = self.render(now);
+        self.append_devices(&mut report, did);
+        report
+    }
+
+    pub(super) fn append_devices(&self, report: &mut String, did: Option<&str>) {
         if let Some(adapter) = &*self.adapter.borrow() {
             for device in adapter
                 .devices
@@ -105,7 +84,6 @@ impl AuthStatus {
                 let _ = write!(report, "\n{}", format_device(device));
             }
         }
-        report
     }
 
     pub fn update_adapter(&self, status: AdapterStatus) {
