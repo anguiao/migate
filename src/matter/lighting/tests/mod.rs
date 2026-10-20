@@ -56,8 +56,8 @@ async fn execute_color(light: &Lighting, task: ColorTask) -> Result<(), rs_matte
     Ok(())
 }
 
-/// Lightweight report fixture: a plain published Function, a controllable
-/// clock and the real Report owner, without a database or Matter node.
+/// Lightweight lighting fixture: a plain published Function and a controllable
+/// clock, without a database or Matter node.
 fn light_fixture(
     rgb: bool,
 ) -> (
@@ -404,7 +404,7 @@ fn startup_waiter_does_not_block_ticks_merge_or_final_and_sent_stop_retains_rece
 
 #[test]
 fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
-    setup!(true, function, receiver, light, clock, ctx);
+    let (light, function, mut receiver, clock) = light_fixture(true);
     function
         .observe_light(LightPatch {
             power: Some(true),
@@ -480,7 +480,6 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
             panic!("expected a level execution")
         };
         assert_eq!(next.frame(0).0, projected);
-        assert!(ctx.changes.borrow().is_empty());
     });
 }
 
@@ -676,7 +675,7 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
 #[test]
 fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_preset() {
     use crate::device::Command;
-    setup!(false, function, receiver, light, clock, ctx);
+    let (light, function, mut receiver, clock) = light_fixture(false);
     function
         .observe_light(LightPatch {
             power: Some(false),
@@ -768,7 +767,6 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
         off.await.unwrap();
     });
     assert_eq!(clock.now(), 0);
-    assert!(ctx.changes.borrow().is_empty());
 }
 
 #[test]

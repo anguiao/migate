@@ -8,6 +8,9 @@ use super::DeviceWork;
 use crate::xiaomi::capability::PropertyBinding;
 
 impl DeviceWork {
+    pub(in crate::xiaomi::adapter) fn test_source_changed(&self) {
+        self.source_changed();
+    }
     pub(in crate::xiaomi::adapter) fn test_observer_is_local(&self) -> bool {
         matches!(
             self.observer(),

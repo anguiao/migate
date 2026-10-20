@@ -1488,7 +1488,7 @@ fn in_flight_feedback_survives_valid_source_epoch_change() {
                 .admitted
                 .clone()
                 .unwrap();
-            work.source_changed();
+            work.test_source_changed();
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
             until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
             assert!(light.light_action_current(action.token()));

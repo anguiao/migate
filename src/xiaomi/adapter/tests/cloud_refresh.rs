@@ -231,7 +231,7 @@ fn retiring_a_source_releases_a_cloud_read_slot_before_its_response_arrives() {
             cloud.read_gates.insert(("one".into(), 2, 1), fresh_gate);
             cloud.read_values.insert(("one".into(), 2, 1), true);
         }
-        work.source_changed();
+        work.test_source_changed();
         until(|| cloud_reads(&c, "one", 2) == 2).await;
         assert_eq!(one.snapshot().power, Power::Unknown);
         assert_eq!(work.refresh.borrow().snapshot().inflight.len(), 1);

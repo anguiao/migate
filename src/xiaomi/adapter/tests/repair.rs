@@ -746,7 +746,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                     .admitted
                     .clone()
                     .unwrap();
-                work.source_changed();
+                work.test_source_changed();
                 c.context.refresh_group_states(did);
             }
             until(|| {

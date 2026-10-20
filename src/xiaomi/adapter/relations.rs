@@ -206,13 +206,7 @@ impl Relations {
             self.groups.remove(group_did);
         }
         let after = self.active_keys();
-        let withdrawn = before
-            .difference(&after)
-            .chain(absent.iter().filter(|did| before.contains(*did)))
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let withdrawn = before.difference(&after).cloned().collect();
         RelationUpdate {
             active: self
                 .groups

@@ -34,7 +34,7 @@ fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
 
         // Only a mode has arrived from the new source authority. Its missing
         // RGB cannot be filled with the previous authority's cached value.
-        work.source_changed();
+        work.test_source_changed();
         work.notify_value(mode, &json!(0), false, false);
         c.context.refresh_group_states("member-a");
         let state = light.snapshot().lighting.unwrap();
@@ -43,7 +43,7 @@ fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
 
         // A readable unknown-mode A and a valid but OFF B are in the same
         // fallback tier, so stable member order selects A and keeps it unknown.
-        work.source_changed();
+        work.test_source_changed();
         work.notify_value(
             crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
             &json!(true),

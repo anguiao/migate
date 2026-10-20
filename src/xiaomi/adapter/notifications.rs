@@ -34,24 +34,6 @@ impl NotificationSource {
             _ => false,
         }
     }
-    fn invalidate(&self, did: &str) {
-        match self {
-            Self::Local(h) => h.invalidate_received_properties(did),
-            Self::Cloud(h) => h.invalidate_received_properties(did),
-        }
-    }
-    fn retire(&self, work: &DeviceWork, did: &str) {
-        match self {
-            Self::Local(handle) => {
-                drop(handle.unsubscribe_properties(did));
-                work.retire_local_preparation();
-            }
-            Self::Cloud(handle) => {
-                drop(handle.unsubscribe_properties(did));
-                work.retire_cloud_preparation();
-            }
-        }
-    }
 }
 pub(super) struct CloudSession {
     pub(super) handle: NotificationHandle,
@@ -289,12 +271,7 @@ impl Context {
 }
 fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
     let did = &work.key.id;
-    // Invalidate received QoS2 values before granting delivery; keep handshakes and ready SUBACKs.
-    source.invalidate(did);
-    if let Some(old) = work.replace_observer(source) {
-        old.retire(work, did);
-    }
-    work.source_changed();
+    work.install_observer(source);
     context.refresh_group_states(did);
     context.note_notification_switch(did, "notification subscriptions ready; source activated");
 }
@@ -326,9 +303,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     if let Some(old) = old
         && !context.source_valid(&did, &old)
     {
-        old.retire(&work, &did);
-        work.take_observer();
-        work.source_changed();
+        work.revoke_observer();
         context.refresh_group_states(&did);
         context.update_routing("notification source access conditions invalidated");
     }

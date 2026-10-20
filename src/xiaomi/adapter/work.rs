@@ -1,6 +1,7 @@
 use super::{
     commands::LightWriteGate,
     model::AdapterError,
+    notifications::NotificationSource,
     observations::Observations,
     refresh::RefreshState,
     state::{Context, Lifetime, LogicalSink},
@@ -183,7 +184,7 @@ pub(super) struct DeviceWork {
     sink: RefCell<Rc<LogicalSink>>,
     local: RefCell<LocalAttachment>,
     cloud: RefCell<CloudAttachment>,
-    active: RefCell<Option<super::notifications::NotificationSource>>,
+    active: RefCell<Option<NotificationSource>>,
     condition_generation: Cell<u64>,
     pub(super) refresh: RefCell<RefreshState>,
     pub(super) refresh_changed: Rc<Event>,
@@ -378,10 +379,7 @@ impl DeviceWork {
         }
     }
     fn local_source_retired(&self) {
-        let active = matches!(
-            *self.active.borrow(),
-            Some(super::notifications::NotificationSource::Local(_))
-        );
+        let active = matches!(*self.active.borrow(), Some(NotificationSource::Local(_)));
         if active {
             self.active.borrow_mut().take();
             self.source_changed();
@@ -389,35 +387,55 @@ impl DeviceWork {
         self.changed.notify(usize::MAX);
     }
     fn cloud_source_retired(&self) {
-        let active = matches!(
-            *self.active.borrow(),
-            Some(super::notifications::NotificationSource::Cloud(_))
-        );
+        let active = matches!(*self.active.borrow(), Some(NotificationSource::Cloud(_)));
         if active {
             self.active.borrow_mut().take();
             self.source_changed();
         }
         self.changed.notify(usize::MAX);
     }
-    pub(super) fn observer(&self) -> Option<super::notifications::NotificationSource> {
+    pub(super) fn observer(&self) -> Option<NotificationSource> {
         self.active.borrow().clone()
     }
-    pub(super) fn observer_is(&self, source: &super::notifications::NotificationSource) -> bool {
+    pub(super) fn observer_is(&self, source: &NotificationSource) -> bool {
         self.active
             .borrow()
             .as_ref()
             .is_some_and(|active| active.same(source))
     }
-    pub(super) fn replace_observer(
-        &self,
-        source: super::notifications::NotificationSource,
-    ) -> Option<super::notifications::NotificationSource> {
-        self.active.borrow_mut().replace(source)
+    pub(super) fn install_observer(&self, source: NotificationSource) {
+        let did = &self.key.id;
+        // Invalidate received QoS2 values before granting delivery; keep handshakes and ready SUBACKs.
+        match &source {
+            NotificationSource::Local(handle) => handle.invalidate_received_properties(did),
+            NotificationSource::Cloud(handle) => handle.invalidate_received_properties(did),
+        }
+        let old = self.active.borrow_mut().replace(source);
+        if let Some(old) = old {
+            self.retire_observer_subscriptions(old);
+        }
+        self.source_changed();
     }
-    pub(super) fn take_observer(&self) -> Option<super::notifications::NotificationSource> {
-        self.active.borrow_mut().take()
+    pub(super) fn revoke_observer(&self) {
+        if let Some(old) = self.observer() {
+            self.retire_observer_subscriptions(old);
+            self.active.borrow_mut().take();
+            self.source_changed();
+        }
     }
-    pub(super) fn source_changed(&self) {
+    fn retire_observer_subscriptions(&self, source: NotificationSource) {
+        match source {
+            NotificationSource::Local(handle) => {
+                drop(handle.unsubscribe_properties(&self.key.id));
+                self.retire_local_preparation();
+            }
+            NotificationSource::Cloud(handle) => {
+                drop(handle.unsubscribe_properties(&self.key.id));
+                self.retire_cloud_preparation();
+            }
+        }
+    }
+    fn source_changed(&self) {
         self.observations.source_changed();
         self.physical().clear_light_state();
         super::refresh::cancel(self);
@@ -659,10 +677,10 @@ impl DeviceWork {
             cloud.prepare.running = false;
         }
     }
-    pub(super) fn source_ready(&self, source: &super::notifications::NotificationSource) -> bool {
+    pub(super) fn source_ready(&self, source: &NotificationSource) -> bool {
         let bindings = self.bindings();
         match source {
-            super::notifications::NotificationSource::Local(handle) => {
+            NotificationSource::Local(handle) => {
                 let local = self.local.borrow();
                 !self.life.is_closed()
                     && local
@@ -671,7 +689,7 @@ impl DeviceWork {
                         .is_some_and(|current| current.same_connection(handle))
                     && local.prepare.ready(&bindings)
             }
-            super::notifications::NotificationSource::Cloud(handle) => {
+            NotificationSource::Cloud(handle) => {
                 let cloud = self.cloud.borrow();
                 !self.life.is_closed()
                     && cloud
@@ -692,10 +710,10 @@ impl DeviceWork {
         cloud.connection.is_some()
             && (!cloud.prepare.subscribed.is_empty() || cloud.prepare.running)
     }
-    pub(super) fn retire_local_preparation(&self) {
+    fn retire_local_preparation(&self) {
         self.local.borrow_mut().invalidate_prepare();
     }
-    pub(super) fn retire_cloud_preparation(&self) {
+    fn retire_cloud_preparation(&self) {
         self.cloud.borrow_mut().prepare.invalidate();
     }
     pub(super) fn retire_local_notifications(&self) {
@@ -749,7 +767,7 @@ impl DeviceWork {
             drop(cloud.unsubscribe_device(&self.key.id));
         }
         self.retire_cloud_preparation();
-        self.take_observer();
+        self.active.borrow_mut().take();
         super::refresh::cancel(self);
         self.light_frames.borrow_mut().cancel_all();
         self.changed.notify(usize::MAX);
