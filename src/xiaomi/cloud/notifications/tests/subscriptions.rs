@@ -243,6 +243,99 @@ fn retiring_queued_subscriptions_keeps_the_request_queue_bounded() {
 }
 
 #[test]
+fn unsubscribe_burst_revokes_delivery_synchronously_even_above_wire_capacity() {
+    let (events, received) = flume::unbounded();
+    let (finished, done) = flume::bounded(1);
+    future::block_on(exercise(
+        timing(),
+        move |mut broker| async move {
+            broker.setup().await;
+            for index in 0..80 {
+                for path in [
+                    format!("device/device{index:02}/up/properties_changed/2/1"),
+                    format!("device/device{index:02}/state/#"),
+                ] {
+                    let pkid = broker.subscribe(&path).await;
+                    broker.accept(pkid).await;
+                }
+            }
+            for index in 0..64 {
+                let Packet::Unsubscribe(unsub) = broker.next().await else {
+                    panic!("UNSUBSCRIBE expected");
+                };
+                assert_eq!(
+                    unsub.filters,
+                    [format!("device/device{index:02}/up/properties_changed/2/1")]
+                );
+                broker
+                    .send(Packet::UnsubAck(UnsubAck {
+                        pkid: unsub.pkid,
+                        reasons: vec![UnsubAckReason::Success],
+                        properties: None,
+                    }))
+                    .await;
+            }
+            for index in 0..80 {
+                let did = format!("device{index:02}");
+                broker
+                    .send(Packet::Publish(Publish::new(
+                        format!("device/{did}/up/properties_changed/2/1"),
+                        QoS::AtMostOnce,
+                        json!({"params":{"did":did,"siid":2,"piid":1,"value":true}}).to_string(),
+                    )))
+                    .await;
+            }
+            // This follows all property reports and belongs to an overflowed
+            // device: property retirement must preserve its online delivery.
+            broker
+                .send(Packet::Publish(Publish::new(
+                    "device/device79/state/offline",
+                    QoS::AtMostOnce,
+                    json!({"device_id":"device79","event":"offline"}).to_string(),
+                )))
+                .await;
+            done.recv_async().await.unwrap();
+        },
+        move |handle, driver| async move {
+            let (result, ()) = future::zip(
+                driver.run(move |event| events.send(event).unwrap()),
+                async {
+                    for index in 0..80 {
+                        let did = format!("device{index:02}");
+                        handle.subscribe_property(&did, POWER).await.unwrap();
+                        handle.subscribe_online(&did).await.unwrap();
+                    }
+                    let mut pending = (0..80)
+                        .map(|index| handle.unsubscribe_properties(&format!("device{index:02}")))
+                        .collect::<Vec<_>>();
+                    let overflow = pending.split_off(64);
+                    // Never poll the queued receipts: retirement and enqueueing
+                    // must already have happened when the handle was called.
+                    drop(pending);
+                    for request in overflow {
+                        assert_eq!(
+                            future::poll_once(request).await,
+                            Some(Err(NotificationError::QueueFull))
+                        );
+                    }
+                    assert_eq!(
+                        received.recv_async().await.unwrap(),
+                        NotificationEvent::Online {
+                            did: "device79".into(),
+                            online: false,
+                        }
+                    );
+                    handle.close();
+                },
+            )
+            .await;
+            result.unwrap();
+            finished.send(()).unwrap();
+        },
+    ));
+}
+
+#[test]
 fn unsubscribe_properties_keeps_online_until_device_is_removed() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let collected = events.clone();
