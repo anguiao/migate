@@ -57,7 +57,7 @@ fn external_cold_white_reports_one_consistent_color_without_changing_the_rgb_cac
     assert!((20000..22000).contains(&y));
     assert_eq!(light.refresh().color_mode, Some(2));
     assert_eq!(
-        function.snapshot().lighting.unwrap().color,
+        function.snapshot().lighting().unwrap().color,
         cached_colors(LightMode::Rgb).color
     );
 
@@ -154,7 +154,7 @@ fn inactive_cache_updates_only_version_values_exposed_by_the_current_projection(
                 let (x, y) = old.xy.unwrap();
                 assert_eq!(hue_sat(&light), Some((hue, saturation)));
                 assert_eq!(light.refresh().xy, Some((x, y)));
-                assert_eq!(function.snapshot().lighting.unwrap().color, patch.color);
+                assert_eq!(function.snapshot().lighting().unwrap().color, patch.color);
             }
             LightMode::Rgb => {
                 assert_ne!(light.report.color_version.get(), old_version);
@@ -367,7 +367,7 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
         assert_eq!(hue_sat(&light), Some((170, 0)));
         light.advance();
         assert!(light.scheduler.observe(LightDimension::Color).is_none());
-        let rgb_cache = function.snapshot().lighting.unwrap().color;
+        let rgb_cache = function.snapshot().lighting().unwrap().color;
 
         function
             .observe_light(LightPatch {
@@ -379,7 +379,7 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
         let (hue, saturation) = hue_sat(&light).unwrap();
         assert_ne!(hue, 170);
         assert!(saturation <= 10);
-        assert_eq!(function.snapshot().lighting.unwrap().color, rgb_cache);
+        assert_eq!(function.snapshot().lighting().unwrap().color, rgb_cache);
 
         function
             .observe_light(LightPatch {
@@ -389,7 +389,7 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
             .unwrap();
         assert_eq!(reported(&light), [0, 1, 3, 4, 8, 0x4001]);
         assert_eq!(hue_sat(&light), Some((170, 0)));
-        assert_eq!(function.snapshot().lighting.unwrap().color, rgb_cache);
+        assert_eq!(function.snapshot().lighting().unwrap().color, rgb_cache);
     });
     assert_eq!(clock.now(), 0);
 }

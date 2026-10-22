@@ -68,7 +68,10 @@ fn standard_lights_are_admitted_as_one_main_function() {
         );
         assert!(lighting.color().is_none());
         assert!(lighting.mode().is_none());
-        assert_eq!(function.power(), PropertyBinding { siid: 2, piid: 1 });
+        assert_eq!(
+            function.power().unwrap(),
+            PropertyBinding { siid: 2, piid: 1 }
+        );
         assert_eq!(brightness.property(), PropertyBinding { siid: 2, piid: 2 });
         assert_eq!(temperature.property(), PropertyBinding { siid: 2, piid: 3 });
     }
@@ -293,7 +296,10 @@ fn four_standard_light_profiles_are_parsed_with_the_right_capabilities() {
             FunctionKind::Light(profile),
             "on={on} brightness={brightness} ct={ct} rgb={rgb}"
         );
-        assert_eq!(function.power(), PropertyBinding { siid: 2, piid: 1 });
+        assert_eq!(
+            function.power().unwrap(),
+            PropertyBinding { siid: 2, piid: 1 }
+        );
         let lighting = function.lighting().unwrap();
         assert_eq!(lighting.brightness().is_some(), brightness);
         assert_eq!(lighting.temperature().is_some(), ct);

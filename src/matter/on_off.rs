@@ -1,4 +1,4 @@
-use crate::device::{Command, CommandError, Function};
+use crate::device::{Command, CommandError, Function, Power};
 use rs_matter::{
     dm::{Cluster, Dataver, HandlerContext, InvokeContext, ReadContext, clusters::app::on_off},
     error::{Error, ErrorCode},
@@ -14,7 +14,7 @@ pub(super) struct OnOffHandler {
 }
 impl OnOffHandler {
     pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Self {
-        let reported = std::cell::Cell::new(function.snapshot().power.value());
+        let reported = std::cell::Cell::new(function.snapshot().power().and_then(Power::value));
         Self {
             function,
             endpoint,
@@ -63,8 +63,8 @@ impl on_off::ClusterAsyncHandler for OnOffHandler {
     async fn on_off(&self, _ctx: impl ReadContext) -> Result<bool, Error> {
         self.function
             .snapshot()
-            .power
-            .value()
+            .power()
+            .and_then(Power::value)
             .ok_or_else(|| ErrorCode::Failure.into())
     }
     async fn handle_off(&self, ctx: impl InvokeContext) -> Result<(), Error> {
@@ -98,7 +98,7 @@ impl on_off::ClusterAsyncHandler for OnOffHandler {
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         let mut changes = self.function.subscribe();
-        let mut value = self.function.snapshot().power.value();
+        let mut value = self.function.snapshot().power().and_then(Power::value);
         loop {
             if self.reported.replace(value) != value {
                 ctx.notify_attr_changed(
@@ -107,7 +107,7 @@ impl on_off::ClusterAsyncHandler for OnOffHandler {
                     on_off::AttributeId::OnOff as _,
                 );
             }
-            value = changes.changed().await.power.value();
+            value = changes.changed().await.power().and_then(Power::value);
         }
     }
 }

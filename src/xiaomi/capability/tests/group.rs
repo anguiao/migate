@@ -27,7 +27,10 @@ fn parses_real_group3_native_light_profile() {
             TemperatureInterval::new(1700, 7000).unwrap()
         ))
     );
-    assert_eq!(function.power(), PropertyBinding { siid: 2, piid: 1 });
+    assert_eq!(
+        function.power().unwrap(),
+        PropertyBinding { siid: 2, piid: 1 }
+    );
     let lighting = function.lighting().unwrap();
     assert_eq!(
         lighting.brightness().unwrap().property(),

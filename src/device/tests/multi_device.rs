@@ -30,10 +30,10 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
         let second = physical.function("outlet_2").unwrap();
         physical.set_availability(Availability::Available);
         first.observe(false);
-        assert_eq!(second.snapshot().power, Power::Unknown);
+        assert_eq!(second.snapshot().power(), Some(Power::Unknown));
         assert_eq!(first.function_key().id, "outlet_1");
         assert_eq!(first.function_key().device, *physical.key());
-        let revision = second.snapshot().revision;
+        let revision = second.snapshot().revision();
         let mut first_command = Box::pin(first.execute(Command::On));
         let mut second_command = Box::pin(second.execute(Command::Off));
         assert!(poll_once(first_command.as_mut()).await.is_none());
@@ -45,22 +45,22 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
             .unwrap()
             .accept()
             .unwrap();
-        assert_eq!(second_command.await.unwrap().power, Power::Off);
-        assert_eq!(second.snapshot().revision, revision + 1);
-        assert_eq!(first.snapshot().power, Power::Off);
+        assert_eq!(second_command.await.unwrap().power(), Some(Power::Off));
+        assert_eq!(second.snapshot().revision(), revision + 1);
+        assert_eq!(first.snapshot().power(), Some(Power::Off));
         first.observe(true);
         pending.accept().unwrap();
         first_command.await.unwrap();
-        assert_eq!(second.snapshot().power, Power::Off);
+        assert_eq!(second.snapshot().power(), Some(Power::Off));
         let mut changes = second.subscribe();
         physical.set_availability(Availability::Unavailable("offline".into()));
         assert_eq!(
-            changes.changed().await.availability,
+            changes.changed().await.availability(),
             Availability::Unavailable("offline".into())
         );
         assert_eq!(
-            first.snapshot().availability,
-            second.snapshot().availability
+            first.snapshot().availability(),
+            second.snapshot().availability()
         );
     });
 }
@@ -100,7 +100,7 @@ fn registry_publishes_whole_devices_and_removal_cancels_only_their_commands() {
             .unwrap()
             .accept()
             .unwrap();
-        assert_eq!(other_command.await.unwrap().power, Power::Off);
+        assert_eq!(other_command.await.unwrap().power(), Some(Power::Off));
     });
 }
 
@@ -123,7 +123,7 @@ fn cancelling_one_channel_does_not_withdraw_another_channel() {
             .unwrap()
             .accept()
             .unwrap();
-        assert_eq!(surviving.await.unwrap().power, Power::Off);
+        assert_eq!(surviving.await.unwrap().power(), Some(Power::Off));
     });
 }
 

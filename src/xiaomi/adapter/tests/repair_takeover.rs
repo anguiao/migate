@@ -102,8 +102,8 @@ fn member_notifications_update_feedback_without_stopping_group_actions() {
                 .await;
             let member = function(&control.context.registry, "member-a", "main");
             until(|| {
-                member.snapshot().power == Power::On
-                    && member.snapshot().lighting.unwrap().mode
+                member.snapshot().power() == Some(Power::On)
+                    && member.snapshot().lighting().unwrap().mode
                         == Some(crate::device::LightMode::Temperature)
             })
             .await;
@@ -119,7 +119,7 @@ fn member_notifications_update_feedback_without_stopping_group_actions() {
                 work.request_dirty_read("main", binding);
             }
             until(|| {
-                let state = group.snapshot().lighting.unwrap();
+                let state = group.snapshot().lighting().unwrap();
                 state.mode == Some(crate::device::LightMode::Rgb)
                     && state.color == Rgb::from_packed(0xaabbcc)
             })
@@ -148,8 +148,8 @@ fn member_notifications_update_feedback_without_stopping_group_actions() {
             }
             until(|| {
                 let state = member.snapshot();
-                let lighting = state.lighting.unwrap();
-                state.power == Power::Off
+                let lighting = state.lighting().unwrap();
+                state.power() == Some(Power::Off)
                     && lighting.brightness_percent == Some(80.0)
                     && lighting.color == Rgb::from_packed(0x0000ff)
                     && lighting.mode == Some(crate::device::LightMode::Rgb)
@@ -161,7 +161,7 @@ fn member_notifications_update_feedback_without_stopping_group_actions() {
                 "member off is feedback, not a group Stop"
             );
             assert_eq!(
-                group.snapshot().lighting.unwrap().brightness_percent,
+                group.snapshot().lighting().unwrap().brightness_percent,
                 Some(50.0),
                 "native group state is not aggregated from members"
             );

@@ -20,14 +20,14 @@ const MULTI: &str = include_str!("../../../tests/fixtures/miot/cuco-cp7pd.json")
 const CEILING: &str = include_str!("../../../tests/fixtures/miot/xiaomi-light-ceil04.json");
 const LS2307: &str = include_str!("../../../tests/fixtures/miot/devcea-light-ls2307.json");
 
-fn scope(uid: &str, home: &str) -> Scope {
+pub(super) fn scope(uid: &str, home: &str) -> Scope {
     Scope {
         uid: uid.into(),
         home_id: home.into(),
     }
 }
 
-fn native(id: &str, model: &str, instance: Value) -> NativeDescription {
+pub(super) fn native(id: &str, model: &str, instance: Value) -> NativeDescription {
     NativeDescription::new(
         model.into(),
         instance["type"].as_str().unwrap().into(),
@@ -36,11 +36,15 @@ fn native(id: &str, model: &str, instance: Value) -> NativeDescription {
     .unwrap()
 }
 
-fn fixture(id: &str, model: &str, data: &str) -> NativeDescription {
+pub(super) fn fixture(id: &str, model: &str, data: &str) -> NativeDescription {
     native(id, model, serde_json::from_str(data).unwrap())
 }
 
-fn next(current: &CommittedConfiguration, scope: Scope, natives: Vec<NativeDescription>) -> Plan {
+pub(super) fn next(
+    current: &CommittedConfiguration,
+    scope: Scope,
+    natives: Vec<NativeDescription>,
+) -> Plan {
     let facts = SourceFacts {
         scope: Some(scope),
         devices: natives
@@ -90,15 +94,15 @@ fn next(current: &CommittedConfiguration, scope: Scope, natives: Vec<NativeDescr
     .unwrap()
 }
 
-fn save(store: &Store, config: &CommittedConfiguration) {
+pub(super) fn save(store: &Store, config: &CommittedConfiguration) {
     store.devices().commit_configuration(config, &[]).unwrap();
 }
 
-fn load(store: &Store) -> CommittedConfiguration {
+pub(super) fn load(store: &Store) -> CommittedConfiguration {
     store.devices().load_configuration().unwrap()
 }
 
-fn raw(store: &Store) -> String {
+pub(super) fn raw(store: &Store) -> String {
     store
         .connection()
         .query_row(
@@ -109,7 +113,7 @@ fn raw(store: &Store) -> String {
         .unwrap()
 }
 
-fn corrupt(store: &Store, value: &Value) {
+pub(super) fn corrupt(store: &Store, value: &Value) {
     store
         .connection()
         .execute(
@@ -119,7 +123,7 @@ fn corrupt(store: &Store, value: &Value) {
         .unwrap();
 }
 
-fn seed(store: &Store, devices: Vec<NativeDescription>) -> CommittedConfiguration {
+pub(super) fn seed(store: &Store, devices: Vec<NativeDescription>) -> CommittedConfiguration {
     let config = next(
         &CommittedConfiguration::empty(),
         scope("account", "home"),

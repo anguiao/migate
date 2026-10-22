@@ -70,7 +70,7 @@ fn certificate_failure_does_not_delay_cloud_directory_or_control() {
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().certs == 1).await;
         let one = function(&c.context.registry, "one", "main");
-        assert_eq!(one.snapshot().availability, Availability::Available);
+        assert_eq!(one.snapshot().availability(), Availability::Available);
         one.execute(Command::On).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
         assert_eq!(c.cloud.lock().unwrap().tokens, 0);
@@ -168,12 +168,12 @@ fn expiry_wakes_availability_and_closes_mqtt_while_refresh_hangs() {
             let one = function(&c.context.registry, "one", "main");
             c.clock.advance(Duration::from_secs(5));
             until(|| c.cloud.lock().unwrap().tokens == 1).await;
-            assert_eq!(one.snapshot().availability, Availability::Available);
+            assert_eq!(one.snapshot().availability(), Availability::Available);
             one.execute(Command::On).await.unwrap();
             c.clock.advance(Duration::from_secs(5));
             until(|| c.context.notifications.borrow().is_none()).await;
             assert!(matches!(
-                one.snapshot().availability,
+                one.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
             assert!(!c.context.token_usable());
@@ -184,7 +184,7 @@ fn expiry_wakes_availability_and_closes_mqtt_while_refresh_hangs() {
             release.send(()).unwrap();
             until(|| cloud_active(&c, "one")).await;
             assert_eq!(peer.state.borrow().connects[1], "fresh-access");
-            assert_eq!(one.snapshot().availability, Availability::Available);
+            assert_eq!(one.snapshot().availability(), Availability::Available);
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
         })
         .await;
@@ -530,7 +530,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             assert_eq!(
                 function(&control.context.registry, "one", "main")
                     .snapshot()
-                    .availability,
+                    .availability(),
                 Availability::Available
             );
         })

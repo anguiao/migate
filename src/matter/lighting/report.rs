@@ -125,10 +125,7 @@ impl Report {
     ) -> Projection {
         self.note_acceptance(scheduler);
         let snapshot = function.snapshot();
-        let lighting = snapshot
-            .lighting
-            .as_ref()
-            .expect("lighting Function snapshot");
+        let lighting = snapshot.lighting().expect("lighting Function snapshot");
         let interval = profile.temperature_interval();
         let temperature = interval.and_then(|interval| {
             lighting.temperature_kelvin.map(|value| {
@@ -152,7 +149,7 @@ impl Report {
             (None, None)
         };
         Projection {
-            power: snapshot.power.value(),
+            power: snapshot.power().and_then(crate::device::Power::value),
             // Observed zero is a known physical value; Matter's nonzero minimum
             // projects it to MinLevel without inferring the independent power state.
             level: lighting.brightness_percent.map(|value| {

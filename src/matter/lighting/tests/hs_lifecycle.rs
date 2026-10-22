@@ -132,7 +132,7 @@ fn gray_hue_motion_waits_for_source_acceptance_and_stop_preserves_the_hue_for_sa
                 light.advance();
                 assert_eq!(handler.current_hue(&ctx).await.unwrap(), hue);
                 assert_eq!(handler.current_saturation(&ctx).await.unwrap(), 0);
-                assert_eq!(function.snapshot().lighting.unwrap().color, Some(white));
+                assert_eq!(function.snapshot().lighting().unwrap().color, Some(white));
                 assert!(poll_once(receiver.next_operation()).await.is_none());
             }
             let data = axis_move(0, 0);

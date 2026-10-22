@@ -78,7 +78,8 @@ fn notification_connect_suback_and_messages_follow_wire_order() {
             NotificationEvent::PropertyValue {
                 did: "target".into(),
                 binding: POWER,
-                value: serde_json::Value::Bool(true)
+                value: serde_json::Value::Bool(true),
+                update_time: None,
             },
             NotificationEvent::Online {
                 did: "target".into(),

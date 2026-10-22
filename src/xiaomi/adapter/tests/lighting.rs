@@ -37,10 +37,10 @@ fn all_light_samples_read_and_subscribe_every_property() {
             c.peer(peer, |peer| async move {
                 let light = function(&control.context.registry, "one", "main");
                 until(|| {
-                    light.snapshot().lighting.unwrap().brightness_percent == Some(100.0)
+                    light.snapshot().lighting().unwrap().brightness_percent == Some(100.0)
                         && light
                             .snapshot()
-                            .lighting
+                            .lighting()
                             .unwrap()
                             .temperature_kelvin
                             .is_some()
@@ -75,7 +75,8 @@ fn local_light_acceptance_keeps_actual_state_until_feedback() {
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
             let light = function(&control.context.registry, "one", "main");
-            until(|| light.snapshot().lighting.unwrap().mode == Some(LightMode::Temperature)).await;
+            until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Temperature))
+                .await;
             let action = light
                 .begin_light_action(
                     LightTarget::rgb(None, Rgb::from_packed(0xff0044).unwrap()),
@@ -88,7 +89,7 @@ fn local_light_acceptance_keeps_actual_state_until_feedback() {
             peer.notify_value("one", COLOR, json!(0xff0044), false);
             peer.notify_value("one", MODE, json!(1), false);
             until(|| {
-                let state = light.snapshot().lighting.unwrap();
+                let state = light.snapshot().lighting().unwrap();
                 state.color == Rgb::from_packed(0xff0044) && state.mode == Some(LightMode::Rgb)
             })
             .await;
@@ -136,7 +137,14 @@ fn on_off_and_dimmable_source_io_use_only_real_bindings() {
                     until(|| control.context.active_notification("one") == Some(PathKind::Local))
                         .await;
                     let light = function(&control.context.registry, "one", "main");
-                    until(|| light.snapshot().power.value() == Some(true)).await;
+                    until(|| {
+                        light
+                            .snapshot()
+                            .power()
+                            .and_then(crate::device::Power::value)
+                            == Some(true)
+                    })
+                    .await;
                     let work = control.context.live.borrow().devices["one"]
                         .admitted
                         .clone()
@@ -172,7 +180,7 @@ fn on_off_and_dimmable_source_io_use_only_real_bindings() {
                     until(|| control.context.active_notification("one") == Some(PathKind::Local))
                         .await;
                     let light = function(&control.context.registry, "one", "main");
-                    until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(50.0))
+                    until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0))
                         .await;
                     let work = control.context.live.borrow().devices["one"]
                         .admitted
@@ -210,7 +218,7 @@ fn stopping_the_source_clears_light_state_but_not_outlet_cache() {
             assert!(
                 light
                     .snapshot()
-                    .lighting
+                    .lighting()
                     .unwrap()
                     .brightness_percent
                     .is_some()
@@ -218,11 +226,11 @@ fn stopping_the_source_clears_light_state_but_not_outlet_cache() {
             control.context.stop();
             let snapshot = light.snapshot();
             assert!(matches!(
-                snapshot.availability,
+                snapshot.availability(),
                 Availability::Unavailable(_)
             ));
-            assert_eq!(snapshot.power, Power::Unknown);
-            let lighting = snapshot.lighting.unwrap();
+            assert_eq!(snapshot.power(), Some(Power::Unknown));
+            let lighting = snapshot.lighting().unwrap();
             assert_eq!(lighting.brightness_percent, None);
             assert_eq!(lighting.temperature_kelvin, None);
             assert_eq!(lighting.color, None);
@@ -354,8 +362,11 @@ async fn ready_light(c: &Control) -> crate::device::Function {
     let function = function(&c.context.registry, "one", "main");
     until(|| {
         let snapshot = function.snapshot();
-        let light = snapshot.lighting.unwrap();
-        snapshot.power.value().is_some()
+        let light = snapshot.lighting().unwrap();
+        snapshot
+            .power()
+            .and_then(crate::device::Power::value)
+            .is_some()
             && light.brightness_percent.is_some()
             && light.temperature_kelvin.is_some()
             && light.mode.is_some()
@@ -440,10 +451,10 @@ fn own_echo_cache_same_value_and_invalid_notifications_do_not_take_over_but_exte
             let action = light.begin_light_action(brightness(60.0), false).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
-            until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
+            until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(60.0)).await;
             assert!(light.light_action_current(action.token()));
             peer.notify_value("one", BRIGHTNESS, json!(65), true);
-            until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(65.0)).await;
+            until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(65.0)).await;
             assert!(light.light_action_current(action.token()));
             peer.notify_value("one", BRIGHTNESS, json!(65), false);
             peer.notify_value("one", BRIGHTNESS, json!(200), false);
@@ -462,7 +473,7 @@ fn own_echo_cache_same_value_and_invalid_notifications_do_not_take_over_but_exte
                 .await;
             action.accepted().await.unwrap();
             assert_eq!(
-                light.snapshot().lighting.unwrap().brightness_percent,
+                light.snapshot().lighting().unwrap().brightness_percent,
                 Some(67.0)
             );
         })
@@ -486,9 +497,9 @@ fn inactive_color_cache_does_not_take_over_until_mode_changes_and_external_off_c
                 .unwrap();
             color.accepted().await.unwrap();
             peer.notify_value("one", MODE, json!(1), true);
-            until(|| light.snapshot().lighting.unwrap().mode == Some(LightMode::Rgb)).await;
+            until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Rgb)).await;
             peer.notify_value("one", TEMPERATURE, json!(4000), false);
-            until(|| light.snapshot().lighting.unwrap().temperature_kelvin == Some(4000)).await;
+            until(|| light.snapshot().lighting().unwrap().temperature_kelvin == Some(4000)).await;
             assert!(light.light_action_current(color.token()));
             peer.notify_value("one", MODE, json!(0), false);
             until(|| !light.light_action_current(color.token())).await;
@@ -506,7 +517,7 @@ fn inactive_color_cache_does_not_take_over_until_mode_changes_and_external_off_c
                 !light.light_action_current(b.token()) && !light.light_action_current(color.token())
             })
             .await;
-            assert_eq!(light.snapshot().power, Power::Off);
+            assert_eq!(light.snapshot().power(), Some(Power::Off));
         })
         .await;
     }));
@@ -530,7 +541,7 @@ fn successful_and_partial_receipts_preserve_newer_feedback() {
                     .unwrap();
                 until(|| peer.count("rpcReq", "one", 0) == 1).await;
                 peer.notify_value("one", COLOR, json!(0x334455), false);
-                until(|| light.snapshot().lighting.unwrap().color == Rgb::from_packed(0x334455))
+                until(|| light.snapshot().lighting().unwrap().color == Rgb::from_packed(0x334455))
                     .await;
                 let observed = light.snapshot();
                 peer.release_property(
@@ -574,12 +585,12 @@ fn brightness_notification_does_not_discard_unrelated_temperature_read() {
             })
             .await;
             peer.notify_value("one", BRIGHTNESS, json!(70), false);
-            until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(70.0)).await;
+            until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(70.0)).await;
             peer.release_property("one", TEMPERATURE, json!({"value":4300}))
                 .await;
-            until(|| light.snapshot().lighting.unwrap().temperature_kelvin == Some(4300)).await;
+            until(|| light.snapshot().lighting().unwrap().temperature_kelvin == Some(4300)).await;
             assert_eq!(
-                light.snapshot().lighting.unwrap().brightness_percent,
+                light.snapshot().lighting().unwrap().brightness_percent,
                 Some(70.0)
             );
         })
@@ -599,7 +610,7 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
             until(|| {
                 light
                     .snapshot()
-                    .lighting
+                    .lighting()
                     .unwrap()
                     .brightness_percent
                     .is_some_and(|value| value > 50.0)
@@ -607,7 +618,7 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
             .await;
             let value = light
                 .snapshot()
-                .lighting
+                .lighting()
                 .unwrap()
                 .brightness_percent
                 .unwrap();
@@ -632,9 +643,9 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
                 .unwrap();
             // Neither a read started before the receipt nor a cached report
             // proves that the displayed value still matches the device.
-            work.observe_read("main", BRIGHTNESS, &old_read, &json!(32768))
+            work.observe_read_at("main", BRIGHTNESS, &old_read, &json!(32768), None, 0)
                 .unwrap();
-            work.notify_value(BRIGHTNESS, &json!(32768), true, false);
+            work.notify_value_at(BRIGHTNESS, &json!(32768), None, true, false, 0);
             light
                 .begin_light_action(brightness(value), true)
                 .unwrap()
@@ -681,7 +692,7 @@ fn reversing_targets_before_feedback_still_sends_power_brightness_and_mode() {
             for target in [
                 LightColorTarget::Rgb(Rgb::from_packed(0xabcdef).unwrap()),
                 LightColorTarget::Temperature(
-                    before.lighting.unwrap().temperature_kelvin.unwrap() as f64
+                    before.lighting().unwrap().temperature_kelvin.unwrap() as f64,
                 ),
             ] {
                 light
@@ -781,7 +792,7 @@ fn binding_change_retires_old_feedback_authority() {
                 .await;
             next.accepted().await.unwrap();
             assert_eq!(
-                new.snapshot().lighting.unwrap().brightness_percent,
+                new.snapshot().lighting().unwrap().brightness_percent,
                 Some(1.0)
             );
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
@@ -791,7 +802,7 @@ fn binding_change_retires_old_feedback_authority() {
                 crate::device::CommandError::Superseded
             );
             assert_eq!(
-                new.snapshot().lighting.unwrap().brightness_percent,
+                new.snapshot().lighting().unwrap().brightness_percent,
                 Some(60.0)
             );
             assert_eq!(peer.count("rpcReq", "one", 0), 2);
@@ -816,7 +827,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
             drop(first);
             assert_eq!(peer.count("rpcReq", "one", 2), 1);
             assert_eq!(
-                old.snapshot().lighting.unwrap().brightness_percent,
+                old.snapshot().lighting().unwrap().brightness_percent,
                 Some(1.0)
             );
             drop(old);
@@ -857,7 +868,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
             next.accepted().await.unwrap();
             assert_eq!(peer.count("rpcReq", "one", 2), 2);
             assert_eq!(
-                new.snapshot().lighting.unwrap().brightness_percent,
+                new.snapshot().lighting().unwrap().brightness_percent,
                 Some(1.0)
             );
             // The replaced binding authority retires the old accepted
@@ -872,7 +883,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
                 crate::device::CommandError::Superseded
             );
             assert_eq!(
-                new.snapshot().lighting.unwrap().brightness_percent,
+                new.snapshot().lighting().unwrap().brightness_percent,
                 Some(60.0)
             );
             assert_eq!(peer.count("rpcReq", "one", 2), 2);
@@ -927,12 +938,12 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             assert!(poll_once(next.accepted()).await.is_none());
             assert!(poll_once(first.accepted()).await.is_none());
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
+            until(|| new.snapshot().lighting().unwrap().brightness_percent == Some(60.0)).await;
             assert!(new.light_action_current(next.token()));
             assert!(poll_once(next.accepted()).await.is_none());
             assert_eq!(peer.count("rpcReq", "one", 0), 1);
             peer.notify_value("one", BRIGHTNESS, json!(55), true);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(55.0)).await;
+            until(|| new.snapshot().lighting().unwrap().brightness_percent == Some(55.0)).await;
             // The old write may have changed this same device after the new
             // instance's cached report, so the queued target must still send.
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
@@ -941,7 +952,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             let accepted_at = control.clock.now();
             until(|| peer.count("rpcReq", "one", 0) == 2).await;
             assert_eq!(
-                new.snapshot().lighting.unwrap().brightness_percent,
+                new.snapshot().lighting().unwrap().brightness_percent,
                 Some(55.0)
             );
             assert!(poll_once(next.accepted()).await.is_none());
@@ -950,17 +961,17 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             next.accepted().await.unwrap();
             assert_eq!(peer.count("rpcReq", "one", 0), 2);
             assert_eq!(
-                new.snapshot().lighting.unwrap().brightness_percent,
+                new.snapshot().lighting().unwrap().brightness_percent,
                 Some(55.0)
             );
             control
                 .clock
                 .advance(accepted_at + Duration::from_millis(2999) - control.clock.now());
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
+            until(|| new.snapshot().lighting().unwrap().brightness_percent == Some(60.0)).await;
             assert!(new.light_action_current(next.token()));
             peer.notify_value("one", BRIGHTNESS, json!(55), false);
-            until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(55.0)).await;
+            until(|| new.snapshot().lighting().unwrap().brightness_percent == Some(55.0)).await;
             assert!(new.light_action_current(next.token()));
             control.clock.advance(Duration::from_millis(1));
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
@@ -970,7 +981,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
                 crate::device::CommandError::Superseded
             );
             assert_eq!(
-                new.snapshot().lighting.unwrap().brightness_percent,
+                new.snapshot().lighting().unwrap().brightness_percent,
                 Some(60.0)
             );
             assert_eq!(peer.count("rpcReq", "one", 0), 2);
@@ -991,7 +1002,7 @@ fn malformed_light_read_retries_its_property_without_changing_snapshot() {
             until(|| {
                 light
                     .snapshot()
-                    .lighting
+                    .lighting()
                     .unwrap()
                     .temperature_kelvin
                     .is_some()
@@ -1002,7 +1013,10 @@ fn malformed_light_read_retries_its_property_without_changing_snapshot() {
                 .clone()
                 .unwrap();
             until(|| !work.refresh.borrow().snapshot().problems.is_empty()).await;
-            assert_eq!(light.snapshot().lighting.unwrap().brightness_percent, None);
+            assert_eq!(
+                light.snapshot().lighting().unwrap().brightness_percent,
+                None
+            );
             assert!(
                 peer.state
                     .borrow()
@@ -1014,7 +1028,7 @@ fn malformed_light_read_retries_its_property_without_changing_snapshot() {
             );
             peer.value("one", BRIGHTNESS, json!(60));
             work.refresh();
-            until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
+            until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(60.0)).await;
         })
         .await;
     }));
@@ -1039,7 +1053,7 @@ fn retired_consumer_keeps_sent_http_startup_owned_until_original_receipt() {
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
         let light = function(&c.context.registry, "one", "main");
-        until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(50.0)).await;
+        until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         c.cloud.lock().unwrap().property_gate = Some(gate);
         let action = light.begin_light_action(brightness(60.0), false).unwrap();
         until(|| c.cloud.lock().unwrap().numeric_writes.len() == 1).await;
@@ -1057,7 +1071,7 @@ fn retired_consumer_keeps_sent_http_startup_owned_until_original_receipt() {
         release.send(()).unwrap();
         accepted.await.unwrap();
         assert_eq!(
-            light.snapshot().lighting.unwrap().brightness_percent,
+            light.snapshot().lighting().unwrap().brightness_percent,
             Some(50.0)
         );
         assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 1);
@@ -1101,7 +1115,7 @@ fn local_late_echo_after_two_accepted_frames_does_not_cancel_action() {
                     work.observe_read("main", BRIGHTNESS, &stamp, &json!(value))
                         .unwrap();
                     assert_eq!(
-                        light.snapshot().lighting.unwrap().brightness_percent,
+                        light.snapshot().lighting().unwrap().brightness_percent,
                         Some(f64::from(value))
                     );
                     assert!(light.light_action_current(action.token()));
@@ -1112,7 +1126,7 @@ fn local_late_echo_after_two_accepted_frames_does_not_cancel_action() {
                 for value in [20, 40, 20, 40] {
                     peer.notify_value("one", BRIGHTNESS, json!(value), false);
                     until(|| {
-                        light.snapshot().lighting.unwrap().brightness_percent
+                        light.snapshot().lighting().unwrap().brightness_percent
                             == Some(f64::from(value))
                     })
                     .await;
@@ -1131,7 +1145,7 @@ fn local_late_echo_after_two_accepted_frames_does_not_cancel_action() {
                     crate::device::CommandError::Superseded
                 );
                 assert_eq!(
-                    light.snapshot().lighting.unwrap().brightness_percent,
+                    light.snapshot().lighting().unwrap().brightness_percent,
                     Some(f64::from(external_value))
                 );
             })
@@ -1159,7 +1173,7 @@ fn cloud_late_echo_after_two_accepted_frames_does_not_cancel_action() {
         }
         block_on(rig.run(|c| async move {
             let light = function(&c.context.registry, "one", "main");
-            until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(50.0)).await;
+            until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
             freeze_light_clock(&c);
             let action = light.begin_light_action(brightness(20.0), false).unwrap();
             action.accepted().await.unwrap();
@@ -1188,7 +1202,7 @@ fn cloud_late_echo_after_two_accepted_frames_does_not_cancel_action() {
             for value in [20, 40] {
                 work.notify_value(BRIGHTNESS, &json!(value), true, true);
                 assert_eq!(
-                    light.snapshot().lighting.unwrap().brightness_percent,
+                    light.snapshot().lighting().unwrap().brightness_percent,
                     Some(f64::from(value))
                 );
                 assert!(light.light_action_current(action.token()));
@@ -1196,7 +1210,7 @@ fn cloud_late_echo_after_two_accepted_frames_does_not_cancel_action() {
             for value in [20, 40, 20, 40] {
                 work.notify_value(BRIGHTNESS, &json!(value), false, true);
                 assert_eq!(
-                    light.snapshot().lighting.unwrap().brightness_percent,
+                    light.snapshot().lighting().unwrap().brightness_percent,
                     Some(f64::from(value))
                 );
                 assert!(light.light_action_current(action.token()));
@@ -1214,7 +1228,7 @@ fn cloud_late_echo_after_two_accepted_frames_does_not_cancel_action() {
                 crate::device::CommandError::Superseded
             );
             assert_eq!(
-                light.snapshot().lighting.unwrap().brightness_percent,
+                light.snapshot().lighting().unwrap().brightness_percent,
                 Some(f64::from(external_value))
             );
         }));
@@ -1244,7 +1258,7 @@ fn accepted_numeric_echoes_expire_three_seconds_after_ack_without_renewal() {
             for value in [40, 20, 40, 20, 40] {
                 work.notify_value(BRIGHTNESS, &json!(value), false, true);
                 assert_eq!(
-                    light.snapshot().lighting.unwrap().brightness_percent,
+                    light.snapshot().lighting().unwrap().brightness_percent,
                     Some(f64::from(value))
                 );
                 assert!(light.light_action_current(action.token()));
@@ -1255,7 +1269,7 @@ fn accepted_numeric_echoes_expire_three_seconds_after_ack_without_renewal() {
             peer.notify_value("one", BRIGHTNESS, json!(20), false);
             until(|| !light.light_action_current(action.token())).await;
             assert_eq!(
-                light.snapshot().lighting.unwrap().brightness_percent,
+                light.snapshot().lighting().unwrap().brightness_percent,
                 Some(20.0)
             );
         })
@@ -1287,7 +1301,7 @@ fn accepted_temperature_and_rgb_history_preserves_repeated_echoes() {
                     })
                 };
                 let current = |value| {
-                    let state = light.snapshot().lighting.unwrap();
+                    let state = light.snapshot().lighting().unwrap();
                     if rgb {
                         state.color == Rgb::from_packed(value)
                     } else {
@@ -1343,7 +1357,7 @@ fn acknowledged_mode_echo_preserves_action_until_history_expires() {
                 first.ended().await.unwrap();
                 peer.notify_value("one", MODE, json!(old_mode), false);
                 until(|| {
-                    light.snapshot().lighting.unwrap().mode
+                    light.snapshot().lighting().unwrap().mode
                         == Some(if old_mode == 0 {
                             LightMode::Temperature
                         } else {
@@ -1359,7 +1373,7 @@ fn acknowledged_mode_echo_preserves_action_until_history_expires() {
                 for mode in [1 - old_mode, old_mode, 1 - old_mode] {
                     peer.notify_value("one", MODE, json!(mode), false);
                     until(|| {
-                        light.snapshot().lighting.unwrap().mode
+                        light.snapshot().lighting().unwrap().mode
                             == Some(if mode == 0 {
                                 LightMode::Temperature
                             } else {
@@ -1377,7 +1391,7 @@ fn acknowledged_mode_echo_preserves_action_until_history_expires() {
                     crate::device::CommandError::Superseded
                 );
                 assert_eq!(
-                    light.snapshot().lighting.unwrap().mode,
+                    light.snapshot().lighting().unwrap().mode,
                     Some(if old_mode == 0 {
                         LightMode::Temperature
                     } else {
@@ -1401,10 +1415,10 @@ fn acknowledged_off_echo_preserves_actions_until_history_expires() {
             freeze_light_clock(control);
             light.execute(Command::Off).await.unwrap();
             peer.notify_value("one", POWER, json!(false), false);
-            until(|| light.snapshot().power == Power::Off).await;
+            until(|| light.snapshot().power() == Some(Power::Off)).await;
             light.execute(Command::On).await.unwrap();
             peer.notify_value("one", POWER, json!(true), false);
-            until(|| light.snapshot().power == Power::On).await;
+            until(|| light.snapshot().power() == Some(Power::On)).await;
             assert_eq!(peer.count("rpcReq", "one", 0), 2);
             let level = light.begin_light_action(brightness(60.0), false).unwrap();
             level.accepted().await.unwrap();
@@ -1415,13 +1429,13 @@ fn acknowledged_off_echo_preserves_actions_until_history_expires() {
                 )
                 .unwrap();
             color.accepted().await.unwrap();
-            assert_eq!(light.snapshot().power, Power::On);
+            assert_eq!(light.snapshot().power(), Some(Power::On));
             peer.notify_value("one", POWER, json!(false), false);
-            until(|| light.snapshot().power == Power::Off).await;
+            until(|| light.snapshot().power() == Some(Power::Off)).await;
             assert!(light.light_action_current(level.token()));
             assert!(light.light_action_current(color.token()));
             peer.notify_value("one", POWER, json!(true), false);
-            until(|| light.snapshot().power == Power::On).await;
+            until(|| light.snapshot().power() == Some(Power::On)).await;
             control.clock.advance(Duration::from_secs(3));
             peer.notify_value("one", POWER, json!(false), false);
             until(|| {
@@ -1429,7 +1443,7 @@ fn acknowledged_off_echo_preserves_actions_until_history_expires() {
                     && !light.light_action_current(color.token())
             })
             .await;
-            assert_eq!(light.snapshot().power, Power::Off);
+            assert_eq!(light.snapshot().power(), Some(Power::Off));
             assert_eq!(
                 level.ended().await.unwrap_err(),
                 crate::device::CommandError::Superseded
@@ -1461,7 +1475,7 @@ fn in_flight_mode_echo_preserves_the_action_before_ack() {
                 .unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
             peer.notify_value("one", MODE, json!(1), false);
-            until(|| light.snapshot().lighting.unwrap().mode == Some(LightMode::Rgb)).await;
+            until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Rgb)).await;
             assert!(light.light_action_current(action.token()));
             assert!(poll_once(action.accepted()).await.is_none());
             peer.release_property("one", COLOR, accepted_items(&[(COLOR, 0), (MODE, 0)]))
@@ -1490,7 +1504,7 @@ fn in_flight_feedback_survives_valid_source_epoch_change() {
                 .unwrap();
             work.test_source_changed();
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
-            until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(60.0)).await;
+            until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(60.0)).await;
             assert!(light.light_action_current(action.token()));
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
                 .await;
@@ -1526,8 +1540,8 @@ fn cloud_partial_auth_rejection_clears_runtime_light_state_when_access_is_restri
         until(|| c.context.cloud_scope_valid.get()).await;
         let light = function(&c.context.registry, "one", "main");
         until(|| {
-            light.snapshot().lighting.unwrap().mode == Some(LightMode::Temperature)
-                && light.snapshot().lighting.unwrap().color.is_some()
+            light.snapshot().lighting().unwrap().mode == Some(LightMode::Temperature)
+                && light.snapshot().lighting().unwrap().color.is_some()
         })
         .await;
         let action = light
@@ -1537,8 +1551,8 @@ fn cloud_partial_auth_rejection_clears_runtime_light_state_when_access_is_restri
             )
             .unwrap();
         assert!(action.accepted().await.is_err());
-        assert_eq!(light.snapshot().lighting.unwrap().color, None);
-        assert_eq!(light.snapshot().lighting.unwrap().mode, None);
+        assert_eq!(light.snapshot().lighting().unwrap().color, None);
+        assert_eq!(light.snapshot().lighting().unwrap().mode, None);
         assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 1);
     }));
 }
@@ -1565,10 +1579,10 @@ fn local_partial_offline_rejection_clears_runtime_light_state_when_device_become
             )
             .await;
             assert!(action.accepted().await.is_err());
-            assert_eq!(light.snapshot().lighting.unwrap().color, None);
-            assert_eq!(light.snapshot().lighting.unwrap().mode, None);
+            assert_eq!(light.snapshot().lighting().unwrap().color, None);
+            assert_eq!(light.snapshot().lighting().unwrap().mode, None);
             assert!(matches!(
-                light.snapshot().availability,
+                light.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
         })
@@ -1666,7 +1680,7 @@ fn dropping_startup_waiter_does_not_cancel_receipt_or_allow_a_second_write() {
             new.accepted().await.unwrap();
             new.ended().await.unwrap();
             assert_eq!(
-                light.snapshot().lighting.unwrap().brightness_percent,
+                light.snapshot().lighting().unwrap().brightness_percent,
                 Some(1.0)
             );
             assert_eq!(control.cloud.lock().unwrap().numeric_writes.len(), 0);
@@ -1746,7 +1760,7 @@ fn rgb_notification_source_requires_all_five_property_subscriptions() {
             assert!(!work.test_local_subscribed_pair(MODE.siid, MODE.piid));
             assert_eq!(control.context.active_notification("one"), None);
             let light = function(&control.context.registry, "one", "main");
-            assert_eq!(light.snapshot().availability, Availability::Available);
+            assert_eq!(light.snapshot().availability(), Availability::Available);
             light
                 .begin_light_action(brightness(60.0), true)
                 .unwrap()
@@ -1776,11 +1790,11 @@ fn new_mode_only_refreshes_its_missing_color_without_retiring_brightness_read() 
             until(|| {
                 light
                     .snapshot()
-                    .lighting
+                    .lighting()
                     .unwrap()
                     .brightness_percent
                     .is_some()
-                    && light.snapshot().lighting.unwrap().mode == Some(LightMode::Temperature)
+                    && light.snapshot().lighting().unwrap().mode == Some(LightMode::Temperature)
                     && !work.refresh.borrow().snapshot().problems.is_empty()
             })
             .await;
@@ -1795,11 +1809,11 @@ fn new_mode_only_refreshes_its_missing_color_without_retiring_brightness_read() 
             })
             .await;
             peer.notify_value("one", MODE, json!(1), false);
-            until(|| light.snapshot().lighting.unwrap().mode == Some(LightMode::Rgb)).await;
-            assert_eq!(light.snapshot().lighting.unwrap().color, None);
+            until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Rgb)).await;
+            assert_eq!(light.snapshot().lighting().unwrap().color, None);
             peer.release_property("one", BRIGHTNESS, json!({"value":50}))
                 .await;
-            until(|| light.snapshot().lighting.unwrap().brightness_percent == Some(50.0)).await;
+            until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         })
         .await;
     }));
@@ -1855,9 +1869,9 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                 .await;
                 until(|| {
                     if rgb {
-                        light.snapshot().lighting.unwrap().color == Rgb::from_packed(0xabcdef)
+                        light.snapshot().lighting().unwrap().color == Rgb::from_packed(0xabcdef)
                     } else {
-                        light.snapshot().lighting.unwrap().temperature_kelvin == Some(4000)
+                        light.snapshot().lighting().unwrap().temperature_kelvin == Some(4000)
                     }
                 })
                 .await;
@@ -1888,7 +1902,7 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
             until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
             let stamp = work.observations.read_stamp("main", COLOR);
             peer.notify_value("one", MODE, json!(1), false);
-            until(|| light.snapshot().lighting.unwrap().mode == Some(LightMode::Rgb)).await;
+            until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Rgb)).await;
             assert!(
                 !work
                     .observations
@@ -1898,7 +1912,8 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
                 .await;
             peer.release_property("one", COLOR, json!({"value":0xabcdef}))
                 .await;
-            until(|| light.snapshot().lighting.unwrap().color == Rgb::from_packed(0xabcdef)).await;
+            until(|| light.snapshot().lighting().unwrap().color == Rgb::from_packed(0xabcdef))
+                .await;
         })
         .await;
     }));
@@ -1931,7 +1946,7 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
             })
             .await;
             peer.notify_value("one", MODE, json!(1), false);
-            until(|| light.snapshot().lighting.unwrap().mode == Some(LightMode::Rgb)).await;
+            until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Rgb)).await;
             peer.release_property("one", COLOR, json!({"code":-1}))
                 .await;
             for _ in 0..100 {
@@ -1949,7 +1964,8 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
             );
             peer.release_property("one", COLOR, json!({"value":0xabcdef}))
                 .await;
-            until(|| light.snapshot().lighting.unwrap().color == Rgb::from_packed(0xabcdef)).await;
+            until(|| light.snapshot().lighting().unwrap().color == Rgb::from_packed(0xabcdef))
+                .await;
         })
         .await;
     }));
@@ -1974,7 +1990,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
         let old = function(&c.context.registry, "one", "main");
-        until(|| old.snapshot().lighting.unwrap().brightness_percent == Some(50.0)).await;
+        until(|| old.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         c.cloud.lock().unwrap().property_gate = Some(gate);
         let first = old.begin_light_action(brightness(60.0), false).unwrap();
         until(|| c.cloud.lock().unwrap().numeric_writes.len() == 1).await;
@@ -2014,7 +2030,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
         })
         .await;
         let new = function(&c.context.registry, "one", "main");
-        until(|| new.snapshot().lighting.unwrap().brightness_percent == Some(50.0)).await;
+        until(|| new.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         let next = new.begin_light_action(brightness(70.0), true).unwrap();
         async_io::Timer::after(std::time::Duration::from_millis(30)).await;
         assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 1);
@@ -2024,13 +2040,13 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
         release.send(()).unwrap();
         first.accepted().await.unwrap();
         assert_ne!(
-            new.snapshot().lighting.unwrap().brightness_percent,
+            new.snapshot().lighting().unwrap().brightness_percent,
             Some(60.0)
         );
         next.accepted().await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 2);
         assert_eq!(
-            new.snapshot().lighting.unwrap().brightness_percent,
+            new.snapshot().lighting().unwrap().brightness_percent,
             Some(50.0)
         );
     }));
@@ -2059,7 +2075,7 @@ fn unknown_mode_color_values_update_only_cache_until_the_mode_changes() {
                         .contains_key(&super::super::lighting::key("main", MODE))
                 })
                 .await;
-                assert_eq!(light.snapshot().lighting.unwrap().mode, None);
+                assert_eq!(light.snapshot().lighting().unwrap().mode, None);
                 peer.state.borrow_mut().hold_writes = true;
                 let action = light
                     .begin_light_action(
@@ -2079,16 +2095,16 @@ fn unknown_mode_color_values_update_only_cache_until_the_mode_changes() {
                 }
                 until(|| {
                     if rgb {
-                        light.snapshot().lighting.unwrap().temperature_kelvin == Some(5000)
+                        light.snapshot().lighting().unwrap().temperature_kelvin == Some(5000)
                     } else {
-                        light.snapshot().lighting.unwrap().color == Rgb::from_packed(0x456789)
+                        light.snapshot().lighting().unwrap().color == Rgb::from_packed(0x456789)
                     }
                 })
                 .await;
-                assert_eq!(light.snapshot().lighting.unwrap().mode, None);
+                assert_eq!(light.snapshot().lighting().unwrap().mode, None);
                 assert!(light.light_action_current(action.token()));
                 peer.notify_value("one", MODE, json!(if rgb { 0 } else { 1 }), false);
-                until(|| light.snapshot().lighting.unwrap().mode.is_some()).await;
+                until(|| light.snapshot().lighting().unwrap().mode.is_some()).await;
                 assert!(!light.light_action_current(action.token()));
                 assert_eq!(
                     action.ended().await,

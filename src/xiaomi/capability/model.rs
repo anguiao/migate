@@ -1,8 +1,8 @@
 use std::{error::Error, fmt};
 
 use crate::device::{
-    DeviceKey, FunctionDescription, FunctionKind, LightMode, LightProfile, NumericRange,
-    PhysicalDeviceDescription, TemperatureInterval,
+    DeviceKey, FunctionDescription, FunctionKind, LightMode, LightProfile, MeasurementRange,
+    NumericRange, PhysicalDeviceDescription, TemperatureInterval,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +27,12 @@ enum FunctionBindings {
     Light {
         power: PropertyBinding,
         lighting: LightBindings,
+    },
+    Temperature {
+        measurement: MeasurementBinding,
+    },
+    Humidity {
+        measurement: MeasurementBinding,
     },
 }
 impl ParsedFunction {
@@ -53,27 +59,67 @@ impl ParsedFunction {
             bindings: FunctionBindings::Light { power, lighting },
         }
     }
+    pub(crate) fn temperature(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        measurement: MeasurementBinding,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Temperature { measurement },
+        }
+    }
+    pub(crate) fn humidity(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        measurement: MeasurementBinding,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Humidity { measurement },
+        }
+    }
     pub fn id(&self) -> &str {
         &self.id
     }
     pub fn label(&self) -> &str {
         &self.label
     }
-    pub fn power(&self) -> PropertyBinding {
+    pub fn power(&self) -> Option<PropertyBinding> {
         match &self.bindings {
-            FunctionBindings::Outlet { power } | FunctionBindings::Light { power, .. } => *power,
+            FunctionBindings::Outlet { power } | FunctionBindings::Light { power, .. } => {
+                Some(*power)
+            }
+            FunctionBindings::Temperature { .. } | FunctionBindings::Humidity { .. } => None,
         }
     }
     pub fn lighting(&self) -> Option<&LightBindings> {
         match &self.bindings {
-            FunctionBindings::Outlet { .. } => None,
+            FunctionBindings::Outlet { .. }
+            | FunctionBindings::Temperature { .. }
+            | FunctionBindings::Humidity { .. } => None,
             FunctionBindings::Light { lighting, .. } => Some(lighting),
+        }
+    }
+    pub fn measurement(&self) -> Option<&MeasurementBinding> {
+        match &self.bindings {
+            FunctionBindings::Temperature { measurement }
+            | FunctionBindings::Humidity { measurement } => Some(measurement),
+            FunctionBindings::Outlet { .. } | FunctionBindings::Light { .. } => None,
         }
     }
     pub fn kind(&self) -> FunctionKind {
         match &self.bindings {
             FunctionBindings::Outlet { .. } => FunctionKind::Outlet,
             FunctionBindings::Light { lighting, .. } => FunctionKind::Light(lighting.profile()),
+            FunctionBindings::Temperature { measurement } => {
+                FunctionKind::Temperature(measurement.range())
+            }
+            FunctionBindings::Humidity { measurement } => {
+                FunctionKind::Humidity(measurement.range())
+            }
         }
     }
     /// The logical description derived from the real bindings on demand.
@@ -86,7 +132,10 @@ impl ParsedFunction {
     }
     /// Every native binding this function really reads or writes.
     pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {
-        let mut bindings = vec![self.power()];
+        if let Some(measurement) = self.measurement() {
+            return vec![measurement.property()];
+        }
+        let mut bindings = vec![self.power().expect("control functions have power")];
         if let Some(lighting) = self.lighting() {
             bindings.extend(lighting.bindings());
         }
@@ -127,11 +176,37 @@ impl ParsedDevice {
                 return Err(CapabilityError::InvalidDescription("function bindings"));
             }
         }
+        let measurements = functions
+            .iter()
+            .filter(|function| function.measurement().is_some())
+            .count();
         let lights = functions
             .iter()
             .filter(|function| function.lighting().is_some())
             .count();
-        if lights > 0 {
+        if measurements > 0 {
+            let ids = functions.iter().map(ParsedFunction::id).collect::<Vec<_>>();
+            let semantic = functions.iter().all(|function| {
+                let Some(measurement) = function.measurement() else {
+                    return false;
+                };
+                matches!(
+                    (function.id(), function.kind(), measurement.unit()),
+                    (
+                        "temperature",
+                        FunctionKind::Temperature(_),
+                        MeasurementUnit::Celsius
+                    ) | (
+                        "humidity",
+                        FunctionKind::Humidity(_),
+                        MeasurementUnit::Percentage
+                    )
+                )
+            });
+            if ids != ["temperature", "humidity"] || !semantic || refresh_trigger.is_some() {
+                return Err(CapabilityError::InvalidDescription("sensor topology"));
+            }
+        } else if lights > 0 {
             if functions.len() != 1 || functions[0].id() != "main" || refresh_trigger.is_some() {
                 return Err(CapabilityError::InvalidDescription("light topology"));
             }
@@ -160,6 +235,13 @@ impl ParsedDevice {
     pub fn refresh_trigger(&self) -> Option<PropertyBinding> {
         self.refresh_trigger
     }
+    pub fn is_read_only(&self) -> bool {
+        !self.functions.is_empty()
+            && self
+                .functions
+                .iter()
+                .all(|function| function.measurement().is_some())
+    }
     pub(crate) fn physical_description(
         &self,
         label: impl Into<String>,
@@ -186,6 +268,8 @@ pub enum CapabilityError {
     MissingAccess(&'static str),
     AmbiguousMainPower,
     MissingFunction(&'static str),
+    MissingMeasurement(&'static str),
+    InvalidMeasurement(&'static str),
     IncompatibleModel(&'static str),
     InvalidLight(&'static str),
     InvalidGroup(&'static str),
@@ -205,13 +289,19 @@ impl fmt::Display for CapabilityError {
             Self::MissingMainPower => formatter.write_str("standard outlet main power is missing"),
             Self::InvalidMainPowerType => formatter.write_str("outlet switch must be boolean"),
             Self::MissingAccess(access) => {
-                write!(formatter, "outlet switch lacks {access} access")
+                write!(formatter, "required property lacks {access} access")
             }
             Self::AmbiguousMainPower => {
                 formatter.write_str("multiple standard outlet main power properties")
             }
             Self::MissingFunction(id) => {
-                write!(formatter, "required outlet binding is missing: {id}")
+                write!(formatter, "required binding is missing: {id}")
+            }
+            Self::MissingMeasurement(id) => {
+                write!(formatter, "required measurement is missing: {id}")
+            }
+            Self::InvalidMeasurement(field) => {
+                write!(formatter, "invalid measurement capability: {field}")
             }
             Self::InvalidLight(field) => write!(formatter, "invalid light capability: {field}"),
             Self::InvalidGroup(field) => write!(formatter, "invalid native light group: {field}"),
@@ -234,6 +324,7 @@ pub enum NumericFormat {
     Int8,
     Int16,
     Int32,
+    Float,
 }
 impl NumericFormat {
     pub(super) fn maximum(self) -> u32 {
@@ -244,7 +335,19 @@ impl NumericFormat {
             Self::Int8 => i8::MAX as u32,
             Self::Int16 => i16::MAX as u32,
             Self::Int32 => i32::MAX as u32,
+            Self::Float => u32::MAX,
         }
+    }
+    fn measurement_bounds(self) -> Option<(f64, f64)> {
+        Some(match self {
+            Self::Uint8 => (0.0, u8::MAX as f64),
+            Self::Uint16 => (0.0, u16::MAX as f64),
+            Self::Uint32 => (0.0, u32::MAX as f64),
+            Self::Int8 => (i8::MIN as f64, i8::MAX as f64),
+            Self::Int16 => (i16::MIN as f64, i16::MAX as f64),
+            Self::Int32 => (i32::MIN as f64, i32::MAX as f64),
+            Self::Float => return None,
+        })
     }
 }
 
@@ -260,6 +363,96 @@ fn grid_raw(value: &Value, range: NumericRange) -> Result<u32, CapabilityError> 
         return Err(CapabilityError::InvalidValue("range or step"));
     }
     Ok(raw)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeasurementUnit {
+    Celsius,
+    Percentage,
+}
+
+/// One real read-only measurement binding. Format, unit, range and access are
+/// fixed at the source boundary; the range is already representable in Matter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeasurementBinding {
+    property: PropertyBinding,
+    format: NumericFormat,
+    unit: MeasurementUnit,
+    range: MeasurementRange,
+    step: f64,
+}
+impl Eq for MeasurementBinding {}
+impl MeasurementBinding {
+    pub(crate) fn new(
+        property: PropertyBinding,
+        format: NumericFormat,
+        unit: MeasurementUnit,
+        range: MeasurementRange,
+        step: f64,
+    ) -> Result<Self, CapabilityError> {
+        if property.siid == 0
+            || property.piid == 0
+            || !step.is_finite()
+            || step <= 0.0
+            || step > range.max() - range.min()
+        {
+            return Err(CapabilityError::InvalidMeasurement("range"));
+        }
+        if let Some((min, max)) = format.measurement_bounds()
+            && (range.min() < min || range.max() > max)
+        {
+            return Err(CapabilityError::InvalidMeasurement("range"));
+        }
+        let representable = match unit {
+            MeasurementUnit::Celsius => range.temperature_bounds().is_some(),
+            MeasurementUnit::Percentage => range.humidity_bounds().is_some(),
+        };
+        if !representable {
+            return Err(CapabilityError::InvalidMeasurement("range"));
+        }
+        Ok(Self {
+            property,
+            format,
+            unit,
+            range,
+            step,
+        })
+    }
+    pub fn property(&self) -> PropertyBinding {
+        self.property
+    }
+    pub fn format(&self) -> NumericFormat {
+        self.format
+    }
+    pub fn unit(&self) -> MeasurementUnit {
+        self.unit
+    }
+    pub fn range(&self) -> MeasurementRange {
+        self.range
+    }
+    pub fn step(&self) -> f64 {
+        self.step
+    }
+    /// Decode a real source value in its declared unit. Integer formats do not
+    /// accept fractional JSON values; every format is finite and in range.
+    pub fn read_value(&self, value: &Value) -> Result<f64, CapabilityError> {
+        let value = match self.format {
+            NumericFormat::Float => value.as_f64(),
+            _ => value
+                .as_i64()
+                .map(|value| value as f64)
+                .or_else(|| value.as_u64().map(|value| value as f64))
+                .or_else(|| {
+                    value
+                        .as_f64()
+                        .filter(|value| value.is_finite() && value.fract() == 0.0)
+                }),
+        }
+        .filter(|value| value.is_finite() && self.range.contains(*value))
+        .ok_or(CapabilityError::InvalidValue("measurement"))?;
+        Ok(value)
+    }
 }
 
 /// A native brightness grid. Construction guarantees a nonzero reachable
@@ -278,6 +471,7 @@ impl BrightnessBinding {
     ) -> Result<Self, CapabilityError> {
         if property.siid == 0
             || property.piid == 0
+            || format == NumericFormat::Float
             || range.nonzero_bounds().is_none()
             || range.max() > format.maximum()
         {
@@ -346,6 +540,7 @@ impl TemperatureBinding {
     ) -> Result<Self, CapabilityError> {
         if property.siid == 0
             || property.piid == 0
+            || format == NumericFormat::Float
             || range.min() == 0
             || range.max() > 1_000_000
             || range.max() > format.maximum()
@@ -394,7 +589,11 @@ impl ColorBinding {
         property: PropertyBinding,
         format: NumericFormat,
     ) -> Result<Self, CapabilityError> {
-        if property.siid == 0 || property.piid == 0 || format.maximum() < 0xffffff {
+        if property.siid == 0
+            || property.piid == 0
+            || format == NumericFormat::Float
+            || format.maximum() < 0xffffff
+        {
             return Err(CapabilityError::InvalidLight("rgb range or format"));
         }
         Ok(Self { property, format })
@@ -430,6 +629,7 @@ impl ModeBinding {
     ) -> Result<Self, CapabilityError> {
         if property.siid == 0
             || property.piid == 0
+            || format == NumericFormat::Float
             || temperature_value == rgb_value
             || temperature_value > format.maximum()
             || rgb_value > format.maximum()

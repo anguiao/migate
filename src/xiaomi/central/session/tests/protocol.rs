@@ -231,7 +231,7 @@ fn strict_business_values_and_returned_identity_are_required() {
     }
     assert!(matches!(
         parse_response(&read, &json!({"value":1})),
-        Ok(Response::PropertyValue(value)) if value == json!(1)
+        Ok(Response::PropertyValue(value)) if value.value == json!(1)
     ));
     let write = RequestKind::Write {
         did: "target".into(),
@@ -366,6 +366,7 @@ fn invalid_device_messages_do_not_disconnect_the_shared_session() {
                     did: "other".into(),
                     binding: PropertyBinding { siid: 2, piid: 1 },
                     value: serde_json::Value::Bool(true),
+                    update_time: None,
                 },
                 CentralEvent::DeviceListChanged {
                     dids: vec!["other".into()],

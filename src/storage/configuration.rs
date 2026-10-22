@@ -12,10 +12,11 @@ use crate::{
         CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation, Revocation,
         Scope,
     },
-    device::{DeviceKey, NumericRange},
+    device::{DeviceKey, MeasurementRange, NumericRange},
     xiaomi::capability::{
-        BrightnessBinding, ColorBinding, LightBindings, ModeBinding, NumericFormat, ParsedDevice,
-        ParsedFunction, PropertyBinding, TemperatureBinding,
+        BrightnessBinding, ColorBinding, LightBindings, MeasurementBinding, MeasurementUnit,
+        ModeBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+        TemperatureBinding,
     },
 };
 use rusqlite::params;
@@ -258,6 +259,27 @@ enum WireFunction {
         power: WireBinding,
         lighting: WireLighting,
     },
+    Temperature {
+        id: String,
+        label: String,
+        measurement: WireMeasurement,
+    },
+    Humidity {
+        id: String,
+        label: String,
+        measurement: WireMeasurement,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireMeasurement {
+    property: WireBinding,
+    format: NumericFormat,
+    unit: MeasurementUnit,
+    min: f64,
+    max: f64,
+    step: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -483,11 +505,30 @@ impl WireNative {
 
 impl WireFunction {
     fn from_parsed(function: &ParsedFunction) -> Self {
+        if let Some(measurement) = function.measurement() {
+            let wire = WireMeasurement::from_binding(measurement);
+            return match function.kind() {
+                crate::device::FunctionKind::Temperature(_) => Self::Temperature {
+                    id: function.id().to_owned(),
+                    label: function.label().to_owned(),
+                    measurement: wire,
+                },
+                crate::device::FunctionKind::Humidity(_) => Self::Humidity {
+                    id: function.id().to_owned(),
+                    label: function.label().to_owned(),
+                    measurement: wire,
+                },
+                _ => unreachable!("measurement functions have measurement kinds"),
+            };
+        }
         let Some(lighting) = function.lighting() else {
             return Self::Outlet {
                 id: function.id().to_owned(),
                 label: function.label().to_owned(),
-                power: function.power().into(),
+                power: function
+                    .power()
+                    .expect("outlet functions have power")
+                    .into(),
             };
         };
         let lighting = match lighting {
@@ -525,7 +566,7 @@ impl WireFunction {
         Self::Light {
             id: function.id().to_owned(),
             label: function.label().to_owned(),
-            power: function.power().into(),
+            power: function.power().expect("light functions have power").into(),
             lighting,
         }
     }
@@ -535,6 +576,24 @@ impl WireFunction {
             Self::Outlet { id, label, power } => {
                 Ok(ParsedFunction::outlet(id, label, power.into()))
             }
+            Self::Temperature {
+                id,
+                label,
+                measurement,
+            } => Ok(ParsedFunction::temperature(
+                id,
+                label,
+                measurement.into_binding()?,
+            )),
+            Self::Humidity {
+                id,
+                label,
+                measurement,
+            } => Ok(ParsedFunction::humidity(
+                id,
+                label,
+                measurement.into_binding()?,
+            )),
             Self::Light {
                 id,
                 label,
@@ -579,6 +638,31 @@ impl WireFunction {
                 Ok(ParsedFunction::light(id, label, power.into(), lighting))
             }
         }
+    }
+}
+
+impl WireMeasurement {
+    fn from_binding(binding: &MeasurementBinding) -> Self {
+        Self {
+            property: binding.property().into(),
+            format: binding.format(),
+            unit: binding.unit(),
+            min: binding.range().min(),
+            max: binding.range().max(),
+            step: binding.step(),
+        }
+    }
+
+    fn into_binding(self) -> Result<MeasurementBinding, &'static str> {
+        MeasurementBinding::new(
+            self.property.into(),
+            self.format,
+            self.unit,
+            MeasurementRange::new(self.min, self.max)
+                .map_err(|_| "Stored measurement binding is invalid")?,
+            self.step,
+        )
+        .map_err(|_| "Stored measurement binding is invalid")
     }
 }
 

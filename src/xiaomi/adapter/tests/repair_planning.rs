@@ -62,7 +62,7 @@ fn native_rgb_group_uses_member_temperature_interval_without_repair() {
         })
         .await;
         assert_eq!(
-            light.snapshot().lighting.unwrap().color,
+            light.snapshot().lighting().unwrap().color,
             Rgb::from_packed(0x112233),
             "native RGB acceptance cannot replace actual member feedback"
         );

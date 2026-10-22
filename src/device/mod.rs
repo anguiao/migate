@@ -13,7 +13,8 @@ pub(crate) use model::mired_span;
 pub use model::{
     Availability, Capability, Command, CommandError, DeviceKey, FunctionDescription, FunctionKind,
     FunctionSnapshot, LightMode, LightPatch, LightProfile, LightProfileKind, LightSnapshot,
-    NumericRange, PhysicalDeviceDescription, Power, Rgb, TemperatureInterval,
+    MeasurementRange, MeasurementSnapshot, NumericRange, PhysicalDeviceDescription, Power, Rgb,
+    TemperatureInterval,
 };
 pub use registry::DeviceRegistry;
 pub use state::{Function, PhysicalDevice};

@@ -58,13 +58,13 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 assert_eq!(
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .power,
-                    Power::Unknown
+                        .power(),
+                    Some(Power::Unknown)
                 );
                 assert_eq!(
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .availability,
+                        .availability(),
                     Availability::Available
                 );
                 control.clock.advance(Duration::from_secs(10));
@@ -98,8 +98,8 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                     until(|| {
                         function(&control.context.registry, "one", "main")
                             .snapshot()
-                            .power
-                            == Power::On
+                            .power()
+                            == Some(Power::On)
                     })
                     .await;
                     assert_eq!(peer.count("get", "one", 2), 2);
@@ -112,7 +112,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                     matches!(
                         function(&control.context.registry, "one", "main")
                             .snapshot()
-                            .availability,
+                            .availability(),
                         Availability::Unavailable(_)
                     )
                 })
@@ -122,8 +122,8 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 until(|| {
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .power
-                        == Power::On
+                        .power()
+                        == Some(Power::On)
                 })
                 .await;
                 let expected = failed_reads + if timeout { 2 } else { 1 };

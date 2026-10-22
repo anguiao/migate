@@ -10,7 +10,8 @@ fn total_control_refresh_reads_mixed_values_without_inference_and_coalesces() {
             initialized(control, &peer, &["multi"]).await;
             let registry = &control.context.registry;
             peer.notify("multi", 4, true);
-            until(|| function(registry, "multi", "outlet_2").snapshot().power == Power::On).await;
+            until(|| function(registry, "multi", "outlet_2").snapshot().power() == Some(Power::On))
+                .await;
             let before = peer.count("get", "multi", 3);
             peer.state.borrow_mut().hold_reads = true;
             peer.notify("multi", 2, true);
@@ -25,16 +26,16 @@ fn total_control_refresh_reads_mixed_values_without_inference_and_coalesces() {
             })
             .await;
             assert_eq!(
-                function(registry, "multi", "outlet_1").snapshot().power,
-                Power::Off
+                function(registry, "multi", "outlet_1").snapshot().power(),
+                Some(Power::Off)
             );
             assert_eq!(
-                function(registry, "multi", "outlet_2").snapshot().power,
-                Power::On
+                function(registry, "multi", "outlet_2").snapshot().power(),
+                Some(Power::On)
             );
             assert_eq!(
-                function(registry, "multi", "usb").snapshot().power,
-                Power::Off
+                function(registry, "multi", "usb").snapshot().power(),
+                Some(Power::Off)
             );
             peer.notify("multi", 2, false);
             peer.notify("multi", 2, true);
@@ -77,7 +78,7 @@ fn total_control_refresh_reads_mixed_values_without_inference_and_coalesces() {
                     .unwrap()
                     .diagnostic()
                     .is_none()
-                    && function(registry, "multi", "outlet_1").snapshot().power == Power::On
+                    && function(registry, "multi", "outlet_1").snapshot().power() == Some(Power::On)
             })
             .await;
             control.clock.advance(Duration::from_secs(1));
@@ -89,16 +90,16 @@ fn total_control_refresh_reads_mixed_values_without_inference_and_coalesces() {
             assert_eq!(peer.count("get", "multi", 4), before + 1);
             assert_eq!(peer.count("get", "multi", 9), before + 1);
             assert_eq!(
-                function(registry, "multi", "usb").snapshot().power,
-                Power::On
+                function(registry, "multi", "usb").snapshot().power(),
+                Some(Power::On)
             );
             assert_eq!(
-                function(registry, "multi", "outlet_1").snapshot().power,
-                Power::On
+                function(registry, "multi", "outlet_1").snapshot().power(),
+                Some(Power::On)
             );
             assert_eq!(
-                function(registry, "multi", "outlet_2").snapshot().power,
-                Power::Off
+                function(registry, "multi", "outlet_2").snapshot().power(),
+                Some(Power::Off)
             );
             assert_eq!(
                 registry

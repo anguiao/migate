@@ -106,7 +106,7 @@ fn cloud_control_without_ready_notifications_is_sync_limited() {
         until(|| {
             function(&c.context.registry, "one", "main")
                 .snapshot()
-                .availability
+                .availability()
                 == Availability::Available
         })
         .await;
@@ -212,7 +212,7 @@ fn command_diagnostics_keep_cloud_rejection_results_without_replay() {
     }
     block_on(rig.run(|c| async move {
         let one = function(&c.context.registry, "one", "main");
-        until(|| one.snapshot().availability == Availability::Available).await;
+        until(|| one.snapshot().availability() == Availability::Available).await;
         let result = one.execute(Command::On).await;
         assert_eq!(
             result,
@@ -248,7 +248,7 @@ fn switch_reasons_identify_http_failure_instead_of_a_generic_access_change() {
     }
     block_on(rig.run(|c| async move {
         let one = function(&c.context.registry, "one", "main");
-        until(|| one.snapshot().availability == Availability::Available).await;
+        until(|| one.snapshot().availability() == Availability::Available).await;
         assert!(one.execute(Command::On).await.is_err());
         let status = c.context.diagnostics();
         assert!(
@@ -287,7 +287,7 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
     }
     block_on(rig.run(|c| async move {
         let one = function(&c.context.registry, "one", "main");
-        until(|| one.snapshot().availability == Availability::Available).await;
+        until(|| one.snapshot().availability() == Availability::Available).await;
         c.clock.advance(Duration::from_secs(5));
         until(|| c.cloud.lock().unwrap().tokens == 1).await;
         c.clock.advance(Duration::from_secs(5));
@@ -303,7 +303,7 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
         c.cloud.lock().unwrap().token_gate = None;
         release.send(()).unwrap();
         until(|| {
-            c.context.token_usable() && one.snapshot().availability == Availability::Available
+            c.context.token_usable() && one.snapshot().availability() == Availability::Available
         })
         .await;
         let status = c.context.diagnostics();

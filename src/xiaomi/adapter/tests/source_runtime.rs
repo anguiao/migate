@@ -184,7 +184,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
                 json!(false),
                 false,
             );
-            until(|| new.snapshot().power == Power::Off).await;
+            until(|| new.snapshot().power() == Some(Power::Off)).await;
         })
         .await;
     }));
@@ -206,7 +206,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().homes > 0).await;
         let old = function(&c.context.registry, "one", "main");
-        until(|| old.snapshot().power == Power::Off).await;
+        until(|| old.snapshot().power() == Some(Power::Off)).await;
 
         c.cloud.lock().unwrap().property_gate = Some(gate);
         let mut command = Box::pin(old.execute(Command::On));
@@ -247,7 +247,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
         })
         .await;
         let new = function(&c.context.registry, "one", "main");
-        assert!(new.snapshot().power != Power::On);
+        assert!(new.snapshot().power() != Some(Power::On));
 
         // The original HTTP future is still in flight after the consumer and
         // sink ended; releasing it must complete and settle that operation.
@@ -280,7 +280,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
         // The late acceptance belongs to the retired sink; the new logical
         // instance keeps the actual state and sends no second write.
         async_io::Timer::after(Duration::from_millis(20)).await;
-        assert_eq!(new.snapshot().power, Power::Off);
+        assert_eq!(new.snapshot().power(), Some(Power::Off));
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
     }));
 }

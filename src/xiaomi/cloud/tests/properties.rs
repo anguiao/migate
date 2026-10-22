@@ -91,7 +91,14 @@ fn batch_reads_correlate_numeric_and_boolean_values_in_request_order() {
     let result =
         future::block_on(cloud.read_properties("token", "target", &[POWER, brightness])).unwrap();
     assert!(!result.protocol_error);
-    assert_eq!(result.items, vec![Ok(json!(true)), Ok(json!(35.5))]);
+    assert_eq!(
+        result
+            .items
+            .into_iter()
+            .map(|item| item.map(|reading| reading.value))
+            .collect::<Vec<_>>(),
+        vec![Ok(json!(true)), Ok(json!(35.5))]
+    );
 }
 
 #[test]
@@ -405,4 +412,27 @@ fn invalid_property_targets_fail_before_sending_http() {
         }
     }
     assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn property_reads_preserve_a_supplied_upstream_update_time() {
+    let (base, _) = mock_server(vec![
+        MockResponse::json(
+            200,
+            r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":21.5,"updateTime":1700000100}]}"#,
+        ),
+        MockResponse::json(
+            200,
+            r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":22.5}]}"#,
+        ),
+    ]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let reading =
+        future::block_on(cloud.read_property_observation("token", "target", POWER)).unwrap();
+    assert_eq!(reading.value, json!(21.5));
+    assert_eq!(reading.update_time, Some(1_700_000_100));
+    let reading =
+        future::block_on(cloud.read_property_observation("token", "target", POWER)).unwrap();
+    assert_eq!(reading.value, json!(22.5));
+    assert_eq!(reading.update_time, None);
 }

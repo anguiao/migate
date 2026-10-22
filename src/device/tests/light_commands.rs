@@ -99,7 +99,7 @@ fn one_inflight_frame_coalesces_ticks_and_keeps_the_final_target_and_original_wa
         assert!(action.ended().await.is_ok());
         assert!(!function.light_action_current(action.token()));
         assert_eq!(
-            function.snapshot().lighting.unwrap().brightness_percent,
+            function.snapshot().lighting().unwrap().brightness_percent,
             None
         );
         assert!(poll_once(receiver.next_operation()).await.is_none());
@@ -275,7 +275,7 @@ fn ordinary_observation_does_not_take_over_and_explicit_external_takeover_is_dim
         next.mark_sent().unwrap();
         next.accept().unwrap();
         assert_eq!(
-            function.snapshot().lighting.unwrap().brightness_percent,
+            function.snapshot().lighting().unwrap().brightness_percent,
             Some(40.0)
         );
     });
@@ -350,7 +350,7 @@ fn partial_acceptance_updates_one_snapshot_and_failure_stops_only_the_original_a
         let new = function
             .begin_light_action(temperature(5000.0), true)
             .unwrap();
-        let revision = function.snapshot().revision;
+        let revision = function.snapshot().revision();
         function
             .observe_light(LightPatch {
                 power: Some(true),
@@ -358,7 +358,7 @@ fn partial_acceptance_updates_one_snapshot_and_failure_stops_only_the_original_a
                 ..LightPatch::default()
             })
             .unwrap();
-        assert_eq!(function.snapshot().revision, revision + 1);
+        assert_eq!(function.snapshot().revision(), revision + 1);
         let failure = CommandError::Rejected("mode write rejected".into());
         request.reject(failure.clone());
         assert_eq!(old.accepted().await, Err(failure));
@@ -369,7 +369,7 @@ fn partial_acceptance_updates_one_snapshot_and_failure_stops_only_the_original_a
         request.accept().unwrap();
         assert!(new.accepted().await.is_ok());
         assert_eq!(
-            function.snapshot().lighting.unwrap().temperature_kelvin,
+            function.snapshot().lighting().unwrap().temperature_kelvin,
             Some(3100)
         );
     });

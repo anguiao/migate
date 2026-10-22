@@ -47,9 +47,9 @@ fn new_devices_have_stable_identity_unknown_state_and_initializing_availability(
         device.function_key().device,
         DeviceKey::new("xiaomi", "test-outlet")
     );
-    assert_eq!(device.snapshot().power, Power::Unknown);
-    assert_eq!(device.snapshot().availability, Availability::Initializing);
-    assert_eq!(device.snapshot().revision, 0);
+    assert_eq!(device.snapshot().power(), Some(Power::Unknown));
+    assert_eq!(device.snapshot().availability(), Availability::Initializing);
+    assert_eq!(device.snapshot().revision(), 0);
 }
 
 #[test]
@@ -61,15 +61,15 @@ fn notifications_coalesce_and_same_values_do_not_increment_revision() {
         device.observe(false);
         device.observe(false);
         physical.set_availability(Availability::Available);
-        assert_eq!(device.snapshot().revision, 2);
+        assert_eq!(device.snapshot().revision(), 2);
         let latest = changes.changed().await;
         assert_eq!(latest, device.snapshot());
         physical.set_availability(Availability::Available);
         assert!(poll_once(changes.changed()).await.is_none());
         physical.set_availability(Availability::Unavailable("connection lost".into()));
         let latest = changes.changed().await;
-        assert_eq!(latest.power, Power::Off);
-        assert_eq!(latest.revision, 3);
+        assert_eq!(latest.power(), Some(Power::Off));
+        assert_eq!(latest.revision(), 3);
     });
 }
 
@@ -84,11 +84,11 @@ fn commands_change_state_only_after_acceptance_and_repeat_targets_are_allowed() 
         assert!(poll_once(command.as_mut()).await.is_none());
         let request = next_power(&mut receiver).await.unwrap();
         assert!(request.target);
-        assert_eq!(device.snapshot().power, Power::Off);
+        assert_eq!(device.snapshot().power(), Some(Power::Off));
         device.observe(true);
         request.accept().unwrap();
-        assert_eq!(command.await.unwrap().power, Power::On);
-        assert_eq!(changes.changed().await.power, Power::On);
+        assert_eq!(command.await.unwrap().power(), Some(Power::On));
+        assert_eq!(changes.changed().await.power(), Some(Power::On));
 
         let command = device.execute(Command::On);
         futures_lite::pin!(command);
@@ -110,14 +110,14 @@ fn request_acceptance_does_not_infer_or_publish_power_state() {
         assert!(poll_once(command.as_mut()).await.is_none());
         let request = next_power(&mut receiver).await.unwrap();
         assert!(request.target);
-        assert_eq!(device.snapshot().power, Power::Off);
+        assert_eq!(device.snapshot().power(), Some(Power::Off));
         request.accept().unwrap();
-        assert_eq!(command.await.unwrap().power, Power::Off);
-        assert_eq!(device.snapshot().power, Power::Off);
+        assert_eq!(command.await.unwrap().power(), Some(Power::Off));
+        assert_eq!(device.snapshot().power(), Some(Power::Off));
         assert!(poll_once(changes.changed()).await.is_none());
         device.observe(true);
-        assert_eq!(device.snapshot().power, Power::On);
-        assert_eq!(changes.changed().await.power, Power::On);
+        assert_eq!(device.snapshot().power(), Some(Power::On));
+        assert_eq!(changes.changed().await.power(), Some(Power::On));
     });
 }
 
@@ -137,9 +137,9 @@ fn rejected_commands_preserve_state_and_later_observations_still_apply() {
             command.await,
             Err(CommandError::Rejected("access denied".into()))
         );
-        assert_eq!(device.snapshot().power, Power::Off);
+        assert_eq!(device.snapshot().power(), Some(Power::Off));
         device.observe(true);
-        assert_eq!(device.snapshot().power, Power::On);
+        assert_eq!(device.snapshot().power(), Some(Power::On));
     });
 }
 
@@ -168,7 +168,7 @@ fn commands_are_fifo_and_toggle_uses_snapshot_at_execution_time() {
         assert!(second_request.target);
         device.observe(true);
         second_request.accept().unwrap();
-        assert_eq!(second.await.unwrap().power, Power::On);
+        assert_eq!(second.await.unwrap().power(), Some(Power::On));
     });
 }
 
@@ -212,13 +212,13 @@ fn queued_commands_wait_for_the_active_adapter_request() {
         assert!(poll_once(second.as_mut()).await.is_none());
         device.observe(true);
         request.accept().unwrap();
-        assert_eq!(first.await.unwrap().power, Power::On);
+        assert_eq!(first.await.unwrap().power(), Some(Power::On));
         let request = next_power(&mut receiver).await.unwrap();
         assert!(!request.target);
         device.observe(false);
         request.accept().unwrap();
-        assert_eq!(second.await.unwrap().power, Power::Off);
-        assert_eq!(device.snapshot().power, Power::Off);
+        assert_eq!(second.await.unwrap().power(), Some(Power::Off));
+        assert_eq!(device.snapshot().power(), Some(Power::Off));
     });
 }
 
@@ -252,7 +252,7 @@ fn receiver_shutdown_cancels_active_commands_without_accepting_stale_results() {
         assert_eq!(request.mark_sent(), Err(CommandError::Cancelled));
         assert_eq!(request.accept(), Err(CommandError::Cancelled));
         assert_eq!(command.await, Err(CommandError::Cancelled));
-        assert_eq!(device.snapshot().power, Power::Off);
+        assert_eq!(device.snapshot().power(), Some(Power::Off));
     });
 }
 
@@ -266,12 +266,12 @@ fn physical_availability_notifications_do_not_follow_channel_power_changes() {
 
         function.observe(true);
         assert!(poll_once(physical_changes.changed()).await.is_none());
-        assert_eq!(function_changes.changed().await.power, Power::On);
+        assert_eq!(function_changes.changed().await.power(), Some(Power::On));
 
         let offline = Availability::Unavailable("offline".into());
         physical.set_availability(offline.clone());
         assert_eq!(physical_changes.changed().await, offline);
-        assert_eq!(function_changes.changed().await.availability, offline);
+        assert_eq!(function_changes.changed().await.availability(), offline);
         assert!(poll_once(physical_changes.changed()).await.is_none());
     });
 }
@@ -288,9 +288,9 @@ fn active_acceptance_survives_an_offline_observation() {
         assert!(poll_once(command.as_mut()).await.is_none());
         device.observe(true);
         let accepted = request.accept().unwrap();
-        assert_eq!(accepted.power, Power::On);
+        assert_eq!(accepted.power(), Some(Power::On));
         assert_eq!(
-            accepted.availability,
+            accepted.availability(),
             Availability::Unavailable("offline".into())
         );
         assert_eq!(command.await.unwrap(), accepted);
@@ -319,10 +319,10 @@ fn becoming_unavailable_ends_queued_requests_but_preserves_active_acceptance() {
         device.observe(false);
         physical.set_availability(Availability::Available);
         device.observe(true);
-        assert_eq!(stale.accept().unwrap().power, Power::On);
-        assert_eq!(first.await.unwrap().power, Power::On);
+        assert_eq!(stale.accept().unwrap().power(), Some(Power::On));
+        assert_eq!(first.await.unwrap().power(), Some(Power::On));
         assert!(poll_once(next_power(&mut receiver)).await.is_none());
-        assert_eq!(device.snapshot().power, Power::On);
+        assert_eq!(device.snapshot().power(), Some(Power::On));
     });
 }
 
@@ -341,7 +341,7 @@ fn dropping_a_queued_command_withdraws_it_before_the_adapter_can_send() {
         assert!(!request.target);
         device.observe(false);
         request.accept().unwrap();
-        assert_eq!(next.await.unwrap().power, Power::Off);
+        assert_eq!(next.await.unwrap().power(), Some(Power::Off));
         assert!(poll_once(next_power(&mut receiver)).await.is_none());
     });
 }
@@ -357,8 +357,8 @@ fn dropping_a_caller_does_not_discard_an_inflight_adapter_result() {
         drop(command);
 
         device.observe(true);
-        assert_eq!(request.accept().unwrap().power, Power::On);
-        assert_eq!(device.snapshot().power, Power::On);
+        assert_eq!(request.accept().unwrap().power(), Some(Power::On));
+        assert_eq!(device.snapshot().power(), Some(Power::On));
         assert!(poll_once(next_power(&mut receiver)).await.is_none());
     });
 }
@@ -382,7 +382,7 @@ fn acceptance_settles_the_current_snapshot_and_never_infers_a_target() {
         assert!(following.target);
         device.observe(true);
         following.accept().unwrap();
-        assert_eq!(next.await.unwrap().power, Power::On);
+        assert_eq!(next.await.unwrap().power(), Some(Power::On));
     });
 }
 
@@ -410,3 +410,5 @@ mod light_commands;
 mod validity;
 
 mod multi_device;
+
+mod sensors;

@@ -171,7 +171,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
         wait_for(
             || {
                 let snapshot = light.snapshot();
-                let lighting = snapshot.lighting.unwrap();
+                let lighting = snapshot.lighting().unwrap();
                 lighting.mode == Some(LightMode::Rgb)
                     && lighting.color
                         == Some(Rgb {
@@ -188,7 +188,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
         force_unavailable(&c.context, "member-a", "test member outage");
         wait_for(
             || {
-                let lighting = light.snapshot().lighting.unwrap();
+                let lighting = light.snapshot().lighting().unwrap();
                 lighting.mode == Some(LightMode::Temperature)
                     && lighting.color
                         == Some(Rgb {
@@ -203,7 +203,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
         // Losing every readable member clears the repaired mode too.
         force_unavailable(&c.context, "member-b", "test member outage");
         wait_for(
-            || light.snapshot().lighting.unwrap().mode.is_none(),
+            || light.snapshot().lighting().unwrap().mode.is_none(),
             "group repaired mode was not cleared on all-member loss",
         )
         .await;
@@ -482,7 +482,7 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
             || {
                 light
                     .snapshot()
-                    .lighting
+                    .lighting()
                     .unwrap()
                     .temperature_kelvin
                     .is_none()
@@ -650,9 +650,12 @@ fn repaired_group_unauthorized_member_path_recovers_after_token_refresh() {
         c.cloud.lock().unwrap().property_status = 200;
         until(|| c.context.token_usable()).await;
         until(|| {
-            ["member-a", "member-b"]
-                .iter()
-                .all(|did| function(&c.context.registry, did, "main").snapshot().power == Power::On)
+            ["member-a", "member-b"].iter().all(|did| {
+                function(&c.context.registry, did, "main")
+                    .snapshot()
+                    .power()
+                    == Some(Power::On)
+            })
         })
         .await;
         let next = light.begin_light_action(rgb(0x0000ff), true).unwrap();
@@ -688,7 +691,7 @@ fn repaired_group_native_partial_failure_fails_without_optimistic_state() {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "main");
         wait_for(
-            || light.snapshot().lighting.unwrap().temperature_kelvin == Some(2700),
+            || light.snapshot().lighting().unwrap().temperature_kelvin == Some(2700),
             "native CT did not settle",
         )
         .await;
@@ -755,18 +758,18 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                     .enumerate()
                     .all(|(index, did)| {
                         let snapshot = function(&c.context.registry, did, "main").snapshot();
-                        snapshot.power.value() == powers[index]
-                            && snapshot.lighting.unwrap().mode.is_some()
+                        snapshot.power().and_then(crate::device::Power::value) == powers[index]
+                            && snapshot.lighting().unwrap().mode.is_some()
                     })
             })
             .await;
             assert_eq!(
-                light.snapshot().power,
-                if powers.contains(&Some(true)) {
+                light.snapshot().power(),
+                Some(if powers.contains(&Some(true)) {
                     Power::On
                 } else {
                     Power::Unknown
-                }
+                })
             );
             let action = light.begin_light_action(rgb(0x00ff00), true).unwrap();
             assert_eq!(

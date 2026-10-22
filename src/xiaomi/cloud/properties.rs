@@ -1,7 +1,9 @@
 use super::{CloudClient, CloudError, CloudErrorKind, response::valid_description};
 use crate::xiaomi::{
     capability::PropertyBinding,
-    property::{PropertyResults, correlate, valid_bindings, valid_value},
+    property::{
+        PropertyReading, PropertyResults, correlate, update_time, valid_bindings, valid_value,
+    },
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -13,6 +15,18 @@ impl CloudClient {
         did: &str,
         binding: PropertyBinding,
     ) -> Result<Value, CloudError> {
+        Ok(self
+            .read_property_observation(access_token, did, binding)
+            .await?
+            .value)
+    }
+
+    pub async fn read_property_observation(
+        &self,
+        access_token: &str,
+        did: &str,
+        binding: PropertyBinding,
+    ) -> Result<PropertyReading, CloudError> {
         single_result(
             "read Xiaomi property",
             self.read_properties(access_token, did, &[binding]).await?,
@@ -24,7 +38,7 @@ impl CloudClient {
         access_token: &str,
         did: &str,
         bindings: &[PropertyBinding],
-    ) -> Result<PropertyResults<Value, CloudError>, CloudError> {
+    ) -> Result<PropertyResults<PropertyReading, CloudError>, CloudError> {
         let operation = "read Xiaomi property";
         validate_targets(operation, did, bindings)?;
         let params: Vec<_> = bindings
@@ -47,10 +61,14 @@ impl CloudClient {
             CloudError::protocol(operation),
             |item| {
                 accepted_code(operation, item, |code| code == 0)?;
-                item.get("value")
-                    .filter(|value| valid_value(value))
-                    .cloned()
-                    .ok_or_else(|| CloudError::protocol(operation))
+                Ok(PropertyReading {
+                    value: item
+                        .get("value")
+                        .filter(|value| valid_value(value))
+                        .cloned()
+                        .ok_or_else(|| CloudError::protocol(operation))?,
+                    update_time: update_time(item),
+                })
             },
         ))
     }

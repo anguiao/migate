@@ -52,7 +52,8 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
             &[CentralEvent::PropertyValue {
                 did: "target".into(),
                 binding: BINDING,
-                value: serde_json::Value::Bool(false)
+                value: serde_json::Value::Bool(false),
+                update_time: None,
             }],
             "a received property from the retired source was dispatched"
         );
@@ -133,7 +134,8 @@ fn received_property_invalidation_takes_effect_between_buffered_frames_in_one_po
             &[CentralEvent::PropertyValue {
                 did: "other".into(),
                 binding: BINDING,
-                value: serde_json::Value::Bool(true)
+                value: serde_json::Value::Bool(true),
+                update_time: None,
             }]
         );
         assert!(driver.ready);
@@ -295,7 +297,8 @@ fn a_qos2_property_received_before_unsubscription_cannot_reappear_after_resubscr
             &[CentralEvent::PropertyValue {
                 did: "target".into(),
                 binding: BINDING,
-                value: serde_json::Value::Bool(false)
+                value: serde_json::Value::Bool(false),
+                update_time: None,
             }]
         );
     });

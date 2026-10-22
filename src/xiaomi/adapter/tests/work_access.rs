@@ -25,7 +25,14 @@ impl DeviceWork {
     }
     #[cfg(test)]
     pub(in crate::xiaomi::adapter) fn test_notify(&self, binding: PropertyBinding, value: bool) {
-        self.notify_value(binding, &serde_json::Value::Bool(value), false, true);
+        self.notify_value_at(
+            binding,
+            &serde_json::Value::Bool(value),
+            None,
+            false,
+            true,
+            0,
+        );
     }
     pub(in crate::xiaomi::adapter) fn test_local_exhausted(&self) -> bool {
         self.local_exhausted()

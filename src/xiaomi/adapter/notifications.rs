@@ -219,6 +219,7 @@ impl Context {
         did: &str,
         binding: crate::xiaomi::capability::PropertyBinding,
         value: &serde_json::Value,
+        update_time: Option<i64>,
         cached_report: bool,
     ) {
         if !self.source_valid(did, source) {
@@ -232,11 +233,13 @@ impl Context {
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = work
             && work.observer_is(source)
-            && work.notify_value(
+            && work.notify_value_at(
                 binding,
                 value,
+                update_time,
                 cached_report,
                 self.is_independent_light(did),
+                self.clock.unix_now(),
             )
             && !self.is_group(did)
         {
@@ -272,6 +275,7 @@ impl Context {
 fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
     let did = &work.key.id;
     work.install_observer(source);
+    context.update_device_availability(did);
     context.refresh_group_states(did);
     context.note_notification_switch(did, "notification subscriptions ready; source activated");
 }
@@ -304,6 +308,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         && !context.source_valid(&did, &old)
     {
         work.revoke_observer();
+        context.update_device_availability(&did);
         context.refresh_group_states(&did);
         context.update_routing("notification source access conditions invalidated");
     }
@@ -607,22 +612,26 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                                 did,
                                 binding,
                                 value,
+                                update_time,
                             } => events.property_value_event(
                                 &NotificationSource::Cloud(event_handle.clone()),
                                 &did,
                                 binding,
                                 &value,
+                                update_time,
                                 false,
                             ),
                             NotificationEvent::PropertySnapshot {
                                 did,
                                 binding,
                                 value,
+                                update_time,
                             } => events.property_value_event(
                                 &NotificationSource::Cloud(event_handle.clone()),
                                 &did,
                                 binding,
                                 &value,
+                                update_time,
                                 true,
                             ),
                         })

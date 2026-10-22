@@ -41,6 +41,7 @@ pub(in super::super) struct CloudState {
     pub(in super::super) property_writes: Vec<(String, u32, u32, bool, String)>,
     pub(in super::super) property_reads: Vec<(String, u32, u32)>,
     pub(in super::super) raw_values: BTreeMap<(String, u32, u32), Value>,
+    pub(in super::super) update_times: BTreeMap<(String, u32, u32), i64>,
     pub(in super::super) property_codes: BTreeMap<(String, u32, u32), i64>,
     pub(in super::super) numeric_writes: Vec<(Vec<Value>, String)>,
     pub(in super::super) read_values: BTreeMap<(String, u32, u32), bool>,
@@ -75,6 +76,7 @@ pub(in super::super) struct Rig {
     pub(in super::super) data: Vec<NativeDescription>,
     pub(in super::super) cloud: Arc<Mutex<CloudState>>,
     pub(in super::super) clock: Arc<TestClock>,
+    stall_timeout: Duration,
 }
 pub(in super::super) struct Control {
     pub(in super::super) uid: String,
@@ -99,7 +101,7 @@ impl Rig {
     }
     /// A fixture-derived independent light with one of the four standard profiles.
     pub(in super::super) fn profile_light(model: &str, instance: Value) -> Self {
-        Self::build_with(true, &["one"], Some(model), Some(instance), &[])
+        Self::build_with(true, &["one"], Some(model), Some(instance), &[], &[])
     }
     /// Several fixture-derived lights with their own DIDs; each gets its real
     /// parsed description and the catalog can serve its instance type.
@@ -115,15 +117,30 @@ impl Rig {
                 )
             })
             .collect::<Vec<_>>();
-        Self::build_with(true, &members, None, None, &instances)
+        Self::build_with(true, &members, None, None, &instances, &[])
     }
+    /// A scenario that needs more real Matter startup time under parallel tests.
+    pub(in super::super) fn with_stall_timeout(mut self, timeout: Duration) -> Self {
+        self.stall_timeout = timeout;
+        self
+    }
+
+    /// Temperature/humidity sensor members with the public t6 fixture.
+    pub(in super::super) fn sensors(members: &[&str]) -> Self {
+        let instances = members
+            .iter()
+            .map(|did| (*did, super::sensor_native(did)))
+            .collect::<Vec<_>>();
+        Self::build_with(true, members, None, None, &[], &instances)
+    }
+
     /// Lights with caller-provided parsed instances, for range/boundary cases.
     pub(in super::super) fn custom_lights(lights: &[(&str, &str, Value)]) -> Self {
         let members = lights.iter().map(|(did, _, _)| *did).collect::<Vec<_>>();
-        Self::build_with(true, &members, None, None, lights)
+        Self::build_with(true, &members, None, None, lights, &[])
     }
     fn build(restore: bool, members: &[&str], light: Option<&str>) -> Self {
-        Self::build_with(restore, members, light, None, &[])
+        Self::build_with(restore, members, light, None, &[], &[])
     }
     fn build_with(
         restore: bool,
@@ -131,6 +148,7 @@ impl Rig {
         light: Option<&str>,
         custom: Option<Value>,
         lights: &[(&str, &str, Value)],
+        natives: &[(&str, NativeDescription)],
     ) -> Self {
         let custom_text = custom.as_ref().map(Value::to_string);
         let directory = tempfile::tempdir().unwrap();
@@ -188,6 +206,13 @@ impl Rig {
                 instance["type"].as_str().unwrap().to_string(),
                 instance.clone(),
             ));
+        }
+        for (did, native) in natives {
+            let record = data
+                .iter_mut()
+                .find(|record| record.device().key().id == *did)
+                .unwrap_or_else(|| panic!("missing DID {did}"));
+            *record = (*native).clone();
         }
         if restore {
             let natives = data
@@ -249,7 +274,11 @@ impl Rig {
                 let value = state.raw_values.get(&key).cloned().unwrap_or_else(|| {
                     json!(state.read_values.get(&key).copied().unwrap_or(false))
                 });
-                let result = json!({"code":0,"result":[{"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":0,"value":value}]});
+                let mut reading = json!({"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":0,"value":value});
+                if let Some(update_time) = state.update_times.get(&key) {
+                    reading["updateTime"] = json!(update_time);
+                }
+                let result = json!({"code":0,"result":[reading]});
                 let mut response = MockResponse::json(state.read_status, &result.to_string());
                 if let Some(gate) = state.read_gates.get(&key).cloned() {
                     response = response.gated(gate);
@@ -482,6 +511,7 @@ impl Rig {
             data,
             cloud,
             clock,
+            stall_timeout: Duration::from_secs(5),
         }
     }
     pub(in super::super) async fn run<F, Fut>(self, test: F)
@@ -518,6 +548,7 @@ impl Rig {
         let keep_events = self.events.clone();
         let context = self.source.context.clone();
         let clock = self.clock.clone();
+        let stall_timeout = self.stall_timeout;
         let publication = Rc::new(
             crate::app::App::open(
                 super::super::super::publication::SourceHandle(context.clone()),
@@ -583,8 +614,8 @@ impl Rig {
                     },
                 ),
                 async {
-                    async_io::Timer::after(Duration::from_secs(5)).await;
-                    panic!("source scenario stalled");
+                    async_io::Timer::after(stall_timeout).await;
+                    panic!("source scenario stalled after {stall_timeout:?}");
                 },
             ),
         )

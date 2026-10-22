@@ -150,7 +150,7 @@ fn refresh_after_write(
         let light = function.lighting().unwrap();
         if context.is_virtual_group(&work.key.id) {
             let written = |property| properties.iter().any(|(binding, _)| *binding == property);
-            let power = written(function.power());
+            let power = written(function.power().expect("light functions have power"));
             let brightness = light
                 .brightness()
                 .is_some_and(|binding| written(binding.property()));

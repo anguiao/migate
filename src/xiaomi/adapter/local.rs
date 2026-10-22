@@ -133,22 +133,26 @@ pub(super) async fn run(
                             did,
                             binding,
                             value,
+                            update_time,
                         } => events.property_value_event(
                             &super::notifications::NotificationSource::Local(event_handle.clone()),
                             &did,
                             binding,
                             &value,
+                            update_time,
                             false,
                         ),
                         CentralEvent::PropertySnapshot {
                             did,
                             binding,
                             value,
+                            update_time,
                         } => events.property_value_event(
                             &super::notifications::NotificationSource::Local(event_handle.clone()),
                             &did,
                             binding,
                             &value,
+                            update_time,
                             true,
                         ),
                     })

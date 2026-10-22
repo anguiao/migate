@@ -5,7 +5,7 @@ async fn cloud_ready(c: &Control, dids: &[&str]) {
         dids.iter().all(|did| {
             function(&c.context.registry, did, "main")
                 .snapshot()
-                .availability
+                .availability()
                 == Availability::Available
         })
     })
@@ -20,7 +20,7 @@ fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
     block_on(rig.run(|c| async move {
         cloud_ready(&c, &["one"]).await;
         let one = function(&c.context.registry, "one", "main");
-        until(|| one.snapshot().power == Power::Off).await;
+        until(|| one.snapshot().power() == Some(Power::Off)).await;
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -48,7 +48,7 @@ fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
                 })
         })
         .await;
-        assert_eq!(one.snapshot().power, Power::Off);
+        assert_eq!(one.snapshot().power(), Some(Power::Off));
     }));
 }
 
@@ -75,11 +75,11 @@ fn http_temporary_failure_pauses_the_account_until_a_complete_scoped_sync() {
         }
         assert!(one.execute(Command::On).await.is_err());
         assert!(matches!(
-            one.snapshot().availability,
+            one.snapshot().availability(),
             Availability::Unavailable(_)
         ));
         assert!(matches!(
-            two.snapshot().availability,
+            two.snapshot().availability(),
             Availability::Unavailable(_)
         ));
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
@@ -94,7 +94,7 @@ fn http_temporary_failure_pauses_the_account_until_a_complete_scoped_sync() {
                 .is_some()
         );
         assert!(matches!(
-            one.snapshot().availability,
+            one.snapshot().availability(),
             Availability::Unavailable(_)
         ));
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
@@ -134,19 +134,19 @@ fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let one = function(&c.context.registry, "one", "main");
             let two = function(&c.context.registry, "two", "main");
-            until(|| one.snapshot().power == Power::Off).await;
+            until(|| one.snapshot().power() == Some(Power::Off)).await;
             let token_refreshes = c.cloud.lock().unwrap().tokens;
             c.cloud.lock().unwrap().property_code = code;
             assert!(matches!(
                 one.execute(Command::On).await,
                 Err(crate::device::CommandError::Rejected(_))
             ));
-            assert_eq!(two.snapshot().availability, Availability::Available);
+            assert_eq!(two.snapshot().availability(), Availability::Available);
             if code == -9 {
-                assert_eq!(one.snapshot().availability, Availability::Available);
+                assert_eq!(one.snapshot().availability(), Availability::Available);
             } else {
                 assert!(matches!(
-                    one.snapshot().availability,
+                    one.snapshot().availability(),
                     Availability::Unavailable(_)
                 ));
                 assert!(c.context.cloud_candidate("one", true).is_err());
@@ -160,7 +160,7 @@ fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_
             c.cloud.lock().unwrap().property_code = 0;
             two.execute(Command::Off).await.unwrap();
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
-            assert_eq!(one.snapshot().power, Power::Off);
+            assert_eq!(one.snapshot().power(), Some(Power::Off));
         }));
     }
 }
@@ -236,9 +236,9 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
         assert_eq!(physical.description().label(), "Cloud strip");
         assert_eq!(physical.functions().len(), 3);
         for function in physical.functions() {
-            assert_eq!(function.snapshot().power, Power::Unknown);
+            assert_eq!(function.snapshot().power(), Some(Power::Unknown));
             assert!(matches!(
-                function.snapshot().availability,
+                function.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
         }
@@ -251,7 +251,7 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
         assert!(c.cloud.lock().unwrap().property_reads.is_empty());
         c.cloud.lock().unwrap().online.insert("multi".into());
         c.context.request_sync();
-        until(|| usb.snapshot().availability == Availability::Available).await;
+        until(|| usb.snapshot().availability() == Availability::Available).await;
         usb.execute(Command::On).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
         c.publication
@@ -370,7 +370,7 @@ fn runtime_identity_and_home_scope_failures_retire_cloud_eligibility_and_preserv
                 })
                 .await;
                 assert!(matches!(
-                    one.snapshot().availability,
+                    one.snapshot().availability(),
                     Availability::Unavailable(_)
                 ));
                 assert!(
@@ -408,8 +408,8 @@ fn temporary_directory_failures_pause_existing_http_candidates_until_sync_recove
         until(|| {
             function(&c.context.registry, "one", "main")
                 .snapshot()
-                .power
-                == Power::Off
+                .power()
+                == Some(Power::Off)
         })
         .await;
         c.clock
@@ -426,7 +426,7 @@ fn temporary_directory_failures_pause_existing_http_candidates_until_sync_recove
         .await;
         let one = function(&c.context.registry, "one", "main");
         assert!(matches!(
-            one.snapshot().availability,
+            one.snapshot().availability(),
             Availability::Unavailable(_)
         ));
         assert!(
@@ -464,13 +464,13 @@ fn published_devices_restore_cloud_control_without_a_local_gateway() {
         until(|| c.cloud.lock().unwrap().homes > 0).await;
         async_io::Timer::after(Duration::from_millis(100)).await;
         let one = function(&c.context.registry, "one", "main");
-        assert_eq!(one.snapshot().availability, Availability::Available);
-        assert_eq!(one.snapshot().power, Power::Off);
+        assert_eq!(one.snapshot().availability(), Availability::Available);
+        assert_eq!(one.snapshot().power(), Some(Power::Off));
         one.execute(Command::On).await.unwrap();
         let usb = function(&c.context.registry, "multi", "usb");
         usb.execute(Command::Off).await.unwrap();
-        assert_eq!(one.snapshot().power, Power::On);
-        assert_eq!(usb.snapshot().power, Power::Off);
+        assert_eq!(one.snapshot().power(), Some(Power::On));
+        assert_eq!(usb.snapshot().power(), Some(Power::Off));
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
         assert_eq!(
             c.store
@@ -493,7 +493,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
         block_on(rig.run(|c| async move {
             cloud_ready(&c, &["one"]).await;
             let one = function(&c.context.registry, "one", "main");
-            until(|| one.snapshot().power == Power::Off).await;
+            until(|| one.snapshot().power() == Some(Power::Off)).await;
             c.clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -550,7 +550,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
                 future::yield_now().await;
             };
             let current = current_physical.function("main").unwrap();
-            until(|| current.snapshot().power == Power::On).await;
+            until(|| current.snapshot().power() == Some(Power::On)).await;
             assert!(c.context.cloud_candidate("one", true).is_ok());
             // The sent light receipt is still owned by the original request;
             // release it only after the replacement instance is serving.
@@ -574,8 +574,8 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
             })
             .await;
             assert!(c.context.cloud_candidate("one", true).is_ok());
-            assert_eq!(current.snapshot().availability, Availability::Available);
-            assert_eq!(current.snapshot().power, Power::On);
+            assert_eq!(current.snapshot().availability(), Availability::Available);
+            assert_eq!(current.snapshot().power(), Some(Power::On));
             assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 1);
             current.execute(Command::Off).await.unwrap();
             let writes = &c.cloud.lock().unwrap().numeric_writes;

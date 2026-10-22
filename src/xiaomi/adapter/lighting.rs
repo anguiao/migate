@@ -17,11 +17,7 @@ pub(super) fn key(id: &str, binding: PropertyBinding) -> PropertyKey {
     (id.into(), binding.siid, binding.piid)
 }
 pub(super) fn bindings(function: &ParsedFunction) -> Vec<PropertyBinding> {
-    let mut values = vec![function.power()];
-    if let Some(light) = function.lighting() {
-        values.extend(light.bindings());
-    }
-    values
+    function.bindings()
 }
 pub(super) fn decode(
     function: &ParsedFunction,
@@ -29,7 +25,7 @@ pub(super) fn decode(
     value: &Value,
 ) -> Result<LightPatch, CapabilityError> {
     let mut patch = LightPatch::default();
-    if binding == function.power() {
+    if Some(binding) == function.power() {
         patch.power = Some(
             value
                 .as_bool()
@@ -77,10 +73,13 @@ pub(super) fn encode(
         .unwrap();
     let light = function.lighting().unwrap();
     let snapshot = work.physical().function(id).unwrap().snapshot();
-    let state = snapshot.lighting.unwrap();
+    let state = snapshot.lighting().unwrap();
     let mut values = Vec::new();
     if let Some(power) = power {
-        values.push((function.power(), json!(power)));
+        values.push((
+            function.power().expect("light functions have power"),
+            json!(power),
+        ));
     }
     let mut mode = None;
     if let Some(target) = target {
@@ -131,8 +130,8 @@ pub(super) fn encode(
         if work.observations.has_unconfirmed_write(id, *binding) {
             return true;
         }
-        let current = if *binding == function.power() {
-            snapshot.power.value().map(Value::Bool)
+        let current = if Some(*binding) == function.power() {
+            snapshot.power().and_then(Power::value).map(Value::Bool)
         } else if light
             .brightness()
             .is_some_and(|brightness| brightness.property() == *binding)
@@ -188,7 +187,7 @@ pub(super) fn refresh_missing_active(
         .function(id)
         .unwrap()
         .snapshot()
-        .lighting
+        .lighting()
         .unwrap();
     let light = work
         .native
@@ -236,10 +235,10 @@ pub(super) fn observe(
     let mut patch = decode(description, binding, value)?;
     let function = work.physical().function(id).unwrap();
     let before = function.snapshot();
-    let state = before.lighting.unwrap();
+    let state = before.lighting().unwrap();
     let changed = patch
         .power
-        .is_some_and(|power| before.power.value() != Some(power))
+        .is_some_and(|power| before.power().and_then(Power::value) != Some(power))
         || patch
             .brightness_percent
             .is_some_and(|value| state.brightness_percent != Some(value))
@@ -439,13 +438,13 @@ impl Context {
                 }
                 let function = physical.function("main")?;
                 let snapshot = function.snapshot();
-                let light = snapshot.lighting?;
+                let light = snapshot.lighting()?;
                 let description = function.description();
                 let supports_color =
                     description.supports_color_temperature() || description.supports_rgb();
                 Some(Member {
                     did,
-                    power: snapshot.power,
+                    power: snapshot.power()?,
                     lighting: light,
                     supports_color,
                 })

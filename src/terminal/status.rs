@@ -244,14 +244,39 @@ fn format_device(status: &DeviceStatus) -> String {
     } else {
         paths.join(", ")
     };
+    let read_paths = status
+        .usable_read_paths
+        .iter()
+        .copied()
+        .map(path)
+        .collect::<Vec<_>>();
+    let read_paths = if read_paths.is_empty() {
+        "none".into()
+    } else {
+        read_paths.join(", ")
+    };
+    let physical_online = match status.physical_online {
+        None => "unknown",
+        Some(true) => "online",
+        Some(false) => "offline",
+    };
     let mut report = format!(
-        "{} routing:\n  Usable control paths: {paths}.\n  Selected control: {}.\n  Notification source: {}.",
+        "{} routing:\n  Usable control paths: {paths}.\n  Selected control: {}.\n  Usable read paths: {read_paths}.\n  Selected read: {}.\n  Physical online: {physical_online}.\n  Notification source: {}.",
         status.did,
         status.selected_control.map(path).unwrap_or("none"),
+        status.selected_read.map(path).unwrap_or("none"),
         status.notification_source.map(path).unwrap_or("none")
     );
+    if status.read_only {
+        report.push_str("\n  Control: read-only.");
+    }
     if let Some(reason) = &status.unavailable_reason {
-        let _ = write!(report, "\n  Control unavailable: {reason}.");
+        let label = if status.read_only {
+            "Read unavailable"
+        } else {
+            "Control unavailable"
+        };
+        let _ = write!(report, "\n  {label}: {reason}.");
     }
     if let Some(reason) = &status.sync_limited_reason {
         let _ = write!(report, "\n  State synchronization limited: {reason}.");
@@ -398,7 +423,7 @@ fn format_certificate(validity: Option<CertificateValidity>, now: i64) -> String
     }
 }
 
-fn timestamp(value: i64) -> String {
+pub(super) fn timestamp(value: i64) -> String {
     OffsetDateTime::from_unix_timestamp(value)
         .expect("validated diagnostic timestamp")
         .format(&Rfc3339)

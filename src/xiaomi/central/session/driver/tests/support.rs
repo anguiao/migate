@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::Value;
 
 struct ControlledIo {
     budget: Rc<Cell<usize>>,
@@ -191,5 +192,33 @@ impl SessionDriver {
         driver.output.clear();
         driver.ready = true;
         (handle, driver)
+    }
+}
+
+pub(super) fn read_value_guarded<F: FnOnce(RequestOutcome<Value>) + 'static>(
+    handle: &SessionHandle,
+    did: &str,
+    binding: PropertyBinding,
+    timeout: Duration,
+    hooks: SendHooks,
+    on_result: F,
+) -> impl std::future::Future<Output = RequestOutcome<Value>> + use<F> {
+    let read = handle.read_property_observation_with_timeout_guarded(
+        did,
+        binding,
+        timeout,
+        hooks,
+        move |outcome| on_result(value_outcome(outcome)),
+    );
+    async move { value_outcome(read.await) }
+}
+
+fn value_outcome(
+    outcome: RequestOutcome<crate::xiaomi::property::PropertyReading>,
+) -> RequestOutcome<Value> {
+    RequestOutcome {
+        result: outcome.result.map(|reading| reading.value),
+        stage: outcome.stage,
+        timeout: outcome.timeout,
     }
 }

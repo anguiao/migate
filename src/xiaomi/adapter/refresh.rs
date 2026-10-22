@@ -357,12 +357,10 @@ fn read_one(
     async move {
         let mut cleanup = cleanup;
         let did = work.key.id.clone();
-        let lighting = work
-            .native
-            .device()
-            .functions()
-            .iter()
-            .any(|function| function.id() == read.id && function.lighting().is_some());
+        let ordered = work.native.device().functions().iter().any(|function| {
+            function.id() == read.id
+                && (function.lighting().is_some() || function.measurement().is_some())
+        });
         let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
         let reading = async {
             if flight.life.is_closed() || !flight.current(&context, &did) {
@@ -386,7 +384,7 @@ fn read_one(
                     let result_handle = handle.clone();
                     let result_flight = flight.clone();
                     let outcome = handle
-                        .read_property_value_with_timeout_guarded(
+                        .read_property_observation_with_timeout_guarded(
                             &did,
                             read.binding,
                             Duration::from_secs(6),
@@ -427,11 +425,13 @@ fn read_one(
                                     && result_flight.current(&result_context, &observing.key.id)
                                     && let Ok(value) = outcome.result
                                 {
-                                    *observed_validation.borrow_mut() = observing.observe_read(
+                                    *observed_validation.borrow_mut() = observing.observe_read_at(
                                         &observed_id,
                                         read.binding,
                                         &observed_stamp,
-                                        &value,
+                                        &value.value,
+                                        value.update_time,
+                                        result_context.clock.unix_now(),
                                     );
                                     if observed_validation.borrow().is_ok() {
                                         result_context.refresh_group_states(&observing.key.id);
@@ -466,14 +466,20 @@ fn read_one(
                 ControlPath::Cloud(credentials) => {
                     match context
                         .cloud
-                        .read_property_value(&credentials.access_token, &did, read.binding)
+                        .read_property_observation(&credentials.access_token, &did, read.binding)
                         .await
                     {
-                        Ok(value) => {
+                        Ok(reading) => {
                             let mut validation = Ok(());
                             if !work.life.is_closed() && flight.current(&context, &did) {
-                                validation =
-                                    work.observe_read(&read.id, read.binding, &stamp, &value);
+                                validation = work.observe_read_at(
+                                    &read.id,
+                                    read.binding,
+                                    &stamp,
+                                    &reading.value,
+                                    reading.update_time,
+                                    context.clock.unix_now(),
+                                );
                                 if validation.is_ok() {
                                     context.refresh_group_states(&did);
                                 }
@@ -521,7 +527,7 @@ fn read_one(
             let result = result?;
             // A stale failure cannot consume demand queued after that read began.
             if !matches!(result, ReadResult::Failed(_))
-                || !lighting
+                || !ordered
                 || work
                     .observations
                     .read_is_current(&work, &read.id, read.binding, &stamp)

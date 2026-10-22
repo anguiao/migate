@@ -2,11 +2,11 @@ mod context;
 pub(crate) use context::Context;
 use context::View;
 
-use super::{AuthStatus, current_time};
+use super::{AuthStatus, current_time, status::timestamp};
 use crate::{
     RuntimeError,
     configuration::GroupRelation,
-    device::{Availability, Capability, Command, DeviceKey, LightMode, Power},
+    device::{Availability, Capability, Command, CommandError, DeviceKey, LightMode, Power},
     storage::StorageError,
 };
 pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID [channel], off DID [channel], help\nUse list to find stable channel keys. A single-channel device may omit channel; channel is required for a multi-channel device.";
@@ -124,6 +124,8 @@ fn capabilities(description: &crate::device::FunctionDescription) -> String {
                 format!("temperature {}–{} K", interval.min(), interval.max())
             }
             Capability::ColorRgb => "RGB".into(),
+            Capability::Temperature => "temperature".into(),
+            Capability::Humidity => "humidity".into(),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -175,57 +177,71 @@ fn render(view: &View, did: Option<&str>) -> String {
             let id = &function.function_key().id;
             let label = &function.description().label;
             let snapshot = function.snapshot();
-            let power = match snapshot.power {
-                Power::Unknown => "unknown",
-                Power::On => "on",
-                Power::Off => "off",
-            };
-            lines.push(format!("  {id} ({label}): {power}"));
-            if let Some(light) = snapshot.lighting {
-                let description = function.description();
-                let capabilities = capabilities(description);
-                lines.push(format!("    Capabilities: {capabilities}."));
-                let mut values = Vec::new();
-                if description.supports_brightness() {
-                    values.push(format!(
-                        "Brightness: {}",
-                        light
-                            .brightness_percent
-                            .map_or_else(|| "unknown".into(), |value| format!("{value}%"))
-                    ));
+            match snapshot {
+                crate::device::FunctionSnapshot::Outlet { power, .. } => {
+                    lines.push(format!("  {id} ({label}): {}", power_text(power)));
                 }
-                if description.supports_color_temperature() {
-                    values.push(format!(
-                        "temperature: {}",
-                        light
-                            .temperature_kelvin
-                            .map_or_else(|| "unknown".into(), |value| format!("{value} K"))
-                    ));
-                }
-                if description.supports_rgb() {
-                    values.push(format!(
-                        "RGB: {}",
-                        light.color.map_or_else(
-                            || "unknown".into(),
-                            |value| format!(
-                                "#{:02X}{:02X}{:02X}",
-                                value.red, value.green, value.blue
+                crate::device::FunctionSnapshot::Light {
+                    power, lighting, ..
+                } => {
+                    lines.push(format!("  {id} ({label}): {}", power_text(power)));
+                    let description = function.description();
+                    let capabilities = capabilities(description);
+                    lines.push(format!("    Capabilities: {capabilities}."));
+                    let mut values = Vec::new();
+                    if description.supports_brightness() {
+                        values.push(format!(
+                            "Brightness: {}",
+                            lighting
+                                .brightness_percent
+                                .map_or_else(|| "unknown".into(), |value| format!("{value}%"))
+                        ));
+                    }
+                    if description.supports_color_temperature() {
+                        values.push(format!(
+                            "temperature: {}",
+                            lighting
+                                .temperature_kelvin
+                                .map_or_else(|| "unknown".into(), |value| format!("{value} K"))
+                        ));
+                    }
+                    if description.supports_rgb() {
+                        values.push(format!(
+                            "RGB: {}",
+                            lighting.color.map_or_else(
+                                || "unknown".into(),
+                                |value| format!(
+                                    "#{:02X}{:02X}{:02X}",
+                                    value.red, value.green, value.blue
+                                )
                             )
-                        )
+                        ));
+                    }
+                    if description.supports_color_temperature() || description.supports_rgb() {
+                        values.push(format!(
+                            "mode: {}",
+                            match lighting.mode {
+                                None => "unknown",
+                                Some(LightMode::Temperature) => "temperature",
+                                Some(LightMode::Rgb) => "RGB",
+                            }
+                        ));
+                    }
+                    if !values.is_empty() {
+                        lines.push(format!("    {}.", values.join("; ")));
+                    }
+                }
+                crate::device::FunctionSnapshot::Temperature { measurement, .. } => {
+                    lines.push(format!(
+                        "  {id} ({label}): {}",
+                        measurement_text(measurement, "°C")
                     ));
                 }
-                if description.supports_color_temperature() || description.supports_rgb() {
-                    values.push(format!(
-                        "mode: {}",
-                        match light.mode {
-                            None => "unknown",
-                            Some(LightMode::Temperature) => "temperature",
-                            Some(LightMode::Rgb) => "RGB",
-                        }
+                crate::device::FunctionSnapshot::Humidity { measurement, .. } => {
+                    lines.push(format!(
+                        "  {id} ({label}): {}",
+                        measurement_text(measurement, "%")
                     ));
-                }
-                if !values.is_empty() {
-                    lines.push(format!("    {}.", values.join("; ")));
                 }
             }
         }
@@ -235,6 +251,27 @@ fn render(view: &View, did: Option<&str>) -> String {
     } else {
         lines.join("\n")
     }
+}
+
+fn power_text(power: Power) -> &'static str {
+    match power {
+        Power::Unknown => "unknown",
+        Power::On => "on",
+        Power::Off => "off",
+    }
+}
+
+fn measurement_text(measurement: crate::device::MeasurementSnapshot, unit: &str) -> String {
+    let value = measurement
+        .value
+        .map_or_else(|| "unknown".into(), |value| format!("{value:.2} {unit}"));
+    let source = measurement
+        .source_time
+        .map_or_else(|| "unknown".into(), |value| value.to_string());
+    let received = measurement
+        .received_at
+        .map_or_else(|| "unknown".into(), timestamp);
+    format!("{value}; upstream time {source}; received at {received}")
 }
 
 impl View {
@@ -294,6 +331,14 @@ impl View {
                 let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
                     return Ok(Some(invalid(registry, status, now, "Unknown device DID.")));
                 };
+                if physical
+                    .functions()
+                    .iter()
+                    .all(|function| function.description().is_read_only())
+                {
+                    log::info!("terminal {did} {verb}: unsupported read-only device");
+                    return Ok(Some(format!("{did}: {}", CommandError::Unsupported)));
+                }
                 let function = if let Some(channel) = channel.first() {
                     physical.function(channel)
                 } else if let [function] = physical.functions() {

@@ -75,7 +75,7 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
         c.cloud.lock().unwrap().property_code = -704_012_904;
         assert!(light.execute(Command::Off).await.is_err());
         assert!(matches!(
-            light.snapshot().availability,
+            light.snapshot().availability(),
             Availability::Unavailable(_)
         ));
 
@@ -96,7 +96,7 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
         c.cloud.lock().unwrap().catalog_groups[0]["extra"]["member_list"]["status"] = json!("1");
         c.context.request_sync();
         until(|| c.context.relations.borrow().snapshot()[0].error.is_none()).await;
-        assert_eq!(light.snapshot().availability, Availability::Available);
+        assert_eq!(light.snapshot().availability(), Availability::Available);
         light.execute(Command::Off).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 2);
     }));
@@ -275,14 +275,14 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
             .unwrap();
         assert_eq!(first.physical().label(), "Native group");
         let light = first.physical().functions()[0].clone();
-        assert_eq!(light.snapshot().power, Power::Unknown);
-        let state = light.snapshot().lighting.unwrap();
+        assert_eq!(light.snapshot().power(), Some(Power::Unknown));
+        let state = light.snapshot().lighting().unwrap();
         assert_eq!(state.brightness_percent, None);
         assert_eq!(state.temperature_kelvin, None);
         assert_eq!(state.color, None);
         assert_eq!(state.mode, None);
         light.execute(Command::On).await.unwrap();
-        assert_eq!(light.snapshot().power, Power::Unknown);
+        assert_eq!(light.snapshot().power(), Some(Power::Unknown));
         assert!(
             c.cloud
                 .lock()
@@ -350,10 +350,10 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
                 .iter()
                 .find(|function| function.lighting().is_some())
                 .unwrap();
-            (function.description().id.clone(), function.power())
+            (function.description().id.clone(), function.power().unwrap())
         };
         let light = function(&c.context.registry, "group-1", &id);
-        until(|| light.snapshot().power == Power::Off).await;
+        until(|| light.snapshot().power() == Some(Power::Off)).await;
         let key = ("group-1".to_string(), power.siid, power.piid);
         let reads = || {
             c.cloud
@@ -379,7 +379,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
         until(|| reads() == before + 1).await;
         light.execute(Command::On).await.unwrap();
         // The accepted target must not become own state before a real read.
-        assert_eq!(light.snapshot().power, Power::Off);
+        assert_eq!(light.snapshot().power(), Some(Power::Off));
         // The follow-up read sees a different actual value than the in-flight one.
         c.cloud
             .lock()
@@ -389,10 +389,10 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
         release_read.send(()).unwrap();
         until(|| reads() == before + 2).await;
         // A read started before the write receipt cannot confirm its result.
-        assert_eq!(light.snapshot().power, Power::Off);
+        assert_eq!(light.snapshot().power(), Some(Power::Off));
         release_read.send(()).unwrap();
         until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
-        assert_eq!(light.snapshot().power, Power::Off);
+        assert_eq!(light.snapshot().power(), Some(Power::Off));
         let write = c
             .cloud
             .lock()
@@ -425,7 +425,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
         let attempts = reads();
         light.execute(Command::On).await.unwrap();
         until(|| reads() > attempts && !work.refresh.borrow().snapshot().problems.is_empty()).await;
-        assert_eq!(light.snapshot().power, Power::Off);
+        assert_eq!(light.snapshot().power(), Some(Power::Off));
         c.context
             .priority
             .set(super::routing::PathPriority::LocalFirst);
@@ -474,12 +474,12 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
             let bindings = light.lighting().unwrap();
             (
                 light.description().id.clone(),
-                light.power(),
+                light.power().unwrap(),
                 bindings.brightness().as_ref().unwrap().property(),
             )
         };
         let light = function(&c.context.registry, "group-1", &id);
-        until(|| light.snapshot().power == Power::Off).await;
+        until(|| light.snapshot().power() == Some(Power::Off)).await;
         let target =
             || crate::device::LightTarget::brightness(Some(true), 70.0).expect("valid test target");
         // Per-property results: power accepted, brightness rejected. The whole
@@ -490,7 +490,7 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
         );
         let action = light.begin_light_action(target(), true).unwrap();
         assert!(action.accepted().await.is_err());
-        assert_eq!(light.snapshot().power, Power::Off);
+        assert_eq!(light.snapshot().power(), Some(Power::Off));
         {
             let cloud = c.cloud.lock().unwrap();
             let (items, _) = cloud
@@ -530,10 +530,10 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
         }
         let action = light.begin_light_action(target(), true).unwrap();
         action.accepted().await.unwrap();
-        assert_eq!(light.snapshot().power, Power::Off);
+        assert_eq!(light.snapshot().power(), Some(Power::Off));
         release.send(()).unwrap();
         release.send(()).unwrap();
-        until(|| light.snapshot().power == Power::On).await;
+        until(|| light.snapshot().power() == Some(Power::On)).await;
     }));
 }
 
@@ -578,7 +578,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
             )
         };
         let light = function(&c.context.registry, "group-1", &id);
-        until(|| light.snapshot().power == Power::On).await;
+        until(|| light.snapshot().power() == Some(Power::On)).await;
         // The record stays present, its own online turns false and the member
         // list becomes invalid: the last confirmed relation is retained.
         {
@@ -623,16 +623,16 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
         }
         assert!(c.context.control_path("group-1").is_none());
         assert!(matches!(
-            light.snapshot().availability,
+            light.snapshot().availability(),
             Availability::Unavailable(_)
         ));
-        assert_eq!(light.snapshot().power, Power::Unknown);
+        assert_eq!(light.snapshot().power(), Some(Power::Unknown));
         // A later valid own online flag with the same failed membership keeps
         // the relation and refreshes the actual fields.
         c.cloud.lock().unwrap().catalog_groups[0]["isOnline"] = json!(true);
         c.context.request_sync();
-        until(|| light.snapshot().power == Power::On).await;
-        assert_eq!(light.snapshot().availability, Availability::Available);
+        until(|| light.snapshot().power() == Some(Power::On)).await;
+        assert_eq!(light.snapshot().availability(), Availability::Available);
     }));
 }
 
@@ -712,7 +712,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
                     .clone()
             };
             let light = function(&control.context.registry, "group-p", &id);
-            until(|| light.snapshot().power == Power::On).await;
+            until(|| light.snapshot().power() == Some(Power::On)).await;
             until(|| control.context.active_notification("group-p").is_some()).await;
             let before = peer.count("subscribe", "group-p", 2);
             let mut virtual_group = group.clone();
@@ -729,13 +729,13 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
                     .is_none()
             })
             .await;
-            assert_eq!(light.snapshot().power, Power::Unknown);
+            assert_eq!(light.snapshot().power(), Some(Power::Unknown));
             control.cloud.lock().unwrap().catalog_groups = vec![group.clone()];
             control.context.request_sync();
             until(|| !control.context.is_virtual_group("group-p")).await;
             until(|| peer.count("subscribe", "group-p", 2) > before).await;
             until(|| control.context.active_notification("group-p").is_some()).await;
-            until(|| light.snapshot().power == Power::On).await;
+            until(|| light.snapshot().power() == Some(Power::On)).await;
             // Withdraw the confirmed relation in a complete catalog.
             control.cloud.lock().unwrap().catalog_groups = vec![];
             control.context.request_sync();
@@ -749,10 +749,10 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             .await;
             // The retained view is permanently unavailable and cleared.
             assert!(matches!(
-                light.snapshot().availability,
+                light.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
-            assert_eq!(light.snapshot().power, Power::Unknown);
+            assert_eq!(light.snapshot().power(), Some(Power::Unknown));
             // The own UNSUBSCRIBE is an actual wire packet: wait for it.
             until(|| {
                 peer.state
@@ -792,10 +792,10 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
                 json!(true),
                 false,
             );
-            until(|| refreshed.snapshot().power == Power::On).await;
-            assert_eq!(light.snapshot().power, Power::Unknown);
+            until(|| refreshed.snapshot().power() == Some(Power::On)).await;
+            assert_eq!(light.snapshot().power(), Some(Power::Unknown));
             assert!(matches!(
-                light.snapshot().availability,
+                light.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
         })
@@ -874,7 +874,7 @@ async fn terminal_command(
 
 #[test]
 fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state() {
-    let rig = Rig::new(false, &["one", "two"]);
+    let rig = Rig::new(false, &["one", "two"]).with_stall_timeout(Duration::from_secs(15));
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/group3-instance.json"
     ))
@@ -1107,7 +1107,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                     .iter()
                     .find(|function| function.lighting().is_some())
                     .unwrap();
-                (light.description().id.clone(), light.power())
+                (light.description().id.clone(), light.power().unwrap())
             };
             let light = function(&c.context.registry, "group-1", &id);
             let action = light
@@ -1292,7 +1292,6 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 list.contains("Native group (virtual): members one."),
                 "{list}"
             );
-
             Ok::<(), crate::RuntimeError>(())
         };
         future::or(runtime, assertions).await.unwrap();
@@ -1622,7 +1621,10 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
             "the recovery graph applies the persisted revocation"
         );
         let member = restored.context.registry.get(&one).unwrap();
-        assert_eq!(member.functions()[0].snapshot().power, Power::Unknown);
+        assert_eq!(
+            member.functions()[0].snapshot().power(),
+            Some(Power::Unknown)
+        );
         let reopened = crate::app::App::open(
             crate::xiaomi::adapter::SourceHandle(restored.context.clone()),
             store.clone(),
@@ -1818,7 +1820,10 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             );
         }
         let member = restored.context.registry.get(&one).unwrap();
-        assert_eq!(member.functions()[0].snapshot().power, Power::Unknown);
+        assert_eq!(
+            member.functions()[0].snapshot().power(),
+            Some(Power::Unknown)
+        );
         let opened = crate::app::App::open(
             crate::xiaomi::adapter::SourceHandle(restored.context.clone()),
             store.clone(),
@@ -1951,12 +1956,12 @@ fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
                     .all(|(did, _, _)| did != "group-1")
             );
             until(|| match dimension {
-                None => light.snapshot().power == Power::Off,
+                None => light.snapshot().power() == Some(Power::Off),
                 Some(crate::device::LightDimension::Brightness) => {
-                    light.snapshot().lighting.unwrap().brightness_percent == Some(60.0)
+                    light.snapshot().lighting().unwrap().brightness_percent == Some(60.0)
                 }
                 Some(crate::device::LightDimension::Color) => {
-                    let state = light.snapshot().lighting.unwrap();
+                    let state = light.snapshot().lighting().unwrap();
                     state.temperature_kelvin == Some(3800)
                         && state.mode == Some(crate::device::LightMode::Temperature)
                 }

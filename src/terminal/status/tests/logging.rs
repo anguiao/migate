@@ -63,8 +63,12 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
     status.update_adapter(adapter.clone());
     adapter.devices.push(DeviceStatus {
         did: "one".into(),
+        read_only: false,
         usable_control_paths: vec![PathKind::Local],
         selected_control: Some(PathKind::Local),
+        usable_read_paths: Vec::new(),
+        selected_read: None,
+        physical_online: None,
         notification_source: Some(PathKind::Local),
         unavailable_reason: None,
         sync_limited_reason: None,

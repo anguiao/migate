@@ -173,7 +173,7 @@ fn an_unsent_pending_write_reselects_cloud_and_submits_the_absolute_target_once(
                 until(|| wire.polls.get() > 0).await;
                 c.context.local_outcome(&handle, &response_timeout());
                 wire.allow(usize::MAX);
-                assert_eq!(command.await.unwrap().power, Power::On);
+                assert_eq!(command.await.unwrap().power(), Some(Power::On));
                 assert!(wire.written.borrow().is_empty());
                 let cloud = c.cloud.lock().unwrap();
                 assert_eq!(cloud.property_writes.len(), 1);
@@ -267,8 +267,8 @@ fn write_observation_capture_occurs_at_first_socket_bytes() {
                     .await;
                     wire.accept();
                     assert_eq!(
-                        command.await.unwrap().power,
-                        if after_send { Power::Off } else { Power::On }
+                        command.await.unwrap().power(),
+                        Some(if after_send { Power::Off } else { Power::On })
                     );
                     assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 0);
                 },
@@ -384,7 +384,7 @@ fn a_cancelled_zero_byte_refresh_keeps_one_demand_until_shared_recovery() {
                     })
                     .await;
                     wire.reply(json!({"value":true}));
-                    until(|| one.snapshot().power == Power::On).await;
+                    until(|| one.snapshot().power() == Some(Power::On)).await;
                     c.clock.advance(Duration::from_secs(3));
                     for _ in 0..20 {
                         future::yield_now().await;
@@ -442,8 +442,8 @@ fn dropping_a_zero_byte_refresh_task_retires_its_operation_and_returns_the_deman
                 assert_eq!(
                     function(&c.context.registry, "one", "main")
                         .snapshot()
-                        .power,
-                    Power::Unknown
+                        .power(),
+                    Some(Power::Unknown)
                 );
             },
         )
@@ -519,9 +519,9 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
                 }));
                 action.accepted().await.unwrap();
                 let snapshot = light.snapshot();
-                assert_eq!(snapshot.power, Power::Off);
+                assert_eq!(snapshot.power(), Some(Power::Off));
                 assert_eq!(
-                    snapshot.lighting.unwrap().mode,
+                    snapshot.lighting().unwrap().mode,
                     Some(LightMode::Temperature)
                 );
             },
@@ -590,7 +590,7 @@ fn latest_tick_withdraws_unsent_transport_frame_and_preserves_linked_power() {
                 wire.reply(json!({"result":result}));
                 action.accepted().await.unwrap();
                 action.ended().await.unwrap();
-                assert_eq!(light.snapshot().power, Power::Off);
+                assert_eq!(light.snapshot().power(), Some(Power::Off));
             };
             future::or(driving, commanding).await;
         }));
@@ -677,7 +677,7 @@ fn an_unsent_light_target_is_not_own_feedback() {
                     CommandError::Superseded
                 );
                 assert_eq!(
-                    light.snapshot().lighting.unwrap().brightness_percent,
+                    light.snapshot().lighting().unwrap().brightness_percent,
                     Some(60.0)
                 );
                 wire.allow(usize::MAX);

@@ -31,6 +31,14 @@ enum FixedKind {
         profile: LightProfileKind,
         mired: Option<(u16, u16)>,
     },
+    Temperature {
+        min: i16,
+        max: i16,
+    },
+    Humidity {
+        min: u16,
+        max: u16,
+    },
 }
 
 /// Canonical shape of the functions as they will be published. The
@@ -48,6 +56,16 @@ pub(crate) fn fixed_shape(functions: &[FunctionDescription]) -> FixedShape {
                         profile: profile.kind(),
                         mired: profile.temperature_interval().map(units::mired_bounds),
                     },
+                    FunctionKind::Temperature(range) => {
+                        let (min, max) = range
+                            .temperature_bounds()
+                            .expect("validated temperature range");
+                        FixedKind::Temperature { min, max }
+                    }
+                    FunctionKind::Humidity(range) => {
+                        let (min, max) = range.humidity_bounds().expect("validated humidity range");
+                        FixedKind::Humidity { min, max }
+                    }
                 },
                 child_label: multiple.then(|| function.label.clone()),
             })

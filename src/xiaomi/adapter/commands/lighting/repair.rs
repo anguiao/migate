@@ -148,8 +148,8 @@ async fn member_task(
                 .function("main")
                 .unwrap()
                 .snapshot()
-                .power
-                .value()
+                .power()
+                .and_then(crate::device::Power::value)
                 != Some(true)
             {
                 return Err(CommandError::Rejected("member is not confirmed on".into()));

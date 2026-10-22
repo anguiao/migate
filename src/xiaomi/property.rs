@@ -1,6 +1,31 @@
 use super::capability::PropertyBinding;
 use serde_json::Value;
 
+/// One decoded real property value and any upstream attribute update time.
+/// The time is preserved exactly as supplied; it is diagnostic only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PropertyReading {
+    pub value: Value,
+    pub update_time: Option<i64>,
+}
+
+/// A supplied upstream attribute update time from a read result or
+/// notification. Only the explicit attribute field is accepted; message
+/// timestamps and transport completion time are never substituted here.
+pub(crate) fn update_time(value: &Value) -> Option<i64> {
+    value.as_object().and_then(update_time_map)
+}
+
+pub(crate) fn update_time_map(map: &serde_json::Map<String, Value>) -> Option<i64> {
+    map.get("updateTime").and_then(number)
+}
+
+fn number(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+}
+
 /// Results remain in request order, including confirmed items from an invalid batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PropertyResults<T, E> {

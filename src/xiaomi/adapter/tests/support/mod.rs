@@ -75,6 +75,19 @@ pub(super) fn force_unavailable(context: &super::super::state::Context, did: &st
     context.problem(did, Some(reason));
 }
 
+pub(super) fn sensor_native(did: &str) -> NativeDescription {
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/miot/miaomiaoce-t6.json"
+    ))
+    .unwrap();
+    NativeDescription::new(
+        "miaomiaoce.sensor_ht.t6".into(),
+        instance["type"].as_str().unwrap().into(),
+        parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap(),
+    )
+    .unwrap()
+}
+
 pub(super) fn cached(_uid: &str, did: &str, multi: bool) -> NativeDescription {
     let instance: Value = serde_json::from_str(if multi {
         include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
@@ -249,7 +262,7 @@ pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
                         && physical
                             .functions()
                             .iter()
-                            .all(|function| function.snapshot().power != Power::Unknown)
+                            .all(|function| function.snapshot().power() != Some(Power::Unknown))
                         && c.context
                             .live
                             .borrow()
@@ -339,8 +352,12 @@ pub(super) fn device_with_temperature_grid(
         .unwrap()
     });
     let lighting = LightBindings::new(brightness, Some(temperature), color, mode).unwrap();
-    let function =
-        ParsedFunction::light(function.id(), function.label(), function.power(), lighting);
+    let function = ParsedFunction::light(
+        function.id(),
+        function.label(),
+        function.power().expect("light power"),
+        lighting,
+    );
     device_with_functions(device, vec![function])
 }
 
@@ -373,7 +390,50 @@ pub(super) fn device_with_brightness_format(
         .unwrap()
     });
     let lighting = LightBindings::new(brightness, temperature, color, mode).unwrap();
-    let function =
-        ParsedFunction::light(function.id(), function.label(), function.power(), lighting);
+    let function = ParsedFunction::light(
+        function.id(),
+        function.label(),
+        function.power().expect("light power"),
+        lighting,
+    );
     device_with_functions(device, vec![function])
+}
+
+/// Test shorthand for source-boundary observations without a supplied update
+/// time. Production callers always use the explicit `_at` APIs.
+pub(super) trait DeviceWorkTestExt {
+    fn notify_value(
+        &self,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        value: &Value,
+        cached_report: bool,
+        takeover: bool,
+    ) -> bool;
+    fn observe_read(
+        &self,
+        id: &str,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        stamp: &crate::xiaomi::adapter::observations::ReadStamp,
+        value: &Value,
+    ) -> Result<(), crate::xiaomi::capability::CapabilityError>;
+}
+impl DeviceWorkTestExt for super::super::work::DeviceWork {
+    fn notify_value(
+        &self,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        value: &Value,
+        cached_report: bool,
+        takeover: bool,
+    ) -> bool {
+        self.notify_value_at(binding, value, None, cached_report, takeover, 0)
+    }
+    fn observe_read(
+        &self,
+        id: &str,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        stamp: &crate::xiaomi::adapter::observations::ReadStamp,
+        value: &Value,
+    ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
+        self.observe_read_at(id, binding, stamp, value, None, 0)
+    }
 }

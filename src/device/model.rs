@@ -29,6 +29,8 @@ pub enum Capability {
     Brightness,
     ColorTemperature(TemperatureInterval),
     ColorRgb,
+    Temperature,
+    Humidity,
 }
 
 /// The four standard light profiles without their interval, for comparisons
@@ -85,6 +87,8 @@ impl LightProfile {
 pub enum FunctionKind {
     Outlet,
     Light(LightProfile),
+    Temperature(MeasurementRange),
+    Humidity(MeasurementRange),
 }
 impl FunctionKind {
     pub fn is_light(self) -> bool {
@@ -93,12 +97,23 @@ impl FunctionKind {
     pub fn light_profile(self) -> Option<LightProfile> {
         match self {
             Self::Light(profile) => Some(profile),
-            Self::Outlet => None,
+            Self::Outlet | Self::Temperature(_) | Self::Humidity(_) => None,
+        }
+    }
+    pub fn is_measurement(self) -> bool {
+        matches!(self, Self::Temperature(_) | Self::Humidity(_))
+    }
+    pub fn measurement_range(self) -> Option<MeasurementRange> {
+        match self {
+            Self::Temperature(range) | Self::Humidity(range) => Some(range),
+            Self::Outlet | Self::Light(_) => None,
         }
     }
     /// Derived only for diagnostics.
     pub fn capabilities(self) -> Vec<Capability> {
         match self {
+            Self::Temperature(_) => vec![Capability::Temperature],
+            Self::Humidity(_) => vec![Capability::Humidity],
             Self::Outlet => vec![Capability::OnOff],
             Self::Light(profile) => {
                 let mut capabilities = vec![Capability::OnOff];
@@ -150,6 +165,15 @@ impl FunctionDescription {
         self.kind
             .light_profile()
             .and_then(LightProfile::inferred_color_mode)
+    }
+    pub fn is_measurement(&self) -> bool {
+        self.kind.is_measurement()
+    }
+    pub fn is_read_only(&self) -> bool {
+        self.is_measurement()
+    }
+    pub fn measurement_range(&self) -> Option<MeasurementRange> {
+        self.kind.measurement_range()
     }
 }
 
@@ -241,12 +265,137 @@ impl Availability {
     }
 }
 
+/// A finite native measurement interval. Values are in the source unit.
+#[derive(Clone, Copy, Debug)]
+pub struct MeasurementRange {
+    min: f64,
+    max: f64,
+}
+impl MeasurementRange {
+    pub fn new(min: f64, max: f64) -> Result<Self, RangeError> {
+        if !min.is_finite() || !max.is_finite() || min >= max {
+            return Err(RangeError::Empty);
+        }
+        Ok(Self { min, max })
+    }
+    pub fn min(self) -> f64 {
+        self.min
+    }
+    pub fn max(self) -> f64 {
+        self.max
+    }
+    pub fn contains(self, value: f64) -> bool {
+        value.is_finite() && (self.min..=self.max).contains(&value)
+    }
+    /// The standard Matter temperature bounds after the native unit is
+    /// projected by 100. Both the raw and rounded bounds must fit.
+    pub(crate) fn temperature_bounds(self) -> Option<(i16, i16)> {
+        const MIN_NATIVE: f64 = -273.15;
+        const MAX_NATIVE: f64 = 327.67;
+        const MIN: i64 = -27_315;
+        const MIN_UPPER: i64 = 32_766;
+        const MAX_UPPER: i64 = 32_767;
+        if self.min < MIN_NATIVE || self.max > MAX_NATIVE {
+            return None;
+        }
+        let (lo, hi) = (self.min * 100.0, self.max * 100.0);
+        if lo >= hi {
+            return None;
+        }
+        let (lo, hi) = (lo.round() as i64, hi.round() as i64);
+        ((MIN..=MIN_UPPER).contains(&lo) && (-27_314..=MAX_UPPER).contains(&hi) && lo < hi)
+            .then_some((lo as i16, hi as i16))
+    }
+    /// The relative-humidity limits are 0..=10000, with MinMeasuredValue at
+    /// most 9999 and MaxMeasuredValue at least 1.
+    pub(crate) fn humidity_bounds(self) -> Option<(u16, u16)> {
+        if self.min < 0.0 || self.max > 100.0 {
+            return None;
+        }
+        let (lo, hi) = (self.min * 100.0, self.max * 100.0);
+        if lo >= hi {
+            return None;
+        }
+        let (lo, hi) = (lo.round() as i64, hi.round() as i64);
+        (lo <= 9_999 && (1..=10_000).contains(&hi) && lo < hi).then_some((lo as u16, hi as u16))
+    }
+}
+impl PartialEq for MeasurementRange {
+    fn eq(&self, other: &Self) -> bool {
+        self.min.to_bits() == other.min.to_bits() && self.max.to_bits() == other.max.to_bits()
+    }
+}
+impl Eq for MeasurementRange {}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeasurementSnapshot {
+    pub value: Option<f64>,
+    pub source_time: Option<i64>,
+    pub received_at: Option<i64>,
+}
+impl Eq for MeasurementSnapshot {}
+
 #[derive(Clone, Debug, PartialEq)]
-pub struct FunctionSnapshot {
-    pub power: Power,
-    pub lighting: Option<LightSnapshot>,
-    pub availability: Availability,
-    pub revision: u64,
+pub enum FunctionSnapshot {
+    Outlet {
+        power: Power,
+        availability: Availability,
+        revision: u64,
+    },
+    Light {
+        power: Power,
+        lighting: LightSnapshot,
+        availability: Availability,
+        revision: u64,
+    },
+    Temperature {
+        measurement: MeasurementSnapshot,
+        availability: Availability,
+        revision: u64,
+    },
+    Humidity {
+        measurement: MeasurementSnapshot,
+        availability: Availability,
+        revision: u64,
+    },
+}
+impl FunctionSnapshot {
+    pub fn power(&self) -> Option<Power> {
+        match self {
+            Self::Outlet { power, .. } | Self::Light { power, .. } => Some(*power),
+            Self::Temperature { .. } | Self::Humidity { .. } => None,
+        }
+    }
+    pub fn lighting(&self) -> Option<LightSnapshot> {
+        match self {
+            Self::Light { lighting, .. } => Some(*lighting),
+            Self::Outlet { .. } | Self::Temperature { .. } | Self::Humidity { .. } => None,
+        }
+    }
+    pub fn measurement(&self) -> Option<MeasurementSnapshot> {
+        match self {
+            Self::Temperature { measurement, .. } | Self::Humidity { measurement, .. } => {
+                Some(*measurement)
+            }
+            Self::Outlet { .. } | Self::Light { .. } => None,
+        }
+    }
+    pub fn availability(&self) -> Availability {
+        match self {
+            Self::Outlet { availability, .. }
+            | Self::Light { availability, .. }
+            | Self::Temperature { availability, .. }
+            | Self::Humidity { availability, .. } => availability.clone(),
+        }
+    }
+    pub fn revision(&self) -> u64 {
+        match self {
+            Self::Outlet { revision, .. }
+            | Self::Light { revision, .. }
+            | Self::Temperature { revision, .. }
+            | Self::Humidity { revision, .. } => *revision,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

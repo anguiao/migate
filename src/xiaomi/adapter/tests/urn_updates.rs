@@ -22,7 +22,7 @@ async fn ready(c: &Control) {
                 .is_some_and(|physical| {
                     physical.functions()[0]
                         .snapshot()
-                        .lighting
+                        .lighting()
                         .and_then(|light| light.temperature_kelvin)
                         == Some(4000)
                 })
@@ -65,7 +65,7 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
                 .unwrap();
             let two = function(&c.context.registry, "two", "main");
             peer.property("two", 2, true);
-            until(|| two.snapshot().power == Power::On).await;
+            until(|| two.snapshot().power() == Some(Power::On)).await;
             let urn = "urn:miot-spec-v2:device:light:0000A001:xiaomi-ceil04:2:0000C802";
             let mut instance = ceil04_instance();
             instance["type"] = json!(urn);
@@ -80,7 +80,7 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
             let one = function(&c.context.registry, "one", "main");
             peer.online("one", false);
             peer.property("two", 2, false);
-            until(|| two.snapshot().power == Power::Off).await;
+            until(|| two.snapshot().power() == Some(Power::Off)).await;
             assert!(
                 !c.context.live.borrow().devices["one"]
                     .cloud_access
@@ -90,13 +90,13 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
                 "the replacement must receive offline events on the existing cloud connection"
             );
             assert!(matches!(
-                one.snapshot().availability,
+                one.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
             peer.online("one", true);
             peer.property("two", 2, true);
-            until(|| two.snapshot().power == Power::On).await;
-            until(|| one.snapshot().availability == Availability::Available).await;
+            until(|| two.snapshot().power() == Some(Power::On)).await;
+            until(|| one.snapshot().availability() == Availability::Available).await;
             assert_eq!(peer.count("device/one/state/#"), 2);
             assert_eq!(peer.state.borrow().connects.len(), 1);
         })
@@ -112,8 +112,11 @@ fn a_failed_description_update_preserves_cloud_online_notifications() {
             until(|| cloud_active(&c, "one") && cloud_active(&c, "two")).await;
             let one = function(&c.context.registry, "one", "main");
             let two = function(&c.context.registry, "two", "main");
-            until(|| one.snapshot().power == Power::Off && two.snapshot().power == Power::Off)
-                .await;
+            until(|| {
+                one.snapshot().power() == Some(Power::Off)
+                    && two.snapshot().power() == Some(Power::Off)
+            })
+            .await;
             c.clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -130,10 +133,10 @@ fn a_failed_description_update_preserves_cloud_online_notifications() {
             until(|| c.context.live.borrow().devices["one"].blocked.is_some()).await;
             // The second device provides a shared-wire processing barrier.
             peer.property("two", 2, true);
-            until(|| two.snapshot().power == Power::On).await;
+            until(|| two.snapshot().power() == Some(Power::On)).await;
             peer.online("one", false);
             peer.property("two", 2, false);
-            until(|| two.snapshot().power == Power::Off).await;
+            until(|| two.snapshot().power() == Some(Power::Off)).await;
             assert!(
                 !c.context.live.borrow().devices["one"]
                     .cloud_access
@@ -143,13 +146,13 @@ fn a_failed_description_update_preserves_cloud_online_notifications() {
                 "a failed new description must not retire the old online subscription"
             );
             assert!(matches!(
-                one.snapshot().availability,
+                one.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
             peer.online("one", true);
             peer.property("two", 2, true);
-            until(|| two.snapshot().power == Power::On).await;
-            until(|| one.snapshot().availability == Availability::Available).await;
+            until(|| two.snapshot().power() == Some(Power::On)).await;
+            until(|| one.snapshot().availability() == Availability::Available).await;
             one.execute(Command::On).await.unwrap();
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
             assert_eq!(c.store.devices().load_configuration().unwrap(), committed);
@@ -403,7 +406,7 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
                     .is_some_and(|interval| interval.max() == 6500)
                     && physical.functions()[0]
                         .snapshot()
-                        .lighting
+                        .lighting()
                         .and_then(|lighting| lighting.temperature_kelvin)
                         == Some(6000)
             })

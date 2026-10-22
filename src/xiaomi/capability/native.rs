@@ -1,7 +1,8 @@
 //! A native device description validated once at the source boundary.
 
 use super::{
-    CapabilityError, ParsedDevice, is_light_type, is_ls2307_type, is_outlet_type, ls2307, outlet,
+    CapabilityError, ParsedDevice, is_light_type, is_ls2307_type, is_outlet_type,
+    is_temperature_humidity_sensor_type, ls2307, outlet,
 };
 use crate::device::PhysicalDeviceDescription;
 
@@ -59,6 +60,15 @@ fn validate_model_topology(
     model: &str,
     instance_type: &str,
 ) -> Result<(), &'static str> {
+    if is_temperature_humidity_sensor_type(instance_type) {
+        if model == ls2307::MODEL || model == outlet::CP7PD_MODEL {
+            return Err("Xiaomi device model is incompatible with its instance type");
+        }
+        if device.functions().len() != 2 || !device.is_read_only() {
+            return Err("Xiaomi sensor topology is invalid");
+        }
+        return Ok(());
+    }
     if is_light_type(instance_type) {
         let function = &device.functions()[0];
         let Some(lighting) = function.lighting() else {
@@ -76,8 +86,11 @@ fn validate_model_topology(
             ) else {
                 return Err("Xiaomi ls2307 adapter is incompatible");
             };
-            if !ls2307::main_bindings(function.power(), brightness, temperature)
-                || !ls2307::is_color(color)
+            if !ls2307::main_bindings(
+                function.power().expect("light functions have power"),
+                brightness,
+                temperature,
+            ) || !ls2307::is_color(color)
                 || !ls2307::is_mode(mode)
             {
                 return Err("Xiaomi ls2307 adapter is incompatible");

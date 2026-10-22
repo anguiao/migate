@@ -9,8 +9,8 @@ fn published_cloud_only_device_is_refreshed_without_a_local_subscription() {
         until(|| {
             function(&c.context.registry, "one", "main")
                 .snapshot()
-                .power
-                == Power::Off
+                .power()
+                == Some(Power::Off)
         })
         .await;
         assert!(c.context.live.borrow().session.is_none());
@@ -56,19 +56,22 @@ fn a_slow_cloud_channel_does_not_block_other_cloud_reads_or_commands() {
         let usb = function(&c.context.registry, "multi", "usb");
         until(|| {
             cloud_reads(&c, "multi", 3) == 1
-                && outlet_2.snapshot().power == Power::On
-                && usb.snapshot().power == Power::On
+                && outlet_2.snapshot().power() == Some(Power::On)
+                && usb.snapshot().power() == Some(Power::On)
         })
         .await;
-        assert_eq!(outlet_1.snapshot().power, Power::Unknown);
-        assert_eq!(usb.execute(Command::Off).await.unwrap().power, Power::Off);
+        assert_eq!(outlet_1.snapshot().power(), Some(Power::Unknown));
+        assert_eq!(
+            usb.execute(Command::Off).await.unwrap().power(),
+            Some(Power::Off)
+        );
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
         assert_eq!(cloud_reads(&c, "multi", 4), 1);
         assert_eq!(cloud_reads(&c, "multi", 9), 1);
 
         release.send(()).unwrap();
-        until(|| outlet_1.snapshot().power == Power::Off).await;
-        assert_eq!(usb.snapshot().power, Power::Off);
+        until(|| outlet_1.snapshot().power() == Some(Power::Off)).await;
+        assert_eq!(usb.snapshot().power(), Some(Power::Off));
     }));
 }
 
@@ -111,12 +114,15 @@ fn a_slow_cloud_did_preserves_local_round_spacing_and_local_commands() {
                 assert_eq!(
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .power,
-                    Power::Unknown
+                        .power(),
+                    Some(Power::Unknown)
                 );
                 if index == 0 {
                     let usb = function(&control.context.registry, "multi", "usb");
-                    assert_eq!(usb.execute(Command::On).await.unwrap().power, Power::On);
+                    assert_eq!(
+                        usb.execute(Command::On).await.unwrap().power(),
+                        Some(Power::On)
+                    );
                     assert_eq!(peer.count("rpcReq", "multi", 9), 1);
                     assert!(control.cloud.lock().unwrap().property_writes.is_empty());
                 }
@@ -128,8 +134,8 @@ fn a_slow_cloud_did_preserves_local_round_spacing_and_local_commands() {
             until(|| {
                 function(&control.context.registry, "one", "main")
                     .snapshot()
-                    .power
-                    == Power::Off
+                    .power()
+                    == Some(Power::Off)
             })
             .await;
         })
@@ -165,12 +171,12 @@ fn refreshes_during_a_cloud_read_coalesce_and_invalidate_its_old_value() {
 
         first_release.send(()).unwrap();
         until(|| cloud_reads(&c, "one", 2) == 2).await;
-        assert_eq!(one.snapshot().power, Power::Unknown);
+        assert_eq!(one.snapshot().power(), Some(Power::Unknown));
         assert_eq!(work.refresh.borrow().snapshot().inflight.len(), 1);
         assert!(work.refresh.borrow().snapshot().pending.is_empty());
 
         next_release.send(()).unwrap();
-        until(|| one.snapshot().power == Power::On).await;
+        until(|| one.snapshot().power() == Some(Power::On)).await;
         until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
         assert_eq!(cloud_reads(&c, "one", 2), 2);
         assert!(work.refresh.borrow().snapshot().pending.is_empty());
@@ -199,13 +205,13 @@ fn switching_to_local_reads_retires_a_held_cloud_read_and_returns_its_demand() {
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
             let one = function(&control.context.registry, "one", "main");
-            assert_eq!(one.snapshot().power, Power::On);
+            assert_eq!(one.snapshot().power(), Some(Power::On));
             assert!(Rc::ptr_eq(&before, &work(control, "one")));
             assert!(peer.count("get", "one", 2) > 0);
 
             release.send(()).unwrap();
             async_io::Timer::after(Duration::from_millis(20)).await;
-            assert_eq!(one.snapshot().power, Power::On);
+            assert_eq!(one.snapshot().power(), Some(Power::On));
             assert_eq!(cloud_reads(control, "one", 2), 1);
         })
         .await;
@@ -233,14 +239,14 @@ fn retiring_a_source_releases_a_cloud_read_slot_before_its_response_arrives() {
         }
         work.test_source_changed();
         until(|| cloud_reads(&c, "one", 2) == 2).await;
-        assert_eq!(one.snapshot().power, Power::Unknown);
+        assert_eq!(one.snapshot().power(), Some(Power::Unknown));
         assert_eq!(work.refresh.borrow().snapshot().inflight.len(), 1);
 
         old_release.send(()).unwrap();
         async_io::Timer::after(Duration::from_millis(20)).await;
-        assert_eq!(one.snapshot().power, Power::Unknown);
+        assert_eq!(one.snapshot().power(), Some(Power::Unknown));
         fresh_release.send(()).unwrap();
-        until(|| one.snapshot().power == Power::On).await;
+        until(|| one.snapshot().power() == Some(Power::On)).await;
         until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
         assert_eq!(cloud_reads(&c, "one", 2), 2);
         assert!(work.refresh.borrow().snapshot().pending.is_empty());

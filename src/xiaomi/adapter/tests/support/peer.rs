@@ -13,6 +13,7 @@ pub(in super::super) struct PeerState {
     pub(in super::super) omit: BTreeSet<String>,
     pub(in super::super) values: BTreeMap<Binding, bool>,
     pub(in super::super) numeric_values: BTreeMap<Binding, Value>,
+    pub(in super::super) update_times: BTreeMap<Binding, i64>,
     pub(in super::super) sub_reject: BTreeSet<Binding>,
     pub(in super::super) sub_timeout: BTreeSet<Binding>,
     pub(in super::super) held_subs: Vec<Subscribe>,
@@ -50,18 +51,29 @@ impl Peer {
         value: Value,
         retain: bool,
     ) {
+        self.notify_value_at(did, binding, value, None, retain);
+    }
+
+    pub(in super::super) fn notify_value_at(
+        &self,
+        did: &str,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        value: Value,
+        update_time: Option<i64>,
+        retain: bool,
+    ) {
         let client = self.state.borrow().client_id.clone();
+        let mut payload = json!({"did":did,"siid":binding.siid,"piid":binding.piid,"value":value});
+        if let Some(update_time) = update_time {
+            payload["updateTime"] = json!(update_time);
+        }
         let mut publish = Publish::new(
             format!(
                 "{client}/appMsg/notify/iot/{did}/property/{}.{}",
                 binding.siid, binding.piid
             ),
             QoS::AtMostOnce,
-            encode_mips(
-                700,
-                None,
-                &json!({"did":did,"siid":binding.siid,"piid":binding.piid,"value":value}),
-            ),
+            encode_mips(700, None, &payload),
         );
         publish.retain = retain;
         self.send(Packet::Publish(publish));
@@ -302,7 +314,11 @@ pub(in super::super) async fn peer_run(
                                 if state.read_fail.contains(&binding) {
                                     json!({"code":-7})
                                 } else {
-                                    json!({"value":state.numeric_values.get(&binding).cloned().unwrap_or_else(||json!(state.values.get(&binding).copied().unwrap_or(false)))})
+                                    let mut value = json!({"value":state.numeric_values.get(&binding).cloned().unwrap_or_else(||json!(state.values.get(&binding).copied().unwrap_or(false)))});
+                                    if let Some(update_time) = state.update_times.get(&binding) {
+                                        value["updateTime"] = json!(update_time);
+                                    }
+                                    value
                                 },
                                 state.hold_reads,
                                 state.read_timeout.contains(&binding),

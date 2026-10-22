@@ -6,19 +6,22 @@ mod model;
 mod native;
 mod outlet;
 mod repair;
+mod sensor;
 
 pub(crate) use group::parse_group;
 pub(crate) use light::is_light_type;
 pub(crate) use ls2307::is_type as is_ls2307_type;
 pub use model::{
-    BrightnessBinding, CapabilityError, ColorBinding, LightBindings, ModeBinding, NumericFormat,
-    ParsedDevice, ParsedFunction, PropertyBinding, TemperatureBinding,
+    BrightnessBinding, CapabilityError, ColorBinding, LightBindings, MeasurementBinding,
+    MeasurementUnit, ModeBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+    TemperatureBinding,
 };
 pub(crate) use native::NativeDescription;
 pub(crate) use outlet::is_outlet_type;
 pub(crate) use repair::{
     RepairPlan, effective_temperature_range, narrowed_profile, plan_rgb_repair, repaired_profile,
 };
+pub(crate) use sensor::is_type as is_temperature_humidity_sensor_type;
 
 pub(crate) fn is_light_group(key: &crate::device::DeviceKey, model: &str) -> bool {
     key.id.starts_with("group.") || model == "mijia.light.group3"
@@ -40,7 +43,12 @@ pub fn parse_device_for_model(
     {
         return Err(CapabilityError::IncompatibleModel(ls2307::MODEL));
     }
-    if description.urn.standard("device", "light", 0x0000a001) {
+    if description
+        .urn
+        .standard("device", "temperature-humidity-sensor", 0x0000_A00A)
+    {
+        sensor::parse_sensor(key, &description)
+    } else if description.urn.standard("device", "light", 0x0000a001) {
         light::parse_light(key, model, &description)
     } else {
         outlet::parse_outlet(key, &description)

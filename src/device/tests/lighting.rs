@@ -47,7 +47,7 @@ fn four_standard_light_profiles_are_valid_and_infer_only_temperature_mode() {
             None
         };
         assert_eq!(function.description().inferred_color_mode(), expected);
-        let lighting = function.snapshot().lighting.expect("light state");
+        let lighting = function.snapshot().lighting().expect("light state");
         assert_eq!(lighting.brightness_percent, None);
         assert_eq!(lighting.temperature_kelvin, None);
         assert_eq!(lighting.color, None);
@@ -73,8 +73,8 @@ fn losing_all_paths_clears_light_state_and_keeps_single_color_mode() {
         "paths lost".into(),
     ));
     let snapshot = function.snapshot();
-    assert_eq!(snapshot.power, crate::device::Power::Unknown);
-    let lighting = snapshot.lighting.unwrap();
+    assert_eq!(snapshot.power(), Some(crate::device::Power::Unknown));
+    let lighting = snapshot.lighting().unwrap();
     assert_eq!(lighting.brightness_percent, None);
     assert_eq!(lighting.temperature_kelvin, None);
     assert_eq!(lighting.color, None);
@@ -98,7 +98,7 @@ fn losing_all_paths_clears_light_state_and_keeps_single_color_mode() {
     device.set_availability(crate::device::Availability::Unavailable(
         "paths lost".into(),
     ));
-    assert_eq!(function.snapshot().lighting.unwrap().mode, None);
+    assert_eq!(function.snapshot().lighting().unwrap().mode, None);
 }
 
 #[test]
@@ -109,8 +109,8 @@ fn outlet_state_is_unchanged_by_light_state_reset() {
         "paths lost".into(),
     ));
     assert_eq!(
-        device.functions()[0].snapshot().power,
-        crate::device::Power::On
+        device.functions()[0].snapshot().power(),
+        Some(crate::device::Power::On)
     );
 }
 
@@ -193,7 +193,7 @@ fn reports_for_absent_capabilities_are_unsupported() {
 fn lighting_starts_unknown_except_for_capability_determined_temperature_mode() {
     for rgb in [false, true] {
         let (device, _) = new_device(light(rgb));
-        let lighting = device.functions()[0].snapshot().lighting.unwrap();
+        let lighting = device.functions()[0].snapshot().lighting().unwrap();
         assert_eq!(lighting.brightness_percent, None);
         assert_eq!(lighting.temperature_kelvin, None);
         assert_eq!(lighting.color, None);
@@ -225,7 +225,7 @@ fn one_light_report_updates_power_and_values_with_one_revision_and_keeps_mode_ex
             mode: Some(LightMode::Temperature),
         })
         .unwrap();
-    assert_eq!(function.snapshot().revision, 1);
+    assert_eq!(function.snapshot().revision(), 1);
     let patch = LightPatch {
         color: Some(Rgb {
             red: 0,
@@ -236,17 +236,17 @@ fn one_light_report_updates_power_and_values_with_one_revision_and_keeps_mode_ex
     };
     function.observe_light(patch).unwrap();
     assert_eq!(
-        function.snapshot().lighting.unwrap().mode,
+        function.snapshot().lighting().unwrap().mode,
         Some(LightMode::Temperature)
     );
-    assert_eq!(function.snapshot().revision, 2);
+    assert_eq!(function.snapshot().revision(), 2);
     function.observe_light(patch).unwrap();
-    assert_eq!(function.snapshot().revision, 2);
+    assert_eq!(function.snapshot().revision(), 2);
     let invalid = LightPatch {
         power: Some(false),
         brightness_percent: Some(f64::NAN),
         ..LightPatch::default()
     };
     assert!(function.observe_light(invalid).is_err());
-    assert_eq!(function.snapshot().power, crate::device::Power::On);
+    assert_eq!(function.snapshot().power(), Some(crate::device::Power::On));
 }

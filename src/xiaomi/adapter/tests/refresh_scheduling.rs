@@ -44,9 +44,9 @@ async fn trigger_burst(c: &Control, peer: &Peer) {
     }
     // The following property notification confirms the preceding triggers arrived.
     let outlet = function(&c.context.registry, "multi", "outlet_2");
-    let value = outlet.snapshot().power != Power::On;
+    let value = outlet.snapshot().power() != Some(Power::On);
     peer.notify("multi", 4, value);
-    until(|| outlet.snapshot().power == if value { Power::On } else { Power::Off }).await;
+    until(|| outlet.snapshot().power() == Some(if value { Power::On } else { Power::Off })).await;
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn numeric_outlet_refresh_trigger_is_ignored() {
             );
             let outlet = function(&control.context.registry, "multi", "outlet_2");
             peer.notify("multi", 4, true);
-            until(|| outlet.snapshot().power == Power::On).await;
+            until(|| outlet.snapshot().power() == Some(Power::On)).await;
             async_io::Timer::after(Duration::from_millis(50)).await;
             assert_eq!(peer.count("get", "multi", 0), before);
         })
@@ -94,8 +94,8 @@ fn refresh_rounds_wait_for_every_did_and_trigger_bursts_keep_the_pending_deadlin
             until(|| {
                 function(&control.context.registry, "multi", "outlet_1")
                     .snapshot()
-                    .power
-                    == Power::Off
+                    .power()
+                    == Some(Power::Off)
             })
             .await;
 
@@ -121,8 +121,8 @@ fn refresh_rounds_wait_for_every_did_and_trigger_bursts_keep_the_pending_deadlin
             until(|| {
                 function(&control.context.registry, "multi", "outlet_1")
                     .snapshot()
-                    .power
-                    == Power::On
+                    .power()
+                    == Some(Power::On)
             })
             .await;
             control.clock.advance(Duration::from_secs(1));

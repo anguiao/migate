@@ -134,7 +134,8 @@ fn received_property_invalidation_keeps_ready_subscriptions_and_online_delivery(
                             NotificationEvent::PropertyValue {
                                 did: "target".into(),
                                 binding: POWER,
-                                value: serde_json::Value::Bool(true)
+                                value: serde_json::Value::Bool(true),
+                                update_time: None,
                             },
                         ],
                         "a received property from the retired source was dispatched"
@@ -210,7 +211,8 @@ fn received_property_invalidation_keeps_a_pending_suback_current() {
                             NotificationEvent::PropertyValue {
                                 did: "target".into(),
                                 binding: POWER,
-                                value: serde_json::Value::Bool(true)
+                                value: serde_json::Value::Bool(true),
+                                update_time: None,
                             },
                             NotificationEvent::Online {
                                 did: "target".into(),
@@ -309,7 +311,8 @@ fn malformed_notification_payloads_are_isolated_from_valid_notifications() {
             NotificationEvent::PropertyValue {
                 did: "target".into(),
                 binding: POWER,
-                value: serde_json::Value::Bool(false)
+                value: serde_json::Value::Bool(false),
+                update_time: None,
             },
             NotificationEvent::Online {
                 did: "target".into(),
@@ -405,6 +408,7 @@ fn qos2_duplicate_and_retired_subscription_messages_do_not_reapply() {
             did: "target".into(),
             binding: POWER,
             value,
+            update_time: None,
         };
         assert_eq!(
             *events.borrow(),
@@ -470,13 +474,66 @@ fn numeric_notifications_preserve_payload_identity_and_values() {
             NotificationEvent::PropertyValue {
                 did: "target".into(),
                 binding: POWER,
-                value: json!(65535)
+                value: json!(65535),
+                update_time: None,
             },
             NotificationEvent::PropertyValue {
                 did: "target".into(),
                 binding: POWER,
-                value: json!(35.5)
+                value: json!(35.5),
+                update_time: None,
             },
         ]
+    );
+}
+
+#[test]
+fn property_notifications_preserve_upstream_update_time() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let collected = events.clone();
+    let (finished, done) = flume::bounded(1);
+    future::block_on(exercise(
+        timing(),
+        move |mut broker| async move {
+            broker.setup().await;
+            let pkid = broker
+                .subscribe("device/target/up/properties_changed/2/1")
+                .await;
+            broker.accept(pkid).await;
+            broker
+                .send(Packet::Publish(Publish::new(
+                    "device/target/up/properties_changed/2/1",
+                    QoS::AtMostOnce,
+                    json!({"params":{"siid":2,"piid":1,"value":21.5,"updateTime":1700000600}})
+                        .to_string(),
+                )))
+                .await;
+            done.recv_async().await.unwrap();
+        },
+        move |handle, driver| async move {
+            let stop = handle.clone();
+            let (result, subscription) = future::zip(
+                driver.run(move |event| {
+                    collected.borrow_mut().push(event);
+                    if collected.borrow().len() == 1 {
+                        finished.send(()).unwrap();
+                        stop.close();
+                    }
+                }),
+                handle.subscribe_property("target", POWER),
+            )
+            .await;
+            result.unwrap();
+            subscription.unwrap();
+        },
+    ));
+    assert_eq!(
+        *events.borrow(),
+        vec![NotificationEvent::PropertyValue {
+            did: "target".into(),
+            binding: POWER,
+            value: json!(21.5),
+            update_time: Some(1_700_000_600),
+        }]
     );
 }

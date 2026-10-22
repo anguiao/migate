@@ -234,6 +234,7 @@ impl DeviceWork {
             .find(|function| function.id() == id)
             .unwrap()
             .power()
+            .expect("light and outlet functions have power")
     }
     fn is_light(&self) -> bool {
         self.native
@@ -441,12 +442,14 @@ impl DeviceWork {
         super::refresh::cancel(self);
         self.refresh();
     }
-    pub(super) fn notify_value(
+    pub(super) fn notify_value_at(
         &self,
         binding: PropertyBinding,
         value: &serde_json::Value,
+        update_time: Option<i64>,
         cached_report: bool,
         takeover: bool,
+        received_at: i64,
     ) -> bool {
         if self.life.is_closed() {
             return false;
@@ -476,6 +479,27 @@ impl DeviceWork {
                 Ok(()) => true,
                 Err(error) => {
                     log::warn!("Ignoring invalid light property: {error}");
+                    false
+                }
+            }
+        } else if function.measurement().is_some() {
+            let origin = if cached_report {
+                super::lighting::Origin::Cache
+            } else {
+                super::lighting::Origin::Notification
+            };
+            match observe_measurement(
+                self,
+                function,
+                binding,
+                value,
+                update_time,
+                received_at,
+                origin,
+            ) {
+                Ok(()) => false,
+                Err(error) => {
+                    log::warn!("Ignoring invalid measurement property: {error}");
                     false
                 }
             }
@@ -801,26 +825,26 @@ impl DeviceWork {
             function.id() == id && super::lighting::bindings(function).contains(&binding)
         })
     }
-    pub(super) fn observe_read(
+    pub(super) fn observe_read_at(
         &self,
         id: &str,
         binding: PropertyBinding,
         stamp: &super::observations::ReadStamp,
         value: &serde_json::Value,
+        update_time: Option<i64>,
+        received_at: i64,
     ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
         if !self.observations.read_is_current(self, id, binding, stamp) {
             return Ok(());
         }
-        let light = self
+        let function = self
             .native
             .device()
             .functions()
             .iter()
             .find(|function| function.id() == id)
-            .unwrap()
-            .lighting()
-            .is_some();
-        if light {
+            .unwrap();
+        if function.lighting().is_some() {
             super::lighting::observe(
                 self,
                 id,
@@ -828,6 +852,16 @@ impl DeviceWork {
                 value,
                 super::lighting::Origin::Read,
                 false,
+            )?;
+        } else if function.measurement().is_some() {
+            observe_measurement(
+                self,
+                function,
+                binding,
+                value,
+                update_time,
+                received_at,
+                super::lighting::Origin::Read,
             )?;
         } else {
             let value =
@@ -895,6 +929,32 @@ impl DeviceWork {
         message
     }
 }
+fn observe_measurement(
+    work: &DeviceWork,
+    function: &crate::xiaomi::capability::ParsedFunction,
+    binding: PropertyBinding,
+    value: &serde_json::Value,
+    source_time: Option<i64>,
+    received_at: i64,
+    origin: super::lighting::Origin,
+) -> Result<(), crate::xiaomi::capability::CapabilityError> {
+    let measurement = function
+        .measurement()
+        .expect("caller selected a measurement function");
+    let decoded = measurement.read_value(value)?;
+    if work.life.is_closed() {
+        return Ok(());
+    }
+    let id = function.id();
+    work.observations.observed(work, id, binding, origin);
+    work.physical()
+        .function(id)
+        .expect("installed source function")
+        .observe_measurement(decoded, source_time, received_at)
+        .map_err(|_| crate::xiaomi::capability::CapabilityError::InvalidValue("measurement"))?;
+    Ok(())
+}
+
 pub(super) async fn run(
     work: Rc<DeviceWork>,
     handle: SessionHandle,

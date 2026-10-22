@@ -166,7 +166,7 @@ fn gray_hue_waits_for_older_red_receipt_and_rejects_failed_white_correction() {
         accept(&function, old);
         old_invoke.await.unwrap();
         let red = Rgb::from_packed(0xff0000).unwrap();
-        assert_eq!(function.snapshot().lighting.unwrap().color, Some(red));
+        assert_eq!(function.snapshot().lighting().unwrap().color, Some(red));
         clock.set(1000);
         light.advance();
         assert!(poll_once(new_invoke.as_mut()).await.is_none());
@@ -179,7 +179,7 @@ fn gray_hue_waits_for_older_red_receipt_and_rejects_failed_white_correction() {
         correction.reject(CommandError::Rejected("white correction rejected".into()));
         assert_eq!(new_invoke.await.unwrap_err().code(), ErrorCode::Failure);
         light.advance();
-        assert_eq!(function.snapshot().lighting.unwrap().color, Some(red));
+        assert_eq!(function.snapshot().lighting().unwrap().color, Some(red));
         assert!(poll_once(receiver.next_operation()).await.is_none());
         assert_eq!(
             ColorHandler::<true>(&light)

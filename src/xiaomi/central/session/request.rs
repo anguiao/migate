@@ -2,7 +2,9 @@ use super::super::{CentralError, wire};
 use super::{LIMIT, Timing};
 use crate::xiaomi::{
     capability::PropertyBinding,
-    property::{PropertyResults, correlate, valid_bindings, valid_value},
+    property::{
+        PropertyReading, PropertyResults, correlate, update_time, valid_bindings, valid_value,
+    },
 };
 use event_listener::Event;
 use mqttbytes::{QoS, v5::Publish};
@@ -91,7 +93,7 @@ impl SendHooks {
 
 pub(super) enum Response {
     Devices(Vec<DeviceEntry>),
-    PropertyValue(Value),
+    PropertyValue(PropertyReading),
     Properties(PropertyResults<(), CentralError>),
     Unit,
 }
@@ -370,14 +372,16 @@ impl SessionHandle {
             on_result,
         )
     }
-    pub fn read_property_value_with_timeout_guarded<F: FnOnce(RequestOutcome<Value>) + 'static>(
+    pub fn read_property_observation_with_timeout_guarded<
+        F: FnOnce(RequestOutcome<PropertyReading>) + 'static,
+    >(
         &self,
         did: &str,
         binding: PropertyBinding,
         timeout: Duration,
         hooks: SendHooks,
         on_result: F,
-    ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
+    ) -> impl Future<Output = RequestOutcome<PropertyReading>> + use<F> {
         self.submit(
             RequestKind::Read {
                 did: did.into(),
@@ -386,7 +390,7 @@ impl SessionHandle {
             timeout.min(self.timing.request),
             Some(hooks),
             |response| match response {
-                Response::PropertyValue(value) => value,
+                Response::PropertyValue(reading) => reading,
                 _ => unreachable!("property read returns a supported value"),
             },
             on_result,
@@ -571,13 +575,14 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
     match kind {
         RequestKind::Read { did, binding } => {
             validate_identity(value, did, *binding, false)?;
-            Ok(Response::PropertyValue(
-                value
+            Ok(Response::PropertyValue(PropertyReading {
+                value: value
                     .get("value")
                     .filter(|value| valid_value(value))
                     .cloned()
                     .ok_or(CentralError::Protocol)?,
-            ))
+                update_time: update_time(value),
+            }))
         }
         RequestKind::WriteProperties { did, properties } => {
             let result = value

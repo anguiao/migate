@@ -125,15 +125,15 @@ pub(in super::super) async fn repair_ready(c: &Control) {
         ["member-a", "member-b"].iter().all(|did| {
             function(&c.context.registry, did, "main")
                 .snapshot()
-                .lighting
+                .lighting()
                 .is_some_and(|state| state.mode.is_some() && state.color.is_some())
         })
     })
     .await;
     until(|| {
         let state = function(&c.context.registry, "group-1", "main").snapshot();
-        state.power != Power::Unknown
-            && state.lighting.is_some_and(|light| {
+        state.power() != Some(Power::Unknown)
+            && state.lighting().is_some_and(|light| {
                 light.brightness_percent.is_some() && light.temperature_kelvin.is_some()
             })
     })

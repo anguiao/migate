@@ -27,14 +27,14 @@ fn cached_local_control_survives_temporary_cloud_detail_failures() {
                     )
                     && function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .power
-                        != Power::Unknown
+                        .power()
+                        != Some(Power::Unknown)
             })
             .await;
             assert_eq!(
                 function(&control.context.registry, "one", "main")
                     .snapshot()
-                    .availability,
+                    .availability(),
                 Availability::Available
             );
             function(&control.context.registry, "one", "main")
@@ -63,7 +63,7 @@ fn cached_local_access_recovers_while_cloud_member_sync_is_stalled() {
             assert_eq!(
                 function(&control.context.registry, "one", "main")
                     .snapshot()
-                    .availability,
+                    .availability(),
                 Availability::Available
             );
             function(&control.context.registry, "one", "main")
@@ -107,8 +107,8 @@ fn whole_gateway_list_failures_preserve_confirmed_access_and_availability() {
                 until(|| {
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .power
-                        == Power::On
+                        .power()
+                        == Some(Power::On)
                 })
                 .await;
                 for physical in control.context.registry.list() {
@@ -202,7 +202,7 @@ fn disconnect_cancels_gateway_list_backoff_before_a_new_session_starts() {
                 matches!(
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .availability,
+                        .availability(),
                     Availability::Unavailable(_)
                 )
             })
@@ -296,13 +296,14 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
             ] {
                 let function = function(&control.context.registry, did, id);
                 until(|| {
-                    peer.count("get", did, siid) == 1 && function.snapshot().power == Power::Off
+                    peer.count("get", did, siid) == 1
+                        && function.snapshot().power() == Some(Power::Off)
                 })
                 .await;
                 function.execute(Command::On).await.unwrap();
                 assert_eq!(peer.count("rpcReq", did, siid), 1);
                 peer.notify(did, siid, false);
-                until(|| function.snapshot().power == Power::Off).await;
+                until(|| function.snapshot().power() == Some(Power::Off)).await;
             }
         })
         .await;
@@ -394,7 +395,7 @@ fn masters_failing_after_connack_cannot_starve_a_later_healthy_master() {
                 let function = function(&c.context.registry, "one", "main");
                 function.execute(Command::On).await.unwrap();
                 peer.notify("one", 2, false);
-                until(|| function.snapshot().power == Power::Off).await;
+                until(|| function.snapshot().power() == Some(Power::Off)).await;
             })
             .await;
         };
@@ -498,7 +499,7 @@ fn reconnect_keeps_command_consumers_cancels_old_writes_and_rebuilds_only_regist
             let usb = function(&control.context.registry, "multi", "usb");
             usb.execute(Command::On).await.unwrap();
             usb.execute(Command::Toggle).await.unwrap();
-            assert_eq!(usb.snapshot().power, Power::Off);
+            assert_eq!(usb.snapshot().power(), Some(Power::Off));
             assert_eq!(peer.count("rpcReq", "multi", 9), 2);
         })
         .await;
@@ -604,7 +605,7 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
             until(|| {
                 function(&control.context.registry, "group-1", &id)
                     .snapshot()
-                    .availability
+                    .availability()
                     == Availability::Available
             })
             .await;
@@ -690,13 +691,13 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
             })
             .await;
             let member = function(&control.context.registry, "one", "main");
-            until(|| member.snapshot().power == Power::Off).await;
+            until(|| member.snapshot().power() == Some(Power::Off)).await;
             let physical = function(&control.context.registry, "group-p", "main");
             let virtual_group = function(&control.context.registry, "group-v", "main");
-            assert_eq!(member.snapshot().availability, Availability::Available);
+            assert_eq!(member.snapshot().availability(), Availability::Available);
             assert!(control.context.control_path("group-p").is_none());
             assert!(matches!(
-                physical.snapshot().availability,
+                physical.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
             // Obtain the virtual group's own advertised local row as well.
@@ -709,7 +710,7 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
             .await;
             assert!(control.context.control_path("group-v").is_none());
             assert!(matches!(
-                virtual_group.snapshot().availability,
+                virtual_group.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
             assert_eq!(peer.count("subscribe", "group-v", 2), 0);
@@ -731,8 +732,8 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
                 json!(true),
                 false,
             );
-            until(|| physical.snapshot().power == Power::On).await;
-            assert_eq!(member.snapshot().power, Power::Off);
+            until(|| physical.snapshot().power() == Some(Power::On)).await;
+            assert_eq!(member.snapshot().power(), Some(Power::Off));
             control.cloud.lock().unwrap().catalog_groups[1]["isOnline"] = json!(true);
             control.context.request_sync();
             until(|| {

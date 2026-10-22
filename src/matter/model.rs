@@ -1,4 +1,4 @@
-use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler};
+use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler, sensors};
 use crate::device::{Function, LightProfileKind, PhysicalDevice};
 use crate::storage::Identity;
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -14,7 +14,8 @@ use rs_matter::{
             basic_info::{BasicInfoConfig, BasicInfoSettings},
             decl::{
                 bridged_device_basic_information::{self as bridged, ClusterHandler as _},
-                color_control, level_control,
+                color_control, level_control, relative_humidity_measurement,
+                temperature_measurement,
             },
             desc::{self, ClusterHandler as _},
             groups::{self, ClusterHandler as _},
@@ -98,6 +99,24 @@ const CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     identify::IdentifyHandler::<()>::CLUSTER,
     OnOffHandler::CLUSTER
 );
+const TEMPERATURE_SENSOR: DeviceType = DeviceType {
+    dtype: 0x0302,
+    drev: 3,
+};
+const HUMIDITY_SENSOR: DeviceType = DeviceType {
+    dtype: 0x0307,
+    drev: 2,
+};
+const TEMPERATURE_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    <sensors::TemperatureHandler as temperature_measurement::ClusterHandler>::CLUSTER
+);
+const HUMIDITY_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    <sensors::HumidityHandler as relative_humidity_measurement::ClusterHandler>::CLUSTER
+);
 
 pub(super) fn basic_info(identity: &Identity) -> BasicInfoConfig<'_> {
     BasicInfoConfig {
@@ -156,6 +175,8 @@ struct Versions {
     bridged: u32,
     level: u32,
     color: u32,
+    temperature: u32,
+    humidity: u32,
 }
 impl Versions {
     /// Each new instance seeds independent random per-cluster DataVersions so
@@ -170,6 +191,8 @@ impl Versions {
             bridged: random.random(),
             level: random.random(),
             color: random.random(),
+            temperature: random.random(),
+            humidity: random.random(),
         }
     }
 }
@@ -201,11 +224,13 @@ struct Control {
 enum ControlKind {
     Outlet(OnOffHandler),
     Light(Box<lighting::Lighting>),
+    Temperature(sensors::TemperatureHandler),
+    Humidity(sensors::HumidityHandler),
 }
 impl Control {
     fn new(function: Function, endpoint: u16, versions: Versions) -> Self {
-        let kind = if function.description().kind.is_light() {
-            ControlKind::Light(Box::new(
+        let kind = match function.description().kind {
+            crate::device::FunctionKind::Light(_) => ControlKind::Light(Box::new(
                 lighting::Lighting::new(
                     function,
                     endpoint,
@@ -214,13 +239,24 @@ impl Control {
                     Dataver::new(versions.color),
                 )
                 .expect("validated published lighting capabilities"),
-            ))
-        } else {
-            ControlKind::Outlet(OnOffHandler::new(
+            )),
+            crate::device::FunctionKind::Temperature(_) => ControlKind::Temperature(
+                sensors::TemperatureHandler::new(
+                    function,
+                    endpoint,
+                    Dataver::new(versions.temperature),
+                )
+                .expect("validated published temperature range"),
+            ),
+            crate::device::FunctionKind::Humidity(_) => ControlKind::Humidity(
+                sensors::HumidityHandler::new(function, endpoint, Dataver::new(versions.humidity))
+                    .expect("validated published humidity range"),
+            ),
+            crate::device::FunctionKind::Outlet => ControlKind::Outlet(OnOffHandler::new(
                 function,
                 endpoint,
                 Dataver::new(versions.on_off),
-            ))
+            )),
         };
         Self {
             groups: Dataver::new(versions.groups),
@@ -231,17 +267,30 @@ impl Control {
     fn light(&self) -> Option<&lighting::Lighting> {
         match &self.kind {
             ControlKind::Light(light) => Some(light),
-            ControlKind::Outlet(_) => None,
+            ControlKind::Outlet(_) | ControlKind::Temperature(_) | ControlKind::Humidity(_) => None,
         }
+    }
+    fn is_sensor(&self) -> bool {
+        matches!(
+            self.kind,
+            ControlKind::Temperature(_) | ControlKind::Humidity(_)
+        )
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
         let matcher: fn(u16, u32) -> bool = match &self.kind {
             ControlKind::Outlet(_) => |_, cluster| cluster == 6,
             ControlKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
+            ControlKind::Temperature(_) => |_, cluster| cluster == 0x402,
+            ControlKind::Humidity(_) => |_, cluster| cluster == 0x405,
+        };
+        let groups_matcher: fn(u16, u32) -> bool = if self.is_sensor() {
+            |_, _| false
+        } else {
+            |_, cluster| cluster == 4
         };
         EmptyHandler
             .chain(
-                |_, cluster| cluster == 4,
+                groups_matcher,
                 Async(
                     groups::GroupsHandler::new_with_identify(
                         Dataver::new(self.groups.get()),
@@ -286,12 +335,42 @@ impl AsyncHandler for ControlKind {
         match self {
             Self::Outlet(handler) => on_off::HandlerAsyncAdaptor(handler).read(ctx, reply).await,
             Self::Light(light) => lighting::Dispatch(light).read(ctx, reply).await,
+            Self::Temperature(handler) => {
+                AsyncHandler::read(
+                    &Async(temperature_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
+            Self::Humidity(handler) => {
+                AsyncHandler::read(
+                    &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
         }
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
         match self {
             Self::Outlet(handler) => on_off::HandlerAsyncAdaptor(handler).write(ctx).await,
             Self::Light(light) => lighting::Dispatch(light).write(ctx).await,
+            Self::Temperature(handler) => {
+                AsyncHandler::write(
+                    &Async(temperature_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                )
+                .await
+            }
+            Self::Humidity(handler) => {
+                AsyncHandler::write(
+                    &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                )
+                .await
+            }
         }
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
@@ -302,12 +381,42 @@ impl AsyncHandler for ControlKind {
                     .await
             }
             Self::Light(light) => lighting::Dispatch(light).invoke(ctx, reply).await,
+            Self::Temperature(handler) => {
+                AsyncHandler::invoke(
+                    &Async(temperature_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
+            Self::Humidity(handler) => {
+                AsyncHandler::invoke(
+                    &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
         }
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         match self {
             Self::Outlet(handler) => on_off::HandlerAsyncAdaptor(handler).run(ctx).await,
             Self::Light(light) => lighting::Dispatch(light).run(ctx).await,
+            Self::Temperature(handler) => {
+                AsyncHandler::run(
+                    &Async(temperature_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                )
+                .await
+            }
+            Self::Humidity(handler) => {
+                AsyncHandler::run(
+                    &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                )
+                .await
+            }
         }
     }
 }
@@ -387,9 +496,22 @@ impl Entry {
                 devices!(DEV_TYPE_BRIDGED_NODE),
                 PARENT_CLUSTERS,
             ),
-            Role::Child { .. } => {
-                Endpoint::new(self.endpoint, devices!(ON_OFF_PLUG), CHILD_CLUSTERS).with_tags(tags)
-            }
+            Role::Child { control, .. } => match &control.kind {
+                ControlKind::Temperature(_) => Endpoint::new(
+                    self.endpoint,
+                    devices!(TEMPERATURE_SENSOR),
+                    TEMPERATURE_CLUSTERS,
+                )
+                .with_tags(tags),
+                ControlKind::Humidity(_) => {
+                    Endpoint::new(self.endpoint, devices!(HUMIDITY_SENSOR), HUMIDITY_CLUSTERS)
+                        .with_tags(tags)
+                }
+                ControlKind::Outlet(_) | ControlKind::Light(_) => {
+                    Endpoint::new(self.endpoint, devices!(ON_OFF_PLUG), CHILD_CLUSTERS)
+                        .with_tags(tags)
+                }
+            },
         }
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
@@ -410,16 +532,31 @@ impl Entry {
             self.descriptor.changed();
         }
         if let Some(control) = self.role.control() {
-            if cluster.is_none_or(|id| id == 4) {
+            if !control.is_sensor() && cluster.is_none_or(|id| id == 4) {
                 control.groups.changed();
             }
             if cluster.is_none_or(|id| id == 3) {
                 control.identify.dataver_changed();
             }
-            if cluster.is_none_or(|id| id == 6)
-                && let ControlKind::Outlet(handler) = &control.kind
-            {
-                handler.dataver_changed();
+            match &control.kind {
+                ControlKind::Outlet(handler)
+                    if cluster.is_none_or(|id| id == 6) =>
+                {
+                    handler.dataver_changed()
+                }
+                ControlKind::Temperature(handler)
+                    if cluster.is_none_or(|id| id == 0x402) =>
+                {
+                    <sensors::TemperatureHandler as
+                        temperature_measurement::ClusterHandler>::dataver_changed(handler)
+                }
+                ControlKind::Humidity(handler)
+                    if cluster.is_none_or(|id| id == 0x405) =>
+                {
+                    <sensors::HumidityHandler as
+                        relative_humidity_measurement::ClusterHandler>::dataver_changed(handler)
+                }
+                _ => {}
             }
         }
         if let Some(light) = self.role.control().and_then(Control::light) {

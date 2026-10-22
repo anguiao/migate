@@ -73,11 +73,14 @@ fn an_accepted_write_invalidates_an_older_held_local_read() {
             peer.state.borrow_mut().hold_reads = true;
             refresh_read(control, &peer, "one", 2).await;
 
-            assert_eq!(one.execute(Command::On).await.unwrap().power, Power::On);
+            assert_eq!(
+                one.execute(Command::On).await.unwrap().power(),
+                Some(Power::On)
+            );
             let accepted = one.snapshot();
             release_operation(&peer, "get", "one", 2, json!({"value":false})).await;
             peer.notify("two", 2, true);
-            until(|| two.snapshot().power == Power::On).await;
+            until(|| two.snapshot().power() == Some(Power::On)).await;
 
             assert_eq!(one.snapshot(), accepted);
             assert_eq!(peer.count("rpcReq", "one", 2), 1);
@@ -105,13 +108,13 @@ fn a_source_change_and_new_read_do_not_invalidate_a_held_write_without_notificat
             refresh_read(control, &peer, "one", 2).await;
             release_operation(&peer, "get", "one", 2, json!({"value":false})).await;
             peer.notify("two", 2, true);
-            until(|| two.snapshot().power == Power::On).await;
-            assert_eq!(one.snapshot().power, Power::Off);
+            until(|| two.snapshot().power() == Some(Power::On)).await;
+            assert_eq!(one.snapshot().power(), Some(Power::Off));
             assert!(poll_once(command.as_mut()).await.is_none());
 
             release_operation(&peer, "rpcReq", "one", 2, accepted("one", 2, 0)).await;
-            assert_eq!(command.await.unwrap().power, Power::On);
-            assert_eq!(one.snapshot().power, Power::On);
+            assert_eq!(command.await.unwrap().power(), Some(Power::On));
+            assert_eq!(one.snapshot().power(), Some(Power::On));
             assert_eq!(peer.count("rpcReq", "one", 2), 1);
         })
         .await;
@@ -169,14 +172,14 @@ fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
 
             assert!(old_work.life.is_closed());
             assert!(matches!(
-                one.snapshot().availability,
+                one.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
             release_operation(&peer, "rpcReq", "one", 2, accepted("one", 2, 0)).await;
             // The sent light receipt keeps its ownership and settles the
             // original request; it does not project into the new sink.
             assert!(command.await.is_ok());
-            assert_ne!(one.snapshot().power, Power::On);
+            assert_ne!(one.snapshot().power(), Some(Power::On));
         })
         .await;
     }));
@@ -208,19 +211,19 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
             control.context.reconcile("multi").unwrap();
             assert!(Rc::ptr_eq(&work, &device_work(control, "multi")));
             release_operation(&peer, "rpcReq", "multi", 3, accepted("multi", 3, 0)).await;
-            assert_eq!(command.await.unwrap().power, Power::On);
+            assert_eq!(command.await.unwrap().power(), Some(Power::On));
 
             let mut following = Box::pin(outlet.execute(Command::Toggle));
             assert!(poll_once(following.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "multi", 3) == 2).await;
             release_operation(&peer, "rpcReq", "multi", 3, accepted("multi", 3, 0)).await;
-            assert_eq!(following.await.unwrap().power, Power::Off);
+            assert_eq!(following.await.unwrap().power(), Some(Power::Off));
             for id in ["outlet_2", "usb"] {
                 assert_eq!(
                     function(&control.context.registry, "multi", id)
                         .snapshot()
-                        .power,
-                    Power::Off
+                        .power(),
+                    Some(Power::Off)
                 );
             }
         })
@@ -265,8 +268,11 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
         assert!(after.test_local_subscribed_empty());
         assert!(c.context.live.borrow().devices["one"].access.is_none());
         let one = function(&c.context.registry, "one", "main");
-        assert_eq!(one.snapshot().availability, Availability::Available);
-        assert_eq!(one.execute(Command::Off).await.unwrap().power, Power::Off);
+        assert_eq!(one.snapshot().availability(), Availability::Available);
+        assert_eq!(
+            one.execute(Command::Off).await.unwrap().power(),
+            Some(Power::Off)
+        );
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
     }));
 }
@@ -352,8 +358,8 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                 until(|| {
                     function(&control.context.registry, "two", "main")
                         .snapshot()
-                        .power
-                        == Power::On
+                        .power()
+                        == Some(Power::On)
                 })
                 .await;
                 let current = device_work(control, "one");

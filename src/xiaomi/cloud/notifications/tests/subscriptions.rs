@@ -182,7 +182,8 @@ fn late_suback_after_timeout_does_not_restore_retired_subscription() {
         [NotificationEvent::PropertyValue {
             did: "target".into(),
             binding: POWER,
-            value: serde_json::Value::Bool(true)
+            value: serde_json::Value::Bool(true),
+            update_time: None,
         }]
     );
 }
@@ -437,7 +438,8 @@ fn unsubscribe_properties_keeps_online_until_device_is_removed() {
             NotificationEvent::PropertyValue {
                 did: "other".into(),
                 binding: POWER,
-                value: serde_json::Value::Bool(true)
+                value: serde_json::Value::Bool(true),
+                update_time: None,
             }
         ]
     );
@@ -502,7 +504,8 @@ fn cancel_pending_subscription_suppresses_its_late_suback() {
         [NotificationEvent::PropertyValue {
             did: "target".into(),
             binding: POWER,
-            value: serde_json::Value::Bool(true)
+            value: serde_json::Value::Bool(true),
+            update_time: None,
         }]
     );
 }

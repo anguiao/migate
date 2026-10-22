@@ -13,7 +13,7 @@ fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
             ["member-a", "member-b"].iter().all(|did| {
                 function(&c.context.registry, did, "main")
                     .snapshot()
-                    .lighting
+                    .lighting()
                     .is_some_and(|state| state.mode.is_some() && state.color.is_some())
             })
         })
@@ -28,7 +28,7 @@ fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
         work.notify_value(color, &json!(0x00ff00), false, false);
         c.context.refresh_group_states("member-a");
         assert_eq!(
-            light.snapshot().lighting.unwrap().color,
+            light.snapshot().lighting().unwrap().color,
             Rgb::from_packed(0x00ff00)
         );
 
@@ -37,7 +37,7 @@ fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
         work.test_source_changed();
         work.notify_value(mode, &json!(0), false, false);
         c.context.refresh_group_states("member-a");
-        let state = light.snapshot().lighting.unwrap();
+        let state = light.snapshot().lighting().unwrap();
         assert_eq!(state.mode, Some(LightMode::Temperature));
         assert_eq!(state.color, None);
 
@@ -51,7 +51,7 @@ fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
             false,
         );
         c.context.refresh_group_states("member-a");
-        let state = light.snapshot().lighting.unwrap();
+        let state = light.snapshot().lighting().unwrap();
         assert_eq!(state.mode, None);
         assert_eq!(state.color, None);
     }));
@@ -101,14 +101,14 @@ fn physical_repair_preserves_native_power_brightness_and_temperature() {
                 )));
             }
             until(|| {
-                group.snapshot().lighting.is_some_and(|state| {
+                group.snapshot().lighting().is_some_and(|state| {
                     state.color == Rgb::from_packed(0x00ff00) && state.mode == Some(LightMode::Rgb)
                 })
             })
             .await;
             let snapshot = group.snapshot();
-            let color = snapshot.lighting.unwrap();
-            assert_eq!(snapshot.power, Power::Off);
+            let color = snapshot.lighting().unwrap();
+            assert_eq!(snapshot.power(), Some(Power::Off));
             assert_eq!(color.brightness_percent, Some(13.0));
             assert_eq!(color.temperature_kelvin, Some(4000));
         })

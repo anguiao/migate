@@ -129,7 +129,8 @@ impl Function {
         let mut state = self.0.state.lock().unwrap();
         self.validate_light_available(&state)?;
         let action = state
-            .commands
+            .commands_mut()
+            .expect("read-only functions have no light queue")
             .begin_light(target, final_frame, allow_unchanged_startup);
         self.notify_light_actions();
         Ok(action)
@@ -151,7 +152,8 @@ impl Function {
         let mut state = self.0.state.lock().unwrap();
         self.validate_light_available(&state)?;
         state
-            .commands
+            .commands_mut()
+            .expect("read-only functions have no light queue")
             .submit_light_frame(token, target, final_frame)?;
         if power == Some(false) {
             self.notify_light_actions();
@@ -161,17 +163,19 @@ impl Function {
     }
 
     fn validate_light_available(&self, state: &RuntimeState) -> Result<(), CommandError> {
-        if state.commands.is_closed() {
+        let commands = state.commands().ok_or(CommandError::Unsupported)?;
+        if commands.is_closed() {
             return Err(CommandError::Cancelled);
         }
-        self.snapshot_locked(state).availability.command_result()
+        self.snapshot_locked(state).availability().command_result()
     }
     pub fn light_action_current(&self, token: ActionToken) -> bool {
         self.0
             .state
             .lock()
             .unwrap()
-            .commands
+            .commands()
+            .expect("read-only functions have no light queue")
             .light_action_current(token)
     }
     /// A completed final frame can finish its remaining writes until takeover or Stop.
@@ -180,7 +184,8 @@ impl Function {
             .state
             .lock()
             .unwrap()
-            .commands
+            .commands()
+            .expect("read-only functions have no light queue")
             .light_action_owns_writes(token)
     }
     pub fn stop_light(&self, dimension: LightDimension) -> Result<FunctionSnapshot, CommandError> {
@@ -202,7 +207,10 @@ impl Function {
         if !self.description().kind.is_light() {
             return Err(CommandError::Unsupported);
         }
-        state.commands.cancel_light(dimension, error);
+        state
+            .commands_mut()
+            .expect("read-only functions have no light queue")
+            .cancel_light(dimension, error);
         self.notify_light_actions();
         Ok(self.snapshot_locked(&state))
     }
@@ -213,7 +221,8 @@ impl Function {
             return Err(CommandError::Unsupported);
         }
         state
-            .commands
+            .commands_mut()
+            .expect("read-only functions have no light queue")
             .cancel_pending_light(CommandError::Superseded);
         self.notify_light_actions();
         Ok(self.snapshot_locked(&state))
@@ -222,7 +231,15 @@ impl Function {
         if !self.description().kind.is_light() {
             return None;
         }
-        Some(self.0.state.lock().unwrap().commands.light_diagnostics())
+        Some(
+            self.0
+                .state
+                .lock()
+                .unwrap()
+                .commands()
+                .expect("read-only functions have no light queue")
+                .light_diagnostics(),
+        )
     }
     pub fn subscribe_light_actions(&self) -> Option<LightActionChanges> {
         self.light_action_diagnostics()

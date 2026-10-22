@@ -59,7 +59,7 @@ pub(crate) fn is_cp7pd_topology(device: &ParsedDevice) -> bool {
         .iter()
         .zip(CHANNELS)
         .all(|(function, (id, power))| {
-            function.lighting().is_none() && function.id() == id && function.power() == power
+            function.lighting().is_none() && function.id() == id && function.power() == Some(power)
         })
 }
 

@@ -6,6 +6,13 @@ use super::{
     routing::ControlPath,
     state::Context,
 };
+fn path_kind(path: ControlPath) -> PathKind {
+    match path {
+        ControlPath::Local(_) => PathKind::Local,
+        ControlPath::Cloud(_) => PathKind::Cloud,
+    }
+}
+
 impl Context {
     pub(super) fn diagnostics(&self) -> AdapterStatus {
         self.update_routing("access conditions changed");
@@ -65,21 +72,46 @@ impl Context {
             .collect::<Vec<_>>();
         let mut devices = Vec::new();
         for did in dids {
+            let read_only = self.is_read_only(&did);
             let mut usable = Vec::new();
+            if !read_only {
+                if self.local_candidate(&did, false).is_ok() {
+                    usable.push(PathKind::Local);
+                }
+                if self.cloud_candidate(&did, true).is_ok() {
+                    usable.push(PathKind::Cloud);
+                }
+            }
+            let selected = self.control_path(&did).map(path_kind);
+            let mut usable_read = Vec::new();
             if self.local_candidate(&did, false).is_ok() {
-                usable.push(PathKind::Local);
+                usable_read.push(PathKind::Local);
             }
             if self.cloud_candidate(&did, true).is_ok() {
-                usable.push(PathKind::Cloud);
+                usable_read.push(PathKind::Cloud);
             }
-            let selected = self.control_path(&did).map(|path| match path {
-                ControlPath::Local(_) => PathKind::Local,
-                ControlPath::Cloud(_) => PathKind::Cloud,
-            });
+            let selected_read = self.read_path(&did).map(path_kind);
+            let physical_online = if read_only && super::routing::unreliable_cloud_online(&did) {
+                None
+            } else {
+                let live = self.live.borrow();
+                let slot = live.devices.get(&did).unwrap();
+                slot.cloud_access
+                    .as_ref()
+                    .map(|access| access.online)
+                    .or_else(|| {
+                        slot.access
+                            .as_ref()
+                            .and_then(|access| access.as_ref().ok())
+                            .map(|access| access.online)
+                    })
+            };
             let notification = self.active_notification(&did);
             let old = previous.devices.iter().find(|device| device.did == did);
             let switched = old.is_some_and(|old| {
-                old.selected_control != selected || old.notification_source != notification
+                old.selected_control != selected
+                    || old.selected_read != selected_read
+                    || old.notification_source != notification
             });
             let last_switch_reason = {
                 let mut live = self.live.borrow_mut();
@@ -89,16 +121,29 @@ impl Context {
                 }
                 slot.last_switch_reason.clone()
             };
-            let unavailable_reason = selected.is_none().then(|| {
-                format!(
-                    "local: {}; cloud: {}",
-                    self.local_candidate(&did, false)
-                        .err()
-                        .expect("no local control path"),
-                    self.cloud_candidate(&did, true)
-                        .expect_err("no cloud control path")
-                )
-            });
+            let unavailable_reason = if read_only {
+                (selected_read.is_none() && notification.is_none()).then(|| {
+                    format!(
+                        "local: {}; cloud: {}",
+                        self.local_candidate(&did, false)
+                            .err()
+                            .expect("no local read path"),
+                        self.cloud_candidate(&did, true)
+                            .expect_err("no cloud read path")
+                    )
+                })
+            } else {
+                selected.is_none().then(|| {
+                    format!(
+                        "local: {}; cloud: {}",
+                        self.local_candidate(&did, false)
+                            .err()
+                            .expect("no local control path"),
+                        self.cloud_candidate(&did, true)
+                            .expect_err("no cloud control path")
+                    )
+                })
+            };
             let sync_limited_reason = notification
                 .is_none()
                 .then(|| self.notification_reason(&did));
@@ -124,8 +169,12 @@ impl Context {
             }
             devices.push(DeviceStatus {
                 did,
+                read_only,
                 usable_control_paths: usable,
                 selected_control: selected,
+                usable_read_paths: usable_read,
+                selected_read,
+                physical_online,
                 notification_source: notification,
                 unavailable_reason,
                 sync_limited_reason,

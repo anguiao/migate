@@ -25,22 +25,22 @@ fn cloud_notifications_activate_after_subscription_and_update_cloud_only_device(
             cloud_active(&c, "one")
                 && function(&c.context.registry, "one", "main")
                     .snapshot()
-                    .power
-                    == Power::Off
+                    .power()
+                    == Some(Power::Off)
         })
         .await;
         broker.property("one", 2, true).await;
         until(|| {
             function(&c.context.registry, "one", "main")
                 .snapshot()
-                .power
-                == Power::On
+                .power()
+                == Some(Power::On)
         })
         .await;
         assert_eq!(
             function(&c.context.registry, "one", "main")
                 .snapshot()
-                .availability,
+                .availability(),
             Availability::Available
         );
     }));
@@ -243,7 +243,7 @@ fn http_pause_keeps_cloud_notifications_and_online_reports_cannot_resume_http() 
             assert!(one.execute(Command::On).await.is_err());
             assert!(c.context.http_paused.get());
             peer.property("one", 2, true);
-            until(|| one.snapshot().power == Power::On).await;
+            until(|| one.snapshot().power() == Some(Power::On)).await;
             peer.online("one", false);
             until(|| {
                 !c.context.live.borrow().devices["one"]
@@ -265,10 +265,10 @@ fn http_pause_keeps_cloud_notifications_and_online_reports_cannot_resume_http() 
             })
             .await;
             peer.property("one", 2, false);
-            until(|| one.snapshot().power == Power::Off).await;
+            until(|| one.snapshot().power() == Some(Power::Off)).await;
             assert!(c.context.http_paused.get());
             assert!(matches!(
-                one.snapshot().availability,
+                one.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
@@ -381,16 +381,16 @@ fn partial_cloud_preparation_keeps_local_and_preparing_qos2_cannot_cross_activat
                 cloud.qos2("multi", 3, true, 41);
                 until(|| cloud.received(41, false)).await;
                 local.notify("multi", 3, true);
-                until(|| outlet.snapshot().power == Power::On).await;
+                until(|| outlet.snapshot().power() == Some(Power::On)).await;
                 cloud.state.borrow_mut().hold.remove(held);
                 cloud.release(held);
                 until(|| cloud_active(control, "multi")).await;
-                until(|| outlet.snapshot().power == Power::Off).await;
+                until(|| outlet.snapshot().power() == Some(Power::Off)).await;
                 cloud.send(Packet::PubRel(PubRel::new(41)));
                 until(|| cloud.received(41, true)).await;
-                assert_eq!(outlet.snapshot().power, Power::Off);
+                assert_eq!(outlet.snapshot().power(), Some(Power::Off));
                 cloud.property("multi", 3, true);
-                until(|| outlet.snapshot().power == Power::On).await;
+                until(|| outlet.snapshot().power() == Some(Power::On)).await;
                 for (path, count) in paths.into_iter().zip(counts) {
                     assert_eq!(cloud.count(path), count + 1);
                 }
@@ -430,8 +430,8 @@ fn local_cloud_local_delivery_epochs_do_not_reactivate_an_old_pubrel() {
                 until(|| {
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .power
-                        == Power::Off
+                        .power()
+                        == Some(Power::Off)
                 })
                 .await;
                 control
@@ -445,15 +445,15 @@ fn local_cloud_local_delivery_epochs_do_not_reactivate_an_old_pubrel() {
                 assert_eq!(
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .power,
-                    Power::Off
+                        .power(),
+                    Some(Power::Off)
                 );
                 cloud.property("one", 2, true);
                 until(|| {
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .power
-                        == Power::On
+                        .power()
+                        == Some(Power::On)
                 })
                 .await;
             })
@@ -496,8 +496,8 @@ fn exhausted_local_preparation_uses_cloud_and_diagnostic_wakes_do_not_restart_it
                 until(|| {
                     function(&control.context.registry, "multi", "usb")
                         .snapshot()
-                        .power
-                        == Power::On
+                        .power()
+                        == Some(Power::On)
                 })
                 .await;
                 assert!(
@@ -538,7 +538,7 @@ fn new_and_restored_pushless_devices_read_and_control_without_local_notification
                         .registry
                         .get(&DeviceKey::new("xiaomi", "one"))
                         .is_some_and(|physical| {
-                            physical.functions()[0].snapshot().power == Power::Off
+                            physical.functions()[0].snapshot().power() == Some(Power::Off)
                         })
                 })
                 .await;
@@ -614,15 +614,16 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
             c.clock.advance(Duration::from_secs(10));
             until(|| cloud_active(&c, "one")).await;
             let one = function(&c.context.registry, "one", "main");
-            until(|| one.snapshot().power == Power::Off).await;
+            until(|| one.snapshot().power() == Some(Power::Off)).await;
             c.context.property_value_event(
                 &super::super::notifications::NotificationSource::Cloud(old),
                 "one",
                 crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
                 &json!(true),
+                None,
                 false,
             );
-            assert_eq!(one.snapshot().power, Power::Off);
+            assert_eq!(one.snapshot().power(), Some(Power::Off));
             assert_eq!(c.cloud.lock().unwrap().tokens, 0);
         })
         .await;
@@ -802,29 +803,29 @@ fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
                         .clone()
                         .unwrap();
                     until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
-                    assert_eq!(one.snapshot().power, Power::Off);
+                    assert_eq!(one.snapshot().power(), Some(Power::Off));
                     if notify_after_send {
                         cloud.property("one", 2, true);
-                        until(|| one.snapshot().power == Power::On).await;
+                        until(|| one.snapshot().power() == Some(Power::On)).await;
                         cloud.property("one", 2, false);
-                        until(|| one.snapshot().power == Power::Off).await;
+                        until(|| one.snapshot().power() == Some(Power::Off)).await;
                     }
                     local.release("one", 2, accepted("one", 2, 0)).await;
                     assert_eq!(
-                        first.await.unwrap().power,
-                        if notify_after_send {
+                        first.await.unwrap().power(),
+                        Some(if notify_after_send {
                             Power::Off
                         } else {
                             Power::On
-                        }
+                        })
                     );
                     assert_eq!(
-                        second.await.unwrap().power,
-                        if notify_after_send {
+                        second.await.unwrap().power(),
+                        Some(if notify_after_send {
                             Power::On
                         } else {
                             Power::Off
-                        }
+                        })
                     );
                     assert_eq!(local.count("rpcReq", "one", 2), 1);
                     let cloud = control.cloud.lock().unwrap();
@@ -1233,11 +1234,11 @@ fn same_value_notification_invalidates_an_inflight_read() {
             let before = one.snapshot();
             peer.notify("one", 2, false);
             peer.notify("two", 2, true);
-            until(|| two.snapshot().power == Power::On).await;
+            until(|| two.snapshot().power() == Some(Power::On)).await;
             assert_eq!(one.snapshot(), before);
             peer.release("one", 2, json!({"value":true})).await;
             async_io::Timer::after(Duration::from_millis(20)).await;
-            assert_eq!(one.snapshot().power, Power::Off);
+            assert_eq!(one.snapshot().power(), Some(Power::Off));
         })
         .await;
     }));
@@ -1261,9 +1262,9 @@ fn notification_after_write_preserves_state_and_advances_the_channel_fifo() {
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
             peer.notify("one", 2, false);
             peer.notify("two", 2, true);
-            until(|| two.snapshot().power == Power::On).await;
+            until(|| two.snapshot().power() == Some(Power::On)).await;
             peer.release("one", 2, accepted("one", 2, 0)).await;
-            assert_eq!(first.await.unwrap().power, Power::Off);
+            assert_eq!(first.await.unwrap().power(), Some(Power::Off));
             until(|| peer.count("rpcReq", "one", 2) == 2 && !peer.state.borrow().held.is_empty())
                 .await;
             assert_eq!(
@@ -1278,7 +1279,7 @@ fn notification_after_write_preserves_state_and_advances_the_channel_fifo() {
                 true
             );
             peer.release("one", 2, accepted("one", 2, 0)).await;
-            assert_eq!(second.await.unwrap().power, Power::On);
+            assert_eq!(second.await.unwrap().power(), Some(Power::On));
         })
         .await;
     }));
@@ -1337,8 +1338,11 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
             until(|| cloud_active(&c, "one") && cloud_active(&c, "two")).await;
             let first = function(&c.context.registry, "group-1", "main");
             let second = function(&c.context.registry, "group-2", "main");
-            until(|| first.snapshot().power == Power::Off && second.snapshot().power == Power::Off)
-                .await;
+            until(|| {
+                first.snapshot().power() == Some(Power::Off)
+                    && second.snapshot().power() == Some(Power::Off)
+            })
+            .await;
 
             c.cloud
                 .lock()
@@ -1346,8 +1350,8 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
                 .raw_values
                 .insert(("one".into(), 2, 1), json!(true));
             peer.property("one", 2, true);
-            until(|| first.snapshot().power == Power::On).await;
-            assert_eq!(second.snapshot().power, Power::Off);
+            until(|| first.snapshot().power() == Some(Power::On)).await;
+            assert_eq!(second.snapshot().power(), Some(Power::Off));
             for (piid, value) in [(2, json!(70)), (3, json!(4000))] {
                 c.cloud
                     .lock()
@@ -1361,7 +1365,7 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
                 )));
             }
             until(|| {
-                first.snapshot().lighting.is_some_and(|light| {
+                first.snapshot().lighting().is_some_and(|light| {
                     light.brightness_percent == Some(70.0) && light.temperature_kelvin == Some(4000)
                 })
             })
@@ -1373,7 +1377,7 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
             c.cloud.lock().unwrap().catalog_groups[1] =
                 super::support::group_record("record-2", "group-2", &["two", "one"], false);
             c.context.request_sync();
-            until(|| second.snapshot().power == Power::On).await;
+            until(|| second.snapshot().power() == Some(Power::On)).await;
             assert_eq!(
                 peer.count("device/one/up/properties_changed/2/1"),
                 subscriptions
@@ -1384,18 +1388,21 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
                 .raw_values
                 .insert(("one".into(), 2, 1), json!(false));
             peer.property("one", 2, false);
-            until(|| first.snapshot().power == Power::Off && second.snapshot().power == Power::Off)
-                .await;
+            until(|| {
+                first.snapshot().power() == Some(Power::Off)
+                    && second.snapshot().power() == Some(Power::Off)
+            })
+            .await;
 
             // Losing a member's actual source invalidates both groups instead
             // of treating the unavailable member as off.
             peer.online("one", false);
             until(|| {
-                first.snapshot().power == Power::Unknown
-                    && second.snapshot().power == Power::Unknown
+                first.snapshot().power() == Some(Power::Unknown)
+                    && second.snapshot().power() == Some(Power::Unknown)
             })
             .await;
-            let cleared = first.snapshot().lighting.unwrap();
+            let cleared = first.snapshot().lighting().unwrap();
             assert_eq!(cleared.brightness_percent, None);
             assert_eq!(cleared.temperature_kelvin, None);
             assert_eq!(cleared.color, None);
@@ -1406,8 +1413,11 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
                 .raw_values
                 .insert(("one".into(), 2, 1), json!(true));
             peer.online("one", true);
-            until(|| first.snapshot().power == Power::On && second.snapshot().power == Power::On)
-                .await;
+            until(|| {
+                first.snapshot().power() == Some(Power::On)
+                    && second.snapshot().power() == Some(Power::On)
+            })
+            .await;
 
             assert!(
                 c.cloud
@@ -1456,7 +1466,7 @@ fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail()
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             assert!(member.observer().is_none());
             let group = function(&c.context.registry, "group-1", "main");
-            assert_eq!(group.snapshot().power, Power::Off);
+            assert_eq!(group.snapshot().power(), Some(Power::Off));
             let key = ("member-a".to_string(), 2, 1);
             let reads = || {
                 c.cloud
@@ -1484,9 +1494,9 @@ fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail()
                 .automatic
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             until(|| peer.count(property) > subscriptions && member.test_cloud_exhausted()).await;
-            until(|| reads() > before && group.snapshot().power == Power::On).await;
+            until(|| reads() > before && group.snapshot().power() == Some(Power::On)).await;
             assert!(member.observer().is_none());
-            assert_eq!(group.snapshot().availability, Availability::Available);
+            assert_eq!(group.snapshot().availability(), Availability::Available);
             assert!(
                 c.context
                     .diagnostics()

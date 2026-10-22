@@ -237,7 +237,7 @@ fn ct_projection_reads_ignore_inactive_rgb_and_rgb_keeps_its_ct_cache_readable()
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!(function.snapshot().lighting.unwrap().color, Some(blue));
+        assert_eq!(function.snapshot().lighting().unwrap().color, Some(blue));
         for (attribute, before) in &baseline {
             ctx.attribute = attr(0x300, *attribute);
             assert_eq!(read_bytes(&handler, &ctx).await.unwrap(), *before);

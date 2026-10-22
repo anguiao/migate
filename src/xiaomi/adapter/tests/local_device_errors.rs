@@ -31,7 +31,7 @@ fn local_offline_or_missing_writes_revoke_only_the_target_until_a_new_list_obser
                     Err(crate::device::CommandError::Rejected(_))
                 ));
                 assert_eq!(control.context.priority(), PathPriority::LocalFirst);
-                assert_eq!(one.snapshot().availability, Availability::Available);
+                assert_eq!(one.snapshot().availability(), Availability::Available);
                 assert!(matches!(
                     control.context.control_path("one"),
                     Some(ControlPath::Cloud(_))
@@ -135,7 +135,7 @@ fn local_device_offline_reads_continue_over_cloud_without_degrading_other_device
             peer.release("one", 2, json!({"error":{"code":-704042011}}))
                 .await;
             peer.state.borrow_mut().hold_reads = false;
-            until(|| one.snapshot().power == Power::On).await;
+            until(|| one.snapshot().power() == Some(Power::On)).await;
             assert_eq!(control.context.priority(), PathPriority::LocalFirst);
             assert!(matches!(
                 control.context.read_path("one"),
@@ -157,7 +157,7 @@ fn local_device_offline_reads_continue_over_cloud_without_degrading_other_device
             .await;
             work.refresh();
             until(|| peer.count("get", "one", 2) > reads).await;
-            until(|| one.snapshot().power == Power::Off).await;
+            until(|| one.snapshot().power() == Some(Power::Off)).await;
         })
         .await;
     }));

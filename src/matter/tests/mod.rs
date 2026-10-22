@@ -439,3 +439,4 @@ fn load_basic_info(
     rs_matter::dm::clusters::basic_info::BasicInfoSettings::from_tlv(&TLVElement::new(blob))
         .unwrap()
 }
+mod sensors;

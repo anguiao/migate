@@ -4,6 +4,7 @@ mod lighting;
 mod model;
 mod on_off;
 mod pairing;
+mod sensors;
 mod shape;
 mod storage;
 pub(crate) mod units;

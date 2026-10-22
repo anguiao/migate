@@ -35,7 +35,7 @@ fn commands_are_concurrent_across_channels_and_fifo_with_execution_time_toggle()
             control.clock.advance(Duration::from_secs(6));
             assert!(poll_once(second.as_mut()).await.is_none());
             peer.release("multi", 4, accepted("multi", 4, 1)).await;
-            assert_eq!(channel.await.unwrap().power, Power::On);
+            assert_eq!(channel.await.unwrap().power(), Some(Power::On));
             peer.release("multi", 3, accepted("multi", 3, 0)).await;
             other.await.unwrap();
             peer.release("one", 2, accepted("one", 2, 0)).await;
@@ -57,7 +57,7 @@ fn commands_are_concurrent_across_channels_and_fifo_with_execution_time_toggle()
             until(|| peer.count("rpcReq", "one", 2) == 3).await;
             peer.release("one", 2, accepted("one", 2, 0)).await;
             third.await.unwrap();
-            assert_eq!(a.snapshot().power, Power::Off);
+            assert_eq!(a.snapshot().power(), Some(Power::Off));
         })
         .await;
     }));
@@ -78,19 +78,19 @@ fn an_offline_event_before_an_active_success_reply_preserves_acceptance() {
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
             peer.state.borrow_mut().online.insert("one".into(), false);
             peer.list_changed(&["one"]);
-            until(|| matches!(one.snapshot().availability, Availability::Unavailable(_))).await;
+            until(|| matches!(one.snapshot().availability(), Availability::Unavailable(_))).await;
             assert!(poll_once(command.as_mut()).await.is_none());
             peer.release("one", 2, accepted("one", 2, 0)).await;
             let accepted = command.await.unwrap();
-            assert_eq!(accepted.power, Power::On);
+            assert_eq!(accepted.power(), Some(Power::On));
             assert!(matches!(
-                accepted.availability,
+                accepted.availability(),
                 Availability::Unavailable(_)
             ));
             assert_eq!(
                 function(&control.context.registry, "two", "main")
                     .snapshot()
-                    .availability,
+                    .availability(),
                 Availability::Available
             );
         })
@@ -167,7 +167,7 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 future::yield_now().await;
             };
             let current = current_physical.function("main").unwrap();
-            until(|| current.snapshot().power == Power::Off).await;
+            until(|| current.snapshot().power() == Some(Power::Off)).await;
             peer.release("one", 2, accepted("one", 2, 0)).await;
             // A sent light receipt keeps its ownership and settles the
             // original request; it must not project into the new instance.
@@ -176,12 +176,12 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 "the original light receipt settles after the sink is retired"
             );
             assert!(matches!(
-                one.snapshot().availability,
+                one.snapshot().availability(),
                 Availability::Unavailable(_)
             ));
-            assert_ne!(one.snapshot().power, Power::On);
-            until(|| current.snapshot().availability == Availability::Available).await;
-            assert_eq!(current.snapshot().power, Power::Off);
+            assert_ne!(one.snapshot().power(), Some(Power::On));
+            until(|| current.snapshot().availability() == Availability::Available).await;
+            assert_eq!(current.snapshot().power(), Some(Power::Off));
             peer.state.borrow_mut().hold_writes = false;
             current.execute(Command::On).await.unwrap();
             assert_eq!(peer.count("rpcReq", "one", 2), 2);
@@ -196,8 +196,8 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 "the replacement instance sends its own absolute power target"
             );
             assert_eq!(
-                current.snapshot().power,
-                Power::Off,
+                current.snapshot().power(),
+                Some(Power::Off),
                 "light acceptance does not infer actual power before feedback"
             );
         })

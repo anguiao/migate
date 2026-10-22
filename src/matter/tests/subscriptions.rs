@@ -378,7 +378,11 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
                 // A new subscription must not reuse the restored ID.
                 let replacement = subscribe(
                     &client,
-                    device.functions()[0].snapshot().power.value().unwrap(),
+                    device.functions()[0]
+                        .snapshot()
+                        .power()
+                        .and_then(crate::device::Power::value)
+                        .unwrap(),
                 )
                 .await
                 .unwrap();
@@ -386,7 +390,11 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
                 id = replacement;
             }
             wait_committed(&state).await;
-            let final_power = !device.functions()[0].snapshot().power.value().unwrap();
+            let final_power = !device.functions()[0]
+                .snapshot()
+                .power()
+                .and_then(crate::device::Power::value)
+                .unwrap();
             super::terminal_command(&device, if final_power { "on" } else { "off" }).await;
             expect_report(&client, id, Some(final_power), None)
                 .await
@@ -1615,6 +1623,256 @@ fn frozen_light_report_action_carries_root_bdbi_and_changed_bounds() {
             assert_eq!(after.bdbis[&2].1, 2);
             assert_eq!(after.lighting[&(2, 0x300, 0x400b)].1, 250);
             assert_eq!(after.lighting[&(2, 0x300, 0x400c)].1, 333);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn sensor_device() -> crate::device::PhysicalDevice {
+    use crate::device::{
+        DeviceKey, FunctionDescription, FunctionKind, MeasurementRange, PhysicalDevice,
+        PhysicalDeviceDescription,
+    };
+    let (device, _receivers) = PhysicalDevice::new(
+        PhysicalDeviceDescription::new(
+            DeviceKey::new("xiaomi", "sensor"),
+            "Sensor",
+            vec![
+                FunctionDescription {
+                    id: "temperature".into(),
+                    label: "Temperature".into(),
+                    kind: FunctionKind::Temperature(MeasurementRange::new(-30.0, 100.0).unwrap()),
+                },
+                FunctionDescription {
+                    id: "humidity".into(),
+                    label: "Humidity".into(),
+                    kind: FunctionKind::Humidity(MeasurementRange::new(0.0, 100.0).unwrap()),
+                },
+            ],
+        )
+        .unwrap(),
+    );
+    device
+}
+
+async fn subscribe_sensor(client: &Matter<'_>) -> Result<u32, Error> {
+    let paths = [
+        AttrPath::from_gp(&GenericPath::new(Some(2), Some(57), Some(17))),
+        AttrPath::from_gp(&GenericPath::new(Some(3), Some(0x402), Some(0))),
+        AttrPath::from_gp(&GenericPath::new(Some(4), Some(0x405), Some(0))),
+    ];
+    let exchange = Exchange::initiate(
+        client,
+        test_only_crypto(),
+        NonZeroU8::new(1).unwrap(),
+        SERVER_ID,
+    )
+    .await?;
+    let mut sender = exchange.subscribe_sender().await?;
+    let mut chunk = loop {
+        match sender.tx().await? {
+            TxOutcome::BuildRequest(builder) => {
+                sender = builder
+                    .keep_subs(false)?
+                    .min_int_floor(0)?
+                    .max_int_ceil(60)?
+                    .attr_requests_from(&paths)?
+                    .fabric_filtered(false)?
+                    .end()?;
+            }
+            TxOutcome::GotResponse(chunk) => break chunk,
+        }
+    };
+    loop {
+        let report = chunk.response()?;
+        assert_eq!(
+            report
+                .attrs::<bool>(57, 17)
+                .map(|(endpoint, value)| (endpoint, value.unwrap()))
+                .collect::<Vec<_>>(),
+            [(2, true)]
+        );
+        assert_eq!(
+            report
+                .attrs::<i16>(0x402, 0)
+                .map(|(endpoint, value)| (endpoint, value.unwrap()))
+                .collect::<Vec<_>>(),
+            [(3, 2150)]
+        );
+        assert_eq!(
+            report
+                .attrs::<u16>(0x405, 0)
+                .map(|(endpoint, value)| (endpoint, value.unwrap()))
+                .collect::<Vec<_>>(),
+            [(4, 4550)]
+        );
+        match chunk.complete().await? {
+            SubscribeOutcome::NextChunk(next) => chunk = next,
+            SubscribeOutcome::Established(subscription) => return Ok(subscription.subscription_id),
+        }
+    }
+}
+
+async fn expect_sensor_report(
+    client: &Matter<'_>,
+    subscription_id: u32,
+    reachable: Option<bool>,
+    temperature: Option<i16>,
+    humidity: Option<u16>,
+) -> Result<(), Error> {
+    let mut exchange = Exchange::accept(client).await?;
+    exchange.recv_fetch().await?;
+    {
+        let rx = exchange.rx()?;
+        assert_eq!(rx.meta().proto_opcode, OpCode::ReportData as u8);
+        let report = ReportDataResp::from_tlv(&TLVElement::new(rx.payload()))?;
+        assert_eq!(report.subscription_id, Some(subscription_id));
+        if let Some(expected) = reachable {
+            assert_eq!(
+                report
+                    .attrs::<bool>(57, 17)
+                    .map(|(endpoint, value)| (endpoint, value.unwrap()))
+                    .collect::<Vec<_>>(),
+                [(2, expected)]
+            );
+        }
+        if let Some(expected) = temperature {
+            assert_eq!(
+                report
+                    .attrs::<i16>(0x402, 0)
+                    .map(|(endpoint, value)| (endpoint, value.unwrap()))
+                    .collect::<Vec<_>>(),
+                [(3, expected)]
+            );
+        } else {
+            assert!(
+                report.attrs::<i16>(0x402, 0).next().is_none(),
+                "unexpected temperature attribute"
+            );
+        }
+        if let Some(expected) = humidity {
+            assert_eq!(
+                report
+                    .attrs::<u16>(0x405, 0)
+                    .map(|(endpoint, value)| (endpoint, value.unwrap()))
+                    .collect::<Vec<_>>(),
+                [(4, expected)]
+            );
+        } else {
+            assert!(
+                report.attrs::<u16>(0x405, 0).next().is_none(),
+                "unexpected humidity attribute"
+            );
+        }
+    }
+    exchange
+        .send_with(|_, buffer| {
+            StatusResp::write(buffer, IMStatusCode::Success)?;
+            Ok(Some(OpCode::StatusResponse.into()))
+        })
+        .await?;
+    exchange.acknowledge().await
+}
+
+#[test]
+fn sensor_subscription_reports_measured_values_and_reachable_changes() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path()).unwrap();
+            let identity = store.load_identity().unwrap();
+            let info = basic_info(&identity);
+            let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            let protocol = StoreAdapter::new(store.matter());
+            let kv = matter.kv(protocol.clone());
+            matter.startup(&kv).unwrap();
+            let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            connect(&matter, SERVER_ID, CLIENT_ID, 71);
+            connect(&client, CLIENT_ID, SERVER_ID, 71);
+            let crypto = test_only_crypto();
+            let buffers: MatterBuffers = MatterBuffers::new();
+            let state: EthInteractionModelState =
+                EthInteractionModelState::new(EthNetwork::new_default());
+            let device = sensor_device();
+            device.set_availability(Availability::Available);
+            device.functions()[0]
+                .observe_measurement(21.5, Some(1), 2)
+                .unwrap();
+            device.functions()[1]
+                .observe_measurement(45.5, Some(1), 2)
+                .unwrap();
+            let handler = crate::matter::tests::support::model_handler(vec![
+                crate::matter::tests::support::entry(
+                    &device,
+                    2,
+                    &[("temperature", 3), ("humidity", 4)],
+                ),
+            ]);
+            let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+            let incoming = Pipe::default();
+            let outgoing = Pipe::default();
+            let responder = DefaultResponder::new(&im);
+
+            block_on(async {
+                im.startup().await.unwrap();
+                let services = async {
+                    or(
+                        matter.run(
+                            &crypto,
+                            SendPipe(&outgoing),
+                            ReceivePipe(&incoming),
+                            NoNetwork,
+                        ),
+                        or(
+                            client.run(
+                                &crypto,
+                                SendPipe(&incoming),
+                                ReceivePipe(&outgoing),
+                                NoNetwork,
+                            ),
+                            or(responder.run::<4, 4>(), im.run()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    panic!("Matter services exited during sensor subscription test");
+                };
+                let controller = async {
+                    let id = subscribe_sensor(&client).await.unwrap();
+                    wait_committed(&state).await;
+                    device.functions()[0]
+                        .observe_measurement(22.0, Some(2), 3)
+                        .unwrap();
+                    expect_sensor_report(&client, id, None, Some(2200), None)
+                        .await
+                        .unwrap();
+                    device.functions()[1]
+                        .observe_measurement(46.0, Some(3), 4)
+                        .unwrap();
+                    expect_sensor_report(&client, id, None, None, Some(4600))
+                        .await
+                        .unwrap();
+                    device.set_availability(Availability::Unavailable("read path lost".into()));
+                    expect_sensor_report(&client, id, Some(false), None, None)
+                        .await
+                        .unwrap();
+                    device.set_availability(Availability::Available);
+                    expect_sensor_report(&client, id, Some(true), None, None)
+                        .await
+                        .unwrap();
+                };
+                or(
+                    services,
+                    or(controller, async {
+                        async_io::Timer::after(Duration::from_secs(5)).await;
+                        panic!("timed out waiting for a sensor subscription report");
+                    }),
+                )
+                .await
+            });
+            protocol.check_failure().unwrap();
         })
         .unwrap()
         .join()

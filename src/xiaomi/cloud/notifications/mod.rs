@@ -19,11 +19,13 @@ pub enum NotificationEvent {
         did: String,
         binding: PropertyBinding,
         value: serde_json::Value,
+        update_time: Option<i64>,
     },
     PropertyValue {
         did: String,
         binding: PropertyBinding,
         value: serde_json::Value,
+        update_time: Option<i64>,
     },
     Online {
         did: String,

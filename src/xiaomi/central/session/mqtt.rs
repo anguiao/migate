@@ -295,17 +295,20 @@ impl SessionDriver {
                 .get("value")
                 .filter(|value| crate::xiaomi::property::valid_value(value))
                 .ok_or(CentralError::Protocol)?;
+            let update_time = crate::xiaomi::property::update_time(&message.payload);
             let event = if publish.retain {
                 CentralEvent::PropertySnapshot {
                     did,
                     binding,
                     value: value.clone(),
+                    update_time,
                 }
             } else {
                 CentralEvent::PropertyValue {
                     did,
                     binding,
                     value: value.clone(),
+                    update_time,
                 }
             };
             on_event(event);

@@ -419,16 +419,24 @@ impl Function {
         let light = self.description().kind.is_light();
         let resolved = {
             let mut state = self.0.state.lock().unwrap();
-            if state.commands.is_closed() {
+            let Some(commands) = state.commands() else {
+                return Err(CommandError::Unsupported);
+            };
+            if commands.is_closed() {
                 return Err(CommandError::Cancelled);
             }
-            self.snapshot_locked(&state).availability.command_result()?;
+            self.snapshot_locked(&state)
+                .availability()
+                .command_result()?;
             let resolved = if light {
                 match command {
                     Command::On => Command::On,
                     Command::Off => Command::Off,
                     Command::Toggle => {
-                        let value = state.power.value().ok_or(CommandError::UnknownState)?;
+                        let value = state
+                            .power()
+                            .and_then(super::Power::value)
+                            .ok_or(CommandError::UnknownState)?;
                         if value { Command::Off } else { Command::On }
                     }
                 }
@@ -436,7 +444,8 @@ impl Function {
                 command
             };
             state
-                .commands
+                .commands_mut()
+                .expect("checked command queue exists")
                 .submit_power(resolved, light, completion.clone());
             resolved
         };
@@ -493,10 +502,11 @@ struct Submission {
 impl Drop for Submission {
     fn drop(&mut self) {
         let mut state = self.function.0.state.lock().unwrap();
-        state
-            .commands
-            .power
-            .retain(|pending| !Arc::ptr_eq(&pending.completion, &self.completion));
+        if let Some(commands) = state.commands_mut() {
+            commands
+                .power
+                .retain(|pending| !Arc::ptr_eq(&pending.completion, &self.completion));
+        }
     }
 }
 
@@ -513,36 +523,44 @@ impl CommandReceiver {
             .state
             .lock()
             .unwrap()
-            .commands
+            .commands()
+            .expect("read-only functions have no command receiver")
             .flight
             .clone();
         if let Some(flight) = flight {
             let _ = flight.gate().wait().await;
             let mut state = self.function.0.state.lock().unwrap();
-            if state
-                .commands
+            let commands = state
+                .commands_mut()
+                .expect("read-only functions have no command receiver");
+            if commands
                 .flight
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, &flight))
             {
-                state.commands.flight = None;
+                commands.flight = None;
             }
         }
     }
     /// One function consumes power in FIFO order and resolves Toggle at dequeue.
     fn take_power(&self, state: &mut RuntimeState) -> Option<CommandRequest> {
-        while let Some(pending) = state.commands.power.pop_front() {
+        loop {
+            let pending = state
+                .commands_mut()
+                .expect("read-only functions have no command receiver")
+                .power
+                .pop_front()?;
             let snapshot = self.function.snapshot_locked(state);
             let target =
                 snapshot
-                    .availability
+                    .availability()
                     .command_result()
                     .and_then(|()| match pending.command {
                         Command::On => Ok(true),
                         Command::Off => Ok(false),
                         Command::Toggle => snapshot
-                            .power
-                            .value()
+                            .power()
+                            .and_then(super::Power::value)
                             .map(|value| !value)
                             .ok_or(CommandError::UnknownState),
                     });
@@ -559,7 +577,10 @@ impl CommandReceiver {
                 sent: AtomicBool::new(false),
                 invalid: Mutex::new(None),
             });
-            state.commands.flight = Some(Arc::new(Flight::Power(flight.clone())));
+            state
+                .commands_mut()
+                .expect("read-only functions have no command receiver")
+                .flight = Some(Arc::new(Flight::Power(flight.clone())));
             return Some(CommandRequest {
                 target,
                 queued_at: pending.queued_at,
@@ -567,7 +588,6 @@ impl CommandReceiver {
                 flight,
             });
         }
-        None
     }
 }
 
@@ -664,12 +684,22 @@ impl CommandReceiver {
             let listener = self.function.0.submitted.listen();
             {
                 let mut state = self.function.0.state.lock().unwrap();
-                let light = state.commands.first_light_pending();
-                let power = state.commands.power.front().map(|pending| pending.order);
+                let (light, power) = {
+                    let commands = state
+                        .commands()
+                        .expect("read-only functions have no command receiver");
+                    (
+                        commands.first_light_pending(),
+                        commands.power.front().map(|pending| pending.order),
+                    )
+                };
                 if let Some((index, order)) = light
                     && power.is_none_or(|power| order < power)
                 {
-                    let frame = state.commands.light_pending[index].take().unwrap();
+                    let commands = state
+                        .commands_mut()
+                        .expect("read-only functions have no command receiver");
+                    let frame = commands.light_pending[index].take().unwrap();
                     let token = frame.action.token;
                     let flight = Arc::new(LightFlight {
                         action: frame.action,
@@ -677,7 +707,7 @@ impl CommandReceiver {
                         gate: Arc::new(Completion::default()),
                         sent: AtomicBool::new(false),
                     });
-                    state.commands.flight = Some(Arc::new(Flight::Light(flight.clone())));
+                    commands.flight = Some(Arc::new(Flight::Light(flight.clone())));
                     return Some(DeviceRequest::Light(LightRequest {
                         token,
                         target: frame.target,
@@ -690,7 +720,11 @@ impl CommandReceiver {
                 if let Some(request) = self.take_power(&mut state) {
                     return Some(DeviceRequest::Power(request));
                 }
-                if state.commands.is_closed() {
+                if state
+                    .commands()
+                    .expect("read-only functions have no command receiver")
+                    .is_closed()
+                {
                     return None;
                 }
             }
@@ -729,7 +763,9 @@ impl LightRequest {
     /// Call at the actual transport submission boundary, never just on dequeue.
     pub fn mark_sent(&self) -> Result<(), CommandError> {
         let mut state = self.function.0.state.lock().unwrap();
-        let coordinator = &mut state.commands;
+        let coordinator = state
+            .commands_mut()
+            .expect("read-only functions have no command receiver");
         if self.flight.sent.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -794,7 +830,9 @@ impl LightRequest {
         if self.flight.gate.is_finished() {
             return;
         }
-        let coordinator = &mut state.commands;
+        let coordinator = state
+            .commands_mut()
+            .expect("read-only functions have no command receiver");
         if accept_startup {
             if result.is_ok()
                 && !self.flight.action.accepted.is_finished()

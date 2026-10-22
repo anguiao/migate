@@ -4,8 +4,8 @@ use crate::{
     device::{FunctionKind, LightProfile},
     xiaomi::capability::NativeDescription,
     xiaomi::capability::{
-        BrightnessBinding, ColorBinding, LightBindings, NumericFormat, ParsedDevice,
-        ParsedFunction, PropertyBinding, TemperatureBinding,
+        BrightnessBinding, ColorBinding, LightBindings, MeasurementBinding, MeasurementUnit,
+        NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, TemperatureBinding,
     },
 };
 
@@ -15,6 +15,10 @@ pub(crate) fn native_for(
     description: &crate::device::PhysicalDeviceDescription,
 ) -> NativeDescription {
     let multiple = description.functions().len() > 1;
+    let sensor = description
+        .functions()
+        .iter()
+        .any(|function| function.kind.is_measurement());
     let functions = description
         .functions()
         .iter()
@@ -22,6 +26,36 @@ pub(crate) fn native_for(
             let id = function.id.clone();
             let label = function.label.clone();
             match function.kind {
+                FunctionKind::Temperature(range) => ParsedFunction::temperature(
+                    id,
+                    label,
+                    MeasurementBinding::new(
+                        PropertyBinding {
+                            siid: 3,
+                            piid: 1001,
+                        },
+                        NumericFormat::Float,
+                        MeasurementUnit::Celsius,
+                        range,
+                        0.1,
+                    )
+                    .unwrap(),
+                ),
+                FunctionKind::Humidity(range) => ParsedFunction::humidity(
+                    id,
+                    label,
+                    MeasurementBinding::new(
+                        PropertyBinding {
+                            siid: 3,
+                            piid: 1008,
+                        },
+                        NumericFormat::Float,
+                        MeasurementUnit::Percentage,
+                        range,
+                        0.1,
+                    )
+                    .unwrap(),
+                ),
                 FunctionKind::Outlet => {
                     let siid = match (multiple, id.as_str()) {
                         (true, "outlet_1") => 3,
@@ -66,6 +100,14 @@ pub(crate) fn native_for(
         })
         .collect::<Vec<_>>();
     let key = description.key().clone();
+    if sensor {
+        return NativeDescription::new(
+            "test.sensor".into(),
+            "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:test-v1:1".into(),
+            ParsedDevice::new(key, functions, None).unwrap(),
+        )
+        .unwrap();
+    }
     if multiple {
         return NativeDescription::new(
             "cuco.plug.cp7pd".into(),

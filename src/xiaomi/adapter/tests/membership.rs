@@ -258,8 +258,8 @@ fn five_minute_member_sync_does_not_poll_healthy_channel_power() {
             until(|| {
                 function(&control.context.registry, "one", "main")
                     .snapshot()
-                    .power
-                    == Power::On
+                    .power()
+                    == Some(Power::On)
             })
             .await;
             for _ in 0..10 {
@@ -341,8 +341,8 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
             assert_eq!(after.functions, before.functions);
             assert_eq!(after.label, "Kitchen saved");
             assert_eq!(
-                function(&registry, "multi", "outlet_1").snapshot().power,
-                Power::Off
+                function(&registry, "multi", "outlet_1").snapshot().power(),
+                Some(Power::Off)
             );
         })
         .await;
@@ -405,7 +405,7 @@ fn incomplete_foreign_or_failed_cloud_sync_cannot_remove_published_devices() {
                 assert_eq!(
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .availability,
+                        .availability(),
                     Availability::Available
                 );
                 assert!(peer.state.borrow().unsubscribes.is_empty());
@@ -467,8 +467,8 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
             until(|| {
                 function(&control.context.registry, "multi", "outlet_2")
                     .snapshot()
-                    .power
-                    == Power::On
+                    .power()
+                    == Some(Power::On)
             })
             .await;
             control.clock.advance(Duration::from_secs(10));

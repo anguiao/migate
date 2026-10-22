@@ -174,7 +174,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
             peer.state.borrow_mut().hold_reads = false;
             let current = function(&control.context.registry, "one", "main");
             device_work(control, "one").refresh();
-            until(|| current.snapshot().lighting.unwrap().temperature_kelvin == Some(6000)).await;
+            until(|| current.snapshot().lighting().unwrap().temperature_kelvin == Some(6000)).await;
             // The old held read (2700 K) belongs to the retired instance and
             // must not overwrite the new instance's actual 6000 K.
             release_read(&peer, "one", 2, json!({"value":2700})).await;
@@ -190,7 +190,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
                 .unwrap();
             assert_eq!(peer.count("rpcReq", "one", 2), 1);
             assert_eq!(
-                current.snapshot().lighting.unwrap().temperature_kelvin,
+                current.snapshot().lighting().unwrap().temperature_kelvin,
                 Some(6000)
             );
             let after = control

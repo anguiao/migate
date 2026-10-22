@@ -301,7 +301,13 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
                 .into_option(),
             Some(1)
         );
-        assert_eq!(function.snapshot().power.value(), Some(true));
+        assert_eq!(
+            function
+                .snapshot()
+                .power()
+                .and_then(crate::device::Power::value),
+            Some(true)
+        );
         let input = light.plan_input();
         let lighting_plan::Plan::Execute {
             task: LightingTask::Level(task),
@@ -436,7 +442,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
         assert!(poll_once(receiver.next_operation()).await.is_none());
         assert!(action.ended().await.is_err());
         assert_eq!(light.remaining_time(LightDimension::Brightness), 0);
-        let before = function.snapshot().lighting.unwrap().brightness_percent;
+        let before = function.snapshot().lighting().unwrap().brightness_percent;
         assert_eq!(
             light.refresh().level,
             Some(crate::matter::units::level_from_brightness(before.unwrap()).unwrap())
@@ -708,7 +714,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
         };
         repeated.await.unwrap();
         assert_eq!(
-            function.snapshot().lighting.unwrap().brightness_percent,
+            function.snapshot().lighting().unwrap().brightness_percent,
             Some(60.0)
         );
         let mut off = pin!(light.power(Command::Off));
@@ -746,7 +752,7 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
         };
         repeated.await.unwrap();
         assert_eq!(
-            function.snapshot().lighting.unwrap().brightness_percent,
+            function.snapshot().lighting().unwrap().brightness_percent,
             Some(30.0)
         );
         light.on_level.set(None);
@@ -884,7 +890,7 @@ fn clipped_ct_step_reaches_two_mired_boundary_in_two_milliseconds_and_equal_targ
         accept(&function, request);
         invoke.await.unwrap();
         assert_eq!(
-            function.snapshot().lighting.unwrap().mode,
+            function.snapshot().lighting().unwrap().mode,
             Some(LightMode::Temperature)
         );
     });

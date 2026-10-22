@@ -2,7 +2,7 @@ use super::*;
 use crate::xiaomi::{
     capability::PropertyBinding,
     central::{CentralError, RequestOutcome, SendDecision, SendHooks},
-    property::PropertyResults,
+    property::{PropertyReading, PropertyResults},
 };
 use serde_json::Value;
 use std::{future::Future, time::Duration};
@@ -398,13 +398,14 @@ impl SessionHandle {
         timeout: Duration,
         on_result: F,
     ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
-        self.read_property_value_with_timeout_guarded(
+        let read = self.read_property_observation_with_timeout_guarded(
             did,
             binding,
             timeout,
             SendHooks::new(|| SendDecision::Send, || {}),
-            on_result,
-        )
+            move |outcome| on_result(value_outcome(outcome)),
+        );
+        async move { value_outcome(read.await) }
     }
     pub(crate) fn set_property<F: FnOnce(RequestOutcome<()>) + 'static>(
         &self,
@@ -435,5 +436,13 @@ impl SessionHandle {
             SendHooks::new(|| SendDecision::Send, || {}),
             on_result,
         )
+    }
+}
+
+fn value_outcome(outcome: RequestOutcome<PropertyReading>) -> RequestOutcome<Value> {
+    RequestOutcome {
+        result: outcome.result.map(|reading| reading.value),
+        stage: outcome.stage,
+        timeout: outcome.timeout,
     }
 }

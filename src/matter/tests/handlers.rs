@@ -70,7 +70,13 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
             device.functions()[0].observe(power);
             next_power(&mut receiver).await.unwrap().accept().unwrap();
             invoke.await.unwrap();
-            assert_eq!(device.functions()[0].snapshot().power.value(), Some(power));
+            assert_eq!(
+                device.functions()[0]
+                    .snapshot()
+                    .power()
+                    .and_then(crate::device::Power::value),
+                Some(power)
+            );
         }
         for bytes in [&[][..], &[0x15], &[0x15, 0x24], &[0x15, 0x35, 0], &[0x09]] {
             ctx.data = TLVElement::new(bytes);
@@ -97,7 +103,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
             .unwrap()
             .reject(CommandError::Rejected("denied".into()));
         assert_eq!(invoke.await.unwrap_err().code(), ErrorCode::Failure);
-        assert_eq!(device.functions()[0].snapshot().power, Power::Off);
+        assert_eq!(device.functions()[0].snapshot().power(), Some(Power::Off));
         let mut run = pin!(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
@@ -367,9 +373,15 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
                         .unwrap()
                 );
                 for other in index + 1..3 {
-                    assert_eq!(multi.functions()[other].snapshot().power, Power::Unknown);
+                    assert_eq!(
+                        multi.functions()[other].snapshot().power(),
+                        Some(Power::Unknown)
+                    );
                 }
-                assert_eq!(single.functions()[0].snapshot().power, Power::Unknown);
+                assert_eq!(
+                    single.functions()[0].snapshot().power(),
+                    Some(Power::Unknown)
+                );
             }
             let single_context = Context::at(&im, 2, 6, 0);
             let before = read_bytes(&handler, &single_context).await.unwrap_err();

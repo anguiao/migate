@@ -9,6 +9,12 @@ use crate::{
 };
 use std::{rc::Rc, time::Duration};
 
+/// Official Xiaomi source omits state subscriptions for BLE and proxy-child
+/// identities; their cloud online flag is not a measurement eligibility signal.
+pub(super) fn unreliable_cloud_online(did: &str) -> bool {
+    did.starts_with("blt.") || did.starts_with("proxy.")
+}
+
 pub(super) enum ControlPath {
     Local(SessionHandle),
     Cloud(CloudPath),
@@ -264,6 +270,17 @@ impl Context {
             listener.await;
         }
     }
+    pub(super) fn is_read_only(&self, did: &str) -> bool {
+        let live = self.live.borrow();
+        let Some(slot) = live.devices.get(did) else {
+            return false;
+        };
+        slot.admitted
+            .as_ref()
+            .map(|work| &work.native)
+            .or(slot.latest.as_ref())
+            .is_some_and(|native| native.device().is_read_only())
+    }
     pub(super) fn cloud_candidate(&self, did: &str, http: bool) -> Result<(), String> {
         self.cloud_authentication()?;
         if http && self.http_paused.get() {
@@ -288,12 +305,40 @@ impl Context {
             .cloud_access
             .as_ref()
             .ok_or("device information not available")?;
-        if !access.online {
+        // BLE and proxy-child devices have no reliable cloud state signal.
+        // Account, membership, authorization, retirement and explicitly
+        // forbidden access still decide here; ordinary devices stay offline.
+        if !(access.online || self.is_read_only(did) && unreliable_cloud_online(did)) {
             return Err("device offline".into());
         }
         Ok(())
     }
+    /// Read/measurement eligibility is independent of a native write path.
+    pub(super) fn observation_path(&self, did: &str) -> Option<ControlPath> {
+        if self.is_virtual_group(did) {
+            return None;
+        }
+        if !self.is_read_only(did) {
+            return self.control_path(did);
+        }
+        let local = self.local_candidate(did, false).ok();
+        match self.priority() {
+            PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
+            _ if self.cloud_candidate(did, true).is_ok() => {
+                self.live.borrow().credentials.as_ref().map(|credentials| {
+                    ControlPath::Cloud(CloudPath {
+                        uid: credentials.uid.clone(),
+                        access_token: credentials.tokens.access_token.clone(),
+                    })
+                })
+            }
+            _ => local.map(ControlPath::Local),
+        }
+    }
     pub(super) fn control_path(&self, did: &str) -> Option<ControlPath> {
+        if self.is_read_only(did) {
+            return None;
+        }
         let local = self.local_candidate(did, false).ok();
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
@@ -312,6 +357,9 @@ impl Context {
     pub(super) fn read_path(&self, did: &str) -> Option<ControlPath> {
         if self.is_virtual_group(did) {
             return None;
+        }
+        if self.is_read_only(did) {
+            return self.observation_path(did);
         }
         match self.control_path(did) {
             Some(ControlPath::Local(_)) if self.priority() == PathPriority::CloudFirst => None,
@@ -363,7 +411,10 @@ impl Context {
         self.refresh_group_states(did);
     }
     pub(super) fn update_device_availability(&self, did: &str) {
-        let available = self.control_path(did).is_some();
+        let read_only = self.is_read_only(did);
+        let available = self.control_path(did).is_some()
+            || self.observation_path(did).is_some()
+            || (read_only && self.active_notification(did).is_some());
         let (work, blocked) = {
             let live = self.live.borrow();
             let slot = &live.devices[did];
@@ -377,7 +428,9 @@ impl Context {
         physical.set_availability(if available {
             Availability::Available
         } else {
-            Availability::Unavailable(blocked.unwrap_or_else(|| "no usable control path".into()))
+            Availability::Unavailable(
+                blocked.unwrap_or_else(|| "no usable read or notification path".into()),
+            )
         });
         if available && !was_available {
             self.refresh_source(did);

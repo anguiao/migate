@@ -173,8 +173,8 @@ fn source_completion_after_matter_startup_stops_serving_and_drops_commands() {
                     assert!(dropped.get());
                     assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
                     assert_eq!(
-                        device.functions()[0].snapshot().power,
-                        crate::device::Power::Off
+                        device.functions()[0].snapshot().power(),
+                        Some(crate::device::Power::Off)
                     );
                 }
             })
@@ -257,10 +257,10 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 assert_eq!(active.await, Err(crate::device::CommandError::Cancelled));
                 assert_eq!(queued.await, Err(crate::device::CommandError::Cancelled));
                 let after = device.functions()[0].snapshot();
-                assert_eq!(after.power, before.power);
-                assert_eq!(after.lighting, before.lighting);
+                assert_eq!(after.power(), before.power());
+                assert_eq!(after.lighting(), before.lighting());
                 assert_eq!(
-                    after.availability,
+                    after.availability(),
                     crate::device::Availability::Unavailable("Xiaomi adapter stopped".into())
                 );
             })

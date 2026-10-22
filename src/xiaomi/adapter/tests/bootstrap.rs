@@ -42,9 +42,9 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     assert_eq!(physical.functions().len(), 3);
     assert_eq!(physical.description().label(), "saved name");
     for function in physical.functions() {
-        assert_eq!(function.snapshot().power, Power::Unknown);
+        assert_eq!(function.snapshot().power(), Some(Power::Unknown));
         assert!(matches!(
-            function.snapshot().availability,
+            function.snapshot().availability(),
             Availability::Unavailable(_)
         ));
     }
@@ -157,12 +157,15 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
                     3
                 );
                 let one = function(registry, "one", "main");
-                assert_eq!(one.snapshot().power, Power::Unknown);
+                assert_eq!(one.snapshot().power(), Some(Power::Unknown));
                 assert_eq!(
                     one.execute(Command::Toggle).await,
                     Err(crate::device::CommandError::UnknownState)
                 );
-                assert_eq!(one.execute(Command::On).await.unwrap().power, Power::On);
+                assert_eq!(
+                    one.execute(Command::On).await.unwrap().power(),
+                    Some(Power::On)
+                );
                 until(|| {
                     ["one", "multi", "two"].iter().all(|did| {
                         let live = control.context.live.borrow();
@@ -174,17 +177,18 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
                 peer.notify("two", 2, true);
                 peer.notify("multi", 4, true);
                 until(|| {
-                    function(registry, "two", "main").snapshot().power == Power::On
-                        && function(registry, "multi", "outlet_2").snapshot().power == Power::On
+                    function(registry, "two", "main").snapshot().power() == Some(Power::On)
+                        && function(registry, "multi", "outlet_2").snapshot().power()
+                            == Some(Power::On)
                 })
                 .await;
                 assert_eq!(
-                    function(registry, "multi", "outlet_1").snapshot().power,
-                    Power::Unknown
+                    function(registry, "multi", "outlet_1").snapshot().power(),
+                    Some(Power::Unknown)
                 );
                 assert_eq!(
-                    function(registry, "multi", "usb").snapshot().power,
-                    Power::Unknown
+                    function(registry, "multi", "usb").snapshot().power(),
+                    Some(Power::Unknown)
                 );
             })
             .await;

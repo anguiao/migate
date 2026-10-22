@@ -209,8 +209,13 @@ pub struct ChannelCommands {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceStatus {
     pub did: String,
+    pub read_only: bool,
     pub usable_control_paths: Vec<PathKind>,
     pub selected_control: Option<PathKind>,
+    pub usable_read_paths: Vec<PathKind>,
+    pub selected_read: Option<PathKind>,
+    /// `None` means the source provides no reliable physical on/off signal.
+    pub physical_online: Option<bool>,
     pub notification_source: Option<PathKind>,
     pub unavailable_reason: Option<String>,
     pub sync_limited_reason: Option<String>,

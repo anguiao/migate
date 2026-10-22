@@ -43,8 +43,8 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         let light = group.function("main").unwrap();
         assert!(light.description().supports_rgb());
         let initial = light.snapshot();
-        assert_eq!(initial.power, Power::Unknown);
-        let color = initial.lighting.unwrap();
+        assert_eq!(initial.power(), Some(Power::Unknown));
+        let color = initial.lighting().unwrap();
         assert_eq!(color.color, None);
         assert_eq!(color.mode, None);
         assert_eq!(color.temperature_kelvin, None);
@@ -90,9 +90,9 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         let testing = async {
             until(|| group.availability() == Availability::Available).await;
             until(|| {
-                ["member-a", "member-b"]
-                    .iter()
-                    .all(|did| function(&registry, did, "main").snapshot().power == Power::On)
+                ["member-a", "member-b"].iter().all(|did| {
+                    function(&registry, did, "main").snapshot().power() == Some(Power::On)
+                })
             })
             .await;
             let target = Rgb {
@@ -182,7 +182,10 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
                 .is_none(),
             "the valid committed native description is not blocked on restart"
         );
-        assert_eq!(member.functions()[0].snapshot().power, Power::Unknown);
+        assert_eq!(
+            member.functions()[0].snapshot().power(),
+            Some(Power::Unknown)
+        );
 
         let publication = App::open(restored.source_handle(), c.store.clone()).unwrap();
         if let Some(plan) = publication.plan().unwrap() {

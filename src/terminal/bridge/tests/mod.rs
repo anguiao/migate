@@ -120,8 +120,8 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
                 .unwrap()
                 .functions()[0]
                 .snapshot()
-                .power,
-            Power::On
+                .power(),
+            Some(Power::On)
         );
     })
 }
@@ -340,7 +340,7 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
             )
             .await;
             assert_eq!(result.unwrap().unwrap(), "light: command accepted");
-            let snapshot = physical.functions()[0].snapshot().lighting.unwrap();
+            let snapshot = physical.functions()[0].snapshot().lighting().unwrap();
             assert_eq!(snapshot.brightness_percent, Some(23.5));
             assert_eq!(snapshot.temperature_kelvin, Some(4000));
             assert_eq!(snapshot.mode, Some(LightMode::Temperature));
@@ -395,8 +395,8 @@ fn input_recovers_and_returns_at_eof() {
                 .unwrap()
                 .functions()[0]
                 .snapshot()
-                .power,
-            Power::Off
+                .power(),
+            Some(Power::Off)
         );
     })
 }
@@ -499,8 +499,12 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
                 .into_iter()
                 .map(|did| DeviceStatus {
                     did: did.into(),
+                    read_only: false,
                     usable_control_paths: vec![PathKind::Local, PathKind::Cloud],
                     selected_control: Some(PathKind::Cloud),
+                    usable_read_paths: Vec::new(),
+                    selected_read: None,
+                    physical_online: None,
                     notification_source: Some(PathKind::Local),
                     unavailable_reason: None,
                     sync_limited_reason: None,
@@ -555,3 +559,5 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         assert!(!help.contains("multi routing:"));
     });
 }
+
+mod sensors;

@@ -33,7 +33,8 @@ fn numeric_reads_keep_guarded_send_outcomes() {
         let (handle, mut driver, budget, _) = rig();
         let first = Rc::new(Cell::new(0));
         let sent = first.clone();
-        let read = handle.read_property_value_with_timeout_guarded(
+        let read = read_value_guarded(
+            &handle,
             "target",
             BINDING,
             Duration::from_secs(1),
@@ -206,7 +207,8 @@ fn numeric_notifications_reuse_received_property_generation() {
             vec![CentralEvent::PropertyValue {
                 did: "target".into(),
                 binding: BINDING,
-                value: json!(20)
+                value: json!(20),
+                update_time: None,
             }]
         );
     });

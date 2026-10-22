@@ -173,8 +173,12 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
         },
         devices: vec![DeviceStatus {
             did: "one".into(),
+            read_only: false,
             usable_control_paths: vec![PathKind::Local, PathKind::Cloud],
             selected_control: Some(PathKind::Cloud),
+            usable_read_paths: Vec::new(),
+            selected_read: None,
+            physical_online: None,
             notification_source: Some(PathKind::Local),
             unavailable_reason: None,
             sync_limited_reason: Some("cloud property subscriptions pending".into()),
@@ -253,8 +257,12 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
         },
         devices: vec![DeviceStatus {
             did: "one".into(),
+            read_only: false,
             usable_control_paths: Vec::new(),
             selected_control: None,
+            usable_read_paths: Vec::new(),
+            selected_read: None,
+            physical_online: None,
             notification_source: None,
             unavailable_reason: Some("token expired".into()),
             sync_limited_reason: Some("no notification source".into()),
@@ -396,8 +404,12 @@ fn light_diagnostics_fixture() -> (crate::device::Function, crate::device::Comma
 fn action_report(function: &crate::device::Function) -> String {
     format_device(&DeviceStatus {
         did: "light".into(),
+        read_only: false,
         usable_control_paths: vec![PathKind::Cloud],
         selected_control: Some(PathKind::Cloud),
+        usable_read_paths: Vec::new(),
+        selected_read: None,
+        physical_online: None,
         notification_source: Some(PathKind::Local),
         unavailable_reason: None,
         sync_limited_reason: None,
@@ -514,4 +526,28 @@ fn unchanged_transition_startup_does_not_claim_acceptance() {
         );
         assert!(!report.contains("accepted"));
     });
+}
+
+#[test]
+fn a_notification_limited_read_only_channel_is_reported_without_claiming_physical_online() {
+    use crate::xiaomi::adapter::{ChannelCommands, DeviceStatus, PathKind};
+    let report = super::format_device(&DeviceStatus {
+        did: "sensor".into(),
+        read_only: true,
+        usable_control_paths: Vec::new(),
+        selected_control: None,
+        usable_read_paths: vec![PathKind::Cloud],
+        selected_read: Some(PathKind::Cloud),
+        physical_online: None,
+        notification_source: None,
+        unavailable_reason: None,
+        sync_limited_reason: Some("notifications disconnected or subscriptions not ready".into()),
+        last_switch_reason: None,
+        commands: Vec::<ChannelCommands>::new(),
+    });
+    assert!(report.contains("Usable read paths: cloud."), "{report}");
+    assert!(report.contains("Selected read: cloud."), "{report}");
+    assert!(report.contains("Physical online: unknown."), "{report}");
+    assert!(report.contains("State synchronization limited"), "{report}");
+    assert!(!report.contains("Control unavailable"), "{report}");
 }

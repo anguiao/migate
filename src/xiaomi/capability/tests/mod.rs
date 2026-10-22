@@ -38,7 +38,7 @@ fn four_single_outlet_models_accept_their_public_instance_urns() {
         let outlet = parse_device(key(), &model_description(model))
             .unwrap_or_else(|error| panic!("{model}: {error}"));
         assert_eq!(
-            outlet.functions()[0].power(),
+            outlet.functions()[0].power().unwrap(),
             PropertyBinding { siid: 2, piid: 1 }
         );
         let device = parse_device(key(), &model_description(model)).unwrap();
@@ -59,7 +59,7 @@ fn cp7pd_exposes_three_independent_channels_and_observes_total_control_internall
         device
             .functions()
             .iter()
-            .map(|function| (function.id(), function.label(), function.power()))
+            .map(|function| (function.id(), function.label(), function.power().unwrap()))
             .collect::<Vec<_>>(),
         [
             ("outlet_1", "开关 1", PropertyBinding { siid: 3, piid: 1 }),
@@ -75,7 +75,7 @@ fn cp7pd_exposes_three_independent_channels_and_observes_total_control_internall
         device
             .functions()
             .iter()
-            .all(|function| function.power().siid != 2)
+            .all(|function| function.power().unwrap().siid != 2)
     );
 }
 
@@ -323,7 +323,7 @@ fn public_spec_selects_main_switch_and_ignores_indicator_and_vendor_switches() {
     assert_eq!(*outlet.key(), key());
     assert_eq!(outlet.functions()[0].kind(), FunctionKind::Outlet);
     assert_eq!(
-        outlet.functions()[0].power(),
+        outlet.functions()[0].power().unwrap(),
         PropertyBinding { siid: 2, piid: 1 }
     );
 }
@@ -332,7 +332,7 @@ fn public_spec_selects_main_switch_and_ignores_indicator_and_vendor_switches() {
 fn standard_semantics_work_with_other_vendor_and_instance_ids() {
     let outlet = parse_device(key(), &minimal_description()).unwrap();
     assert_eq!(
-        outlet.functions()[0].power(),
+        outlet.functions()[0].power().unwrap(),
         PropertyBinding { siid: 42, piid: 19 }
     );
 }
@@ -344,7 +344,9 @@ fn descriptions_do_not_determine_the_main_power() {
         service["description"] = json!("Switch");
     }
     assert_eq!(
-        parse_device(key(), &description).unwrap().functions()[0].power(),
+        parse_device(key(), &description).unwrap().functions()[0]
+            .power()
+            .unwrap(),
         PropertyBinding { siid: 2, piid: 1 }
     );
 }
@@ -474,3 +476,5 @@ pub(crate) fn parse_device(
 ) -> Result<super::ParsedDevice, CapabilityError> {
     super::parse_device_for_model(key, "", instance)
 }
+
+mod sensors;
