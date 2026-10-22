@@ -894,7 +894,10 @@ fn retired_work_replacement_retires_old_feedback_authority() {
 
 #[test]
 fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
-    block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
+    let mut rig = Rig::light("xiaomi.light.ceil04");
+    // Keep the deliberately held receipt alive across replacement and feedback.
+    rig.source.request_timeout = Duration::from_secs(2);
+    block_on(rig.run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
         let control = &c;
