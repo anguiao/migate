@@ -508,6 +508,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
                     notification_source: Some(PathKind::Local),
                     unavailable_reason: None,
                     sync_limited_reason: None,
+                    battery_problem: None,
                     last_switch_reason: None,
                     commands: Vec::new(),
                 })

@@ -4,8 +4,9 @@ use crate::{
     device::{FunctionKind, LightProfile},
     xiaomi::capability::NativeDescription,
     xiaomi::capability::{
-        BrightnessBinding, ColorBinding, LightBindings, MeasurementBinding, MeasurementUnit,
-        NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, TemperatureBinding,
+        BatteryBinding, BrightnessBinding, ColorBinding, LightBindings, MeasurementBinding,
+        MeasurementUnit, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+        TemperatureBinding,
     },
 };
 
@@ -101,10 +102,22 @@ pub(crate) fn native_for(
         .collect::<Vec<_>>();
     let key = description.key().clone();
     if sensor {
+        let battery = description.has_battery().then(|| {
+            BatteryBinding::new(
+                PropertyBinding {
+                    siid: 2,
+                    piid: 1003,
+                },
+                NumericFormat::Uint8,
+                crate::device::MeasurementRange::new(0.0, 100.0).unwrap(),
+                1.0,
+            )
+            .unwrap()
+        });
         return NativeDescription::new(
             "test.sensor".into(),
             "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:test-v1:1".into(),
-            ParsedDevice::new(key, functions, None).unwrap(),
+            ParsedDevice::new_with_battery(key, functions, None, battery).unwrap(),
         )
         .unwrap();
     }

@@ -83,11 +83,17 @@ fn sensor_bindings_round_trip_with_parent_and_child_endpoints() {
     assert_eq!(functions[0]["measurement"]["step"], json!(0.1));
     assert_eq!(functions[1]["kind"], json!("humidity"));
     assert_eq!(functions[1]["measurement"]["unit"], json!("percentage"));
-    // This slice does not model battery or persist its observations.
-    assert!(encoded["devices"][0].get("battery").is_none());
-    assert!(encoded["devices"][0]["native"].get("battery").is_none());
-    for forbidden in ["value", "source_time", "received_at", "reading"] {
-        assert!(functions[0].get(forbidden).is_none(), "{forbidden}");
+    let battery = &encoded["devices"][0]["native"]["battery"];
+    assert_eq!(battery["property"], json!({"siid": 2, "piid": 1003}));
+    assert_eq!(battery["format"], json!("uint8"));
+    assert_eq!(battery["unit"], json!("percentage"));
+    assert_eq!(battery["min"], json!(0.0));
+    assert_eq!(battery["max"], json!(100.0));
+    assert_eq!(battery["step"], json!(1.0));
+    for target in [&functions[0], battery] {
+        for forbidden in ["value", "source_time", "received_at", "reading"] {
+            assert!(target.get(forbidden).is_none(), "{forbidden}");
+        }
     }
 }
 
@@ -166,13 +172,92 @@ fn multiple_sensors_keep_distinct_identities_names_and_bindings() {
 }
 
 #[test]
-fn a_schema8_sensor_record_with_an_unknown_battery_field_is_rejected() {
+fn schema8_records_without_the_optional_battery_field_remain_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(dir.path()).unwrap();
+    seed(&store, vec![sensor("sensor")]);
+    let mut old: Value = serde_json::from_str(&raw(&store)).unwrap();
+    old["devices"][0]["native"]
+        .as_object_mut()
+        .unwrap()
+        .remove("battery");
+    corrupt(&store, &old);
+    let loaded = load(&store);
+    let native = loaded.devices[0].native.as_ref().unwrap();
+    assert!(native.device().battery().is_none());
+    assert_eq!(native.device().functions().len(), 2);
+}
+
+#[test]
+fn optional_battery_bindings_round_trip_without_runtime_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(dir.path()).unwrap();
+    let original = sensor("sensor");
+    let planned = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![original.clone()],
+    )
+    .configuration;
+    save(&store, &planned);
+    let loaded = load(&store);
+    assert_eq!(loaded, planned);
+    let battery = loaded.devices[0]
+        .native
+        .as_ref()
+        .unwrap()
+        .device()
+        .battery()
+        .unwrap();
+    assert_eq!(
+        battery.property(),
+        PropertyBinding {
+            siid: 2,
+            piid: 1003
+        }
+    );
+    assert_eq!(battery.format(), NumericFormat::Uint8);
+    assert_eq!(battery.range().min(), 0.0);
+    assert_eq!(battery.range().max(), 100.0);
+    assert_eq!(battery.step(), 1.0);
+    assert_eq!(loaded.devices[0].functions.len(), 2);
+    assert_eq!(loaded.devices[0].endpoint, 2);
+    assert_eq!(
+        loaded.devices[0]
+            .functions
+            .iter()
+            .map(|function| function.endpoint)
+            .collect::<Vec<_>>(),
+        [3, 4]
+    );
+}
+
+#[test]
+fn invalid_battery_storage_shapes_are_rejected_at_the_boundary() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
     seed(&store, vec![sensor("sensor")]);
     let valid: Value = serde_json::from_str(&raw(&store)).unwrap();
+    for (pointer, value) in [
+        ("/devices/0/native/battery/property/siid", json!(0)),
+        ("/devices/0/native/battery/format", json!("bool")),
+        ("/devices/0/native/battery/unit", json!("celsius")),
+        ("/devices/0/native/battery/min", json!(-1.0)),
+        ("/devices/0/native/battery/max", json!(101.0)),
+        ("/devices/0/native/battery/max", json!(0.0)),
+        ("/devices/0/native/battery/step", json!(0.0)),
+    ] {
+        let mut changed = valid.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        corrupt(&store, &changed);
+        assert!(store.devices().load_configuration().is_err(), "{pointer}");
+    }
     let mut changed = valid.clone();
-    changed["devices"][0]["battery"] = json!({"level": 50});
+    changed["devices"][0]["native"]["battery"]["unknown"] = json!(true);
+    corrupt(&store, &changed);
+    assert!(store.devices().load_configuration().is_err());
+    let mut changed = valid;
+    changed["devices"][0]["native"]["battery"]["property"] = json!({"siid": 3, "piid": 1001});
     corrupt(&store, &changed);
     assert!(store.devices().load_configuration().is_err());
 }
@@ -285,13 +370,14 @@ fn a_sensor_range_change_is_a_publish_shape_change_but_keeps_its_identity() {
     let changed = crate::xiaomi::capability::NativeDescription::new(
         original.model().into(),
         original.instance_type().into(),
-        ParsedDevice::new(
+        ParsedDevice::new_with_battery(
             original.device().key().clone(),
             vec![
                 ParsedFunction::temperature("temperature", "Temperature", changed_binding),
                 functions[1].clone(),
             ],
             None,
+            original.device().battery().cloned(),
         )
         .unwrap(),
     )
@@ -356,13 +442,14 @@ fn a_measurement_step_only_change_does_not_rebuild_the_published_instance() {
     let changed = crate::xiaomi::capability::NativeDescription::new(
         original.model().into(),
         original.instance_type().into(),
-        ParsedDevice::new(
+        ParsedDevice::new_with_battery(
             original.device().key().clone(),
             vec![
                 ParsedFunction::temperature("temperature", "Temperature", changed_binding),
                 functions[1].clone(),
             ],
             None,
+            original.device().battery().cloned(),
         )
         .unwrap(),
     )
@@ -377,5 +464,146 @@ fn a_measurement_step_only_change_does_not_rebuild_the_published_instance() {
     assert_eq!(
         plan.configuration.devices[0].configuration_version,
         first.devices[0].configuration_version
+    );
+}
+
+#[test]
+fn adding_battery_changes_the_published_shape_not_the_sensor_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(dir.path()).unwrap();
+    let with_battery = sensor("sensor");
+    let without_battery = crate::xiaomi::capability::NativeDescription::new(
+        with_battery.model().into(),
+        with_battery.instance_type().into(),
+        crate::xiaomi::capability::ParsedDevice::new(
+            with_battery.device().key().clone(),
+            with_battery.device().functions().to_vec(),
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let first = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![without_battery],
+    )
+    .configuration;
+    save(&store, &first);
+    let old = first.devices[0].clone();
+    let plan = next(&first, scope("account", "home"), vec![with_battery]);
+    assert!(plan.rebuild);
+    assert_eq!(
+        plan.operations[0].kind,
+        crate::configuration::OperationKind::ReplacedNative
+    );
+    assert_eq!(plan.configuration.devices[0].key, old.key);
+    assert_eq!(plan.configuration.devices[0].unique_id, old.unique_id);
+    assert_eq!(plan.configuration.devices[0].endpoint, old.endpoint);
+    assert_eq!(plan.configuration.devices[0].functions, old.functions);
+    assert_eq!(plan.configuration.devices[0].configuration_version, 2);
+    save(&store, &plan.configuration);
+    assert_eq!(load(&store), plan.configuration);
+}
+
+#[test]
+fn specific_battery_parse_diagnostics_survive_save_and_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(dir.path()).unwrap();
+    let description =
+        crate::xiaomi::capability::tests::parse_device(DeviceKey::new("xiaomi", "sensor"), &{
+            let mut value: Value = serde_json::from_str(SENSOR).unwrap();
+            value["services"].as_array_mut().unwrap().retain(|service| {
+                !service["type"]
+                    .as_str()
+                    .is_some_and(|urn| urn.contains("service:battery:"))
+            });
+            value
+        })
+        .unwrap();
+    let native = crate::xiaomi::capability::NativeDescription::new(
+        "miaomiaoce.sensor_ht.t6".into(),
+        "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:miaomiaoce-t6:1".into(),
+        description,
+    )
+    .unwrap();
+    let expected = native.device().battery_issue().unwrap().to_owned();
+    let diagnostic_only = crate::xiaomi::capability::NativeDescription::new(
+        native.model().into(),
+        native.instance_type().into(),
+        crate::xiaomi::capability::ParsedDevice::new_with_battery_diagnostic(
+            native.device().key().clone(),
+            native.device().functions().to_vec(),
+            None,
+            None,
+            Some("battery capability not declared".into()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let planned = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![native],
+    )
+    .configuration;
+    save(&store, &planned);
+    let loaded = load(&store);
+    assert_eq!(loaded, planned);
+    let device = loaded.devices[0].native.as_ref().unwrap().device();
+    assert!(device.battery().is_none());
+    assert_eq!(device.battery_issue(), Some(expected.as_str()));
+    let plan = next(&loaded, scope("account", "home"), vec![diagnostic_only]);
+    assert!(!plan.changed);
+    assert!(!plan.rebuild);
+    assert_eq!(
+        plan.operations[0].kind,
+        crate::configuration::OperationKind::Reused
+    );
+}
+
+#[test]
+fn old_schema8_sensor_records_without_a_diagnostic_get_a_truthful_generic_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(dir.path()).unwrap();
+    let instance: Value = serde_json::from_str(SENSOR).unwrap();
+    let parsed = parse_device_for_model(
+        DeviceKey::new("xiaomi", "sensor"),
+        "miaomiaoce.sensor_ht.t6",
+        &instance,
+    )
+    .unwrap();
+    let device = crate::xiaomi::capability::ParsedDevice::new(
+        parsed.key().clone(),
+        parsed.functions().to_vec(),
+        None,
+    )
+    .unwrap();
+    let native = crate::xiaomi::capability::NativeDescription::new(
+        "miaomiaoce.sensor_ht.t6".into(),
+        instance["type"].as_str().unwrap().into(),
+        device,
+    )
+    .unwrap();
+    let planned = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![native],
+    )
+    .configuration;
+    save(&store, &planned);
+    let mut old: Value = serde_json::from_str(&raw(&store)).unwrap();
+    old["devices"][0]["native"]
+        .as_object_mut()
+        .unwrap()
+        .remove("battery_issue");
+    corrupt(&store, &old);
+    let loaded = load(&store);
+    let device = loaded.devices[0].native.as_ref().unwrap().device();
+    assert!(device.battery().is_none());
+    assert!(
+        device
+            .battery_issue()
+            .is_some_and(|issue| issue.contains("not declared"))
     );
 }

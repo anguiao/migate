@@ -327,6 +327,24 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     let Some(desired) = desired else { return };
 
     if work.observer_is(&desired) {
+        if work.take_optional_retry() {
+            match &desired {
+                NotificationSource::Local(_) => work.request_local_subscriptions(),
+                NotificationSource::Cloud(handle) => {
+                    if let Some(preparation) = work.begin_cloud_preparation(handle) {
+                        let session = context.notifications.borrow().as_ref().unwrap().clone();
+                        session.tasks.spawn(prepare_properties(
+                            context.clone(),
+                            work.clone(),
+                            handle.clone(),
+                            session.key.token.clone(),
+                            session.subscriptions.clone(),
+                            preparation,
+                        ));
+                    }
+                }
+            }
+        }
         return;
     }
     if work.source_ready(&desired) {
@@ -481,7 +499,12 @@ async fn prepare_properties(
                 break 'attempts;
             }
             match result {
-                Ok(()) => work.cloud_subscribed(&handle, preparation, binding),
+                Ok(()) => {
+                    work.cloud_subscribed(&handle, preparation, binding);
+                    if work.cloud_required_ready(&handle, preparation) {
+                        context.changed.notify(usize::MAX);
+                    }
+                }
                 Err(NotificationError::Unauthorized) => {
                     context.token_rejected(
                         &token,

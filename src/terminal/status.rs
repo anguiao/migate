@@ -281,6 +281,9 @@ fn format_device(status: &DeviceStatus) -> String {
     if let Some(reason) = &status.sync_limited_reason {
         let _ = write!(report, "\n  State synchronization limited: {reason}.");
     }
+    if let Some(reason) = &status.battery_problem {
+        let _ = write!(report, "\n  Battery: {reason}.");
+    }
     if let Some(reason) = &status.last_switch_reason {
         let _ = write!(report, "\n  Device last switch: {reason}.");
     }

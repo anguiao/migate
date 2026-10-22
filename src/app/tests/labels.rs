@@ -104,3 +104,52 @@ fn failed_name_commit_keeps_the_saved_and_served_name() {
             .contains("Test Outlet")
     );
 }
+
+#[test]
+fn renaming_a_sensor_keeps_its_battery_capability() {
+    use crate::device::{FunctionKind, MeasurementRange};
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let sensor = crate::device::PhysicalDeviceDescription::new(
+        crate::device::DeviceKey::new("xiaomi", "sensor"),
+        "Sensor",
+        vec![
+            crate::device::FunctionDescription {
+                id: "temperature".into(),
+                label: "Temperature".into(),
+                kind: FunctionKind::Temperature(MeasurementRange::new(-30.0, 100.0).unwrap()),
+            },
+            crate::device::FunctionDescription {
+                id: "humidity".into(),
+                label: "Humidity".into(),
+                kind: FunctionKind::Humidity(MeasurementRange::new(0.0, 100.0).unwrap()),
+            },
+        ],
+    )
+    .unwrap()
+    .with_battery();
+    let source = AppSource::new(&store, Some(sensor));
+    let key = source.physical.as_ref().unwrap().key().clone();
+    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    app.rename(&key, "Renamed sensor").unwrap();
+    assert!(app.current().derived.served[&key].description.has_battery());
+    assert!(
+        source
+            .physical
+            .as_ref()
+            .unwrap()
+            .description()
+            .has_battery()
+    );
+    assert_eq!(
+        crate::matter::fixed_shape_with_battery(
+            app.current().derived.served[&key].description.functions(),
+            true
+        ),
+        crate::matter::fixed_shape_with_battery(
+            source.physical.as_ref().unwrap().description().functions(),
+            true
+        )
+    );
+}

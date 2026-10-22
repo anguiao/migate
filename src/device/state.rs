@@ -1,8 +1,8 @@
 use super::{
     command::{CommandCoordinator, CommandReceiver},
     model::{
-        Availability, FunctionDescription, FunctionKey, FunctionSnapshot, MeasurementSnapshot,
-        PhysicalDeviceDescription, Power,
+        Availability, BatterySnapshot, FunctionDescription, FunctionKey, FunctionSnapshot,
+        MeasurementSnapshot, PhysicalDeviceDescription, Power,
     },
 };
 use event_listener::Event;
@@ -105,8 +105,14 @@ struct PhysicalState {
     availability: Availability,
     revision: u64,
 }
+struct BatteryState {
+    snapshot: BatterySnapshot,
+    revision: u64,
+}
 struct PhysicalInner {
     state: Mutex<PhysicalState>,
+    battery: Mutex<Option<BatteryState>>,
+    battery_changed: Event,
     changed: Event,
 }
 pub(super) struct Inner {
@@ -151,17 +157,27 @@ pub struct PhysicalDevice {
     label: Arc<Mutex<String>>,
     inner: Arc<PhysicalInner>,
     functions: Arc<[Function]>,
+    has_battery: bool,
 }
 impl PhysicalDevice {
     pub fn new(description: PhysicalDeviceDescription) -> (Self, Vec<CommandReceiver>) {
+        let (key, label, functions, battery) = description.into_parts();
         let inner = Arc::new(PhysicalInner {
             state: Mutex::new(PhysicalState {
                 availability: Availability::Initializing,
                 revision: 0,
             }),
+            battery: Mutex::new(battery.then_some(BatteryState {
+                snapshot: BatterySnapshot {
+                    value: None,
+                    source_time: None,
+                    received_at: None,
+                },
+                revision: 0,
+            })),
+            battery_changed: Event::new(),
             changed: Event::new(),
         });
-        let (key, label, functions) = description.into_parts();
         let (functions, receivers): (Vec<_>, Vec<_>) = functions
             .into_iter()
             .map(|function| Function::new(key.clone(), function, inner.clone()))
@@ -173,6 +189,7 @@ impl PhysicalDevice {
                 label: Arc::new(Mutex::new(label)),
                 inner,
                 functions: functions.into(),
+                has_battery: battery,
             },
             receivers,
         )
@@ -188,6 +205,56 @@ impl PhysicalDevice {
     }
     pub fn functions(&self) -> &[Function] {
         &self.functions
+    }
+    pub fn has_battery(&self) -> bool {
+        self.has_battery
+    }
+    pub fn battery_snapshot(&self) -> Option<BatterySnapshot> {
+        self.inner
+            .battery
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|battery| battery.snapshot)
+    }
+    /// Apply one validated physical battery percentage. Missing capability is
+    /// unsupported, and invalid values never replace the last valid value.
+    pub fn observe_battery(
+        &self,
+        value: f64,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) -> Result<BatterySnapshot, super::CommandError> {
+        let mut state = self.inner.battery.lock().unwrap();
+        let Some(battery) = state.as_mut() else {
+            return Err(super::CommandError::Unsupported);
+        };
+        if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+            return Err(super::CommandError::Rejected("battery".into()));
+        }
+        let snapshot = BatterySnapshot {
+            value: Some(value),
+            source_time,
+            received_at: Some(received_at),
+        };
+        if battery.snapshot != snapshot {
+            battery.snapshot = snapshot;
+            battery.revision = battery.revision.wrapping_add(1);
+            self.inner.battery_changed.notify(usize::MAX);
+        }
+        Ok(snapshot)
+    }
+    pub(crate) fn subscribe_battery(&self) -> BatteryChanges {
+        BatteryChanges {
+            physical: self.inner.clone(),
+            revision: self
+                .inner
+                .battery
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(0, |battery| battery.revision),
+        }
     }
     pub fn function(&self, id: &str) -> Option<Function> {
         self.functions
@@ -526,6 +593,31 @@ impl Function {
 pub struct FunctionChanges {
     function: Function,
     revision: u64,
+}
+
+/// One physical battery's independent state changes.
+pub(crate) struct BatteryChanges {
+    physical: Arc<PhysicalInner>,
+    revision: u64,
+}
+impl BatteryChanges {
+    pub(crate) async fn changed(&mut self) -> BatterySnapshot {
+        loop {
+            let listener = self.physical.battery_changed.listen();
+            let current = {
+                let battery = self.physical.battery.lock().unwrap();
+                battery.as_ref().and_then(|battery| {
+                    (battery.revision != self.revision)
+                        .then_some((battery.revision, battery.snapshot))
+                })
+            };
+            if let Some((revision, snapshot)) = current {
+                self.revision = revision;
+                return snapshot;
+            }
+            listener.await;
+        }
+    }
 }
 
 /// Physical-device observers are independent of function power changes.

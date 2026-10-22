@@ -551,13 +551,18 @@ fn with_light_kind(
     description: PhysicalDeviceDescription,
     kind: FunctionKind,
 ) -> PhysicalDeviceDescription {
-    let (key, label, mut functions) = description.into_parts();
+    let (key, label, mut functions, battery) = description.into_parts();
     functions
         .first_mut()
         .expect("a native group description has one main function")
         .kind = kind;
-    PhysicalDeviceDescription::new(key, label, functions)
-        .expect("a light replacement keeps the description valid")
+    let description = PhysicalDeviceDescription::new(key, label, functions)
+        .expect("a light replacement keeps the description valid");
+    if battery {
+        description.with_battery()
+    } else {
+        description
+    }
 }
 
 /// Native step is source resolution metadata, not part of the published
@@ -583,6 +588,12 @@ fn same_measurement(
 /// instance.
 pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescription) -> bool {
     a.device().refresh_trigger() == b.device().refresh_trigger()
+        && a.device()
+            .battery()
+            .map(|battery| (battery.property(), battery.format(), battery.range()))
+            == b.device()
+                .battery()
+                .map(|battery| (battery.property(), battery.format(), battery.range()))
         && a.device().functions().len() == b.device().functions().len()
         && a.device()
             .functions()

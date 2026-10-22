@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::device::{FunctionKind, MeasurementRange};
+use crate::xiaomi::capability::ParsedDevice;
 use crate::xiaomi::capability::{MeasurementUnit, NumericFormat};
 use serde_json::{Value, json};
 
@@ -425,4 +426,242 @@ fn projected_bounds_reject_values_that_round_into_the_matter_range() {
         parse_device(sensor_key(), &description),
         Err(CapabilityError::InvalidMeasurement("range"))
     );
+}
+
+fn battery_service_mut(description: &mut Value) -> &mut Value {
+    description["services"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|service| {
+            service["type"]
+                .as_str()
+                .is_some_and(|urn| urn.contains("service:battery:00007805"))
+        })
+        .unwrap()
+}
+
+fn battery_property_mut(description: &mut Value) -> &mut Value {
+    battery_service_mut(description)["properties"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|property| property["iid"] == 1003)
+        .unwrap()
+}
+
+#[test]
+fn standard_battery_is_a_physical_binding_not_a_third_function() {
+    let device = parse_device(sensor_key(), &sensor_description()).unwrap();
+    assert_eq!(device.functions().len(), 2);
+    assert!(device.battery_issue().is_none());
+    let battery = device.battery().unwrap();
+    assert_eq!(
+        battery.property(),
+        PropertyBinding {
+            siid: 2,
+            piid: 1003
+        }
+    );
+    assert_eq!(battery.format(), NumericFormat::Uint8);
+    assert_eq!(battery.range().min(), 0.0);
+    assert_eq!(battery.range().max(), 100.0);
+    assert_eq!(battery.step(), 1.0);
+    assert!(device.is_read_only());
+}
+
+#[test]
+fn another_sensor_model_uses_standard_battery_semantics_with_other_instance_ids() {
+    let mut description = sensor_description();
+    description["type"] =
+        json!("urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:vendor-t7:1");
+    measurement_service_mut(&mut description)["iid"] = json!(7);
+    measurement_property_mut(&mut description, 1008)["iid"] = json!(2008);
+    measurement_property_mut(&mut description, 1001)["iid"] = json!(2001);
+    let battery = battery_service_mut(&mut description);
+    battery["iid"] = json!(9);
+    battery["properties"][0]["iid"] = json!(3003);
+
+    let device = parse_device(sensor_key(), &description).expect("second compatible sensor model");
+    assert!(device.battery_issue().is_none());
+    assert_eq!(
+        device.functions()[0].measurement().unwrap().property().siid,
+        7
+    );
+    assert_eq!(
+        device.functions()[1].measurement().unwrap().property(),
+        PropertyBinding {
+            siid: 7,
+            piid: 2008
+        }
+    );
+    assert_eq!(
+        device.battery().unwrap().property(),
+        PropertyBinding {
+            siid: 9,
+            piid: 3003
+        }
+    );
+}
+
+#[test]
+fn absent_invalid_or_non_notifying_battery_is_diagnosed_and_omitted() {
+    let mut missing = sensor_description();
+    missing["services"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|service| {
+            !service["type"]
+                .as_str()
+                .is_some_and(|urn| urn.contains("service:battery:"))
+        });
+    for (description, expected) in [
+        (missing, "battery"),
+        {
+            let mut value = sensor_description();
+            battery_property_mut(&mut value)["access"] = json!(["read"]);
+            (value, "notify")
+        },
+        {
+            let mut value = sensor_description();
+            battery_property_mut(&mut value)["access"] = json!(["notify"]);
+            (value, "read")
+        },
+        {
+            let mut value = sensor_description();
+            battery_property_mut(&mut value)["unit"] = json!("celsius");
+            (value, "unit")
+        },
+        {
+            let mut value = sensor_description();
+            battery_service_mut(&mut value)["properties"] = json!([]);
+            (value, "battery-level")
+        },
+    ] {
+        let device = parse_device(sensor_key(), &description).unwrap();
+        assert!(device.battery().is_none());
+        let issue = device.battery_issue().expect("battery diagnosis");
+        assert!(
+            issue.to_ascii_lowercase().contains(expected),
+            "{expected}: {issue}"
+        );
+        assert_eq!(device.functions().len(), 2);
+        assert!(device.is_read_only());
+    }
+}
+
+#[test]
+fn invalid_battery_format_unit_range_and_duplicates_are_not_published() {
+    for (field, value) in [
+        ("format", json!("bool")),
+        ("unit", json!("percentage-points")),
+        ("value-range", json!([0, 101, 1])),
+        ("value-range", json!([-1, 100, 1])),
+        ("value-range", json!([0, 100, 0])),
+        ("value-range", json!([-1, 100, 1])),
+    ] {
+        let mut description = sensor_description();
+        battery_property_mut(&mut description)[field] = value.clone();
+        let device = parse_device(sensor_key(), &description).unwrap();
+        assert!(device.battery().is_none(), "{field} {value}");
+        assert!(device.battery_issue().is_some(), "{field} {value}");
+        assert_eq!(device.functions().len(), 2);
+    }
+
+    let mut description = sensor_description();
+    let duplicate = battery_property_mut(&mut description).clone();
+    let mut duplicate = duplicate;
+    duplicate["iid"] = json!(1004);
+    battery_service_mut(&mut description)["properties"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    let device = parse_device(sensor_key(), &description).unwrap();
+    assert!(device.battery().is_none());
+    assert!(device.battery_issue().is_some());
+
+    let mut description = sensor_description();
+    let mut duplicate = battery_service_mut(&mut description).clone();
+    duplicate["iid"] = json!(42);
+    description["services"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    let device = parse_device(sensor_key(), &description).unwrap();
+    assert!(device.battery().is_none());
+    assert!(device.battery_issue().is_some());
+}
+
+#[test]
+fn battery_values_follow_the_declared_integer_percentage_range() {
+    let device = parse_device(sensor_key(), &sensor_description()).unwrap();
+    let battery = device.battery().unwrap();
+    assert_eq!(battery.read_value(&json!(0)).unwrap(), 0.0);
+    assert_eq!(battery.read_value(&json!(5)).unwrap(), 5.0);
+    assert_eq!(battery.read_value(&json!(10)).unwrap(), 10.0);
+    assert_eq!(battery.read_value(&json!(100)).unwrap(), 100.0);
+    for invalid in [
+        json!(101),
+        json!(-1),
+        json!(5.5),
+        json!(null),
+        json!(true),
+        json!("5"),
+    ] {
+        assert_eq!(
+            battery.read_value(&invalid),
+            Err(CapabilityError::InvalidValue("battery")),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn a_battery_binding_is_only_valid_on_the_two_measurement_sensor_topology() {
+    use crate::xiaomi::capability::{BatteryBinding, ParsedFunction};
+    let battery = BatteryBinding::new(
+        PropertyBinding {
+            siid: 2,
+            piid: 1003,
+        },
+        NumericFormat::Uint8,
+        MeasurementRange::new(0.0, 100.0).unwrap(),
+        1.0,
+    )
+    .unwrap();
+    let outlet = ParsedFunction::outlet("main", "Main", PropertyBinding { siid: 2, piid: 1 });
+    assert_eq!(
+        parse_device(sensor_key(), &sensor_description())
+            .unwrap()
+            .battery()
+            .unwrap()
+            .property(),
+        battery.property()
+    );
+    assert!(
+        ParsedDevice::new_with_battery(sensor_key(), vec![outlet], None, Some(battery),).is_err()
+    );
+}
+
+#[test]
+fn battery_diagnostics_do_not_change_native_capability_equality() {
+    let mut missing = sensor_description();
+    missing["services"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|service| {
+            !service["type"]
+                .as_str()
+                .is_some_and(|urn| urn.contains("service:battery:"))
+        });
+    let diagnosed = parse_device(sensor_key(), &missing).unwrap();
+    let stored = ParsedDevice::new(
+        diagnosed.key().clone(),
+        diagnosed.functions().to_vec(),
+        diagnosed.refresh_trigger(),
+    )
+    .unwrap();
+    assert_eq!(diagnosed, stored);
+    assert!(diagnosed.battery_issue().is_some());
+    assert!(stored.battery_issue().is_none());
 }

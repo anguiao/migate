@@ -14,7 +14,7 @@ use rs_matter::{
             basic_info::{BasicInfoConfig, BasicInfoSettings},
             decl::{
                 bridged_device_basic_information::{self as bridged, ClusterHandler as _},
-                color_control, level_control, relative_humidity_measurement,
+                color_control, level_control, power_source, relative_humidity_measurement,
                 temperature_measurement,
             },
             desc::{self, ClusterHandler as _},
@@ -93,6 +93,15 @@ const OBCR_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = light_clusters!(
 );
 const PARENT_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
     clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER);
+const POWER_SOURCE: DeviceType = DeviceType {
+    dtype: 0x0011,
+    drev: 1,
+};
+const PARENT_BATTERY_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::DescHandler::CLUSTER,
+    BridgedHandler::CLUSTER,
+    <sensors::BatteryHandler as power_source::ClusterHandler>::CLUSTER
+);
 const CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
@@ -177,6 +186,7 @@ struct Versions {
     color: u32,
     temperature: u32,
     humidity: u32,
+    power_source: u32,
 }
 impl Versions {
     /// Each new instance seeds independent random per-cluster DataVersions so
@@ -193,6 +203,7 @@ impl Versions {
             color: random.random(),
             temperature: random.random(),
             humidity: random.random(),
+            power_source: random.random(),
         }
     }
 }
@@ -209,6 +220,7 @@ enum Role {
     Parent {
         children: Vec<u16>,
         bridged: BridgedHandler,
+        battery: Option<sensors::BatteryHandler>,
     },
     Child {
         control: Control,
@@ -433,6 +445,12 @@ impl Role {
             Self::Child { .. } => None,
         }
     }
+    fn battery(&self) -> Option<&sensors::BatteryHandler> {
+        match self {
+            Self::Parent { battery, .. } => battery.as_ref(),
+            Self::Single { .. } | Self::Child { .. } => None,
+        }
+    }
 }
 // Each role composes only its supported clusters; rs-matter owns operation routing.
 macro_rules! dispatch {
@@ -445,12 +463,25 @@ macro_rules! dispatch {
                     control,
                 ), $($arg),*
             ).await,
-            Role::Parent { bridged, .. } => AsyncHandler::$method(
-                &EmptyHandler.chain(
-                    |_, cluster| cluster == 0x39,
-                    Async(bridged::HandlerAdaptor(bridged)),
-                ), $($arg),*
-            ).await,
+            Role::Parent { bridged, battery, .. } => match battery {
+                Some(battery) => AsyncHandler::$method(
+                    &EmptyHandler
+                        .chain(
+                            |_, cluster| cluster == 0x39,
+                            Async(bridged::HandlerAdaptor(bridged)),
+                        )
+                        .chain(
+                            |_, cluster| cluster == 0x2f,
+                            Async(power_source::HandlerAdaptor(battery)),
+                        ), $($arg),*
+                ).await,
+                None => AsyncHandler::$method(
+                    &EmptyHandler.chain(
+                        |_, cluster| cluster == 0x39,
+                        Async(bridged::HandlerAdaptor(bridged)),
+                    ), $($arg),*
+                ).await,
+            },
             Role::Child { control, .. } => control.$method($($arg),*).await,
         }
     };
@@ -491,11 +522,21 @@ impl Entry {
                     Endpoint::new(self.endpoint, SINGLE_TYPES, SINGLE_CLUSTERS)
                 }
             }
-            Role::Parent { .. } => Endpoint::new(
-                self.endpoint,
-                devices!(DEV_TYPE_BRIDGED_NODE),
-                PARENT_CLUSTERS,
-            ),
+            Role::Parent { battery, .. } => {
+                if battery.is_some() {
+                    Endpoint::new(
+                        self.endpoint,
+                        devices!(DEV_TYPE_BRIDGED_NODE, POWER_SOURCE),
+                        PARENT_BATTERY_CLUSTERS,
+                    )
+                } else {
+                    Endpoint::new(
+                        self.endpoint,
+                        devices!(DEV_TYPE_BRIDGED_NODE),
+                        PARENT_CLUSTERS,
+                    )
+                }
+            }
             Role::Child { control, .. } => match &control.kind {
                 ControlKind::Temperature(_) => Endpoint::new(
                     self.endpoint,
@@ -566,6 +607,11 @@ impl Entry {
             && cluster.is_none_or(|id| id == 0x39)
         {
             handler.dataver_changed();
+        }
+        if let Some(handler) = self.role.battery()
+            && cluster.is_none_or(|id| id == 0x2f)
+        {
+            <sensors::BatteryHandler as power_source::ClusterHandler>::dataver_changed(handler);
         }
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
@@ -650,14 +696,27 @@ pub(super) fn handler_from(
                 )
             };
             let role = match function {
-                None => Role::Parent {
-                    children: identity
+                None => {
+                    let children = identity
                         .functions
                         .iter()
                         .map(|function| function.endpoint)
-                        .collect(),
-                    bridged: bridged(),
-                },
+                        .collect::<Vec<_>>();
+                    let battery = device.has_battery().then(|| {
+                        sensors::BatteryHandler::new(
+                            device.clone(),
+                            identity.endpoint,
+                            children.clone(),
+                            Dataver::new(versions.power_source),
+                        )
+                        .expect("validated published battery capability")
+                    });
+                    Role::Parent {
+                        children,
+                        bridged: bridged(),
+                        battery,
+                    }
+                }
                 Some((index, function)) => {
                     let function_device = device.function(&function.id).unwrap();
                     let label = function_device.description().label.clone();

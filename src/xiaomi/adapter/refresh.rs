@@ -142,8 +142,12 @@ impl RefreshState {
             }
         }
     }
-    pub(super) fn problems(&self) -> Vec<String> {
-        self.problems.values().cloned().collect()
+    pub(super) fn problems_except(&self, id: &str) -> Vec<String> {
+        self.problems
+            .iter()
+            .filter(|((entry, _, _), _)| entry != id)
+            .map(|(_, problem)| problem.clone())
+            .collect()
     }
     #[cfg(test)]
     pub(super) fn snapshot(&self) -> RefreshSnapshot {
@@ -357,10 +361,15 @@ fn read_one(
     async move {
         let mut cleanup = cleanup;
         let did = work.key.id.clone();
-        let ordered = work.native.device().functions().iter().any(|function| {
-            function.id() == read.id
-                && (function.lighting().is_some() || function.measurement().is_some())
-        });
+        let ordered = work
+            .native
+            .device()
+            .battery()
+            .is_some_and(|battery| read.id == "battery" && read.binding == battery.property())
+            || work.native.device().functions().iter().any(|function| {
+                function.id() == read.id
+                    && (function.lighting().is_some() || function.measurement().is_some())
+            });
         let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
         let reading = async {
             if flight.life.is_closed() || !flight.current(&context, &did) {
@@ -526,12 +535,28 @@ fn read_one(
         if !work.life.is_closed() && work.contains(&read.id, read.binding) {
             let result = result?;
             // A stale failure cannot consume demand queued after that read began.
-            if !matches!(result, ReadResult::Failed(_))
+            let current = !matches!(result, ReadResult::Failed(_))
                 || !ordered
                 || work
                     .observations
-                    .read_is_current(&work, &read.id, read.binding, &stamp)
+                    .read_is_current(&work, &read.id, read.binding, &stamp);
+            if current
+                && read.id == "battery"
+                && work
+                    .native
+                    .device()
+                    .battery()
+                    .is_some_and(|battery| read.binding == battery.property())
             {
+                match &result {
+                    ReadResult::Observed => work.set_battery_read_problem(None),
+                    ReadResult::Failed(problem) => {
+                        work.set_battery_read_problem(Some(problem.clone()))
+                    }
+                    ReadResult::Retired => {}
+                }
+            }
+            if current {
                 work.refresh.borrow_mut().complete(
                     read,
                     result,

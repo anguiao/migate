@@ -12,9 +12,9 @@ pub(crate) use group::parse_group;
 pub(crate) use light::is_light_type;
 pub(crate) use ls2307::is_type as is_ls2307_type;
 pub use model::{
-    BrightnessBinding, CapabilityError, ColorBinding, LightBindings, MeasurementBinding,
-    MeasurementUnit, ModeBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
-    TemperatureBinding,
+    BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding, LightBindings,
+    MeasurementBinding, MeasurementUnit, ModeBinding, NumericFormat, ParsedDevice, ParsedFunction,
+    PropertyBinding, TemperatureBinding,
 };
 pub(crate) use native::NativeDescription;
 pub(crate) use outlet::is_outlet_type;

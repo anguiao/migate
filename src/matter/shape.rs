@@ -2,8 +2,9 @@
 //!
 //! The frozen model and publication compare this exact surface when deciding
 //! root/endpoint ConfigurationVersion changes: the four standard light
-//! profiles with their published CT mired bounds, and outlet function order
-//! (which fixes parent/child descriptor tags). Endpoint numbers, bindings,
+//! profiles with their published CT mired bounds, outlet function order (which
+//! fixes parent/child descriptor tags), and the physical battery capability
+//! that decides the parent Power Source topology. Endpoint numbers, bindings,
 //! live state and every generated attribute/command are deliberately excluded.
 //! Equivalent Kelvin encodings of the same mired span compare equal.
 
@@ -13,6 +14,7 @@ use crate::device::{FunctionDescription, FunctionKind, LightProfileKind};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FixedShape {
     functions: Vec<FixedFunction>,
+    battery: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,9 +45,13 @@ enum FixedKind {
 
 /// Canonical shape of the functions as they will be published. The
 /// application collects this value once and hands it to planning.
-pub(crate) fn fixed_shape(functions: &[FunctionDescription]) -> FixedShape {
+pub(crate) fn fixed_shape_with_battery(
+    functions: &[FunctionDescription],
+    battery: bool,
+) -> FixedShape {
     let multiple = functions.len() > 1;
     FixedShape {
+        battery,
         functions: functions
             .iter()
             .map(|function| FixedFunction {

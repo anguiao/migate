@@ -173,6 +173,19 @@ fn render(view: &View, did: Option<&str>) -> String {
         };
         lines.push(format!("{} ({}): {availability}", key.id, physical.label()));
         lines.extend(configuration_lines(view, &key.id));
+        if let Some(battery) = physical.battery_snapshot() {
+            lines.push(format!(
+                "  battery (shared): {}",
+                measurement_text(
+                    crate::device::MeasurementSnapshot {
+                        value: battery.value,
+                        source_time: battery.source_time,
+                        received_at: battery.received_at,
+                    },
+                    "%"
+                )
+            ));
+        }
         for function in physical.functions() {
             let id = &function.function_key().id;
             let label = &function.description().label;

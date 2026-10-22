@@ -152,6 +152,7 @@ impl Context {
                 .as_ref()
                 .unwrap()
                 .clone();
+            let battery_problem = work.battery_problem();
             let channels = work
                 .native
                 .device()
@@ -178,6 +179,7 @@ impl Context {
                 notification_source: notification,
                 unavailable_reason,
                 sync_limited_reason,
+                battery_problem,
                 last_switch_reason,
                 commands,
             });

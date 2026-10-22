@@ -145,20 +145,64 @@ impl ParsedFunction {
 
 /// A parsed device description with non-empty, uniquely keyed functions and
 /// uniquely owned real bindings. Lights use the single `main` function layout.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ParsedDevice {
     key: DeviceKey,
     functions: Vec<ParsedFunction>,
     refresh_trigger: Option<PropertyBinding>,
+    battery: Option<BatteryBinding>,
+    battery_issue: Option<String>,
 }
+impl PartialEq for ParsedDevice {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.functions == other.functions
+            && self.refresh_trigger == other.refresh_trigger
+            && self.battery == other.battery
+    }
+}
+impl Eq for ParsedDevice {}
 impl ParsedDevice {
     pub(crate) fn new(
         key: DeviceKey,
         functions: Vec<ParsedFunction>,
         refresh_trigger: Option<PropertyBinding>,
     ) -> Result<Self, CapabilityError> {
+        Self::new_with_battery(key, functions, refresh_trigger, None)
+    }
+    pub(crate) fn new_with_battery(
+        key: DeviceKey,
+        functions: Vec<ParsedFunction>,
+        refresh_trigger: Option<PropertyBinding>,
+        battery: Option<BatteryBinding>,
+    ) -> Result<Self, CapabilityError> {
+        Self::build(key, functions, refresh_trigger, battery, None)
+    }
+    pub(crate) fn new_with_battery_diagnostic(
+        key: DeviceKey,
+        functions: Vec<ParsedFunction>,
+        refresh_trigger: Option<PropertyBinding>,
+        battery: Option<BatteryBinding>,
+        battery_issue: Option<String>,
+    ) -> Result<Self, CapabilityError> {
+        Self::build(key, functions, refresh_trigger, battery, battery_issue)
+    }
+    fn build(
+        key: DeviceKey,
+        functions: Vec<ParsedFunction>,
+        refresh_trigger: Option<PropertyBinding>,
+        battery: Option<BatteryBinding>,
+        battery_issue: Option<String>,
+    ) -> Result<Self, CapabilityError> {
         if functions.is_empty() {
             return Err(CapabilityError::InvalidDescription("functions"));
+        }
+        if battery_issue
+            .as_ref()
+            .is_some_and(|issue| issue.is_empty() || issue.chars().any(char::is_control))
+            || (battery.is_some() && battery_issue.is_some())
+        {
+            return Err(CapabilityError::InvalidDescription("battery diagnostic"));
         }
         let mut ids = std::collections::HashSet::new();
         if functions.iter().any(|function| !ids.insert(function.id())) {
@@ -171,6 +215,7 @@ impl ParsedDevice {
             .iter()
             .flat_map(ParsedFunction::bindings)
             .chain(refresh_trigger)
+            .chain(battery.as_ref().map(BatteryBinding::property))
         {
             if binding.siid == 0 || binding.piid == 0 || !bindings.insert(binding) {
                 return Err(CapabilityError::InvalidDescription("function bindings"));
@@ -206,6 +251,8 @@ impl ParsedDevice {
             if ids != ["temperature", "humidity"] || !semantic || refresh_trigger.is_some() {
                 return Err(CapabilityError::InvalidDescription("sensor topology"));
             }
+        } else if battery.is_some() {
+            return Err(CapabilityError::InvalidDescription("battery topology"));
         } else if lights > 0 {
             if functions.len() != 1 || functions[0].id() != "main" || refresh_trigger.is_some() {
                 return Err(CapabilityError::InvalidDescription("light topology"));
@@ -224,6 +271,8 @@ impl ParsedDevice {
             key,
             functions,
             refresh_trigger,
+            battery,
+            battery_issue,
         })
     }
     pub fn key(&self) -> &DeviceKey {
@@ -234,6 +283,12 @@ impl ParsedDevice {
     }
     pub fn refresh_trigger(&self) -> Option<PropertyBinding> {
         self.refresh_trigger
+    }
+    pub fn battery(&self) -> Option<&BatteryBinding> {
+        self.battery.as_ref()
+    }
+    pub fn battery_issue(&self) -> Option<&str> {
+        self.battery_issue.as_deref()
     }
     pub fn is_read_only(&self) -> bool {
         !self.functions.is_empty()
@@ -246,7 +301,7 @@ impl ParsedDevice {
         &self,
         label: impl Into<String>,
     ) -> PhysicalDeviceDescription {
-        PhysicalDeviceDescription::new(
+        let description = PhysicalDeviceDescription::new(
             self.key.clone(),
             label,
             self.functions
@@ -254,7 +309,12 @@ impl ParsedDevice {
                 .map(ParsedFunction::description)
                 .collect(),
         )
-        .expect("a parsed device keeps a valid description")
+        .expect("a parsed device keeps a valid description");
+        if self.battery.is_some() {
+            description.with_battery()
+        } else {
+            description
+        }
     }
 }
 
@@ -452,6 +512,54 @@ impl MeasurementBinding {
         .filter(|value| value.is_finite() && self.range.contains(*value))
         .ok_or(CapabilityError::InvalidValue("measurement"))?;
         Ok(value)
+    }
+}
+
+/// One optional physical battery binding. The service/property semantics are
+/// resolved before construction; this type only carries the real binding and
+/// its supported percentage representation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatteryBinding {
+    measurement: MeasurementBinding,
+}
+impl Eq for BatteryBinding {}
+impl BatteryBinding {
+    pub(crate) fn new(
+        property: PropertyBinding,
+        format: NumericFormat,
+        range: MeasurementRange,
+        step: f64,
+    ) -> Result<Self, CapabilityError> {
+        if range.min() < 0.0 || range.max() > 100.0 {
+            return Err(CapabilityError::InvalidMeasurement("battery"));
+        }
+        Ok(Self {
+            measurement: MeasurementBinding::new(
+                property,
+                format,
+                MeasurementUnit::Percentage,
+                range,
+                step,
+            )
+            .map_err(|_| CapabilityError::InvalidMeasurement("battery"))?,
+        })
+    }
+    pub fn property(&self) -> PropertyBinding {
+        self.measurement.property()
+    }
+    pub fn format(&self) -> NumericFormat {
+        self.measurement.format()
+    }
+    pub fn range(&self) -> MeasurementRange {
+        self.measurement.range()
+    }
+    pub fn step(&self) -> f64 {
+        self.measurement.step()
+    }
+    pub fn read_value(&self, value: &Value) -> Result<f64, CapabilityError> {
+        self.measurement
+            .read_value(value)
+            .map_err(|_| CapabilityError::InvalidValue("battery"))
     }
 }
 

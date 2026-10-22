@@ -60,6 +60,9 @@ fn validate_model_topology(
     model: &str,
     instance_type: &str,
 ) -> Result<(), &'static str> {
+    if device.battery_issue().is_some() && !is_temperature_humidity_sensor_type(instance_type) {
+        return Err("Xiaomi battery diagnostic is invalid");
+    }
     if is_temperature_humidity_sensor_type(instance_type) {
         if model == ls2307::MODEL || model == outlet::CP7PD_MODEL {
             return Err("Xiaomi device model is incompatible with its instance type");

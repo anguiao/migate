@@ -131,7 +131,10 @@ pub(crate) fn planned_from(
             .map(|(key, served)| {
                 (
                     key.clone(),
-                    matter::fixed_shape(served.description.functions()),
+                    matter::fixed_shape_with_battery(
+                        served.description.functions(),
+                        served.description.has_battery(),
+                    ),
                 )
             })
             .collect()

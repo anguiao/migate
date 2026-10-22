@@ -20,7 +20,7 @@ impl DeviceRegistry {
 
 impl PhysicalDevice {
     pub(crate) fn description(&self) -> PhysicalDeviceDescription {
-        PhysicalDeviceDescription::new(
+        let description = PhysicalDeviceDescription::new(
             self.key().clone(),
             self.label(),
             self.functions()
@@ -28,7 +28,12 @@ impl PhysicalDevice {
                 .map(|function| function.description().clone())
                 .collect(),
         )
-        .unwrap()
+        .unwrap();
+        if self.has_battery() {
+            description.with_battery()
+        } else {
+            description
+        }
     }
 }
 

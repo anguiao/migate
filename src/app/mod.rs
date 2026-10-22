@@ -305,12 +305,18 @@ impl App {
         self.source.set_label(key, label);
         let mut derived = (*current.derived).clone();
         if let Some(served) = derived.served.get_mut(key) {
-            served.description = crate::device::PhysicalDeviceDescription::new(
+            let battery = served.description.has_battery();
+            let description = crate::device::PhysicalDeviceDescription::new(
                 key.clone(),
                 label,
                 served.description.functions().to_vec(),
             )
             .expect("a served description keeps its functions");
+            served.description = if battery {
+                description.with_battery()
+            } else {
+                description
+            };
         }
         *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
             configuration,
@@ -335,7 +341,10 @@ fn shapes(derived: &DerivedConfiguration) -> BTreeMap<DeviceKey, FixedShape> {
         .map(|(key, served)| {
             (
                 key.clone(),
-                matter::fixed_shape(served.description.functions()),
+                matter::fixed_shape_with_battery(
+                    served.description.functions(),
+                    served.description.has_battery(),
+                ),
             )
         })
         .collect()

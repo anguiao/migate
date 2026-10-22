@@ -134,6 +134,18 @@ impl Rig {
         Self::build_with(true, members, None, None, &[], &instances)
     }
 
+    /// A restored sensor whose stored native facts have no battery capability.
+    pub(in super::super) fn sensor_without_battery(did: &str) -> Self {
+        Self::build_with(
+            true,
+            &[did],
+            None,
+            None,
+            &[],
+            &[(did, super::sensor_native_without_battery(did))],
+        )
+    }
+
     /// Lights with caller-provided parsed instances, for range/boundary cases.
     pub(in super::super) fn custom_lights(lights: &[(&str, &str, Value)]) -> Self {
         let members = lights.iter().map(|(did, _, _)| *did).collect::<Vec<_>>();

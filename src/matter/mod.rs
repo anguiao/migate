@@ -15,7 +15,7 @@ pub use pairing::PairingEvent;
 pub(crate) use storage::discard_subscriptions;
 
 pub(crate) use model::{FrozenEntry, PublishedFunction, PublishedIdentity};
-pub(crate) use shape::{FixedShape, fixed_shape};
+pub(crate) use shape::{FixedShape, fixed_shape_with_battery};
 
 #[cfg(test)]
 pub(crate) mod tests;

@@ -20,6 +20,8 @@ use std::{
     time::Duration,
 };
 
+const BATTERY_CHANNEL: &str = "battery";
+
 #[cfg(test)]
 #[path = "tests/work_access.rs"]
 mod test_access;
@@ -118,9 +120,9 @@ impl Prepare {
         self.running = true;
         Some(self.generation)
     }
-    fn finish(&mut self, problem: Option<String>) {
+    fn finish(&mut self, problem: Option<String>, required_ready: bool) {
         self.running = false;
-        self.exhausted = problem.is_some();
+        self.exhausted = problem.is_some() && !required_ready;
         self.problem = problem;
     }
     fn ready(&self, bindings: &[PropertyBinding]) -> bool {
@@ -189,6 +191,9 @@ pub(super) struct DeviceWork {
     pub(super) refresh: RefCell<RefreshState>,
     pub(super) refresh_changed: Rc<Event>,
     pub(super) light_frames: RefCell<LightFrames>,
+    battery_subscription_problem: RefCell<Option<String>>,
+    battery_read_problem: RefCell<Option<String>>,
+    retry_optional: Cell<bool>,
     changed: Event,
 }
 impl DeviceWork {
@@ -213,6 +218,9 @@ impl DeviceWork {
             refresh: RefCell::new(RefreshState::default()),
             refresh_changed,
             light_frames: RefCell::new(LightFrames::default()),
+            battery_subscription_problem: RefCell::new(None),
+            battery_read_problem: RefCell::new(None),
+            retry_optional: Cell::new(false),
             changed: Event::new(),
         }
     }
@@ -227,6 +235,11 @@ impl DeviceWork {
         self.current_sink().physical.clone()
     }
     pub(super) fn binding(&self, id: &str) -> PropertyBinding {
+        if id == BATTERY_CHANNEL {
+            return self
+                .battery_binding()
+                .expect("battery channel has a native binding");
+        }
         self.native
             .device()
             .functions()
@@ -235,6 +248,25 @@ impl DeviceWork {
             .unwrap()
             .power()
             .expect("light and outlet functions have power")
+    }
+    fn battery_binding(&self) -> Option<PropertyBinding> {
+        self.native
+            .device()
+            .battery()
+            .map(crate::xiaomi::capability::BatteryBinding::property)
+    }
+    fn required_bindings(&self) -> Vec<PropertyBinding> {
+        let mut values = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .flat_map(super::lighting::bindings)
+            .collect::<Vec<_>>();
+        if let Some(trigger) = self.native.device().refresh_trigger() {
+            values.push(trigger);
+        }
+        values
     }
     fn is_light(&self) -> bool {
         self.native
@@ -458,6 +490,23 @@ impl DeviceWork {
             self.refresh();
             return false;
         }
+        if self.battery_binding() == Some(binding) {
+            let origin = if cached_report {
+                super::lighting::Origin::Cache
+            } else {
+                super::lighting::Origin::Notification
+            };
+            return match observe_battery(self, binding, value, update_time, received_at, origin) {
+                Ok(()) => false,
+                Err(error) => {
+                    log::warn!("Ignoring invalid battery property: {error}");
+                    self.set_battery_read_problem(Some(format!(
+                        "invalid battery property: {error}"
+                    )));
+                    false
+                }
+            };
+        }
         let Some(function) = self
             .native
             .device()
@@ -587,7 +636,19 @@ impl DeviceWork {
                 .prepare
                 .subscribed
                 .insert((binding.siid, binding.piid));
+            if self.battery_binding() == Some(binding) {
+                self.set_battery_subscription_problem(None);
+            }
         }
+    }
+    pub(super) fn local_required_ready(&self, handle: &SessionHandle, generation: u64) -> bool {
+        let local = self.local.borrow();
+        local
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && local.prepare.generation == generation
+            && local.prepare.ready(&self.required_bindings())
     }
     pub(super) fn local_finished(
         &self,
@@ -595,6 +656,8 @@ impl DeviceWork {
         generation: u64,
         problem: Option<String>,
     ) {
+        let required = self.required_bindings();
+        let battery = self.battery_binding();
         let mut local = self.local.borrow_mut();
         if local
             .connection
@@ -602,7 +665,21 @@ impl DeviceWork {
             .is_some_and(|current| current.same_connection(handle))
             && local.prepare.generation == generation
         {
-            local.prepare.finish(problem);
+            let required_ready = local.prepare.ready(&required);
+            let battery_only_problem = required_ready
+                && problem.is_some()
+                && battery.is_some_and(|binding| {
+                    !local
+                        .prepare
+                        .subscribed
+                        .contains(&(binding.siid, binding.piid))
+                });
+            if battery_only_problem {
+                self.set_battery_subscription_problem(problem.clone());
+                local.prepare.finish(None, required_ready);
+            } else {
+                local.prepare.finish(problem, required_ready);
+            }
         }
     }
     fn local_abandoned(&self, handle: &SessionHandle, generation: u64) {
@@ -672,7 +749,23 @@ impl DeviceWork {
                 .prepare
                 .subscribed
                 .insert((binding.siid, binding.piid));
+            if self.battery_binding() == Some(binding) {
+                self.set_battery_subscription_problem(None);
+            }
         }
+    }
+    pub(super) fn cloud_required_ready(
+        &self,
+        handle: &NotificationHandle,
+        generation: u64,
+    ) -> bool {
+        let cloud = self.cloud.borrow();
+        cloud
+            .connection
+            .as_ref()
+            .is_some_and(|current| current.same_connection(handle))
+            && cloud.prepare.generation == generation
+            && cloud.prepare.ready(&self.required_bindings())
     }
     pub(super) fn cloud_finished(
         &self,
@@ -680,6 +773,8 @@ impl DeviceWork {
         generation: u64,
         problem: Option<String>,
     ) {
+        let required = self.required_bindings();
+        let battery = self.battery_binding();
         let mut cloud = self.cloud.borrow_mut();
         if cloud
             .connection
@@ -687,7 +782,21 @@ impl DeviceWork {
             .is_some_and(|current| current.same_connection(handle))
             && cloud.prepare.generation == generation
         {
-            cloud.prepare.finish(problem);
+            let required_ready = cloud.prepare.ready(&required);
+            let battery_only_problem = required_ready
+                && problem.is_some()
+                && battery.is_some_and(|binding| {
+                    !cloud
+                        .prepare
+                        .subscribed
+                        .contains(&(binding.siid, binding.piid))
+                });
+            if battery_only_problem {
+                self.set_battery_subscription_problem(problem.clone());
+                cloud.prepare.finish(None, required_ready);
+            } else {
+                cloud.prepare.finish(problem, required_ready);
+            }
         }
     }
     pub(super) fn cloud_abandoned(&self, handle: &NotificationHandle, generation: u64) {
@@ -702,7 +811,7 @@ impl DeviceWork {
         }
     }
     pub(super) fn source_ready(&self, source: &NotificationSource) -> bool {
-        let bindings = self.bindings();
+        let bindings = self.required_bindings();
         match source {
             NotificationSource::Local(handle) => {
                 let local = self.local.borrow();
@@ -768,7 +877,13 @@ impl DeviceWork {
             .set(self.condition_generation.get() + 1);
         self.local.borrow_mut().prepare.exhausted = false;
         self.cloud.borrow_mut().prepare.exhausted = false;
+        if self.observer().is_some() && self.battery_binding().is_some() {
+            self.retry_optional.set(true);
+        }
         self.changed.notify(usize::MAX);
+    }
+    pub(super) fn take_optional_retry(&self) -> bool {
+        self.retry_optional.replace(false)
     }
     /// End this runtime's authority and notification preparation. Sent
     /// requests keep their own receipt task; only unsent reads and queued
@@ -802,6 +917,9 @@ impl DeviceWork {
                 self.refresh_property(function.id(), binding);
             }
         }
+        if let Some(binding) = self.battery_binding() {
+            self.refresh_property(BATTERY_CHANNEL, binding);
+        }
     }
     pub(super) fn refresh_property(&self, id: &str, binding: PropertyBinding) {
         self.observations.refresh(id, binding);
@@ -821,6 +939,9 @@ impl DeviceWork {
         }
     }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
+        if id == BATTERY_CHANNEL {
+            return self.battery_binding() == Some(binding);
+        }
         self.native.device().functions().iter().any(|function| {
             function.id() == id && super::lighting::bindings(function).contains(&binding)
         })
@@ -836,6 +957,16 @@ impl DeviceWork {
     ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
         if !self.observations.read_is_current(self, id, binding, stamp) {
             return Ok(());
+        }
+        if id == BATTERY_CHANNEL && self.battery_binding() == Some(binding) {
+            return observe_battery(
+                self,
+                binding,
+                value,
+                update_time,
+                received_at,
+                super::lighting::Origin::Read,
+            );
         }
         let function = self
             .native
@@ -875,15 +1006,9 @@ impl DeviceWork {
         Ok(())
     }
     pub(super) fn bindings(&self) -> Vec<PropertyBinding> {
-        let mut values = self
-            .native
-            .device()
-            .functions()
-            .iter()
-            .flat_map(super::lighting::bindings)
-            .collect::<Vec<_>>();
-        if let Some(trigger) = self.native.device().refresh_trigger() {
-            values.push(trigger);
+        let mut values = self.required_bindings();
+        if let Some(battery) = self.battery_binding() {
+            values.push(battery);
         }
         values
     }
@@ -895,9 +1020,28 @@ impl DeviceWork {
             .clone()
             .into_iter()
             .chain(self.cloud.borrow().prepare.problem.clone())
-            .chain(self.refresh.borrow().problems())
+            .chain(self.refresh.borrow().problems_except(BATTERY_CHANNEL))
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
+    }
+    pub(super) fn battery_problem(&self) -> Option<String> {
+        let mut values = Vec::new();
+        if let Some(issue) = self.native.device().battery_issue() {
+            values.push(issue.to_owned());
+        }
+        if let Some(problem) = self.battery_subscription_problem.borrow().clone() {
+            values.push(problem);
+        }
+        if let Some(problem) = self.battery_read_problem.borrow().clone() {
+            values.push(problem);
+        }
+        (!values.is_empty()).then(|| values.join("; "))
+    }
+    pub(super) fn set_battery_subscription_problem(&self, problem: Option<String>) {
+        *self.battery_subscription_problem.borrow_mut() = problem;
+    }
+    pub(super) fn set_battery_read_problem(&self, problem: Option<String>) {
+        *self.battery_read_problem.borrow_mut() = problem;
     }
     pub(super) fn subscription_problem(&self) -> Option<String> {
         self.local
@@ -929,6 +1073,32 @@ impl DeviceWork {
         message
     }
 }
+fn observe_battery(
+    work: &DeviceWork,
+    binding: PropertyBinding,
+    value: &serde_json::Value,
+    source_time: Option<i64>,
+    received_at: i64,
+    origin: super::lighting::Origin,
+) -> Result<(), crate::xiaomi::capability::CapabilityError> {
+    let battery = work
+        .native
+        .device()
+        .battery()
+        .expect("caller selected the battery binding");
+    let decoded = battery.read_value(value)?;
+    if work.life.is_closed() {
+        return Ok(());
+    }
+    work.observations
+        .observed(work, BATTERY_CHANNEL, binding, origin);
+    work.physical()
+        .observe_battery(decoded, source_time, received_at)
+        .map_err(|_| crate::xiaomi::capability::CapabilityError::InvalidValue("battery"))?;
+    work.set_battery_read_problem(None);
+    Ok(())
+}
+
 fn observe_measurement(
     work: &DeviceWork,
     function: &crate::xiaomi::capability::ParsedFunction,
@@ -1006,7 +1176,14 @@ async fn subscriptions(
                     break 'attempts;
                 }
                 match result {
-                    Ok(()) => work.local_subscribed(handle, preparation, binding),
+                    Ok(()) => {
+                        work.local_subscribed(handle, preparation, binding);
+                        if work.local_required_ready(handle, preparation) {
+                            // Measurement links become active without waiting
+                            // for the optional battery subscription.
+                            context.changed.notify(usize::MAX);
+                        }
+                    }
                     Err(error) => {
                         problem = Some(work.problem("subscribe", binding, &error));
                         failed.push(binding);

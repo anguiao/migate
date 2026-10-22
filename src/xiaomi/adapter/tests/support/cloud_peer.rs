@@ -77,10 +77,13 @@ impl CloudPeer {
         self.changed.notify(usize::MAX);
     }
     pub(in super::super) fn property(&self, did: &str, siid: u32, value: bool) {
+        self.property_at(did, siid, 1, json!(value));
+    }
+    pub(in super::super) fn property_at(&self, did: &str, siid: u32, piid: u32, value: Value) {
         self.send(Packet::Publish(Publish::new(
-            format!("device/{did}/up/properties_changed/{siid}/1"),
+            format!("device/{did}/up/properties_changed/{siid}/{piid}"),
             QoS::AtMostOnce,
-            json!({"params":{"did":did,"siid":siid,"piid":1,"value":value}}).to_string(),
+            json!({"params":{"did":did,"siid":siid,"piid":piid,"value":value}}).to_string(),
         )));
     }
     pub(in super::super) fn qos2(&self, did: &str, siid: u32, value: bool, pkid: u16) {
@@ -227,12 +230,16 @@ impl CloudBroker {
 pub(in super::super) fn with_cloud_peer(
     members: &[&str],
 ) -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
-    let rig = Rig::new(true, members);
-    rig.cloud
-        .lock()
-        .unwrap()
-        .online
-        .extend(members.iter().map(|did| (*did).to_owned()));
+    with_cloud_rig(Rig::new(true, members))
+}
+pub(in super::super) fn with_cloud_sensors(
+    members: &[&str],
+) -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
+    with_cloud_rig(Rig::sensors(members))
+}
+fn with_cloud_rig(rig: Rig) -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
+    let members = rig.cloud.lock().unwrap().members.clone();
+    rig.cloud.lock().unwrap().online.extend(members);
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
     rig.source.context.notification_connector.set(
         crate::xiaomi::adapter::notifications::NotificationConnector::Plaintext(

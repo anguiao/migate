@@ -88,6 +88,16 @@ pub(crate) fn humidity_matter_value(percent: f64) -> Option<u16> {
     Some(rounded as u16)
 }
 
+/// Percentage to the Matter battery scale (0.5 %). Range checks apply both
+/// before and after rounding; unknown and invalid values stay absent.
+pub(crate) fn battery_percent_matter_value(percent: f64) -> Option<u8> {
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        return None;
+    }
+    let rounded = (percent * 2.0).round();
+    (0.0..=200.0).contains(&rounded).then_some(rounded as u8)
+}
+
 pub(crate) fn temperature_matter_range(range: MeasurementRange) -> Option<(i16, i16)> {
     let min = temperature_matter_value(range.min())?;
     let max = temperature_matter_value(range.max())?;

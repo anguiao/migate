@@ -1,6 +1,6 @@
 use super::{
-    CapabilityError, MeasurementBinding, MeasurementUnit, NumericFormat, ParsedDevice,
-    ParsedFunction, PropertyBinding,
+    BatteryBinding, CapabilityError, MeasurementBinding, MeasurementUnit, NumericFormat,
+    ParsedDevice, ParsedFunction, PropertyBinding,
     description::{Description, Service, Urn, array, string},
 };
 use crate::device::{DeviceKey, MeasurementRange};
@@ -8,6 +8,8 @@ use crate::device::{DeviceKey, MeasurementRange};
 const TEMPERATURE: u32 = 0x0000_0020;
 const RELATIVE_HUMIDITY: u32 = 0x0000_000C;
 const SENSOR_SERVICE: u32 = 0x0000_7814;
+const BATTERY_SERVICE: u32 = 0x0000_7805;
+const BATTERY_LEVEL: u32 = 0x0000_0014;
 
 pub(super) fn parse_sensor(
     key: DeviceKey,
@@ -48,13 +50,16 @@ pub(super) fn parse_sensor(
         humidity.2,
         MeasurementUnit::Percentage,
     )?;
-    ParsedDevice::new(
+    let (battery, battery_issue) = battery(instance);
+    ParsedDevice::new_with_battery_diagnostic(
         key,
         vec![
             ParsedFunction::temperature("temperature", "Temperature", temperature),
             ParsedFunction::humidity("humidity", "Humidity", humidity),
         ],
         None,
+        battery,
+        battery_issue,
     )
 }
 
@@ -135,4 +140,83 @@ fn measurement_binding(
     let binding =
         MeasurementBinding::new(PropertyBinding { siid, piid }, format, unit, range, *step)?;
     Ok(binding)
+}
+
+fn battery(instance: &Description<'_>) -> (Option<BatteryBinding>, Option<String>) {
+    let services = instance
+        .services
+        .iter()
+        .filter(|service| service.urn.standard("service", "battery", BATTERY_SERVICE))
+        .collect::<Vec<_>>();
+    let service = match services.as_slice() {
+        [] => return (None, Some("battery service is missing".into())),
+        [service] => *service,
+        _ => return (None, Some("multiple battery services".into())),
+    };
+    let properties = service
+        .properties
+        .iter()
+        .filter(|property| {
+            property
+                .urn
+                .standard("property", "battery-level", BATTERY_LEVEL)
+        })
+        .collect::<Vec<_>>();
+    let property = match properties.as_slice() {
+        [] => return (None, Some("battery-level property is missing".into())),
+        [property] => *property,
+        _ => return (None, Some("multiple battery-level properties".into())),
+    };
+    match battery_binding(service.iid, property.iid, property.value) {
+        Ok(binding) => (Some(binding), None),
+        Err(error) => (None, Some(format!("invalid battery capability: {error}"))),
+    }
+}
+
+fn battery_binding(
+    siid: u32,
+    piid: u32,
+    value: &serde_json::Value,
+) -> Result<BatteryBinding, CapabilityError> {
+    let access = array(value, "access")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or(CapabilityError::InvalidDescription("access"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for permission in ["read", "notify"] {
+        if !access.contains(&permission) {
+            return Err(CapabilityError::MissingAccess(permission));
+        }
+    }
+    let format = match string(value, "format")? {
+        "float" => NumericFormat::Float,
+        "uint8" => NumericFormat::Uint8,
+        "uint16" => NumericFormat::Uint16,
+        "uint32" => NumericFormat::Uint32,
+        "int8" => NumericFormat::Int8,
+        "int16" => NumericFormat::Int16,
+        "int32" => NumericFormat::Int32,
+        _ => return Err(CapabilityError::InvalidMeasurement("battery")),
+    };
+    if string(value, "unit")? != "percentage" {
+        return Err(CapabilityError::InvalidMeasurement("unit"));
+    }
+    let range = array(value, "value-range")?
+        .iter()
+        .map(|value| {
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or(CapabilityError::InvalidMeasurement("battery"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let [min, max, step] = range.as_slice() else {
+        return Err(CapabilityError::InvalidMeasurement("battery"));
+    };
+    let range = MeasurementRange::new(*min, *max)
+        .map_err(|_| CapabilityError::InvalidMeasurement("battery"))?;
+    BatteryBinding::new(PropertyBinding { siid, piid }, format, range, *step)
 }

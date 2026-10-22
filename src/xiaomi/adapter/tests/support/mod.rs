@@ -44,7 +44,9 @@ mod groups;
 mod peer;
 mod rig;
 
-pub(super) use cloud_peer::{CloudBroker, CloudPeer, cloud_active, with_cloud_peer};
+pub(super) use cloud_peer::{
+    CloudBroker, CloudPeer, cloud_active, with_cloud_peer, with_cloud_sensors,
+};
 pub(super) use groups::{
     MEMBER_COLOR, MEMBER_MODE, confirmed_for, group_instance, group_record, ls2307_instance,
     repair_ready, repair_rig,
@@ -84,6 +86,28 @@ pub(super) fn sensor_native(did: &str) -> NativeDescription {
         "miaomiaoce.sensor_ht.t6".into(),
         instance["type"].as_str().unwrap().into(),
         parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap(),
+    )
+    .unwrap()
+}
+
+/// A restored sensor shape without a declared battery capability. This is the
+/// persisted capability surface an old schema-8 record exposes.
+pub(super) fn sensor_native_without_battery(did: &str) -> NativeDescription {
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/miot/miaomiaoce-t6.json"
+    ))
+    .unwrap();
+    let parsed = parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap();
+    let device = crate::xiaomi::capability::ParsedDevice::new(
+        parsed.key().clone(),
+        parsed.functions().to_vec(),
+        parsed.refresh_trigger(),
+    )
+    .unwrap();
+    NativeDescription::new(
+        "miaomiaoce.sensor_ht.t6".into(),
+        instance["type"].as_str().unwrap().into(),
+        device,
     )
     .unwrap()
 }

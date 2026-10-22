@@ -72,6 +72,7 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
         notification_source: Some(PathKind::Local),
         unavailable_reason: None,
         sync_limited_reason: None,
+        battery_problem: None,
         last_switch_reason: None,
         commands: vec![ChannelCommands {
             light_actions: None,

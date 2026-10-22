@@ -14,9 +14,9 @@ use crate::{
     },
     device::{DeviceKey, MeasurementRange, NumericRange},
     xiaomi::capability::{
-        BrightnessBinding, ColorBinding, LightBindings, MeasurementBinding, MeasurementUnit,
-        ModeBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
-        TemperatureBinding,
+        BatteryBinding, BrightnessBinding, ColorBinding, LightBindings, MeasurementBinding,
+        MeasurementUnit, ModeBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+        TemperatureBinding, is_temperature_humidity_sensor_type,
     },
 };
 use rusqlite::params;
@@ -242,6 +242,10 @@ struct WireNative {
     instance_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_trigger: Option<WireBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    battery: Option<WireMeasurement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    battery_issue: Option<String>,
     functions: Vec<WireFunction>,
 }
 
@@ -480,6 +484,8 @@ impl WireNative {
             model: native.model().to_owned(),
             instance_type: native.instance_type().to_owned(),
             refresh_trigger: native.device().refresh_trigger().map(WireBinding::from),
+            battery: native.device().battery().map(WireMeasurement::from_battery),
+            battery_issue: native.device().battery_issue().map(str::to_owned),
             functions: native
                 .device()
                 .functions()
@@ -491,13 +497,27 @@ impl WireNative {
 
     fn into_native(self, key: &DeviceKey) -> Result<NativeDescription, &'static str> {
         let refresh_trigger = self.refresh_trigger.map(PropertyBinding::from);
+        let battery = self
+            .battery
+            .map(WireMeasurement::into_battery)
+            .transpose()?;
+        let battery_issue = self.battery_issue.or_else(|| {
+            (battery.is_none() && is_temperature_humidity_sensor_type(&self.instance_type))
+                .then(|| "battery capability not declared".into())
+        });
         let functions = self
             .functions
             .into_iter()
             .map(WireFunction::into_parsed)
             .collect::<Result<Vec<_>, _>>()?;
-        let device = ParsedDevice::new(key.clone(), functions, refresh_trigger)
-            .map_err(|_| "Stored native description is invalid")?;
+        let device = ParsedDevice::new_with_battery_diagnostic(
+            key.clone(),
+            functions,
+            refresh_trigger,
+            battery,
+            battery_issue,
+        )
+        .map_err(|_| "Stored native description is invalid")?;
         NativeDescription::new(self.model, self.instance_type, device)
             .map_err(|_| "Stored native description is invalid")
     }
@@ -653,6 +673,17 @@ impl WireMeasurement {
         }
     }
 
+    fn from_battery(binding: &BatteryBinding) -> Self {
+        Self {
+            property: binding.property().into(),
+            format: binding.format(),
+            unit: MeasurementUnit::Percentage,
+            min: binding.range().min(),
+            max: binding.range().max(),
+            step: binding.step(),
+        }
+    }
+
     fn into_binding(self) -> Result<MeasurementBinding, &'static str> {
         MeasurementBinding::new(
             self.property.into(),
@@ -663,6 +694,20 @@ impl WireMeasurement {
             self.step,
         )
         .map_err(|_| "Stored measurement binding is invalid")
+    }
+
+    fn into_battery(self) -> Result<BatteryBinding, &'static str> {
+        if self.unit != MeasurementUnit::Percentage {
+            return Err("Stored battery binding is invalid");
+        }
+        BatteryBinding::new(
+            self.property.into(),
+            self.format,
+            MeasurementRange::new(self.min, self.max)
+                .map_err(|_| "Stored battery binding is invalid")?,
+            self.step,
+        )
+        .map_err(|_| "Stored battery binding is invalid")
     }
 }
 

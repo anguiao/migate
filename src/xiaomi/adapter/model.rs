@@ -219,6 +219,7 @@ pub struct DeviceStatus {
     pub notification_source: Option<PathKind>,
     pub unavailable_reason: Option<String>,
     pub sync_limited_reason: Option<String>,
+    pub battery_problem: Option<String>,
     pub last_switch_reason: Option<String>,
     pub commands: Vec<ChannelCommands>,
 }

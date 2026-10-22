@@ -182,6 +182,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
             notification_source: Some(PathKind::Local),
             unavailable_reason: None,
             sync_limited_reason: Some("cloud property subscriptions pending".into()),
+            battery_problem: None,
             last_switch_reason: Some("cloud preferred after local timeout".into()),
             commands: vec![ChannelCommands {
                 light_actions: None,
@@ -266,6 +267,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
             notification_source: None,
             unavailable_reason: Some("token expired".into()),
             sync_limited_reason: Some("no notification source".into()),
+            battery_problem: None,
             last_switch_reason: None,
             commands: vec![ChannelCommands {
                 light_actions: None,
@@ -413,6 +415,7 @@ fn action_report(function: &crate::device::Function) -> String {
         notification_source: Some(PathKind::Local),
         unavailable_reason: None,
         sync_limited_reason: None,
+        battery_problem: None,
         last_switch_reason: None,
         commands: vec![ChannelCommands {
             channel: "main".into(),
@@ -542,6 +545,7 @@ fn a_notification_limited_read_only_channel_is_reported_without_claiming_physica
         notification_source: None,
         unavailable_reason: None,
         sync_limited_reason: Some("notifications disconnected or subscriptions not ready".into()),
+        battery_problem: None,
         last_switch_reason: None,
         commands: Vec::<ChannelCommands>::new(),
     });
@@ -550,4 +554,29 @@ fn a_notification_limited_read_only_channel_is_reported_without_claiming_physica
     assert!(report.contains("Physical online: unknown."), "{report}");
     assert!(report.contains("State synchronization limited"), "{report}");
     assert!(!report.contains("Control unavailable"), "{report}");
+}
+
+#[test]
+fn battery_diagnostics_are_separate_from_physical_reachability() {
+    let report = format_device(&DeviceStatus {
+        did: "sensor".into(),
+        read_only: true,
+        usable_control_paths: Vec::new(),
+        selected_control: None,
+        usable_read_paths: vec![PathKind::Local],
+        selected_read: Some(PathKind::Local),
+        physical_online: None,
+        notification_source: Some(PathKind::Local),
+        unavailable_reason: None,
+        sync_limited_reason: None,
+        battery_problem: Some("sensor subscribe 2.1003: denied".into()),
+        last_switch_reason: None,
+        commands: Vec::new(),
+    });
+    assert!(report.contains("Physical online: unknown."), "{report}");
+    assert!(
+        report.contains("Battery: sensor subscribe 2.1003: denied."),
+        "{report}"
+    );
+    assert!(!report.contains("Read unavailable"), "{report}");
 }

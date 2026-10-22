@@ -12,25 +12,33 @@ use crate::xiaomi::cloud::CloudClient;
 use futures_lite::future::block_on;
 
 fn sensor() -> PhysicalDevice {
-    let (physical, receivers) = PhysicalDevice::new(
-        PhysicalDeviceDescription::new(
-            DeviceKey::new("xiaomi", "sensor"),
-            "Bedroom sensor".to_string(),
-            vec![
-                FunctionDescription {
-                    id: "temperature".into(),
-                    label: "Temperature".into(),
-                    kind: FunctionKind::Temperature(MeasurementRange::new(-30.0, 100.0).unwrap()),
-                },
-                FunctionDescription {
-                    id: "humidity".into(),
-                    label: "Humidity".into(),
-                    kind: FunctionKind::Humidity(MeasurementRange::new(0.0, 100.0).unwrap()),
-                },
-            ],
-        )
-        .unwrap(),
-    );
+    sensor_with_battery(false)
+}
+
+fn sensor_with_battery(battery: bool) -> PhysicalDevice {
+    let description = PhysicalDeviceDescription::new(
+        DeviceKey::new("xiaomi", "sensor"),
+        "Bedroom sensor".to_string(),
+        vec![
+            FunctionDescription {
+                id: "temperature".into(),
+                label: "Temperature".into(),
+                kind: FunctionKind::Temperature(MeasurementRange::new(-30.0, 100.0).unwrap()),
+            },
+            FunctionDescription {
+                id: "humidity".into(),
+                label: "Humidity".into(),
+                kind: FunctionKind::Humidity(MeasurementRange::new(0.0, 100.0).unwrap()),
+            },
+        ],
+    )
+    .unwrap();
+    let description = if battery {
+        description.with_battery()
+    } else {
+        description
+    };
+    let (physical, receivers) = PhysicalDevice::new(description);
     assert!(receivers.is_empty());
     physical
 }
@@ -108,4 +116,41 @@ fn a_supplied_source_time_is_displayed_without_rfc3339_assumptions() {
     );
     assert!(text.contains("upstream time 9223372036854775807"), "{text}");
     assert!(text.contains("received at"), "{text}");
+}
+
+#[test]
+fn status_shows_shared_battery_value_and_separate_times() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .local_status()
+            .unwrap();
+        let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
+        let registry = DeviceRegistry::new();
+        let physical = sensor_with_battery(true);
+        physical.set_availability(Availability::Available);
+        add_device(&store, &physical.description());
+        registry.insert(physical.clone());
+        physical
+            .observe_battery(55.0, Some(1_700_000_600), 1_700_000_610)
+            .unwrap();
+        physical.functions()[0]
+            .observe_measurement(21.5, Some(1_700_000_100), 1_700_000_110)
+            .unwrap();
+
+        let list = handle_line(&registry, &store.devices(), &status, "status sensor", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(list.contains("battery (shared): 55.00 %"), "{list}");
+        assert!(list.contains("upstream time 1700000600"), "{list}");
+        assert!(list.contains("received at"), "{list}");
+        // The battery's times are independent of the temperature observation.
+        assert!(
+            list.contains("temperature (Temperature): 21.50 °C"),
+            "{list}"
+        );
+        assert!(!list.contains("battery (Battery)"), "{list}");
+    });
 }

@@ -183,6 +183,7 @@ pub struct PhysicalDeviceDescription {
     key: DeviceKey,
     label: String,
     functions: Vec<FunctionDescription>,
+    battery: bool,
 }
 impl PhysicalDeviceDescription {
     pub fn new(
@@ -206,13 +207,22 @@ impl PhysicalDeviceDescription {
             key,
             label: label.into(),
             functions,
+            battery: false,
         })
+    }
+    /// Mark the physical device as exposing one valid shared battery capability.
+    pub fn with_battery(mut self) -> Self {
+        self.battery = true;
+        self
+    }
+    pub fn has_battery(&self) -> bool {
+        self.battery
     }
     pub fn functions(&self) -> &[FunctionDescription] {
         &self.functions
     }
-    pub(crate) fn into_parts(self) -> (DeviceKey, String, Vec<FunctionDescription>) {
-        (self.key, self.label, self.functions)
+    pub(crate) fn into_parts(self) -> (DeviceKey, String, Vec<FunctionDescription>, bool) {
+        (self.key, self.label, self.functions, self.battery)
     }
 }
 
@@ -326,6 +336,14 @@ impl PartialEq for MeasurementRange {
     }
 }
 impl Eq for MeasurementRange {}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BatterySnapshot {
+    pub value: Option<f64>,
+    pub source_time: Option<i64>,
+    pub received_at: Option<i64>,
+}
+impl Eq for BatterySnapshot {}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeasurementSnapshot {
