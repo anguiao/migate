@@ -227,7 +227,8 @@ fn duplicated_identity_and_endpoint_are_rejected() {
 
     let mut changed = valid.clone();
     let endpoint = changed["devices"][0]["endpoint"].clone();
-    changed["devices"][1]["endpoint"] = endpoint;
+    changed["devices"][1]["endpoint"] = endpoint.clone();
+    changed["devices"][1]["functions"][0]["endpoint"] = endpoint;
     overwrite(&store, &changed);
     assert!(store.devices().load_configuration().is_err());
 

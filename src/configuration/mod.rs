@@ -278,6 +278,10 @@ impl CommittedConfiguration {
                 }
                 reserve_endpoint(&mut endpoints, function.endpoint, &device.key)?;
             }
+            let single = device.functions.len() == 1;
+            if own_endpoints.contains(&device.endpoint) != single {
+                return Err("Committed device endpoint does not match its function topology");
+            }
             reserve_endpoint(&mut endpoints, device.endpoint, &device.key)?;
             if let Some(native) = &device.native {
                 if native.device().key() != &device.key {

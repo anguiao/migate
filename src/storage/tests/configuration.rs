@@ -178,6 +178,8 @@ fn damaged_cache_and_identity_fail_without_replacing_stored_data() {
         ("/devices/0/native/functions/0/kind", json!("unknown")),
         ("/devices/0/unique_id", json!("broken")),
         ("/devices/0/configuration_version", json!(0)),
+        ("/devices/0/endpoint", json!(3)),
+        ("/devices/0/functions/0/endpoint", json!(3)),
         ("/root_version", json!(0)),
         ("/scope", Value::Null),
     ] {
@@ -497,11 +499,15 @@ fn malformed_stored_functions_are_rejected_when_loading_a_publication() {
     let store = Store::open(dir.path()).unwrap();
     seed(&store, vec![fixture("multi", "cuco.plug.cp7pd", MULTI)]);
     let valid: Value = serde_json::from_str(&raw(&store)).unwrap();
+    let bridge = store.load_identity().unwrap().bridge_id;
     for (pointer, replacement) in [
         ("/devices/0/functions/2/id", json!("")),
         ("/devices/0/functions/2/id", json!("outlet_1")),
         ("/devices/0/functions/2/endpoint", json!(3)),
         ("/devices/0/functions/2/endpoint", json!(65535)),
+        ("/devices/0/endpoint", json!(3)),
+        ("/devices/0/endpoint", json!(4)),
+        ("/devices/0/endpoint", json!(5)),
         ("/devices/0/native/functions/2/kind", json!("unknown")),
         ("/devices/0/label", json!("x".repeat(33))),
         ("/devices/0/functions", json!([])),
@@ -511,6 +517,7 @@ fn malformed_stored_functions_are_rejected_when_loading_a_publication() {
         corrupt(&store, &encoded);
         assert!(store.devices().load_configuration().is_err(), "{pointer}");
         assert_eq!(raw(&store), encoded.to_string());
+        assert_eq!(store.load_identity().unwrap().bridge_id, bridge);
     }
     let mut missing = valid;
     missing["devices"][0]["functions"]
