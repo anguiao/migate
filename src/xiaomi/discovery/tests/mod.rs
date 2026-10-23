@@ -1,3 +1,4 @@
+mod recovery;
 mod support;
 
 use std::{
@@ -367,6 +368,7 @@ fn dropping_driver_clears_addresses_wakes_consumers_and_drops_the_event_source()
         let observed = shutdowns.clone();
         let (discovery, driver) = Discovery::from_events(
             receiver,
+            None,
             Some(Box::new(move || {
                 observed.fetch_add(1, Ordering::SeqCst);
             })),
@@ -407,6 +409,7 @@ fn source_shutdown_stops_the_driver_and_invokes_cleanup_once() {
             let observed = shutdowns.clone();
             let (discovery, driver) = Discovery::from_events(
                 receiver,
+                None,
                 Some(Box::new(move || {
                     observed.fetch_add(1, Ordering::SeqCst);
                 })),

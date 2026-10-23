@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use event_listener::Event;
+use futures_lite::future;
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent};
 
 use super::{
@@ -11,6 +12,7 @@ use super::{
 #[derive(Default)]
 struct State {
     snapshot: DiscoverySnapshot,
+    rediscover: Option<String>,
     stopped: bool,
 }
 
@@ -35,20 +37,24 @@ impl Discovery {
                 return Err(DiscoveryError::Backend(error.to_string()));
             }
         };
+        let shutdown = daemon.clone();
         Ok(Self::from_events(
             receiver,
-            Some(Box::new(move || shutdown_daemon(&daemon))),
+            Some(daemon),
+            Some(Box::new(move || shutdown_daemon(&shutdown))),
         ))
     }
 
     pub(super) fn from_events(
         receiver: Receiver<ServiceEvent>,
+        daemon: Option<ServiceDaemon>,
         shutdown: Option<Box<dyn FnOnce() + Send>>,
     ) -> (Self, DiscoveryDriver) {
         let discovery = Self(Arc::new(Shared::default()));
         let driver = DiscoveryDriver {
             discovery: discovery.clone(),
             receiver,
+            daemon,
             registry: Registry::default(),
             shutdown,
         };
@@ -57,6 +63,12 @@ impl Discovery {
 
     pub fn snapshot(&self) -> DiscoverySnapshot {
         self.0.state.lock().unwrap().snapshot.clone()
+    }
+
+    /// Retry discovery when the selected home has no current route.
+    pub(crate) fn rediscover(&self, group_id: &str) {
+        self.0.state.lock().unwrap().rediscover = Some(group_id.into());
+        self.0.changed.notify(usize::MAX);
     }
 
     pub fn subscribe(&self) -> DiscoveryChanges {
@@ -106,6 +118,7 @@ impl DiscoveryChanges {
 pub struct DiscoveryDriver {
     discovery: Discovery,
     receiver: Receiver<ServiceEvent>,
+    daemon: Option<ServiceDaemon>,
     registry: Registry,
     shutdown: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -113,11 +126,39 @@ pub struct DiscoveryDriver {
 impl DiscoveryDriver {
     pub async fn run(mut self) -> Result<(), DiscoveryError> {
         loop {
-            let event = self
-                .receiver
-                .recv_async()
-                .await
-                .map_err(|_| DiscoveryError::Stopped)?;
+            let changed = self.discovery.0.changed.listen();
+            let rediscover = self.discovery.0.state.lock().unwrap().rediscover.take();
+            if let Some(group_id) = rediscover
+                && self.discovery.snapshot().routes(&group_id, None).is_empty()
+                && let Some(daemon) = &self.daemon
+            {
+                // A fresh browse clears cached PTRs that can suppress resolution
+                // after the shorter-lived SRV/address records have expired.
+                daemon
+                    .stop_browse(SERVICE_TYPE)
+                    .map_err(|error| DiscoveryError::Backend(error.to_string()))?;
+                self.receiver = daemon
+                    .browse(SERVICE_TYPE)
+                    .map_err(|error| DiscoveryError::Backend(error.to_string()))?;
+                self.registry = Registry::default();
+                self.discovery.publish(self.registry.snapshot());
+                log::debug!("Restarted local gateway discovery");
+            }
+            let event = future::or(
+                async {
+                    self.receiver
+                        .recv_async()
+                        .await
+                        .map(Some)
+                        .map_err(|_| DiscoveryError::Stopped)
+                },
+                async {
+                    changed.await;
+                    Ok(None)
+                },
+            )
+            .await?;
+            let Some(event) = event else { continue };
             match event {
                 ServiceEvent::ServiceResolved(service) if service.ty_domain == SERVICE_TYPE => {
                     if let Err(error) = self.registry.resolve(*service) {

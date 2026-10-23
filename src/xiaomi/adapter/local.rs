@@ -45,6 +45,9 @@ pub(super) async fn run(
                     },
                     async {
                         context.clock.wait_until(deadline).await;
+                        if let Some(scope) = &scope {
+                            discovery.rediscover(&scope.group_id());
+                        }
                         context.set_gateway(GatewayStatus::Unavailable(
                             AdapterError::NoLocalGateway.to_string(),
                         ));
