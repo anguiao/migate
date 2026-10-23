@@ -11,8 +11,6 @@ pub(super) struct Urn<'a> {
     pub name: &'a str,
     pub type_id: u32,
     pub vendor: &'a str,
-    pub version: u32,
-    pub suffix: Option<&'a str>,
 }
 
 impl<'a> Urn<'a> {
@@ -31,11 +29,11 @@ impl<'a> Urn<'a> {
         else {
             return Err(CapabilityError::InvalidDescription("type"));
         };
-        let suffix = match tail {
-            [] => None,
-            [suffix] if hexadecimal_id(suffix) => Some(*suffix),
+        match tail {
+            [] => {}
+            [suffix] if hexadecimal_id(suffix) => {}
             _ => return Err(CapabilityError::InvalidDescription("type")),
-        };
+        }
         if *prefix != "urn"
             || !token(namespace)
             || !matches!(
@@ -49,7 +47,7 @@ impl<'a> Urn<'a> {
         {
             return Err(CapabilityError::InvalidDescription("type"));
         }
-        let version = version
+        version
             .parse::<u32>()
             .ok()
             .filter(|version| *version > 0)
@@ -61,8 +59,6 @@ impl<'a> Urn<'a> {
             type_id: u32::from_str_radix(type_id, 16)
                 .map_err(|_| CapabilityError::InvalidDescription("type"))?,
             vendor,
-            version,
-            suffix,
         })
     }
 

@@ -13,12 +13,12 @@ pub(crate) const MODE_FORMAT: NumericFormat = NumericFormat::Uint8;
 pub(crate) const MODE_TEMPERATURE_VALUE: u32 = 0;
 pub(crate) const MODE_RGB_VALUE: u32 = 1;
 
-pub(super) fn exact_urn(urn: &Urn<'_>) -> bool {
-    urn.vendor == "devcea-ls2307" && urn.version == 1 && urn.suffix.is_none()
+pub(super) fn matches_vendor(urn: &Urn<'_>) -> bool {
+    urn.vendor == "devcea-ls2307"
 }
 pub(crate) fn is_type(value: &str) -> bool {
     Urn::parse(value)
-        .is_ok_and(|urn| urn.standard("device", "light", 0x0000a001) && exact_urn(&urn))
+        .is_ok_and(|urn| urn.standard("device", "light", 0x0000a001) && matches_vendor(&urn))
 }
 pub(crate) fn main_bindings(
     power: PropertyBinding,

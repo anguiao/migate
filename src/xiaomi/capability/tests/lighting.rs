@@ -186,6 +186,25 @@ fn ls2307_combines_exact_rgb_and_mode_binding_without_scene_inference() {
 }
 
 #[test]
+fn ls2307_uses_required_mode_values_independently_of_labels_and_other_modes() {
+    let model = "devcea.light.ls2307";
+    let mut instance = description(model);
+    let expected = parse_device_for_model(key(), model, &instance).unwrap();
+    let values = instance["services"][2]["properties"][1]["value-list"]
+        .as_array_mut()
+        .unwrap();
+    values[0]["description"] = json!("White");
+    values[1]["description"] = json!("RGB");
+    values.push(json!({"value": 2, "description": "Other"}));
+    let parsed = parse_device_for_model(key(), model, &instance).unwrap();
+    assert_eq!(parsed, expected);
+    let mode = parsed.functions()[0].lighting().unwrap().mode().unwrap();
+    assert!(mode.read_mode(&json!(0)).is_ok());
+    assert!(mode.read_mode(&json!(1)).is_ok());
+    assert!(mode.read_mode(&json!(2)).is_err());
+}
+
+#[test]
 fn incomplete_invalid_or_ambiguous_light_descriptions_are_rejected() {
     let original = description("xiaomi.light.ceil04");
     for (field, value) in [

@@ -157,7 +157,7 @@ fn cp7pd_checks_boolean_type_and_every_permission_for_each_binding() {
 }
 
 #[test]
-fn cp7pd_rejects_wrong_vendor_namespace_semantics_and_description_version() {
+fn cp7pd_rejects_wrong_vendor_namespace_and_semantics() {
     for (siid, field, urn) in [
         (
             3,
@@ -199,11 +199,6 @@ fn cp7pd_rejects_wrong_vendor_namespace_semantics_and_description_version() {
             "service",
             "urn:miot-spec-v2:service:indicator-light:00007803:cuco-cp7pd:1",
         ),
-        (
-            9,
-            "property",
-            "urn:miot-spec-v2:property:on:00000006:cuco-cp7pd:2",
-        ),
     ] {
         let mut description = model_description("cuco.plug.cp7pd");
         let service = cp7pd_service_mut(&mut description, siid);
@@ -221,16 +216,52 @@ fn cp7pd_rejects_wrong_vendor_namespace_semantics_and_description_version() {
         );
     }
     let mut description = model_description("cuco.plug.cp7pd");
-    description["type"] = json!("urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:2");
-    assert!(matches!(
-        parse_device(key(), &description),
-        Err(CapabilityError::IncompatibleModel(_))
-    ));
     description["type"] = json!("urn:miot-spec-v2:device:outlet:0000A002:other-cp7pd:1");
     assert_eq!(
         parse_device(key(), &description),
         Err(CapabilityError::AmbiguousMainPower)
     );
+}
+
+#[test]
+fn model_adapters_accept_urn_metadata_with_unchanged_bindings() {
+    for (model, fixture) in [
+        (
+            "cuco.plug.cp7pd",
+            include_str!("../../../../tests/fixtures/miot/cuco-cp7pd.json"),
+        ),
+        (
+            "devcea.light.ls2307",
+            include_str!("../../../../tests/fixtures/miot/devcea-light-ls2307.json"),
+        ),
+    ] {
+        let original: Value = serde_json::from_str(fixture).unwrap();
+        let expected = super::parse_device_for_model(key(), model, &original).unwrap();
+        for tail in ["2", "1:0000C816", "2:0000C816"] {
+            let mut revised = original.clone();
+            let revise_type = |value: &mut Value| {
+                let prefix = value["type"].as_str().unwrap().rsplit_once(':').unwrap().0;
+                value["type"] = json!(format!("{prefix}:{tail}"));
+            };
+            revise_type(&mut revised);
+            for service in revised["services"].as_array_mut().unwrap() {
+                revise_type(service);
+                if let Some(properties) = service["properties"].as_array_mut() {
+                    for property in properties {
+                        revise_type(property);
+                    }
+                }
+            }
+            let parsed = super::parse_device_for_model(key(), model, &revised).unwrap();
+            assert_eq!(parsed, expected, "{model} {tail}");
+            super::NativeDescription::new(
+                model.into(),
+                revised["type"].as_str().unwrap().into(),
+                parsed,
+            )
+            .unwrap();
+        }
+    }
 }
 
 #[test]

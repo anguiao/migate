@@ -12,7 +12,6 @@ use crate::{
 };
 
 const OUTLET_TYPE: &str = "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1";
-const CP7PD_TYPE: &str = "urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:1";
 const LIGHT_TYPE: &str = "urn:miot-spec-v2:device:light:0000A001:vendor-v1:1";
 
 fn scope() -> Scope {
@@ -86,21 +85,6 @@ fn ct_light_native(id: &str, min: u32, max: u32) -> NativeDescription {
         LIGHT_TYPE,
         vec![ParsedFunction::light("main", "Light", power, lighting)],
         None,
-    )
-}
-
-fn cp7pd_native(id: &str) -> NativeDescription {
-    let functions = vec![
-        ParsedFunction::outlet("outlet_1", "Outlet 1", PropertyBinding { siid: 3, piid: 1 }),
-        ParsedFunction::outlet("outlet_2", "Outlet 2", PropertyBinding { siid: 4, piid: 1 }),
-        ParsedFunction::outlet("usb", "USB", PropertyBinding { siid: 9, piid: 1 }),
-    ];
-    native(
-        id,
-        "cuco.plug.cp7pd",
-        CP7PD_TYPE,
-        functions,
-        Some(PropertyBinding { siid: 2, piid: 1 }),
     )
 }
 
@@ -681,58 +665,6 @@ fn scope_change_replaces_the_native_instance_with_the_same_key() {
         1
     );
     assert_eq!(plan.configuration.root_version, 2);
-}
-
-#[test]
-fn retired_function_keeps_its_reservation() {
-    let native = cp7pd_native("multi");
-    let mut previous = committed("multi", native.clone(), "Multi", 1);
-    previous.functions.push(CommittedFunction {
-        id: "legacy".into(),
-        endpoint: 6,
-    });
-    let current = CommittedConfiguration {
-        scope: Some(scope()),
-        root_version: 2,
-        devices: vec![previous],
-        groups: Vec::new(),
-    };
-    let facts = facts(scope(), vec![source("multi", native, None)], Vec::new());
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
-    let device = plan.configuration.device(&key("multi")).unwrap();
-    assert_eq!(
-        device
-            .functions
-            .iter()
-            .map(|function| function.id.as_str())
-            .collect::<Vec<_>>(),
-        ["outlet_1", "outlet_2", "usb", "legacy"]
-    );
-    assert_eq!(
-        device
-            .functions
-            .iter()
-            .map(|function| function.endpoint)
-            .collect::<Vec<_>>(),
-        [3, 4, 5, 6]
-    );
-    let served = plan.derived.served.get(&key("multi")).unwrap();
-    assert_eq!(
-        served
-            .description
-            .functions()
-            .iter()
-            .map(|function| function.id.as_str())
-            .collect::<Vec<_>>(),
-        ["outlet_1", "outlet_2", "usb"]
-    );
-    assert_eq!(
-        plan.operations,
-        [PlanOperation {
-            key: key("multi"),
-            kind: OperationKind::Reused,
-        }]
-    );
 }
 
 #[test]

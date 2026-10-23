@@ -196,10 +196,10 @@ fn parse_ls2307(
     temperature: TemperatureBinding,
 ) -> Result<(Option<ColorBinding>, Option<ModeBinding>), CapabilityError> {
     let incompatible = || CapabilityError::IncompatibleModel(ls2307::MODEL);
-    let exact = ls2307::exact_urn;
-    if !exact(&instance.urn)
+    let matches_vendor = ls2307::matches_vendor;
+    if !matches_vendor(&instance.urn)
         || main.iid != ls2307::POWER.siid
-        || !exact(&main.urn)
+        || !matches_vendor(&main.urn)
         || !ls2307::main_bindings(power, &brightness, &temperature)
     {
         return Err(incompatible());
@@ -209,15 +209,17 @@ fn parse_ls2307(
         .iter()
         .find(|service| service.iid == ls2307::COLOR_PROPERTY.siid)
         .ok_or_else(incompatible)?;
-    if !ambient.urn.standard("service", "ambient-light", 0x0000789d) || !exact(&ambient.urn) {
+    if !ambient.urn.standard("service", "ambient-light", 0x0000789d)
+        || !matches_vendor(&ambient.urn)
+    {
         return Err(incompatible());
     }
     let color_property = standard_property(ambient, "color", 0x0e)?;
     let mode_property = standard_property(ambient, "mode", 8)?;
     if color_property.iid != ls2307::COLOR_PROPERTY.piid
         || mode_property.iid != ls2307::MODE_PROPERTY.piid
-        || !exact(&color_property.urn)
-        || !exact(&mode_property.urn)
+        || !matches_vendor(&color_property.urn)
+        || !matches_vendor(&mode_property.urn)
     {
         return Err(incompatible());
     }
@@ -230,15 +232,12 @@ fn parse_ls2307(
         return Err(incompatible());
     }
     let values = array(mode_property.value, "value-list")?;
-    if values.len() != 2
-        || !values.iter().any(|value| {
-            value["value"].as_u64() == Some(ls2307::MODE_TEMPERATURE_VALUE as u64)
-                && value["description"].as_str() == Some("Warm")
-        })
-        || !values.iter().any(|value| {
-            value["value"].as_u64() == Some(ls2307::MODE_RGB_VALUE as u64)
-                && value["description"].as_str() == Some("Color")
-        })
+    if !values
+        .iter()
+        .any(|value| value["value"].as_u64() == Some(ls2307::MODE_TEMPERATURE_VALUE as u64))
+        || !values
+            .iter()
+            .any(|value| value["value"].as_u64() == Some(ls2307::MODE_RGB_VALUE as u64))
     {
         return Err(incompatible());
     }

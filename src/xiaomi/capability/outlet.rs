@@ -34,12 +34,8 @@ pub(crate) fn is_outlet_type(value: &str) -> bool {
 pub(crate) const CP7PD_MODEL: &str = "cuco.plug.cp7pd";
 
 pub(crate) fn is_cp7pd_type(value: &str) -> bool {
-    Urn::parse(value).is_ok_and(|urn| {
-        urn.standard("device", "outlet", 0x0000A002)
-            && urn.vendor == "cuco-cp7pd"
-            && urn.version == 1
-            && urn.suffix.is_none()
-    })
+    Urn::parse(value)
+        .is_ok_and(|urn| urn.standard("device", "outlet", 0x0000A002) && urn.vendor == "cuco-cp7pd")
 }
 
 /// The exact cp7pd channel bindings and master trigger in their fixed layout.
@@ -114,9 +110,6 @@ fn parse_cp7pd(
     key: DeviceKey,
     instance: &Description<'_>,
 ) -> Result<ParsedDevice, CapabilityError> {
-    if instance.urn.version != 1 || instance.urn.suffix.is_some() {
-        return Err(CapabilityError::IncompatibleModel("cuco.plug.cp7pd"));
-    }
     let refresh_trigger = cp7pd_binding(instance, "master", 2, "miot-spec-v2", 0x0000780C)?;
     let mut functions = Vec::new();
     for (id, label, siid, namespace, type_id) in [
@@ -161,8 +154,5 @@ fn cp7pd_binding(
 }
 
 fn cp7pd_urn(urn: &Urn<'_>, namespace: &str, entity: &str, name: &str, type_id: u32) -> bool {
-    urn.matches(namespace, entity, name, type_id)
-        && urn.vendor == "cuco-cp7pd"
-        && urn.version == 1
-        && urn.suffix.is_none()
+    urn.matches(namespace, entity, name, type_id) && urn.vendor == "cuco-cp7pd"
 }
