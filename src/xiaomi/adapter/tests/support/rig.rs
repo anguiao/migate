@@ -538,7 +538,17 @@ impl Rig {
         F: FnOnce(Control) -> Fut,
         Fut: Future<Output = ()>,
     {
-        self.run_result_mode(true, test).await
+        self.run_result_mode(true, |_| {}, test).await
+    }
+    pub(in super::super) async fn run_with_status<F, Fut>(
+        self,
+        on_status: impl FnMut(AdapterStatus),
+        test: F,
+    ) where
+        F: FnOnce(Control) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        self.run_result_mode(true, on_status, test).await.unwrap();
     }
     /// Run with the production publication applier disabled; the caller drives
     /// the real configured runtime as the sole publisher.
@@ -550,9 +560,14 @@ impl Rig {
         F: FnOnce(Control) -> Fut,
         Fut: Future<Output = ()>,
     {
-        self.run_result_mode(false, test).await
+        self.run_result_mode(false, |_| {}, test).await
     }
-    async fn run_result_mode<F, Fut>(self, autoapply: bool, test: F) -> Result<(), AdapterError>
+    async fn run_result_mode<F, Fut>(
+        self,
+        autoapply: bool,
+        on_status: impl FnMut(AdapterStatus),
+        test: F,
+    ) -> Result<(), AdapterError>
     where
         F: FnOnce(Control) -> Fut,
         Fut: Future<Output = ()>,
@@ -588,7 +603,7 @@ impl Rig {
                 changed.await;
             }
         };
-        let running = self.source.run(|_| {});
+        let running = self.source.run(on_status);
         let discovering = async {
             self.driver.run().await?;
             future::pending::<Result<(), AdapterError>>().await

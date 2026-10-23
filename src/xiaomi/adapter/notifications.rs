@@ -233,17 +233,22 @@ impl Context {
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = work
             && work.observer_is(source)
-            && work.notify_value_at(
+        {
+            let battery_problem = work.battery_problem();
+            let changed = work.notify_value_at(
                 binding,
                 value,
                 update_time,
                 cached_report,
                 self.is_independent_light(did),
                 self.clock.unix_now(),
-            )
-            && !self.is_group(did)
-        {
-            self.refresh_group_states(did);
+            );
+            if work.battery_problem() != battery_problem {
+                self.status_changed.notify(usize::MAX);
+            }
+            if changed && !self.is_group(did) {
+                self.refresh_group_states(did);
+            }
         }
     }
     fn online_event(&self, handle: &NotificationHandle, did: &str, online: bool) {

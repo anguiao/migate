@@ -1177,6 +1177,68 @@ fn battery_read_and_subscription_diagnostics_remain_independent() {
 }
 
 #[test]
+fn battery_notifications_publish_diagnostic_changes() {
+    let published = Rc::new(RefCell::new(None::<AdapterStatus>));
+    let reported = published.clone();
+    block_on(Rig::sensors(&["sensor"]).run_with_status(
+        move |status| *reported.borrow_mut() = Some(status),
+        |c| async move {
+            c.announce();
+            let peer = sensor_peer(21.0, 45.0);
+            peer.value("sensor", BATTERY, json!(55));
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                let published_device = || {
+                    published.borrow().as_ref().and_then(|status| {
+                        status
+                            .devices
+                            .iter()
+                            .find(|device| device.did == "sensor")
+                            .cloned()
+                    })
+                };
+                until(|| {
+                    battery(&control.context, "sensor").and_then(|b| b.value) == Some(55.0)
+                        && work(&control.context, "sensor").test_local_subscribed_contains(BATTERY)
+                        && published_device().is_some_and(|device| {
+                            device.notification_source == Some(PathKind::Local)
+                                && device.battery_problem.is_none()
+                        })
+                })
+                .await;
+                control
+                    .clock
+                    .automatic
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                for _ in 0..100 {
+                    future::yield_now().await;
+                }
+                peer.notify_value("sensor", BATTERY, json!(150), false);
+                until(|| {
+                    published_device().is_some_and(|device| {
+                        device
+                            .battery_problem
+                            .is_some_and(|problem| problem.contains("invalid battery"))
+                    })
+                })
+                .await;
+                assert_eq!(
+                    battery(&control.context, "sensor").and_then(|b| b.value),
+                    Some(55.0)
+                );
+                peer.notify_value("sensor", BATTERY, json!(66), false);
+                until(|| {
+                    battery(&control.context, "sensor").and_then(|b| b.value) == Some(66.0)
+                        && published_device().unwrap().battery_problem.is_none()
+                })
+                .await;
+            })
+            .await;
+        },
+    ));
+}
+
+#[test]
 fn a_restored_sensor_without_battery_still_reports_why_capability_is_missing() {
     block_on(Rig::sensor_without_battery("sensor").run(|c| async move {
         c.announce();
