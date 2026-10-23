@@ -140,7 +140,7 @@ fn sent_timeout_degrades_without_replaying_the_write_or_revoking_local_notificat
             assert_eq!(peer.count("rpcReq", "one", 2), 1);
             peer.notify("one", 2, false);
             until(|| one.snapshot().power() == Some(Power::Off)).await;
-            assert_eq!(one.snapshot().availability(), Availability::Available);
+            assert_eq!(one.snapshot().availability, Availability::Available);
         })
         .await;
     }));

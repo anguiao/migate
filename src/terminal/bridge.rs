@@ -190,13 +190,11 @@ fn render(view: &View, did: Option<&str>) -> String {
             let id = &function.function_key().id;
             let label = &function.description().label;
             let snapshot = function.snapshot();
-            match snapshot {
-                crate::device::FunctionSnapshot::Outlet { power, .. } => {
+            match snapshot.state {
+                crate::device::FunctionState::Outlet { power } => {
                     lines.push(format!("  {id} ({label}): {}", power_text(power)));
                 }
-                crate::device::FunctionSnapshot::Light {
-                    power, lighting, ..
-                } => {
+                crate::device::FunctionState::Light { power, lighting } => {
                     lines.push(format!("  {id} ({label}): {}", power_text(power)));
                     let description = function.description();
                     let capabilities = capabilities(description);
@@ -244,13 +242,13 @@ fn render(view: &View, did: Option<&str>) -> String {
                         lines.push(format!("    {}.", values.join("; ")));
                     }
                 }
-                crate::device::FunctionSnapshot::Temperature { measurement, .. } => {
+                crate::device::FunctionState::Temperature { measurement } => {
                     lines.push(format!(
                         "  {id} ({label}): {}",
                         measurement_text(measurement, "°C")
                     ));
                 }
-                crate::device::FunctionSnapshot::Humidity { measurement, .. } => {
+                crate::device::FunctionState::Humidity { measurement } => {
                     lines.push(format!(
                         "  {id} ({label}): {}",
                         measurement_text(measurement, "%")

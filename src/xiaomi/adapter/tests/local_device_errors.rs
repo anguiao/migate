@@ -31,7 +31,7 @@ fn local_offline_or_missing_writes_revoke_only_the_target_until_a_new_list_obser
                     Err(crate::device::CommandError::Rejected(_))
                 ));
                 assert_eq!(control.context.priority(), PathPriority::LocalFirst);
-                assert_eq!(one.snapshot().availability(), Availability::Available);
+                assert_eq!(one.snapshot().availability, Availability::Available);
                 assert!(matches!(
                     control.context.control_path("one"),
                     Some(ControlPath::Cloud(_))

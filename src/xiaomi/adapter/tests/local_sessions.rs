@@ -34,7 +34,7 @@ fn cached_local_control_survives_temporary_cloud_detail_failures() {
             assert_eq!(
                 function(&control.context.registry, "one", "main")
                     .snapshot()
-                    .availability(),
+                    .availability,
                 Availability::Available
             );
             function(&control.context.registry, "one", "main")
@@ -63,7 +63,7 @@ fn cached_local_access_recovers_while_cloud_member_sync_is_stalled() {
             assert_eq!(
                 function(&control.context.registry, "one", "main")
                     .snapshot()
-                    .availability(),
+                    .availability,
                 Availability::Available
             );
             function(&control.context.registry, "one", "main")
@@ -202,7 +202,7 @@ fn disconnect_cancels_gateway_list_backoff_before_a_new_session_starts() {
                 matches!(
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .availability(),
+                        .availability,
                     Availability::Unavailable(_)
                 )
             })
@@ -605,7 +605,7 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
             until(|| {
                 function(&control.context.registry, "group-1", &id)
                     .snapshot()
-                    .availability()
+                    .availability
                     == Availability::Available
             })
             .await;
@@ -694,10 +694,10 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
             until(|| member.snapshot().power() == Some(Power::Off)).await;
             let physical = function(&control.context.registry, "group-p", "main");
             let virtual_group = function(&control.context.registry, "group-v", "main");
-            assert_eq!(member.snapshot().availability(), Availability::Available);
+            assert_eq!(member.snapshot().availability, Availability::Available);
             assert!(control.context.control_path("group-p").is_none());
             assert!(matches!(
-                physical.snapshot().availability(),
+                physical.snapshot().availability,
                 Availability::Unavailable(_)
             ));
             // Obtain the virtual group's own advertised local row as well.
@@ -710,7 +710,7 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
             .await;
             assert!(control.context.control_path("group-v").is_none());
             assert!(matches!(
-                virtual_group.snapshot().availability(),
+                virtual_group.snapshot().availability,
                 Availability::Unavailable(_)
             ));
             assert_eq!(peer.count("subscribe", "group-v", 2), 0);

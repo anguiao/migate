@@ -2,15 +2,14 @@ use super::{
     command::{CommandCoordinator, CommandReceiver},
     model::{
         Availability, BatterySnapshot, FunctionDescription, FunctionKey, FunctionSnapshot,
-        MeasurementSnapshot, PhysicalDeviceDescription, Power,
+        FunctionState, MeasurementSnapshot, PhysicalDeviceDescription, Power,
     },
 };
 use event_listener::Event;
 use std::sync::{Arc, Mutex};
 enum RuntimeValue {
     Control(Box<ControlRuntime>),
-    Temperature(MeasurementSnapshot),
-    Humidity(MeasurementSnapshot),
+    Measurement(MeasurementSnapshot),
 }
 struct ControlRuntime {
     power: Power,
@@ -32,20 +31,15 @@ impl RuntimeState {
             revision: 0,
         }
     }
-    fn measurement_state(kind: super::FunctionKind) -> Self {
-        let measurement = MeasurementSnapshot {
-            value: None,
-            source_time: None,
-            received_at: None,
-        };
-        let value = match kind {
-            super::FunctionKind::Temperature(_) => RuntimeValue::Temperature(measurement),
-            super::FunctionKind::Humidity(_) => RuntimeValue::Humidity(measurement),
-            super::FunctionKind::Outlet | super::FunctionKind::Light(_) => {
-                unreachable!("measurement runtime kind")
-            }
-        };
-        Self { value, revision: 0 }
+    fn measurement_state() -> Self {
+        Self {
+            value: RuntimeValue::Measurement(MeasurementSnapshot {
+                value: None,
+                source_time: None,
+                received_at: None,
+            }),
+            revision: 0,
+        }
     }
     fn has_control_state(&self) -> bool {
         matches!(self.value, RuntimeValue::Control(_))
@@ -53,19 +47,19 @@ impl RuntimeState {
     pub(super) fn commands(&self) -> Option<&CommandCoordinator> {
         match &self.value {
             RuntimeValue::Control(control) => Some(&control.commands),
-            RuntimeValue::Temperature(_) | RuntimeValue::Humidity(_) => None,
+            RuntimeValue::Measurement(_) => None,
         }
     }
     pub(super) fn commands_mut(&mut self) -> Option<&mut CommandCoordinator> {
         match &mut self.value {
             RuntimeValue::Control(control) => Some(&mut control.commands),
-            RuntimeValue::Temperature(_) | RuntimeValue::Humidity(_) => None,
+            RuntimeValue::Measurement(_) => None,
         }
     }
     pub(super) fn power(&self) -> Option<Power> {
         match &self.value {
             RuntimeValue::Control(control) => Some(control.power),
-            RuntimeValue::Temperature(_) | RuntimeValue::Humidity(_) => None,
+            RuntimeValue::Measurement(_) => None,
         }
     }
     fn set_power(&mut self, new: Power) {
@@ -76,7 +70,7 @@ impl RuntimeState {
     fn control_parts(&self) -> Option<(Power, Option<super::LightSnapshot>)> {
         match &self.value {
             RuntimeValue::Control(control) => Some((control.power, control.lighting)),
-            RuntimeValue::Temperature(_) | RuntimeValue::Humidity(_) => None,
+            RuntimeValue::Measurement(_) => None,
         }
     }
     fn set_control_parts(&mut self, power: Power, lighting: Option<super::LightSnapshot>) {
@@ -88,14 +82,12 @@ impl RuntimeState {
     fn lighting_mut(&mut self) -> Option<&mut super::LightSnapshot> {
         match &mut self.value {
             RuntimeValue::Control(control) => control.lighting.as_mut(),
-            RuntimeValue::Temperature(_) | RuntimeValue::Humidity(_) => None,
+            RuntimeValue::Measurement(_) => None,
         }
     }
     fn measurement_mut(&mut self) -> Option<&mut MeasurementSnapshot> {
         match &mut self.value {
-            RuntimeValue::Temperature(measurement) | RuntimeValue::Humidity(measurement) => {
-                Some(measurement)
-            }
+            RuntimeValue::Measurement(measurement) => Some(measurement),
             RuntimeValue::Control(_) => None,
         }
     }
@@ -217,8 +209,7 @@ impl PhysicalDevice {
             .as_ref()
             .map(|battery| battery.snapshot)
     }
-    /// Apply one validated physical battery percentage. Missing capability is
-    /// unsupported, and invalid values never replace the last valid value.
+    /// Apply one physical battery percentage validated at the source boundary.
     pub fn observe_battery(
         &self,
         value: f64,
@@ -229,9 +220,6 @@ impl PhysicalDevice {
         let Some(battery) = state.as_mut() else {
             return Err(super::CommandError::Unsupported);
         };
-        if !value.is_finite() || !(0.0..=100.0).contains(&value) {
-            return Err(super::CommandError::Rejected("battery".into()));
-        }
         let snapshot = BatterySnapshot {
             value: Some(value),
             source_time,
@@ -347,7 +335,7 @@ impl Function {
             mode: description.inferred_color_mode(),
         });
         let state = if description.kind.is_measurement() {
-            RuntimeState::measurement_state(description.kind)
+            RuntimeState::measurement_state()
         } else {
             RuntimeState::control(lighting)
         };
@@ -380,41 +368,38 @@ impl Function {
         let physical = self.0.physical.state.lock().unwrap();
         let availability = physical.availability.clone();
         let revision = state.revision.wrapping_add(physical.revision);
-        match (&self.description().kind, &state.value) {
+        let state = match (&self.description().kind, &state.value) {
             (super::FunctionKind::Outlet, RuntimeValue::Control(control))
                 if control.lighting.is_none() =>
             {
-                FunctionSnapshot::Outlet {
+                FunctionState::Outlet {
                     power: control.power,
-                    availability,
-                    revision,
                 }
             }
             (super::FunctionKind::Light(_), RuntimeValue::Control(control))
                 if control.lighting.is_some() =>
             {
-                FunctionSnapshot::Light {
+                FunctionState::Light {
                     power: control.power,
                     lighting: control.lighting.expect("light has lighting state"),
-                    availability,
-                    revision,
                 }
             }
-            (super::FunctionKind::Temperature(_), RuntimeValue::Temperature(measurement)) => {
-                FunctionSnapshot::Temperature {
+            (super::FunctionKind::Temperature(_), RuntimeValue::Measurement(measurement)) => {
+                FunctionState::Temperature {
                     measurement: *measurement,
-                    availability,
-                    revision,
                 }
             }
-            (super::FunctionKind::Humidity(_), RuntimeValue::Humidity(measurement)) => {
-                FunctionSnapshot::Humidity {
+            (super::FunctionKind::Humidity(_), RuntimeValue::Measurement(measurement)) => {
+                FunctionState::Humidity {
                     measurement: *measurement,
-                    availability,
-                    revision,
                 }
             }
             _ => unreachable!("runtime value matches the function kind"),
+        };
+        FunctionSnapshot {
+            state,
+            availability,
+            revision,
         }
     }
     /// Apply one validated measurement. Missing source time stays unknown for
@@ -425,11 +410,8 @@ impl Function {
         source_time: Option<i64>,
         received_at: i64,
     ) -> Result<FunctionSnapshot, super::CommandError> {
-        let Some(range) = self.description().measurement_range() else {
+        if !self.description().is_measurement() {
             return Err(super::CommandError::Unsupported);
-        };
-        if !range.contains(value) {
-            return Err(super::CommandError::Rejected("measurement".into()));
         }
         let observed = MeasurementSnapshot {
             value: Some(value),
@@ -585,7 +567,7 @@ impl Function {
     pub fn subscribe(&self) -> FunctionChanges {
         FunctionChanges {
             function: self.clone(),
-            revision: self.snapshot().revision(),
+            revision: self.snapshot().revision,
         }
     }
 }
@@ -646,8 +628,8 @@ impl FunctionChanges {
             let listener = self.function.0.changed.listen();
             let physical = self.function.0.physical.changed.listen();
             let snapshot = self.function.snapshot();
-            if snapshot.revision() != self.revision {
-                self.revision = snapshot.revision();
+            if snapshot.revision != self.revision {
+                self.revision = snapshot.revision;
                 return snapshot;
             }
             futures_lite::future::or(listener, physical).await;

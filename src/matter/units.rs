@@ -6,7 +6,7 @@
 //! concern owned here. Mired to kelvin keeps full precision so the native grid
 //! is quantized exactly once, at the Xiaomi send boundary.
 
-use crate::device::{CommandError, MeasurementRange, TemperatureInterval, mired_span};
+use crate::device::{CommandError, TemperatureInterval, mired_span};
 
 /// Matter nonzero level to device brightness percent.
 pub(crate) fn brightness_from_level(level: u8) -> Result<f64, CommandError> {
@@ -96,18 +96,4 @@ pub(crate) fn battery_percent_matter_value(percent: f64) -> Option<u8> {
     }
     let rounded = (percent * 2.0).round();
     (0.0..=200.0).contains(&rounded).then_some(rounded as u8)
-}
-
-pub(crate) fn temperature_matter_range(range: MeasurementRange) -> Option<(i16, i16)> {
-    let min = temperature_matter_value(range.min())?;
-    let max = temperature_matter_value(range.max())?;
-    // MinMeasuredValue is at most 32766 and MaxMeasuredValue is at least
-    // -27314; MeasuredValue itself uses the full signed range.
-    (min <= 32_766 && max >= -27_314 && min < max).then_some((min, max))
-}
-
-pub(crate) fn humidity_matter_range(range: MeasurementRange) -> Option<(u16, u16)> {
-    let min = humidity_matter_value(range.min())?;
-    let max = humidity_matter_value(range.max())?;
-    (min <= 9_999 && max >= 1 && min < max).then_some((min, max))
 }

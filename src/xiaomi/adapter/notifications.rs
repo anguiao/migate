@@ -328,22 +328,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
 
     if work.observer_is(&desired) {
         if work.take_optional_retry() {
-            match &desired {
-                NotificationSource::Local(_) => work.request_local_subscriptions(),
-                NotificationSource::Cloud(handle) => {
-                    if let Some(preparation) = work.begin_cloud_preparation(handle) {
-                        let session = context.notifications.borrow().as_ref().unwrap().clone();
-                        session.tasks.spawn(prepare_properties(
-                            context.clone(),
-                            work.clone(),
-                            handle.clone(),
-                            session.key.token.clone(),
-                            session.subscriptions.clone(),
-                            preparation,
-                        ));
-                    }
-                }
-            }
+            prepare_source(context, work, desired);
         }
         return;
     }
@@ -351,7 +336,10 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         activate(context, &work, desired);
         return;
     }
-    match desired {
+    prepare_source(context, work, desired);
+}
+fn prepare_source(context: &Rc<Context>, work: Rc<DeviceWork>, source: NotificationSource) {
+    match source {
         NotificationSource::Local(_) => {
             work.request_local_subscriptions();
         }
@@ -500,8 +488,7 @@ async fn prepare_properties(
             }
             match result {
                 Ok(()) => {
-                    work.cloud_subscribed(&handle, preparation, binding);
-                    if work.cloud_required_ready(&handle, preparation) {
+                    if work.cloud_subscribed(&handle, preparation, binding) {
                         context.changed.notify(usize::MAX);
                     }
                 }

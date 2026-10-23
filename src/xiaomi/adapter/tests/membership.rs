@@ -405,7 +405,7 @@ fn incomplete_foreign_or_failed_cloud_sync_cannot_remove_published_devices() {
                 assert_eq!(
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .availability(),
+                        .availability,
                     Availability::Available
                 );
                 assert!(peer.state.borrow().unsubscribes.is_empty());

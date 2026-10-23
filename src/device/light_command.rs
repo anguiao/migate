@@ -167,7 +167,7 @@ impl Function {
         if commands.is_closed() {
             return Err(CommandError::Cancelled);
         }
-        self.snapshot_locked(state).availability().command_result()
+        self.snapshot_locked(state).availability.command_result()
     }
     pub fn light_action_current(&self, token: ActionToken) -> bool {
         self.0

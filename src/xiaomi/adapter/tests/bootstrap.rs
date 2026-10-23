@@ -44,7 +44,7 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     for function in physical.functions() {
         assert_eq!(function.snapshot().power(), Some(Power::Unknown));
         assert!(matches!(
-            function.snapshot().availability(),
+            function.snapshot().availability,
             Availability::Unavailable(_)
         ));
     }

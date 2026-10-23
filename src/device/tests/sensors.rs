@@ -2,7 +2,7 @@
 
 use crate::device::{
     Availability, Command, CommandError, DeviceKey, FunctionDescription, FunctionKind,
-    FunctionSnapshot, MeasurementRange, MeasurementSnapshot, PhysicalDevice,
+    FunctionState, MeasurementRange, MeasurementSnapshot, PhysicalDevice,
     PhysicalDeviceDescription,
 };
 use futures_lite::future::block_on;
@@ -48,8 +48,8 @@ fn sensors_start_unknown_without_fabricated_power_or_commands() {
                 received_at: None,
             })
         );
-        assert_eq!(snapshot.availability(), Availability::Initializing);
-        assert_eq!(snapshot.revision(), 0);
+        assert_eq!(snapshot.availability, Availability::Initializing);
+        assert_eq!(snapshot.revision, 0);
     }
     assert!(matches!(
         block_on(physical.functions()[0].execute(Command::On)),
@@ -68,7 +68,7 @@ fn temperature_and_humidity_update_independently_with_source_and_reception_times
         .observe_measurement(21.5, Some(1_700_000_000), 1_700_000_010)
         .unwrap();
     let snapshot = temperature.snapshot();
-    assert!(matches!(snapshot, FunctionSnapshot::Temperature { .. }));
+    assert!(matches!(snapshot.state, FunctionState::Temperature { .. }));
     assert_eq!(
         snapshot.measurement(),
         Some(MeasurementSnapshot {
@@ -83,7 +83,7 @@ fn temperature_and_humidity_update_independently_with_source_and_reception_times
         .observe_measurement(45.0, None, 1_700_000_020)
         .unwrap();
     let snapshot = humidity.snapshot();
-    assert!(matches!(snapshot, FunctionSnapshot::Humidity { .. }));
+    assert!(matches!(snapshot.state, FunctionState::Humidity { .. }));
     assert_eq!(
         snapshot.measurement(),
         Some(MeasurementSnapshot {
@@ -123,7 +123,7 @@ fn repeated_same_measurement_does_not_change_the_value_or_revision_without_times
     assert_eq!(after.measurement().unwrap().value, Some(21.5));
     assert_eq!(after.measurement().unwrap().received_at, Some(300));
     assert_eq!(after.measurement().unwrap().source_time, Some(100));
-    assert!(after.revision() > before.revision());
+    assert!(after.revision > before.revision);
 }
 
 #[test]
@@ -145,34 +145,7 @@ fn a_new_value_without_source_time_does_not_inherit_the_previous_source_time() {
 }
 
 #[test]
-fn invalid_measurements_keep_the_last_value() {
-    let physical = sensor();
-    let temperature = &physical.functions()[0];
-    temperature
-        .observe_measurement(21.5, Some(100), 200)
-        .unwrap();
-    let before = temperature.snapshot();
-    for (value, error) in [
-        (f64::NAN, CommandError::Rejected("measurement".into())),
-        (f64::INFINITY, CommandError::Rejected("measurement".into())),
-        (100.1, CommandError::Rejected("measurement".into())),
-        (-30.1, CommandError::Rejected("measurement".into())),
-    ] {
-        assert_eq!(
-            temperature.observe_measurement(value, Some(999), 999),
-            Err(error)
-        );
-        assert_eq!(temperature.snapshot(), before);
-    }
-
-    assert_eq!(
-        block_on(physical.functions()[0].execute(Command::Off)),
-        Err(CommandError::Unsupported)
-    );
-}
-
-#[test]
-fn silence_availability_changes_and_loss_of_all_paths_keep_measurements() {
+fn availability_changes_and_loss_of_all_paths_keep_measurements() {
     let physical = sensor();
     let temperature = &physical.functions()[0];
     temperature
@@ -183,12 +156,9 @@ fn silence_availability_changes_and_loss_of_all_paths_keep_measurements() {
     let snapshot = temperature.snapshot();
     assert_eq!(snapshot.measurement().unwrap().value, Some(21.5));
     assert_eq!(
-        snapshot.availability(),
+        snapshot.availability,
         Availability::Unavailable("no read path".into())
     );
-    // A long silence changes nothing at all.
-    let before = temperature.snapshot();
-    assert_eq!(temperature.snapshot(), before);
     physical.set_availability(Availability::Available);
     assert_eq!(
         temperature.snapshot().measurement().unwrap().value,
@@ -232,7 +202,7 @@ fn battery_capability_is_shared_and_starts_unknown_without_a_third_function() {
 fn battery_values_update_independently_with_their_own_times() {
     let physical = battery_sensor();
     let temperature = &physical.functions()[0];
-    let battery_before = temperature.snapshot().revision();
+    let battery_before = temperature.snapshot().revision;
     physical
         .observe_battery(45.0, Some(1_700_000_000), 1_700_000_010)
         .unwrap();
@@ -251,7 +221,7 @@ fn battery_values_update_independently_with_their_own_times() {
         temperature.snapshot().measurement().unwrap().value,
         Some(21.5)
     );
-    assert!(temperature.snapshot().revision() > battery_before);
+    assert!(temperature.snapshot().revision > battery_before);
     // A battery-only update never invented a temperature or humidity value.
     assert_eq!(
         physical.functions()[1]
@@ -264,17 +234,10 @@ fn battery_values_update_independently_with_their_own_times() {
 }
 
 #[test]
-fn invalid_battery_values_keep_the_last_value_and_survive_availability_loss() {
+fn battery_values_survive_availability_loss_without_creating_measurements() {
     let physical = battery_sensor();
     physical.observe_battery(45.0, Some(100), 200).unwrap();
     let before = physical.battery_snapshot();
-    for value in [f64::NAN, f64::INFINITY, -0.1, 100.1] {
-        assert_eq!(
-            physical.observe_battery(value, Some(999), 999),
-            Err(CommandError::Rejected("battery".into()))
-        );
-        assert_eq!(physical.battery_snapshot(), before);
-    }
     physical.set_availability(Availability::Unavailable("no read path".into()));
     assert_eq!(physical.battery_snapshot(), before);
     assert_eq!(

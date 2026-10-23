@@ -350,7 +350,7 @@ fn partial_acceptance_updates_one_snapshot_and_failure_stops_only_the_original_a
         let new = function
             .begin_light_action(temperature(5000.0), true)
             .unwrap();
-        let revision = function.snapshot().revision();
+        let revision = function.snapshot().revision;
         function
             .observe_light(LightPatch {
                 power: Some(true),
@@ -358,7 +358,7 @@ fn partial_acceptance_updates_one_snapshot_and_failure_stops_only_the_original_a
                 ..LightPatch::default()
             })
             .unwrap();
-        assert_eq!(function.snapshot().revision(), revision + 1);
+        assert_eq!(function.snapshot().revision, revision + 1);
         let failure = CommandError::Rejected("mode write rejected".into());
         request.reject(failure.clone());
         assert_eq!(old.accepted().await, Err(failure));

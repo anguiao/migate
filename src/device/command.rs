@@ -425,9 +425,7 @@ impl Function {
             if commands.is_closed() {
                 return Err(CommandError::Cancelled);
             }
-            self.snapshot_locked(&state)
-                .availability()
-                .command_result()?;
+            self.snapshot_locked(&state).availability.command_result()?;
             let resolved = if light {
                 match command {
                     Command::On => Command::On,
@@ -553,7 +551,7 @@ impl CommandReceiver {
             let snapshot = self.function.snapshot_locked(state);
             let target =
                 snapshot
-                    .availability()
+                    .availability
                     .command_result()
                     .and_then(|()| match pending.command {
                         Command::On => Ok(true),

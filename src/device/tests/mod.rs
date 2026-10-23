@@ -48,8 +48,8 @@ fn new_devices_have_stable_identity_unknown_state_and_initializing_availability(
         DeviceKey::new("xiaomi", "test-outlet")
     );
     assert_eq!(device.snapshot().power(), Some(Power::Unknown));
-    assert_eq!(device.snapshot().availability(), Availability::Initializing);
-    assert_eq!(device.snapshot().revision(), 0);
+    assert_eq!(device.snapshot().availability, Availability::Initializing);
+    assert_eq!(device.snapshot().revision, 0);
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn notifications_coalesce_and_same_values_do_not_increment_revision() {
         device.observe(false);
         device.observe(false);
         physical.set_availability(Availability::Available);
-        assert_eq!(device.snapshot().revision(), 2);
+        assert_eq!(device.snapshot().revision, 2);
         let latest = changes.changed().await;
         assert_eq!(latest, device.snapshot());
         physical.set_availability(Availability::Available);
@@ -69,7 +69,7 @@ fn notifications_coalesce_and_same_values_do_not_increment_revision() {
         physical.set_availability(Availability::Unavailable("connection lost".into()));
         let latest = changes.changed().await;
         assert_eq!(latest.power(), Some(Power::Off));
-        assert_eq!(latest.revision(), 3);
+        assert_eq!(latest.revision, 3);
     });
 }
 
@@ -271,7 +271,7 @@ fn physical_availability_notifications_do_not_follow_channel_power_changes() {
         let offline = Availability::Unavailable("offline".into());
         physical.set_availability(offline.clone());
         assert_eq!(physical_changes.changed().await, offline);
-        assert_eq!(function_changes.changed().await.availability(), offline);
+        assert_eq!(function_changes.changed().await.availability, offline);
         assert!(poll_once(physical_changes.changed()).await.is_none());
     });
 }
@@ -290,7 +290,7 @@ fn active_acceptance_survives_an_offline_observation() {
         let accepted = request.accept().unwrap();
         assert_eq!(accepted.power(), Some(Power::On));
         assert_eq!(
-            accepted.availability(),
+            accepted.availability,
             Availability::Unavailable("offline".into())
         );
         assert_eq!(command.await.unwrap(), accepted);

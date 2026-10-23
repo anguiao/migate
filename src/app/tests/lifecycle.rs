@@ -260,7 +260,7 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 assert_eq!(after.power(), before.power());
                 assert_eq!(after.lighting(), before.lighting());
                 assert_eq!(
-                    after.availability(),
+                    after.availability,
                     crate::device::Availability::Unavailable("Xiaomi adapter stopped".into())
                 );
             })

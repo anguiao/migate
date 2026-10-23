@@ -1782,11 +1782,15 @@ async fn expect_battery_report(
     exchange.acknowledge().await
 }
 
-#[test]
-fn battery_subscription_reports_shared_percentage_charge_and_replacement() {
+fn with_sensor_subscription(
+    battery: bool,
+    scenario: impl AsyncFnOnce(&Matter<'_>, &EthInteractionModelState, &crate::device::PhysicalDevice)
+    + Send
+    + 'static,
+) {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             let directory = tempfile::tempdir().unwrap();
             let store = Store::open(directory.path()).unwrap();
             let identity = store.load_identity().unwrap();
@@ -1796,13 +1800,17 @@ fn battery_subscription_reports_shared_percentage_charge_and_replacement() {
             let kv = matter.kv(protocol.clone());
             matter.startup(&kv).unwrap();
             let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-            connect(&matter, SERVER_ID, CLIENT_ID, 72);
-            connect(&client, CLIENT_ID, SERVER_ID, 72);
+            connect(&matter, SERVER_ID, CLIENT_ID, 71);
+            connect(&client, CLIENT_ID, SERVER_ID, 71);
             let crypto = test_only_crypto();
             let buffers: MatterBuffers = MatterBuffers::new();
             let state: EthInteractionModelState =
                 EthInteractionModelState::new(EthNetwork::new_default());
-            let device = battery_sensor_device();
+            let device = if battery {
+                battery_sensor_device()
+            } else {
+                sensor_device()
+            };
             device.set_availability(Availability::Available);
             device.functions()[0]
                 .observe_measurement(21.5, Some(1), 2)
@@ -1844,27 +1852,14 @@ fn battery_subscription_reports_shared_percentage_charge_and_replacement() {
                     )
                     .await
                     .unwrap();
-                    panic!("Matter services exited during battery subscription test");
+                    panic!("Matter services exited during sensor subscription test");
                 };
-                let controller = async {
-                    let id = subscribe_battery(&client).await.unwrap();
-                    wait_committed(&state).await;
-                    device.observe_battery(55.0, Some(2), 3).unwrap();
-                    expect_battery_report(&client, id, 110, 0, false)
-                        .await
-                        .unwrap();
-                    device.observe_battery(5.0, Some(3), 4).unwrap();
-                    expect_battery_report(&client, id, 10, 2, true)
-                        .await
-                        .unwrap();
-                    device.observe_battery(5.0, Some(4), 5).unwrap();
-                    async_io::Timer::after(Duration::from_millis(50)).await;
-                };
+                let controller = scenario(&client, &state, &device);
                 or(
                     services,
                     or(controller, async {
                         async_io::Timer::after(Duration::from_secs(5)).await;
-                        panic!("timed out waiting for a battery subscription report");
+                        panic!("timed out waiting for a sensor subscription report");
                     }),
                 )
                 .await
@@ -1874,6 +1869,24 @@ fn battery_subscription_reports_shared_percentage_charge_and_replacement() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn battery_subscription_reports_shared_percentage_charge_and_replacement() {
+    with_sensor_subscription(true, async |client, state, device| {
+        let id = subscribe_battery(client).await.unwrap();
+        wait_committed(state).await;
+        device.observe_battery(55.0, Some(2), 3).unwrap();
+        expect_battery_report(client, id, 110, 0, false)
+            .await
+            .unwrap();
+        device.observe_battery(5.0, Some(3), 4).unwrap();
+        expect_battery_report(client, id, 10, 2, true)
+            .await
+            .unwrap();
+        device.observe_battery(5.0, Some(4), 5).unwrap();
+        async_io::Timer::after(Duration::from_millis(50)).await;
+    });
 }
 
 async fn subscribe_sensor(client: &Matter<'_>) -> Result<u32, Error> {
@@ -1997,104 +2010,28 @@ async fn expect_sensor_report(
 
 #[test]
 fn sensor_subscription_reports_measured_values_and_reachable_changes() {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            let directory = tempfile::tempdir().unwrap();
-            let store = Store::open(directory.path()).unwrap();
-            let identity = store.load_identity().unwrap();
-            let info = basic_info(&identity);
-            let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-            let protocol = StoreAdapter::new(store.matter());
-            let kv = matter.kv(protocol.clone());
-            matter.startup(&kv).unwrap();
-            let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-            connect(&matter, SERVER_ID, CLIENT_ID, 71);
-            connect(&client, CLIENT_ID, SERVER_ID, 71);
-            let crypto = test_only_crypto();
-            let buffers: MatterBuffers = MatterBuffers::new();
-            let state: EthInteractionModelState =
-                EthInteractionModelState::new(EthNetwork::new_default());
-            let device = sensor_device();
-            device.set_availability(Availability::Available);
-            device.functions()[0]
-                .observe_measurement(21.5, Some(1), 2)
-                .unwrap();
-            device.functions()[1]
-                .observe_measurement(45.5, Some(1), 2)
-                .unwrap();
-            let handler = crate::matter::tests::support::model_handler(vec![
-                crate::matter::tests::support::entry(
-                    &device,
-                    2,
-                    &[("temperature", 3), ("humidity", 4)],
-                ),
-            ]);
-            let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
-            let incoming = Pipe::default();
-            let outgoing = Pipe::default();
-            let responder = DefaultResponder::new(&im);
-
-            block_on(async {
-                im.startup().await.unwrap();
-                let services = async {
-                    or(
-                        matter.run(
-                            &crypto,
-                            SendPipe(&outgoing),
-                            ReceivePipe(&incoming),
-                            NoNetwork,
-                        ),
-                        or(
-                            client.run(
-                                &crypto,
-                                SendPipe(&incoming),
-                                ReceivePipe(&outgoing),
-                                NoNetwork,
-                            ),
-                            or(responder.run::<4, 4>(), im.run()),
-                        ),
-                    )
-                    .await
-                    .unwrap();
-                    panic!("Matter services exited during sensor subscription test");
-                };
-                let controller = async {
-                    let id = subscribe_sensor(&client).await.unwrap();
-                    wait_committed(&state).await;
-                    device.functions()[0]
-                        .observe_measurement(22.0, Some(2), 3)
-                        .unwrap();
-                    expect_sensor_report(&client, id, None, Some(2200), None)
-                        .await
-                        .unwrap();
-                    device.functions()[1]
-                        .observe_measurement(46.0, Some(3), 4)
-                        .unwrap();
-                    expect_sensor_report(&client, id, None, None, Some(4600))
-                        .await
-                        .unwrap();
-                    device.set_availability(Availability::Unavailable("read path lost".into()));
-                    expect_sensor_report(&client, id, Some(false), None, None)
-                        .await
-                        .unwrap();
-                    device.set_availability(Availability::Available);
-                    expect_sensor_report(&client, id, Some(true), None, None)
-                        .await
-                        .unwrap();
-                };
-                or(
-                    services,
-                    or(controller, async {
-                        async_io::Timer::after(Duration::from_secs(5)).await;
-                        panic!("timed out waiting for a sensor subscription report");
-                    }),
-                )
-                .await
-            });
-            protocol.check_failure().unwrap();
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    with_sensor_subscription(false, async |client, state, device| {
+        let id = subscribe_sensor(client).await.unwrap();
+        wait_committed(state).await;
+        device.functions()[0]
+            .observe_measurement(22.0, Some(2), 3)
+            .unwrap();
+        expect_sensor_report(client, id, None, Some(2200), None)
+            .await
+            .unwrap();
+        device.functions()[1]
+            .observe_measurement(46.0, Some(3), 4)
+            .unwrap();
+        expect_sensor_report(client, id, None, None, Some(4600))
+            .await
+            .unwrap();
+        device.set_availability(Availability::Unavailable("read path lost".into()));
+        expect_sensor_report(client, id, Some(false), None, None)
+            .await
+            .unwrap();
+        device.set_availability(Availability::Available);
+        expect_sensor_report(client, id, Some(true), None, None)
+            .await
+            .unwrap();
+    });
 }

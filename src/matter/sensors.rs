@@ -24,47 +24,107 @@ use rs_matter::{
 };
 use std::cell::Cell;
 
-pub(super) struct TemperatureHandler {
+pub(super) type TemperatureHandler = MeasurementHandler<i16>;
+pub(super) type HumidityHandler = MeasurementHandler<u16>;
+
+pub(super) struct MeasurementHandler<T> {
     function: Function,
     endpoint: u16,
     dataver: Dataver,
-    min: i16,
-    max: i16,
-    versioned: Cell<Option<i16>>,
-    observed: Cell<Option<i16>>,
+    min: T,
+    max: T,
+    project: fn(f64) -> Option<T>,
+    versioned: Cell<Option<T>>,
+    observed: Cell<Option<T>>,
 }
+impl<T: Copy + Eq> MeasurementHandler<T> {
+    fn with_projection(
+        function: Function,
+        endpoint: u16,
+        dataver: Dataver,
+        (min, max): (T, T),
+        project: fn(f64) -> Option<T>,
+    ) -> Self {
+        let versioned = function
+            .snapshot()
+            .measurement()
+            .and_then(|measurement| measurement.value)
+            .and_then(project);
+        Self {
+            function,
+            endpoint,
+            dataver,
+            min,
+            max,
+            project,
+            versioned: Cell::new(versioned),
+            observed: Cell::new(versioned),
+        }
+    }
+    fn sync_version(&self) -> Option<T> {
+        let current = self
+            .function
+            .snapshot()
+            .measurement()
+            .and_then(|measurement| measurement.value)
+            .and_then(self.project);
+        if self.versioned.replace(current) != current {
+            self.dataver.changed();
+        }
+        current
+    }
+    async fn run_measurement(
+        &self,
+        ctx: impl HandlerContext,
+        cluster: u32,
+        attribute: u32,
+    ) -> Result<(), Error> {
+        let mut changes = self.function.subscribe();
+        let mut observed = self.observed.get();
+        loop {
+            let current = self.sync_version();
+            if observed != current {
+                observed = current;
+                self.observed.set(current);
+                self.dataver.changed();
+                ctx.notify_attr_changed(self.endpoint, cluster, attribute);
+            }
+            changes.changed().await;
+        }
+    }
+}
+
 impl TemperatureHandler {
     pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Result<Self, Error> {
         let range = function
             .description()
             .measurement_range()
             .ok_or(ErrorCode::InvalidState)?;
-        let (min, max) = units::temperature_matter_range(range).ok_or(ErrorCode::InvalidState)?;
-        let versioned = project(&function);
-        Ok(Self {
+        let bounds = range.temperature_bounds().ok_or(ErrorCode::InvalidState)?;
+        Ok(Self::with_projection(
             function,
             endpoint,
             dataver,
-            min,
-            max,
-            versioned: Cell::new(versioned),
-            observed: Cell::new(versioned),
-        })
-    }
-    fn sync_version(&self) -> Option<i16> {
-        let current = project(&self.function);
-        if self.versioned.replace(current) != current {
-            self.dataver.changed();
-        }
-        current
+            bounds,
+            units::temperature_matter_value,
+        ))
     }
 }
-fn project(function: &Function) -> Option<i16> {
-    function
-        .snapshot()
-        .measurement()?
-        .value
-        .and_then(units::temperature_matter_value)
+impl HumidityHandler {
+    pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Result<Self, Error> {
+        let range = function
+            .description()
+            .measurement_range()
+            .ok_or(ErrorCode::InvalidState)?;
+        let bounds = range.humidity_bounds().ok_or(ErrorCode::InvalidState)?;
+        Ok(Self::with_projection(
+            function,
+            endpoint,
+            dataver,
+            bounds,
+            units::humidity_matter_value,
+        ))
+    }
 }
 
 impl temperature::ClusterHandler for TemperatureHandler {
@@ -90,66 +150,13 @@ impl temperature::ClusterHandler for TemperatureHandler {
         Ok(Nullable::new(Some(self.max)))
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        let mut changes = self.function.subscribe();
-        let mut observed = self.observed.get();
-        loop {
-            let current = self.sync_version();
-            if observed != current {
-                observed = current;
-                self.observed.set(current);
-                self.dataver.changed();
-                ctx.notify_attr_changed(
-                    self.endpoint,
-                    Self::CLUSTER.id,
-                    temperature::AttributeId::MeasuredValue as _,
-                );
-            }
-            changes.changed().await;
-        }
+        self.run_measurement(
+            ctx,
+            Self::CLUSTER.id,
+            temperature::AttributeId::MeasuredValue as _,
+        )
+        .await
     }
-}
-
-pub(super) struct HumidityHandler {
-    function: Function,
-    endpoint: u16,
-    dataver: Dataver,
-    min: u16,
-    max: u16,
-    versioned: Cell<Option<u16>>,
-    observed: Cell<Option<u16>>,
-}
-impl HumidityHandler {
-    pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Result<Self, Error> {
-        let range = function
-            .description()
-            .measurement_range()
-            .ok_or(ErrorCode::InvalidState)?;
-        let (min, max) = units::humidity_matter_range(range).ok_or(ErrorCode::InvalidState)?;
-        let versioned = project_humidity(&function);
-        Ok(Self {
-            function,
-            endpoint,
-            dataver,
-            min,
-            max,
-            versioned: Cell::new(versioned),
-            observed: Cell::new(versioned),
-        })
-    }
-    fn sync_version(&self) -> Option<u16> {
-        let current = project_humidity(&self.function);
-        if self.versioned.replace(current) != current {
-            self.dataver.changed();
-        }
-        current
-    }
-}
-fn project_humidity(function: &Function) -> Option<u16> {
-    function
-        .snapshot()
-        .measurement()?
-        .value
-        .and_then(units::humidity_matter_value)
 }
 
 impl humidity::ClusterHandler for HumidityHandler {
@@ -175,22 +182,12 @@ impl humidity::ClusterHandler for HumidityHandler {
         Ok(Nullable::new(Some(self.max)))
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        let mut changes = self.function.subscribe();
-        let mut observed = self.observed.get();
-        loop {
-            let current = self.sync_version();
-            if observed != current {
-                observed = current;
-                self.observed.set(current);
-                self.dataver.changed();
-                ctx.notify_attr_changed(
-                    self.endpoint,
-                    Self::CLUSTER.id,
-                    humidity::AttributeId::MeasuredValue as _,
-                );
-            }
-            changes.changed().await;
-        }
+        self.run_measurement(
+            ctx,
+            Self::CLUSTER.id,
+            humidity::AttributeId::MeasuredValue as _,
+        )
+        .await
     }
 }
 

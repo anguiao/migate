@@ -172,7 +172,7 @@ fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
 
             assert!(old_work.life.is_closed());
             assert!(matches!(
-                one.snapshot().availability(),
+                one.snapshot().availability,
                 Availability::Unavailable(_)
             ));
             release_operation(&peer, "rpcReq", "one", 2, accepted("one", 2, 0)).await;
@@ -268,7 +268,7 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
         assert!(after.test_local_subscribed_empty());
         assert!(c.context.live.borrow().devices["one"].access.is_none());
         let one = function(&c.context.registry, "one", "main");
-        assert_eq!(one.snapshot().availability(), Availability::Available);
+        assert_eq!(one.snapshot().availability, Availability::Available);
         assert_eq!(
             one.execute(Command::Off).await.unwrap().power(),
             Some(Power::Off)

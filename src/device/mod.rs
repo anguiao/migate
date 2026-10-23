@@ -12,9 +12,9 @@ pub use light_command::{LightColorTarget, LightTarget};
 pub(crate) use model::mired_span;
 pub use model::{
     Availability, BatterySnapshot, Capability, Command, CommandError, DeviceKey,
-    FunctionDescription, FunctionKind, FunctionSnapshot, LightMode, LightPatch, LightProfile,
-    LightProfileKind, LightSnapshot, MeasurementRange, MeasurementSnapshot, NumericRange,
-    PhysicalDeviceDescription, Power, Rgb, TemperatureInterval,
+    FunctionDescription, FunctionKind, FunctionSnapshot, FunctionState, LightMode, LightPatch,
+    LightProfile, LightProfileKind, LightSnapshot, MeasurementRange, MeasurementSnapshot,
+    NumericRange, PhysicalDeviceDescription, Power, Rgb, TemperatureInterval,
 };
 pub use registry::DeviceRegistry;
 pub use state::{Function, PhysicalDevice};

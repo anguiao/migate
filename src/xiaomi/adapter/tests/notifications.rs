@@ -40,7 +40,7 @@ fn cloud_notifications_activate_after_subscription_and_update_cloud_only_device(
         assert_eq!(
             function(&c.context.registry, "one", "main")
                 .snapshot()
-                .availability(),
+                .availability,
             Availability::Available
         );
     }));
@@ -268,7 +268,7 @@ fn http_pause_keeps_cloud_notifications_and_online_reports_cannot_resume_http() 
             until(|| one.snapshot().power() == Some(Power::Off)).await;
             assert!(c.context.http_paused.get());
             assert!(matches!(
-                one.snapshot().availability(),
+                one.snapshot().availability,
                 Availability::Unavailable(_)
             ));
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
@@ -1496,7 +1496,7 @@ fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail()
             until(|| peer.count(property) > subscriptions && member.test_cloud_exhausted()).await;
             until(|| reads() > before && group.snapshot().power() == Some(Power::On)).await;
             assert!(member.observer().is_none());
-            assert_eq!(group.snapshot().availability(), Availability::Available);
+            assert_eq!(group.snapshot().availability, Availability::Available);
             assert!(
                 c.context
                     .diagnostics()

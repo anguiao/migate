@@ -90,13 +90,13 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
                 "the replacement must receive offline events on the existing cloud connection"
             );
             assert!(matches!(
-                one.snapshot().availability(),
+                one.snapshot().availability,
                 Availability::Unavailable(_)
             ));
             peer.online("one", true);
             peer.property("two", 2, true);
             until(|| two.snapshot().power() == Some(Power::On)).await;
-            until(|| one.snapshot().availability() == Availability::Available).await;
+            until(|| one.snapshot().availability == Availability::Available).await;
             assert_eq!(peer.count("device/one/state/#"), 2);
             assert_eq!(peer.state.borrow().connects.len(), 1);
         })
@@ -146,13 +146,13 @@ fn a_failed_description_update_preserves_cloud_online_notifications() {
                 "a failed new description must not retire the old online subscription"
             );
             assert!(matches!(
-                one.snapshot().availability(),
+                one.snapshot().availability,
                 Availability::Unavailable(_)
             ));
             peer.online("one", true);
             peer.property("two", 2, true);
             until(|| two.snapshot().power() == Some(Power::On)).await;
-            until(|| one.snapshot().availability() == Availability::Available).await;
+            until(|| one.snapshot().availability == Availability::Available).await;
             one.execute(Command::On).await.unwrap();
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
             assert_eq!(c.store.devices().load_configuration().unwrap(), committed);

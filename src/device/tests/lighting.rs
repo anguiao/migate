@@ -225,7 +225,7 @@ fn one_light_report_updates_power_and_values_with_one_revision_and_keeps_mode_ex
             mode: Some(LightMode::Temperature),
         })
         .unwrap();
-    assert_eq!(function.snapshot().revision(), 1);
+    assert_eq!(function.snapshot().revision, 1);
     let patch = LightPatch {
         color: Some(Rgb {
             red: 0,
@@ -239,9 +239,9 @@ fn one_light_report_updates_power_and_values_with_one_revision_and_keeps_mode_ex
         function.snapshot().lighting().unwrap().mode,
         Some(LightMode::Temperature)
     );
-    assert_eq!(function.snapshot().revision(), 2);
+    assert_eq!(function.snapshot().revision, 2);
     function.observe_light(patch).unwrap();
-    assert_eq!(function.snapshot().revision(), 2);
+    assert_eq!(function.snapshot().revision, 2);
     let invalid = LightPatch {
         power: Some(false),
         brightness_percent: Some(f64::NAN),

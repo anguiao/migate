@@ -64,7 +64,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 assert_eq!(
                     function(&control.context.registry, "one", "main")
                         .snapshot()
-                        .availability(),
+                        .availability,
                     Availability::Available
                 );
                 control.clock.advance(Duration::from_secs(10));
@@ -112,7 +112,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                     matches!(
                         function(&control.context.registry, "one", "main")
                             .snapshot()
-                            .availability(),
+                            .availability,
                         Availability::Unavailable(_)
                     )
                 })

@@ -305,15 +305,19 @@ fn matter_projection_rejects_unrepresentable_and_out_of_range_values() {
     assert_eq!(units::battery_percent_matter_value(-0.001), None);
     assert_eq!(units::battery_percent_matter_value(f64::NAN), None);
     assert_eq!(
-        units::temperature_matter_range(MeasurementRange::new(-30.0, 100.0).unwrap()),
+        MeasurementRange::new(-30.0, 100.0)
+            .unwrap()
+            .temperature_bounds(),
         Some((-3000, 10000))
     );
     assert_eq!(
-        units::humidity_matter_range(MeasurementRange::new(0.0, 100.0).unwrap()),
+        MeasurementRange::new(0.0, 100.0).unwrap().humidity_bounds(),
         Some((0, 10000))
     );
     assert_eq!(
-        units::temperature_matter_range(MeasurementRange::new(-273.15, 327.67).unwrap()),
+        MeasurementRange::new(-273.15, 327.67)
+            .unwrap()
+            .temperature_bounds(),
         Some((-27315, 32767))
     );
 }

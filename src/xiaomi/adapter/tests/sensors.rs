@@ -13,6 +13,13 @@ const HUMIDITY: PropertyBinding = PropertyBinding {
     piid: 1008,
 };
 
+fn sensor_peer(temperature: f64, humidity: f64) -> Rc<Peer> {
+    let peer = Rc::new(Peer::default());
+    peer.value("sensor", TEMPERATURE, json!(temperature));
+    peer.value("sensor", HUMIDITY, json!(humidity));
+    peer
+}
+
 fn measurement(context: &super::super::state::Context, did: &str, id: &str) -> MeasurementSnapshot {
     super::support::function(&context.registry, did, id)
         .snapshot()
@@ -32,9 +39,7 @@ fn work(context: &super::super::state::Context, did: &str) -> Rc<super::super::w
 fn initial_reads_keep_independent_values_and_upstream_update_times() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(21.5));
-        peer.value("sensor", HUMIDITY, json!(45.0));
+        let peer = sensor_peer(21.5, 45.0);
         {
             let mut state = peer.state.borrow_mut();
             state
@@ -76,12 +81,58 @@ fn initial_reads_keep_independent_values_and_upstream_update_times() {
 }
 
 #[test]
+fn native_silence_keeps_readings_without_polling_or_marking_unavailable() {
+    block_on(Rig::sensors(&["sensor"]).run(|c| async move {
+        c.announce();
+        let peer = sensor_peer(21.5, 45.0);
+        peer.value("sensor", BATTERY, json!(55));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                measurement(&control.context, "sensor", "temperature").value == Some(21.5)
+                    && measurement(&control.context, "sensor", "humidity").value == Some(45.0)
+                    && battery(&control.context, "sensor").and_then(|b| b.value) == Some(55.0)
+                    && battery_status(&control.context, "sensor").notification_source
+                        == Some(PathKind::Local)
+            })
+            .await;
+            let physical = work(&control.context, "sensor").physical();
+            let before = physical
+                .functions()
+                .iter()
+                .map(|function| function.snapshot())
+                .collect::<Vec<_>>();
+            let battery_before = physical.battery_snapshot();
+            let reads = (
+                peer.count("get", "sensor", 3),
+                peer.count("get", "sensor", 2),
+            );
+            control.clock.advance(Duration::from_secs(30 * 60));
+            for _ in 0..50 {
+                future::yield_now().await;
+            }
+            assert_eq!(physical.availability(), Availability::Available);
+            for (function, expected) in physical.functions().iter().zip(before) {
+                assert_eq!(function.snapshot(), expected);
+            }
+            assert_eq!(physical.battery_snapshot(), battery_before);
+            assert_eq!(
+                (
+                    peer.count("get", "sensor", 3),
+                    peer.count("get", "sensor", 2)
+                ),
+                reads
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn notifications_update_source_time_and_missing_time_stays_unknown() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(20.0));
-        peer.value("sensor", HUMIDITY, json!(40.0));
+        let peer = sensor_peer(20.0, 40.0);
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
@@ -125,9 +176,7 @@ fn notifications_update_source_time_and_missing_time_stays_unknown() {
 fn a_cached_read_keeps_the_source_time_but_records_a_new_reception() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(20.0));
-        peer.value("sensor", HUMIDITY, json!(40.0));
+        let peer = sensor_peer(20.0, 40.0);
         peer.state
             .borrow_mut()
             .update_times
@@ -157,9 +206,7 @@ fn a_cached_read_keeps_the_source_time_but_records_a_new_reception() {
 fn an_earlier_read_cannot_overwrite_a_later_notification() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(20.0));
-        peer.value("sensor", HUMIDITY, json!(40.0));
+        let peer = sensor_peer(20.0, 40.0);
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| measurement(&control.context, "sensor", "temperature").value == Some(20.0))
@@ -194,9 +241,7 @@ fn an_earlier_read_cannot_overwrite_a_later_notification() {
 fn invalid_observations_and_read_failures_preserve_each_independent_value() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(21.0));
-        peer.value("sensor", HUMIDITY, json!(45.0));
+        let peer = sensor_peer(21.0, 45.0);
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
@@ -252,9 +297,7 @@ fn invalid_observations_and_read_failures_preserve_each_independent_value() {
 fn a_read_only_device_is_available_without_notifications_and_recovers_them() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(19.0));
-        peer.value("sensor", HUMIDITY, json!(39.0));
+        let peer = sensor_peer(19.0, 39.0);
         peer.state.borrow_mut().pushless.insert("sensor".into());
         let control = &c;
         c.peer(peer, |peer| async move {
@@ -480,9 +523,7 @@ fn multiple_sensors_keep_their_own_values() {
 fn losing_the_notification_path_retains_readings_and_recovers() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(20.0));
-        peer.value("sensor", HUMIDITY, json!(40.0));
+        let peer = sensor_peer(20.0, 40.0);
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
@@ -557,9 +598,7 @@ fn losing_the_notification_path_retains_readings_and_recovers() {
 fn a_retired_or_old_source_cannot_update_sensor_state() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(20.0));
-        peer.value("sensor", HUMIDITY, json!(40.0));
+        let peer = sensor_peer(20.0, 40.0);
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
@@ -683,9 +722,7 @@ fn battery_status(
 fn battery_reads_and_notifications_keep_independent_source_and_reception_times() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(21.0));
-        peer.value("sensor", HUMIDITY, json!(45.0));
+        let peer = sensor_peer(21.0, 45.0);
         peer.value("sensor", BATTERY, json!(55));
         peer.state
             .borrow_mut()
@@ -728,9 +765,7 @@ fn battery_reads_and_notifications_keep_independent_source_and_reception_times()
 fn invalid_battery_data_and_read_failures_preserve_last_value_and_measurements() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(21.0));
-        peer.value("sensor", HUMIDITY, json!(45.0));
+        let peer = sensor_peer(21.0, 45.0);
         peer.value("sensor", BATTERY, json!(55));
         let control = &c;
         c.peer(peer, |peer| async move {
@@ -795,9 +830,7 @@ fn battery_subscription_denial_or_timeout_does_not_block_measurement_notificatio
     for timeout in [false, true] {
         block_on(Rig::sensors(&["sensor"]).run(|c| async move {
             c.announce();
-            let peer = Rc::new(Peer::default());
-            peer.value("sensor", TEMPERATURE, json!(21.0));
-            peer.value("sensor", HUMIDITY, json!(45.0));
+            let peer = sensor_peer(21.0, 45.0);
             peer.value("sensor", BATTERY, json!(55));
             let reject = ("sensor".into(), BATTERY.siid, BATTERY.piid);
             if timeout {
@@ -886,9 +919,7 @@ fn multiple_sensors_keep_isolated_battery_values() {
 fn a_retired_source_cannot_update_battery_state() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(20.0));
-        peer.value("sensor", HUMIDITY, json!(40.0));
+        let peer = sensor_peer(20.0, 40.0);
         peer.value("sensor", BATTERY, json!(55));
         let control = &c;
         c.peer(peer, |peer| async move {
@@ -911,9 +942,7 @@ fn a_retired_source_cannot_update_battery_state() {
 fn an_earlier_battery_read_cannot_overwrite_a_later_notification() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(20.0));
-        peer.value("sensor", HUMIDITY, json!(40.0));
+        let peer = sensor_peer(20.0, 40.0);
         peer.value("sensor", BATTERY, json!(55));
         let control = &c;
         c.peer(peer, |peer| async move {
@@ -944,9 +973,7 @@ fn an_earlier_battery_read_cannot_overwrite_a_later_notification() {
 fn a_working_battery_subscription_cannot_make_measurement_notifications_ready() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(21.0));
-        peer.value("sensor", HUMIDITY, json!(45.0));
+        let peer = sensor_peer(21.0, 45.0);
         peer.value("sensor", BATTERY, json!(55));
         {
             let mut state = peer.state.borrow_mut();
@@ -980,9 +1007,7 @@ fn a_working_battery_subscription_cannot_make_measurement_notifications_ready() 
 fn battery_subscription_failure_survives_a_successful_cache_read() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(21.0));
-        peer.value("sensor", HUMIDITY, json!(45.0));
+        let peer = sensor_peer(21.0, 45.0);
         peer.value("sensor", BATTERY, json!(55));
         peer.state
             .borrow_mut()
@@ -1011,9 +1036,7 @@ fn battery_subscription_failure_survives_a_successful_cache_read() {
 fn measurement_notifications_activate_while_battery_subscribe_is_pending() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(21.0));
-        peer.value("sensor", HUMIDITY, json!(45.0));
+        let peer = sensor_peer(21.0, 45.0);
         peer.value("sensor", BATTERY, json!(55));
         peer.state
             .borrow_mut()
@@ -1099,9 +1122,7 @@ fn cloud_battery_subscription_failure_keeps_active_measurements_and_retries_fini
 fn battery_read_and_subscription_diagnostics_remain_independent() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(21.0));
-        peer.value("sensor", HUMIDITY, json!(45.0));
+        let peer = sensor_peer(21.0, 45.0);
         peer.value("sensor", BATTERY, json!(55));
         peer.state
             .borrow_mut()
@@ -1184,9 +1205,7 @@ fn a_restored_sensor_without_battery_still_reports_why_capability_is_missing() {
 fn a_stale_battery_read_failure_cannot_replace_a_newer_valid_notification() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.value("sensor", TEMPERATURE, json!(20.0));
-        peer.value("sensor", HUMIDITY, json!(40.0));
+        let peer = sensor_peer(20.0, 40.0);
         peer.value("sensor", BATTERY, json!(55));
         let control = &c;
         c.peer(peer, |peer| async move {

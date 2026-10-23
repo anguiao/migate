@@ -354,64 +354,48 @@ pub struct MeasurementSnapshot {
 impl Eq for MeasurementSnapshot {}
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum FunctionSnapshot {
+pub struct FunctionSnapshot {
+    pub state: FunctionState,
+    pub availability: Availability,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FunctionState {
     Outlet {
         power: Power,
-        availability: Availability,
-        revision: u64,
     },
     Light {
         power: Power,
         lighting: LightSnapshot,
-        availability: Availability,
-        revision: u64,
     },
     Temperature {
         measurement: MeasurementSnapshot,
-        availability: Availability,
-        revision: u64,
     },
     Humidity {
         measurement: MeasurementSnapshot,
-        availability: Availability,
-        revision: u64,
     },
 }
 impl FunctionSnapshot {
     pub fn power(&self) -> Option<Power> {
-        match self {
-            Self::Outlet { power, .. } | Self::Light { power, .. } => Some(*power),
-            Self::Temperature { .. } | Self::Humidity { .. } => None,
+        match &self.state {
+            FunctionState::Outlet { power } | FunctionState::Light { power, .. } => Some(*power),
+            FunctionState::Temperature { .. } | FunctionState::Humidity { .. } => None,
         }
     }
     pub fn lighting(&self) -> Option<LightSnapshot> {
-        match self {
-            Self::Light { lighting, .. } => Some(*lighting),
-            Self::Outlet { .. } | Self::Temperature { .. } | Self::Humidity { .. } => None,
+        match &self.state {
+            FunctionState::Light { lighting, .. } => Some(*lighting),
+            FunctionState::Outlet { .. }
+            | FunctionState::Temperature { .. }
+            | FunctionState::Humidity { .. } => None,
         }
     }
     pub fn measurement(&self) -> Option<MeasurementSnapshot> {
-        match self {
-            Self::Temperature { measurement, .. } | Self::Humidity { measurement, .. } => {
-                Some(*measurement)
-            }
-            Self::Outlet { .. } | Self::Light { .. } => None,
-        }
-    }
-    pub fn availability(&self) -> Availability {
-        match self {
-            Self::Outlet { availability, .. }
-            | Self::Light { availability, .. }
-            | Self::Temperature { availability, .. }
-            | Self::Humidity { availability, .. } => availability.clone(),
-        }
-    }
-    pub fn revision(&self) -> u64 {
-        match self {
-            Self::Outlet { revision, .. }
-            | Self::Light { revision, .. }
-            | Self::Temperature { revision, .. }
-            | Self::Humidity { revision, .. } => *revision,
+        match &self.state {
+            FunctionState::Temperature { measurement }
+            | FunctionState::Humidity { measurement } => Some(*measurement),
+            FunctionState::Outlet { .. } | FunctionState::Light { .. } => None,
         }
     }
 }

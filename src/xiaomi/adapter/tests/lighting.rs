@@ -226,7 +226,7 @@ fn stopping_the_source_clears_light_state_but_not_outlet_cache() {
             control.context.stop();
             let snapshot = light.snapshot();
             assert!(matches!(
-                snapshot.availability(),
+                snapshot.availability,
                 Availability::Unavailable(_)
             ));
             assert_eq!(snapshot.power(), Some(Power::Unknown));
@@ -1585,7 +1585,7 @@ fn local_partial_offline_rejection_clears_runtime_light_state_when_device_become
             assert_eq!(light.snapshot().lighting().unwrap().color, None);
             assert_eq!(light.snapshot().lighting().unwrap().mode, None);
             assert!(matches!(
-                light.snapshot().availability(),
+                light.snapshot().availability,
                 Availability::Unavailable(_)
             ));
         })
@@ -1763,7 +1763,7 @@ fn rgb_notification_source_requires_all_five_property_subscriptions() {
             assert!(!work.test_local_subscribed_pair(MODE.siid, MODE.piid));
             assert_eq!(control.context.active_notification("one"), None);
             let light = function(&control.context.registry, "one", "main");
-            assert_eq!(light.snapshot().availability(), Availability::Available);
+            assert_eq!(light.snapshot().availability, Availability::Available);
             light
                 .begin_light_action(brightness(60.0), true)
                 .unwrap()

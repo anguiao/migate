@@ -33,7 +33,7 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
         assert_eq!(second.snapshot().power(), Some(Power::Unknown));
         assert_eq!(first.function_key().id, "outlet_1");
         assert_eq!(first.function_key().device, *physical.key());
-        let revision = second.snapshot().revision();
+        let revision = second.snapshot().revision;
         let mut first_command = Box::pin(first.execute(Command::On));
         let mut second_command = Box::pin(second.execute(Command::Off));
         assert!(poll_once(first_command.as_mut()).await.is_none());
@@ -46,7 +46,7 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
             .accept()
             .unwrap();
         assert_eq!(second_command.await.unwrap().power(), Some(Power::Off));
-        assert_eq!(second.snapshot().revision(), revision + 1);
+        assert_eq!(second.snapshot().revision, revision + 1);
         assert_eq!(first.snapshot().power(), Some(Power::Off));
         first.observe(true);
         pending.accept().unwrap();
@@ -55,12 +55,12 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
         let mut changes = second.subscribe();
         physical.set_availability(Availability::Unavailable("offline".into()));
         assert_eq!(
-            changes.changed().await.availability(),
+            changes.changed().await.availability,
             Availability::Unavailable("offline".into())
         );
         assert_eq!(
-            first.snapshot().availability(),
-            second.snapshot().availability()
+            first.snapshot().availability,
+            second.snapshot().availability
         );
     });
 }

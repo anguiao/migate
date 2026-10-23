@@ -120,10 +120,28 @@ impl Prepare {
         self.running = true;
         Some(self.generation)
     }
-    fn finish(&mut self, problem: Option<String>, required_ready: bool) {
+    fn subscribed(&mut self, binding: PropertyBinding, required: &[PropertyBinding]) -> bool {
+        self.subscribed.insert((binding.siid, binding.piid));
+        self.ready(required)
+    }
+    /// Keep optional battery failures separate from required source readiness.
+    fn finish(
+        &mut self,
+        mut problem: Option<String>,
+        required: &[PropertyBinding],
+        battery: Option<PropertyBinding>,
+    ) -> Option<String> {
+        let required_ready = self.ready(required);
+        let battery_problem =
+            if required_ready && battery.is_some_and(|binding| !self.ready(&[binding])) {
+                problem.take()
+            } else {
+                None
+            };
         self.running = false;
         self.exhausted = problem.is_some() && !required_ready;
         self.problem = problem;
+        battery_problem
     }
     fn ready(&self, bindings: &[PropertyBinding]) -> bool {
         bindings
@@ -623,7 +641,7 @@ impl DeviceWork {
         handle: &SessionHandle,
         generation: u64,
         binding: PropertyBinding,
-    ) {
+    ) -> bool {
         let mut local = self.local.borrow_mut();
         if local
             .connection
@@ -632,23 +650,13 @@ impl DeviceWork {
             && local.prepare.generation == generation
             && !self.life.is_closed()
         {
-            local
-                .prepare
-                .subscribed
-                .insert((binding.siid, binding.piid));
             if self.battery_binding() == Some(binding) {
                 self.set_battery_subscription_problem(None);
             }
+            local.prepare.subscribed(binding, &self.required_bindings())
+        } else {
+            false
         }
-    }
-    pub(super) fn local_required_ready(&self, handle: &SessionHandle, generation: u64) -> bool {
-        let local = self.local.borrow();
-        local
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && local.prepare.generation == generation
-            && local.prepare.ready(&self.required_bindings())
     }
     pub(super) fn local_finished(
         &self,
@@ -664,22 +672,9 @@ impl DeviceWork {
             .as_ref()
             .is_some_and(|current| current.same_connection(handle))
             && local.prepare.generation == generation
+            && let Some(problem) = local.prepare.finish(problem, &required, battery)
         {
-            let required_ready = local.prepare.ready(&required);
-            let battery_only_problem = required_ready
-                && problem.is_some()
-                && battery.is_some_and(|binding| {
-                    !local
-                        .prepare
-                        .subscribed
-                        .contains(&(binding.siid, binding.piid))
-                });
-            if battery_only_problem {
-                self.set_battery_subscription_problem(problem.clone());
-                local.prepare.finish(None, required_ready);
-            } else {
-                local.prepare.finish(problem, required_ready);
-            }
+            self.set_battery_subscription_problem(Some(problem));
         }
     }
     fn local_abandoned(&self, handle: &SessionHandle, generation: u64) {
@@ -736,7 +731,7 @@ impl DeviceWork {
         handle: &NotificationHandle,
         generation: u64,
         binding: PropertyBinding,
-    ) {
+    ) -> bool {
         let mut cloud = self.cloud.borrow_mut();
         if cloud
             .connection
@@ -745,27 +740,13 @@ impl DeviceWork {
             && cloud.prepare.generation == generation
             && !self.life.is_closed()
         {
-            cloud
-                .prepare
-                .subscribed
-                .insert((binding.siid, binding.piid));
             if self.battery_binding() == Some(binding) {
                 self.set_battery_subscription_problem(None);
             }
+            cloud.prepare.subscribed(binding, &self.required_bindings())
+        } else {
+            false
         }
-    }
-    pub(super) fn cloud_required_ready(
-        &self,
-        handle: &NotificationHandle,
-        generation: u64,
-    ) -> bool {
-        let cloud = self.cloud.borrow();
-        cloud
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && cloud.prepare.generation == generation
-            && cloud.prepare.ready(&self.required_bindings())
     }
     pub(super) fn cloud_finished(
         &self,
@@ -781,22 +762,9 @@ impl DeviceWork {
             .as_ref()
             .is_some_and(|current| current.same_connection(handle))
             && cloud.prepare.generation == generation
+            && let Some(problem) = cloud.prepare.finish(problem, &required, battery)
         {
-            let required_ready = cloud.prepare.ready(&required);
-            let battery_only_problem = required_ready
-                && problem.is_some()
-                && battery.is_some_and(|binding| {
-                    !cloud
-                        .prepare
-                        .subscribed
-                        .contains(&(binding.siid, binding.piid))
-                });
-            if battery_only_problem {
-                self.set_battery_subscription_problem(problem.clone());
-                cloud.prepare.finish(None, required_ready);
-            } else {
-                cloud.prepare.finish(problem, required_ready);
-            }
+            self.set_battery_subscription_problem(Some(problem));
         }
     }
     pub(super) fn cloud_abandoned(&self, handle: &NotificationHandle, generation: u64) {
@@ -1177,8 +1145,7 @@ async fn subscriptions(
                 }
                 match result {
                     Ok(()) => {
-                        work.local_subscribed(handle, preparation, binding);
-                        if work.local_required_ready(handle, preparation) {
+                        if work.local_subscribed(handle, preparation, binding) {
                             // Measurement links become active without waiting
                             // for the optional battery subscription.
                             context.changed.notify(usize::MAX);

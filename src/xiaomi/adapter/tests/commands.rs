@@ -78,19 +78,19 @@ fn an_offline_event_before_an_active_success_reply_preserves_acceptance() {
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
             peer.state.borrow_mut().online.insert("one".into(), false);
             peer.list_changed(&["one"]);
-            until(|| matches!(one.snapshot().availability(), Availability::Unavailable(_))).await;
+            until(|| matches!(one.snapshot().availability, Availability::Unavailable(_))).await;
             assert!(poll_once(command.as_mut()).await.is_none());
             peer.release("one", 2, accepted("one", 2, 0)).await;
             let accepted = command.await.unwrap();
             assert_eq!(accepted.power(), Some(Power::On));
             assert!(matches!(
-                accepted.availability(),
+                accepted.availability,
                 Availability::Unavailable(_)
             ));
             assert_eq!(
                 function(&control.context.registry, "two", "main")
                     .snapshot()
-                    .availability(),
+                    .availability,
                 Availability::Available
             );
         })
@@ -176,11 +176,11 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 "the original light receipt settles after the sink is retired"
             );
             assert!(matches!(
-                one.snapshot().availability(),
+                one.snapshot().availability,
                 Availability::Unavailable(_)
             ));
             assert_ne!(one.snapshot().power(), Some(Power::On));
-            until(|| current.snapshot().availability() == Availability::Available).await;
+            until(|| current.snapshot().availability == Availability::Available).await;
             assert_eq!(current.snapshot().power(), Some(Power::Off));
             peer.state.borrow_mut().hold_writes = false;
             current.execute(Command::On).await.unwrap();

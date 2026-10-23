@@ -75,7 +75,7 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
         c.cloud.lock().unwrap().property_code = -704_012_904;
         assert!(light.execute(Command::Off).await.is_err());
         assert!(matches!(
-            light.snapshot().availability(),
+            light.snapshot().availability,
             Availability::Unavailable(_)
         ));
 
@@ -96,7 +96,7 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
         c.cloud.lock().unwrap().catalog_groups[0]["extra"]["member_list"]["status"] = json!("1");
         c.context.request_sync();
         until(|| c.context.relations.borrow().snapshot()[0].error.is_none()).await;
-        assert_eq!(light.snapshot().availability(), Availability::Available);
+        assert_eq!(light.snapshot().availability, Availability::Available);
         light.execute(Command::Off).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 2);
     }));
@@ -623,7 +623,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
         }
         assert!(c.context.control_path("group-1").is_none());
         assert!(matches!(
-            light.snapshot().availability(),
+            light.snapshot().availability,
             Availability::Unavailable(_)
         ));
         assert_eq!(light.snapshot().power(), Some(Power::Unknown));
@@ -632,7 +632,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
         c.cloud.lock().unwrap().catalog_groups[0]["isOnline"] = json!(true);
         c.context.request_sync();
         until(|| light.snapshot().power() == Some(Power::On)).await;
-        assert_eq!(light.snapshot().availability(), Availability::Available);
+        assert_eq!(light.snapshot().availability, Availability::Available);
     }));
 }
 
@@ -749,7 +749,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             .await;
             // The retained view is permanently unavailable and cleared.
             assert!(matches!(
-                light.snapshot().availability(),
+                light.snapshot().availability,
                 Availability::Unavailable(_)
             ));
             assert_eq!(light.snapshot().power(), Some(Power::Unknown));
@@ -795,7 +795,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             until(|| refreshed.snapshot().power() == Some(Power::On)).await;
             assert_eq!(light.snapshot().power(), Some(Power::Unknown));
             assert!(matches!(
-                light.snapshot().availability(),
+                light.snapshot().availability,
                 Availability::Unavailable(_)
             ));
         })
