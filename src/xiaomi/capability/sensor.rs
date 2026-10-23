@@ -137,9 +137,10 @@ fn measurement_binding(
     };
     let range = MeasurementRange::new(*min, *max)
         .map_err(|_| CapabilityError::InvalidMeasurement("range"))?;
-    let binding =
-        MeasurementBinding::new(PropertyBinding { siid, piid }, format, unit, range, *step)?;
-    Ok(binding)
+    if *step <= 0.0 || *step > range.max() - range.min() {
+        return Err(CapabilityError::InvalidMeasurement("range"));
+    }
+    MeasurementBinding::new(PropertyBinding { siid, piid }, format, unit, range)
 }
 
 fn battery(instance: &Description<'_>) -> (Option<BatteryBinding>, Option<String>) {
@@ -167,56 +168,15 @@ fn battery(instance: &Description<'_>) -> (Option<BatteryBinding>, Option<String
         [property] => *property,
         _ => return (None, Some("multiple battery-level properties".into())),
     };
-    match battery_binding(service.iid, property.iid, property.value) {
+    match measurement_binding(
+        service.iid,
+        property.iid,
+        property.value,
+        MeasurementUnit::Percentage,
+    )
+    .and_then(BatteryBinding::new)
+    {
         Ok(binding) => (Some(binding), None),
         Err(error) => (None, Some(format!("invalid battery capability: {error}"))),
     }
-}
-
-fn battery_binding(
-    siid: u32,
-    piid: u32,
-    value: &serde_json::Value,
-) -> Result<BatteryBinding, CapabilityError> {
-    let access = array(value, "access")?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .ok_or(CapabilityError::InvalidDescription("access"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for permission in ["read", "notify"] {
-        if !access.contains(&permission) {
-            return Err(CapabilityError::MissingAccess(permission));
-        }
-    }
-    let format = match string(value, "format")? {
-        "float" => NumericFormat::Float,
-        "uint8" => NumericFormat::Uint8,
-        "uint16" => NumericFormat::Uint16,
-        "uint32" => NumericFormat::Uint32,
-        "int8" => NumericFormat::Int8,
-        "int16" => NumericFormat::Int16,
-        "int32" => NumericFormat::Int32,
-        _ => return Err(CapabilityError::InvalidMeasurement("battery")),
-    };
-    if string(value, "unit")? != "percentage" {
-        return Err(CapabilityError::InvalidMeasurement("unit"));
-    }
-    let range = array(value, "value-range")?
-        .iter()
-        .map(|value| {
-            value
-                .as_f64()
-                .filter(|value| value.is_finite())
-                .ok_or(CapabilityError::InvalidMeasurement("battery"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let [min, max, step] = range.as_slice() else {
-        return Err(CapabilityError::InvalidMeasurement("battery"));
-    };
-    let range = MeasurementRange::new(*min, *max)
-        .map_err(|_| CapabilityError::InvalidMeasurement("battery"))?;
-    BatteryBinding::new(PropertyBinding { siid, piid }, format, range, *step)
 }

@@ -80,7 +80,6 @@ fn sensor_bindings_round_trip_with_parent_and_child_endpoints() {
     assert_eq!(functions[0]["measurement"]["unit"], json!("celsius"));
     assert_eq!(functions[0]["measurement"]["min"], json!(-30.0));
     assert_eq!(functions[0]["measurement"]["max"], json!(100.0));
-    assert_eq!(functions[0]["measurement"]["step"], json!(0.1));
     assert_eq!(functions[1]["kind"], json!("humidity"));
     assert_eq!(functions[1]["measurement"]["unit"], json!("percentage"));
     let battery = &encoded["devices"][0]["native"]["battery"];
@@ -89,9 +88,12 @@ fn sensor_bindings_round_trip_with_parent_and_child_endpoints() {
     assert_eq!(battery["unit"], json!("percentage"));
     assert_eq!(battery["min"], json!(0.0));
     assert_eq!(battery["max"], json!(100.0));
-    assert_eq!(battery["step"], json!(1.0));
-    for target in [&functions[0], battery] {
-        for forbidden in ["value", "source_time", "received_at", "reading"] {
+    for target in [
+        &functions[0]["measurement"],
+        &functions[1]["measurement"],
+        battery,
+    ] {
+        for forbidden in ["step", "value", "source_time", "received_at", "reading"] {
             assert!(target.get(forbidden).is_none(), "{forbidden}");
         }
     }
@@ -219,7 +221,6 @@ fn optional_battery_bindings_round_trip_without_runtime_values() {
     assert_eq!(battery.format(), NumericFormat::Uint8);
     assert_eq!(battery.range().min(), 0.0);
     assert_eq!(battery.range().max(), 100.0);
-    assert_eq!(battery.step(), 1.0);
     assert_eq!(loaded.devices[0].functions.len(), 2);
     assert_eq!(loaded.devices[0].endpoint, 2);
     assert_eq!(
@@ -245,7 +246,6 @@ fn invalid_battery_storage_shapes_are_rejected_at_the_boundary() {
         ("/devices/0/native/battery/min", json!(-1.0)),
         ("/devices/0/native/battery/max", json!(101.0)),
         ("/devices/0/native/battery/max", json!(0.0)),
-        ("/devices/0/native/battery/step", json!(0.0)),
     ] {
         let mut changed = valid.clone();
         *changed.pointer_mut(pointer).unwrap() = value;
@@ -277,7 +277,6 @@ fn invalid_sensor_measurement_ranges_are_rejected_at_the_storage_boundary() {
             "/devices/0/native/functions/0/measurement/max",
             json!(-30.0),
         ),
-        ("/devices/0/native/functions/0/measurement/step", json!(0.0)),
         (
             "/devices/0/native/functions/0/measurement/unit",
             json!("fahrenheit"),
@@ -334,7 +333,6 @@ fn native_measurement_metadata_is_preserved_without_a_battery_field() {
     assert_eq!(measurement.unit(), MeasurementUnit::Celsius);
     assert_eq!(measurement.range().min(), -30.0);
     assert_eq!(measurement.range().max(), 100.0);
-    assert_eq!(measurement.step(), 0.1);
 }
 
 #[test]
@@ -364,7 +362,6 @@ fn a_sensor_range_change_is_a_publish_shape_change_but_keeps_its_identity() {
         measurement.format(),
         measurement.unit(),
         MeasurementRange::new(-20.0, 80.0).unwrap(),
-        measurement.step(),
     )
     .unwrap();
     let changed = crate::xiaomi::capability::NativeDescription::new(
@@ -413,10 +410,7 @@ fn a_sensor_range_change_is_a_publish_shape_change_but_keeps_its_identity() {
 }
 
 #[test]
-fn a_measurement_step_only_change_does_not_rebuild_the_published_instance() {
-    use crate::device::MeasurementRange;
-    use crate::xiaomi::capability::{MeasurementBinding, ParsedDevice, ParsedFunction};
-
+fn measurement_and_battery_step_changes_do_not_change_the_configuration() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
     let original = sensor("sensor");
@@ -429,32 +423,23 @@ fn a_measurement_step_only_change_does_not_rebuild_the_published_instance() {
     save(&store, &first);
     let root = first.root_version;
 
-    let functions = original.device().functions().to_vec();
-    let measurement = functions[0].measurement().unwrap();
-    let changed_binding = MeasurementBinding::new(
-        measurement.property(),
-        measurement.format(),
-        measurement.unit(),
-        MeasurementRange::new(-30.0, 100.0).unwrap(),
-        0.01,
-    )
-    .unwrap();
+    let mut instance: Value = serde_json::from_str(SENSOR).unwrap();
+    for service in instance["services"].as_array_mut().unwrap() {
+        for property in service["properties"].as_array_mut().unwrap() {
+            if let Some(range) = property["value-range"].as_array_mut() {
+                range[2] = json!(0.01);
+            }
+        }
+    }
     let changed = crate::xiaomi::capability::NativeDescription::new(
         original.model().into(),
         original.instance_type().into(),
-        ParsedDevice::new_with_battery(
-            original.device().key().clone(),
-            vec![
-                ParsedFunction::temperature("temperature", "Temperature", changed_binding),
-                functions[1].clone(),
-            ],
-            None,
-            original.device().battery().cloned(),
-        )
-        .unwrap(),
+        parse_device_for_model(original.device().key().clone(), original.model(), &instance)
+            .unwrap(),
     )
     .unwrap();
     let plan = next(&first, scope("account", "home"), vec![changed]);
+    assert!(!plan.changed);
     assert!(!plan.rebuild);
     assert_eq!(
         plan.operations[0].kind,

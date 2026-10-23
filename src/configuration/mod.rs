@@ -565,35 +565,12 @@ fn with_light_kind(
     }
 }
 
-/// Native step is source resolution metadata, not part of the published
-/// measurement; a step-only change keeps the running instance.
-fn same_measurement(
-    left: Option<&crate::xiaomi::capability::MeasurementBinding>,
-    right: Option<&crate::xiaomi::capability::MeasurementBinding>,
-) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            left.property() == right.property()
-                && left.format() == right.format()
-                && left.unit() == right.unit()
-                && left.range() == right.range()
-        }
-        _ => false,
-    }
-}
-
 /// True when two native descriptions use the same real control bindings.
 /// Model and instance type are metadata: a URN-only change reuses the served
 /// instance.
 pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescription) -> bool {
     a.device().refresh_trigger() == b.device().refresh_trigger()
-        && a.device()
-            .battery()
-            .map(|battery| (battery.property(), battery.format(), battery.range()))
-            == b.device()
-                .battery()
-                .map(|battery| (battery.property(), battery.format(), battery.range()))
+        && a.device().battery() == b.device().battery()
         && a.device().functions().len() == b.device().functions().len()
         && a.device()
             .functions()
@@ -603,7 +580,7 @@ pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescript
                 left.id() == right.id()
                     && left.power() == right.power()
                     && left.lighting() == right.lighting()
-                    && same_measurement(left.measurement(), right.measurement())
+                    && left.measurement() == right.measurement()
             })
 }
 

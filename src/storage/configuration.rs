@@ -283,7 +283,6 @@ struct WireMeasurement {
     unit: MeasurementUnit,
     min: f64,
     max: f64,
-    step: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -669,7 +668,6 @@ impl WireMeasurement {
             unit: binding.unit(),
             min: binding.range().min(),
             max: binding.range().max(),
-            step: binding.step(),
         }
     }
 
@@ -680,7 +678,6 @@ impl WireMeasurement {
             unit: MeasurementUnit::Percentage,
             min: binding.range().min(),
             max: binding.range().max(),
-            step: binding.step(),
         }
     }
 
@@ -691,23 +688,14 @@ impl WireMeasurement {
             self.unit,
             MeasurementRange::new(self.min, self.max)
                 .map_err(|_| "Stored measurement binding is invalid")?,
-            self.step,
         )
         .map_err(|_| "Stored measurement binding is invalid")
     }
 
     fn into_battery(self) -> Result<BatteryBinding, &'static str> {
-        if self.unit != MeasurementUnit::Percentage {
-            return Err("Stored battery binding is invalid");
-        }
-        BatteryBinding::new(
-            self.property.into(),
-            self.format,
-            MeasurementRange::new(self.min, self.max)
-                .map_err(|_| "Stored battery binding is invalid")?,
-            self.step,
-        )
-        .map_err(|_| "Stored battery binding is invalid")
+        self.into_binding().and_then(|binding| {
+            BatteryBinding::new(binding).map_err(|_| "Stored battery binding is invalid")
+        })
     }
 }
 

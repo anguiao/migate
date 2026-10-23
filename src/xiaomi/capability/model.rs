@@ -434,29 +434,21 @@ pub enum MeasurementUnit {
 
 /// One real read-only measurement binding. Format, unit, range and access are
 /// fixed at the source boundary; the range is already representable in Matter.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeasurementBinding {
     property: PropertyBinding,
     format: NumericFormat,
     unit: MeasurementUnit,
     range: MeasurementRange,
-    step: f64,
 }
-impl Eq for MeasurementBinding {}
 impl MeasurementBinding {
     pub(crate) fn new(
         property: PropertyBinding,
         format: NumericFormat,
         unit: MeasurementUnit,
         range: MeasurementRange,
-        step: f64,
     ) -> Result<Self, CapabilityError> {
-        if property.siid == 0
-            || property.piid == 0
-            || !step.is_finite()
-            || step <= 0.0
-            || step > range.max() - range.min()
-        {
+        if property.siid == 0 || property.piid == 0 {
             return Err(CapabilityError::InvalidMeasurement("range"));
         }
         if let Some((min, max)) = format.measurement_bounds()
@@ -476,7 +468,6 @@ impl MeasurementBinding {
             format,
             unit,
             range,
-            step,
         })
     }
     pub fn property(&self) -> PropertyBinding {
@@ -490,9 +481,6 @@ impl MeasurementBinding {
     }
     pub fn range(&self) -> MeasurementRange {
         self.range
-    }
-    pub fn step(&self) -> f64 {
-        self.step
     }
     /// Decode a real source value in its declared unit. Integer formats do not
     /// accept fractional JSON values; every format is finite and in range.
@@ -509,7 +497,7 @@ impl MeasurementBinding {
                         .filter(|value| value.is_finite() && value.fract() == 0.0)
                 }),
         }
-        .filter(|value| value.is_finite() && self.range.contains(*value))
+        .filter(|value| self.range.contains(*value))
         .ok_or(CapabilityError::InvalidValue("measurement"))?;
         Ok(value)
     }
@@ -518,31 +506,16 @@ impl MeasurementBinding {
 /// One optional physical battery binding. The service/property semantics are
 /// resolved before construction; this type only carries the real binding and
 /// its supported percentage representation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatteryBinding {
     measurement: MeasurementBinding,
 }
-impl Eq for BatteryBinding {}
 impl BatteryBinding {
-    pub(crate) fn new(
-        property: PropertyBinding,
-        format: NumericFormat,
-        range: MeasurementRange,
-        step: f64,
-    ) -> Result<Self, CapabilityError> {
-        if range.min() < 0.0 || range.max() > 100.0 {
+    pub(crate) fn new(measurement: MeasurementBinding) -> Result<Self, CapabilityError> {
+        if measurement.unit() != MeasurementUnit::Percentage {
             return Err(CapabilityError::InvalidMeasurement("battery"));
         }
-        Ok(Self {
-            measurement: MeasurementBinding::new(
-                property,
-                format,
-                MeasurementUnit::Percentage,
-                range,
-                step,
-            )
-            .map_err(|_| CapabilityError::InvalidMeasurement("battery"))?,
-        })
+        Ok(Self { measurement })
     }
     pub fn property(&self) -> PropertyBinding {
         self.measurement.property()
@@ -552,9 +525,6 @@ impl BatteryBinding {
     }
     pub fn range(&self) -> MeasurementRange {
         self.measurement.range()
-    }
-    pub fn step(&self) -> f64 {
-        self.measurement.step()
     }
     pub fn read_value(&self, value: &Value) -> Result<f64, CapabilityError> {
         self.measurement

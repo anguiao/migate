@@ -72,7 +72,6 @@ fn standard_sensor_admits_independent_temperature_and_humidity_bindings() {
     assert_eq!(measurement.unit(), MeasurementUnit::Celsius);
     assert_eq!(measurement.range().min(), -30.0);
     assert_eq!(measurement.range().max(), 100.0);
-    assert_eq!(measurement.step(), 0.1);
     assert_eq!(
         temperature.kind(),
         FunctionKind::Temperature(MeasurementRange::new(-30.0, 100.0).unwrap())
@@ -92,7 +91,6 @@ fn standard_sensor_admits_independent_temperature_and_humidity_bindings() {
     assert_eq!(measurement.unit(), MeasurementUnit::Percentage);
     assert_eq!(measurement.range().min(), 0.0);
     assert_eq!(measurement.range().max(), 100.0);
-    assert_eq!(measurement.step(), 0.1);
     assert_eq!(
         humidity.kind(),
         FunctionKind::Humidity(MeasurementRange::new(0.0, 100.0).unwrap())
@@ -243,6 +241,8 @@ fn format_unit_range_and_matter_representability_are_enforced() {
         (Some("value-range"), json!([-30, 100]), "range"),
         (Some("value-range"), json!([100, -30, 0.1]), "range"),
         (Some("value-range"), json!([-30, 100, 0]), "range"),
+        (Some("value-range"), json!([-30, 100, -0.1]), "range"),
+        (Some("value-range"), json!([-30, 100, 131]), "range"),
         (Some("value-range"), json!([-30, "100", 0.1]), "range"),
         (Some("value-range"), json!([-274, 100, 0.1]), "range"),
         (Some("value-range"), json!([-30, 328, 0.1]), "range"),
@@ -292,7 +292,10 @@ fn native_boundaries_are_strict_before_matter_rounding() {
     for (piid, range) in [
         (1001, json!([-273.1500000001, 100, 0.1])),
         (1001, json!([-30, 327.6700000001, 0.1])),
+        (1001, json!([-30, 327.671, 0.1])),
+        (1001, json!([-30, 327.68, 0.1])),
         (1008, json!([-1e-12, 100, 0.1])),
+        (1008, json!([-0.001, 100, 0.1])),
         (1008, json!([0, 100.0000000001, 0.1])),
     ] {
         let mut description = sensor_description();
@@ -314,37 +317,24 @@ fn native_boundaries_are_strict_before_matter_rounding() {
 
 #[test]
 fn measured_values_at_the_native_boundaries_are_strict() {
-    let device = parse_device(sensor_key(), &sensor_description()).unwrap();
-    let temperature = device.functions()[0].measurement().unwrap();
-    assert_eq!(
-        temperature.read_value(&json!(-273.1500000001)),
-        Err(CapabilityError::InvalidValue("measurement"))
-    );
-    assert_eq!(
-        temperature.read_value(&json!(327.6700000001)),
-        Err(CapabilityError::InvalidValue("measurement"))
-    );
-    let humidity = device.functions()[1].measurement().unwrap();
-    assert_eq!(
-        humidity.read_value(&json!(-1e-12)),
-        Err(CapabilityError::InvalidValue("measurement"))
-    );
-    assert_eq!(
-        humidity.read_value(&json!(100.0000000001)),
-        Err(CapabilityError::InvalidValue("measurement"))
-    );
-}
-
-#[test]
-fn full_standard_temperature_upper_bound_is_admitted() {
     let mut description = sensor_description();
-    measurement_property_mut(&mut description, 1001)["value-range"] = json!([-30, 327.67, 0.1]);
-    assert!(parse_device(sensor_key(), &description).is_ok());
-    measurement_property_mut(&mut description, 1001)["value-range"] = json!([-30, 327.68, 0.1]);
-    assert_eq!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::InvalidMeasurement("range"))
-    );
+    measurement_property_mut(&mut description, 1001)["value-range"] = json!([-273.15, 327.67, 0.1]);
+    let device = parse_device(sensor_key(), &description).unwrap();
+    for (index, min, max, below, above) in [
+        (0, -273.15, 327.67, -273.1500000001, 327.6700000001),
+        (1, 0.0, 100.0, -1e-12, 100.0000000001),
+    ] {
+        let measurement = device.functions()[index].measurement().unwrap();
+        for valid in [min, max] {
+            assert_eq!(measurement.read_value(&json!(valid)), Ok(valid));
+        }
+        for invalid in [below, above] {
+            assert_eq!(
+                measurement.read_value(&json!(invalid)),
+                Err(CapabilityError::InvalidValue("measurement"))
+            );
+        }
+    }
 }
 
 #[test]
@@ -399,35 +389,6 @@ fn source_values_are_validated_by_their_declared_format_and_range() {
     );
 }
 
-#[test]
-fn projected_bounds_reject_values_that_round_into_the_matter_range() {
-    // The raw bound is outside the Matter limit even though rounding would
-    // land on the limit; admission must not repair it.
-    let mut description = sensor_description();
-    measurement_service_mut(&mut description)["properties"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|property| property["iid"] == 1001)
-        .unwrap()["value-range"] = json!([-30, 327.671, 0.1]);
-    assert_eq!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::InvalidMeasurement("range"))
-    );
-
-    let mut description = sensor_description();
-    measurement_service_mut(&mut description)["properties"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|property| property["iid"] == 1008)
-        .unwrap()["value-range"] = json!([-0.001, 100, 0.1]);
-    assert_eq!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::InvalidMeasurement("range"))
-    );
-}
-
 fn battery_service_mut(description: &mut Value) -> &mut Value {
     description["services"]
         .as_array_mut()
@@ -466,7 +427,6 @@ fn standard_battery_is_a_physical_binding_not_a_third_function() {
     assert_eq!(battery.format(), NumericFormat::Uint8);
     assert_eq!(battery.range().min(), 0.0);
     assert_eq!(battery.range().max(), 100.0);
-    assert_eq!(battery.step(), 1.0);
     assert!(device.is_read_only());
 }
 
@@ -558,7 +518,8 @@ fn invalid_battery_format_unit_range_and_duplicates_are_not_published() {
         ("value-range", json!([0, 101, 1])),
         ("value-range", json!([-1, 100, 1])),
         ("value-range", json!([0, 100, 0])),
-        ("value-range", json!([-1, 100, 1])),
+        ("value-range", json!([0, 100, -1])),
+        ("value-range", json!([0, 100, 101])),
     ] {
         let mut description = sensor_description();
         battery_property_mut(&mut description)[field] = value.clone();
@@ -618,26 +579,13 @@ fn battery_values_follow_the_declared_integer_percentage_range() {
 
 #[test]
 fn a_battery_binding_is_only_valid_on_the_two_measurement_sensor_topology() {
-    use crate::xiaomi::capability::{BatteryBinding, ParsedFunction};
-    let battery = BatteryBinding::new(
-        PropertyBinding {
-            siid: 2,
-            piid: 1003,
-        },
-        NumericFormat::Uint8,
-        MeasurementRange::new(0.0, 100.0).unwrap(),
-        1.0,
-    )
-    .unwrap();
+    use crate::xiaomi::capability::ParsedFunction;
+    let battery = parse_device(sensor_key(), &sensor_description())
+        .unwrap()
+        .battery()
+        .unwrap()
+        .clone();
     let outlet = ParsedFunction::outlet("main", "Main", PropertyBinding { siid: 2, piid: 1 });
-    assert_eq!(
-        parse_device(sensor_key(), &sensor_description())
-            .unwrap()
-            .battery()
-            .unwrap()
-            .property(),
-        battery.property()
-    );
     assert!(
         ParsedDevice::new_with_battery(sensor_key(), vec![outlet], None, Some(battery),).is_err()
     );

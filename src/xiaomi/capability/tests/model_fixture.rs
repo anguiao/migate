@@ -38,7 +38,6 @@ pub(crate) fn native_for(
                         NumericFormat::Float,
                         MeasurementUnit::Celsius,
                         range,
-                        0.1,
                     )
                     .unwrap(),
                 ),
@@ -53,7 +52,6 @@ pub(crate) fn native_for(
                         NumericFormat::Float,
                         MeasurementUnit::Percentage,
                         range,
-                        0.1,
                     )
                     .unwrap(),
                 ),
@@ -104,13 +102,16 @@ pub(crate) fn native_for(
     if sensor {
         let battery = description.has_battery().then(|| {
             BatteryBinding::new(
-                PropertyBinding {
-                    siid: 2,
-                    piid: 1003,
-                },
-                NumericFormat::Uint8,
-                crate::device::MeasurementRange::new(0.0, 100.0).unwrap(),
-                1.0,
+                MeasurementBinding::new(
+                    PropertyBinding {
+                        siid: 2,
+                        piid: 1003,
+                    },
+                    NumericFormat::Uint8,
+                    MeasurementUnit::Percentage,
+                    crate::device::MeasurementRange::new(0.0, 100.0).unwrap(),
+                )
+                .unwrap(),
             )
             .unwrap()
         });
