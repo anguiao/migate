@@ -1,10 +1,11 @@
-//! Matter representation boundary for light level and color-temperature units.
+//! Matter representation boundary for lighting and numeric measurements.
 //!
 //! The effective device model keeps logical kelvin intervals and native
 //! quantization grids. Converting between level percent and Matter's 1..254
 //! scale, and between kelvin and the Matter mired scale, is a representation
 //! concern owned here. Mired to kelvin keeps full precision so the native grid
 //! is quantized exactly once, at the Xiaomi send boundary.
+//! Numeric measurements retain their source units until protocol projection.
 
 use crate::device::{CommandError, TemperatureInterval, mired_span};
 
@@ -108,4 +109,27 @@ pub(crate) fn co2_matter_bounds(range: crate::device::MeasurementRange) -> Optio
     let min = co2_matter_value(range.min())?;
     let max = co2_matter_value(range.max())?;
     (min < max).then_some((min, max))
+}
+
+/// Lux to the Matter logarithmic scale; zero denotes all values below one lux.
+pub(crate) fn illuminance_matter_value(lux: f64) -> Option<u16> {
+    if !lux.is_finite() || lux < 0.0 {
+        return None;
+    }
+    if lux < 1.0 {
+        return Some(0);
+    }
+    let encoded = (10000.0 * lux.log10() + 1.0).round();
+    (1.0..=65534.0).contains(&encoded).then_some(encoded as u16)
+}
+
+pub(crate) fn illuminance_matter_bounds(
+    range: crate::device::MeasurementRange,
+) -> Option<(u16, u16)> {
+    if range.min() < 0.0 {
+        return None;
+    }
+    let min = illuminance_matter_value(range.min().max(1.0))?;
+    let max = illuminance_matter_value(range.max())?;
+    (min >= 1 && min < max).then_some((min, max))
 }

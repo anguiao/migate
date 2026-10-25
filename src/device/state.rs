@@ -399,6 +399,11 @@ impl Function {
                     measurement: *measurement,
                 }
             }
+            (super::FunctionKind::Illuminance(_), RuntimeValue::Measurement(measurement)) => {
+                FunctionState::Illuminance {
+                    measurement: *measurement,
+                }
+            }
             _ => unreachable!("runtime value matches the function kind"),
         };
         FunctionSnapshot {

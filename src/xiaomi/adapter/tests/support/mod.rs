@@ -150,7 +150,8 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
     let mut endpoint = 2u16;
     for native in natives {
         let id = native.device().key().id.clone();
-        let single = native.device().functions().len() == 1;
+        let single = native.device().functions().len() == 1
+            && !native.device().functions()[0].kind().is_measurement();
         let functions = native
             .device()
             .functions()

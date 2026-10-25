@@ -37,6 +37,9 @@ enum FunctionBindings {
     CarbonDioxide {
         measurement: MeasurementBinding,
     },
+    Illuminance {
+        measurement: MeasurementBinding,
+    },
 }
 impl ParsedFunction {
     pub(crate) fn outlet(
@@ -95,6 +98,17 @@ impl ParsedFunction {
             bindings: FunctionBindings::CarbonDioxide { measurement },
         }
     }
+    pub(crate) fn illuminance(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        measurement: MeasurementBinding,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Illuminance { measurement },
+        }
+    }
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -108,7 +122,8 @@ impl ParsedFunction {
             }
             FunctionBindings::Temperature { .. }
             | FunctionBindings::Humidity { .. }
-            | FunctionBindings::CarbonDioxide { .. } => None,
+            | FunctionBindings::CarbonDioxide { .. }
+            | FunctionBindings::Illuminance { .. } => None,
         }
     }
     pub fn lighting(&self) -> Option<&LightBindings> {
@@ -116,7 +131,8 @@ impl ParsedFunction {
             FunctionBindings::Outlet { .. }
             | FunctionBindings::Temperature { .. }
             | FunctionBindings::Humidity { .. }
-            | FunctionBindings::CarbonDioxide { .. } => None,
+            | FunctionBindings::CarbonDioxide { .. }
+            | FunctionBindings::Illuminance { .. } => None,
             FunctionBindings::Light { lighting, .. } => Some(lighting),
         }
     }
@@ -124,7 +140,8 @@ impl ParsedFunction {
         match &self.bindings {
             FunctionBindings::Temperature { measurement }
             | FunctionBindings::Humidity { measurement }
-            | FunctionBindings::CarbonDioxide { measurement } => Some(measurement),
+            | FunctionBindings::CarbonDioxide { measurement }
+            | FunctionBindings::Illuminance { measurement } => Some(measurement),
             FunctionBindings::Outlet { .. } | FunctionBindings::Light { .. } => None,
         }
     }
@@ -140,6 +157,9 @@ impl ParsedFunction {
             }
             FunctionBindings::CarbonDioxide { measurement } => {
                 FunctionKind::CarbonDioxide(measurement.range())
+            }
+            FunctionBindings::Illuminance { measurement } => {
+                FunctionKind::Illuminance(measurement.range())
             }
         }
     }
@@ -263,6 +283,11 @@ impl ParsedDevice {
                     FunctionKind::Humidity(_),
                     MeasurementUnit::Percentage
                 ) | ("co2", FunctionKind::CarbonDioxide(_), MeasurementUnit::Ppm)
+                    | (
+                        "illuminance",
+                        FunctionKind::Illuminance(_),
+                        MeasurementUnit::Lux
+                    )
             ) {
                 return Err(CapabilityError::InvalidDescription("sensor topology"));
             }
@@ -454,6 +479,7 @@ pub enum MeasurementUnit {
     Celsius,
     Percentage,
     Ppm,
+    Lux,
 }
 
 /// One real read-only measurement binding. Format, unit, range and access are

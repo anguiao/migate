@@ -204,8 +204,10 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
             control.clock.advance(Duration::from_millis(500));
             peer.state.borrow_mut().omit.remove("multi");
             peer.list_changed(&["multi"]);
-            advance_to(&control.clock, Duration::from_millis(710)).await;
+            // Hold time until the late device has a real read route and its own round.
+            until(|| control.context.local_candidate("multi", false).is_ok()).await;
             wait_deadline(&control.clock, 900).await;
+            advance_to(&control.clock, Duration::from_millis(710)).await;
             control.clock.advance(Duration::from_millis(189));
             settle_wire().await;
             assert_eq!(peer.count("get", "multi", 0), 0);

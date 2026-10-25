@@ -752,3 +752,96 @@ fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readi
     assert!(!unchanged.changed);
     assert!(!unchanged.rebuild);
 }
+
+#[test]
+fn illuminance_restores_current_identity_and_range_without_persisting_readings_or_steps() {
+    for (model, text, battery) in [
+        (
+            "yeelink.light.nl1",
+            include_str!("../../../tests/fixtures/miot/yeelink-nl1.json"),
+            true,
+        ),
+        (
+            "linp.sensor_occupy.hb01",
+            include_str!("../../../tests/fixtures/miot/linp-hb01.json"),
+            false,
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::storage::Store::open(directory.path()).unwrap();
+        let native = fixture("illuminance", model, text);
+        let key = native.device().key().clone();
+        let mut planned = next(
+            &CommittedConfiguration::empty(),
+            scope("account", "home"),
+            vec![native.clone()],
+        )
+        .configuration;
+        planned.devices[0].label = "Room light level".into();
+        save(&store, &planned);
+        let (physical, _) =
+            crate::device::PhysicalDevice::new(planned.derive().served[&key].description.clone());
+        physical.functions()[0]
+            .observe_measurement(0.125, Some(100), 200)
+            .unwrap();
+        let encoded = raw(&store);
+        assert!(!encoded.contains("source_time"));
+        assert!(!encoded.contains("received_at"));
+        assert!(!encoded.contains("step"));
+        drop(store);
+        let reopened = crate::storage::Store::open(directory.path()).unwrap();
+        let restored = load(&reopened);
+        assert_eq!(restored, planned);
+        let description = &restored.derive().served[&key].description;
+        assert_eq!(description.label(), "Room light level");
+        assert_eq!(description.has_battery(), battery);
+        let (restarted, _) = crate::device::PhysicalDevice::new(description.clone());
+        assert_eq!(
+            restarted.functions()[0]
+                .snapshot()
+                .measurement()
+                .unwrap()
+                .value,
+            None
+        );
+        assert_ne!(
+            restored.devices[0].endpoint,
+            restored.devices[0].functions[0].endpoint
+        );
+        let mut instance: Value = serde_json::from_str(text).unwrap();
+        for service in instance["services"].as_array_mut().unwrap() {
+            if let Some(properties) = service["properties"].as_array_mut() {
+                for property in properties {
+                    if property["value-range"].is_array() {
+                        property["value-range"][2] = json!(2);
+                    }
+                }
+            }
+        }
+        let changed_step = super::configuration::native("illuminance", model, instance.clone());
+        let unchanged = next(&restored, scope("account", "home"), vec![changed_step]);
+        assert!(!unchanged.changed);
+        assert!(!unchanged.rebuild);
+        for service in instance["services"].as_array_mut().unwrap() {
+            if let Some(properties) = service["properties"].as_array_mut() {
+                for property in properties {
+                    if property["unit"] == "lux" {
+                        property["value-range"][1] = json!(5000);
+                    }
+                }
+            }
+        }
+        let changed_range = super::configuration::native("illuminance", model, instance);
+        let updated = next(&restored, scope("account", "home"), vec![changed_range]);
+        assert!(updated.changed);
+        assert!(updated.rebuild);
+        assert_eq!(
+            updated.configuration.devices[0].endpoint,
+            restored.devices[0].endpoint
+        );
+        assert_eq!(
+            updated.configuration.devices[0].functions,
+            restored.devices[0].functions
+        );
+    }
+}

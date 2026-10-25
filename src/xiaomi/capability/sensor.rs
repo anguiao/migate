@@ -27,6 +27,12 @@ pub(super) fn measurements(instance: &Description<'_>) -> Vec<ParsedFunction> {
             MeasurementUnit::Percentage,
         ),
         ("co2", "co2-density", 0x0000_004B, MeasurementUnit::Ppm),
+        (
+            "illuminance",
+            "illumination",
+            0x0000_004E,
+            MeasurementUnit::Lux,
+        ),
     ] {
         let candidate = instance
             .services
@@ -54,6 +60,7 @@ pub(super) fn measurements(instance: &Description<'_>) -> Vec<ParsedFunction> {
                 "temperature" => ParsedFunction::temperature(name, "Temperature", binding),
                 "humidity" => ParsedFunction::humidity(name, "Humidity", binding),
                 "co2" => ParsedFunction::co2(name, "CO₂", binding),
+                "illuminance" => ParsedFunction::illuminance(name, "Illuminance", binding),
                 _ => unreachable!(),
             });
         }
@@ -94,6 +101,7 @@ fn measurement_binding(
         MeasurementUnit::Celsius => "celsius",
         MeasurementUnit::Percentage => "percentage",
         MeasurementUnit::Ppm => "ppm",
+        MeasurementUnit::Lux => "lux",
     };
     if string(value, "unit")? != expected_unit {
         return Err(CapabilityError::InvalidMeasurement("unit"));

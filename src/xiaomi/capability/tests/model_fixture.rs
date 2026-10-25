@@ -74,6 +74,17 @@ pub(crate) fn native_for(
                     )
                     .unwrap(),
                 ),
+                FunctionKind::Illuminance(range) => ParsedFunction::illuminance(
+                    id,
+                    label,
+                    MeasurementBinding::new(
+                        PropertyBinding { siid: 42, piid: 1 },
+                        NumericFormat::Float,
+                        MeasurementUnit::Lux,
+                        range,
+                    )
+                    .unwrap(),
+                ),
                 FunctionKind::Outlet => {
                     let siid = match (multiple, id.as_str()) {
                         (true, "outlet_1") => 3,

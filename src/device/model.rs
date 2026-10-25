@@ -32,6 +32,7 @@ pub enum Capability {
     Temperature,
     Humidity,
     CarbonDioxide,
+    Illuminance,
 }
 
 /// The four standard light profiles without their interval, for comparisons
@@ -91,6 +92,7 @@ pub enum FunctionKind {
     Temperature(MeasurementRange),
     Humidity(MeasurementRange),
     CarbonDioxide(MeasurementRange),
+    Illuminance(MeasurementRange),
 }
 impl FunctionKind {
     pub fn is_light(self) -> bool {
@@ -99,22 +101,28 @@ impl FunctionKind {
     pub fn light_profile(self) -> Option<LightProfile> {
         match self {
             Self::Light(profile) => Some(profile),
-            Self::Outlet | Self::Temperature(_) | Self::Humidity(_) | Self::CarbonDioxide(_) => {
-                None
-            }
+            Self::Outlet
+            | Self::Temperature(_)
+            | Self::Humidity(_)
+            | Self::CarbonDioxide(_)
+            | Self::Illuminance(_) => None,
         }
     }
     pub fn is_measurement(self) -> bool {
         matches!(
             self,
-            Self::Temperature(_) | Self::Humidity(_) | Self::CarbonDioxide(_)
+            Self::Temperature(_)
+                | Self::Humidity(_)
+                | Self::CarbonDioxide(_)
+                | Self::Illuminance(_)
         )
     }
     pub fn measurement_range(self) -> Option<MeasurementRange> {
         match self {
-            Self::Temperature(range) | Self::Humidity(range) | Self::CarbonDioxide(range) => {
-                Some(range)
-            }
+            Self::Temperature(range)
+            | Self::Humidity(range)
+            | Self::CarbonDioxide(range)
+            | Self::Illuminance(range) => Some(range),
             Self::Outlet | Self::Light(_) => None,
         }
     }
@@ -124,6 +132,7 @@ impl FunctionKind {
             Self::Temperature(_) => vec![Capability::Temperature],
             Self::Humidity(_) => vec![Capability::Humidity],
             Self::CarbonDioxide(_) => vec![Capability::CarbonDioxide],
+            Self::Illuminance(_) => vec![Capability::Illuminance],
             Self::Outlet => vec![Capability::OnOff],
             Self::Light(profile) => {
                 let mut capabilities = vec![Capability::OnOff];
@@ -388,6 +397,9 @@ pub enum FunctionState {
     CarbonDioxide {
         measurement: MeasurementSnapshot,
     },
+    Illuminance {
+        measurement: MeasurementSnapshot,
+    },
 }
 impl FunctionSnapshot {
     pub fn power(&self) -> Option<Power> {
@@ -395,7 +407,8 @@ impl FunctionSnapshot {
             FunctionState::Outlet { power } | FunctionState::Light { power, .. } => Some(*power),
             FunctionState::Temperature { .. }
             | FunctionState::Humidity { .. }
-            | FunctionState::CarbonDioxide { .. } => None,
+            | FunctionState::CarbonDioxide { .. }
+            | FunctionState::Illuminance { .. } => None,
         }
     }
     pub fn lighting(&self) -> Option<LightSnapshot> {
@@ -404,14 +417,16 @@ impl FunctionSnapshot {
             FunctionState::Outlet { .. }
             | FunctionState::Temperature { .. }
             | FunctionState::Humidity { .. }
-            | FunctionState::CarbonDioxide { .. } => None,
+            | FunctionState::CarbonDioxide { .. }
+            | FunctionState::Illuminance { .. } => None,
         }
     }
     pub fn measurement(&self) -> Option<MeasurementSnapshot> {
         match &self.state {
             FunctionState::Temperature { measurement }
             | FunctionState::Humidity { measurement }
-            | FunctionState::CarbonDioxide { measurement } => Some(*measurement),
+            | FunctionState::CarbonDioxide { measurement }
+            | FunctionState::Illuminance { measurement } => Some(*measurement),
             FunctionState::Outlet { .. } | FunctionState::Light { .. } => None,
         }
     }

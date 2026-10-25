@@ -200,3 +200,56 @@ fn co2_terminal_status_shows_native_ppm_and_independent_times() {
         );
     });
 }
+
+#[test]
+fn illuminance_terminal_status_keeps_native_lux_and_independent_times() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .local_status()
+            .unwrap();
+        let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
+        let registry = DeviceRegistry::new();
+        let (physical, receivers) = PhysicalDevice::new(
+            PhysicalDeviceDescription::new(
+                DeviceKey::new("xiaomi", "illuminance"),
+                "Light level",
+                vec![FunctionDescription {
+                    id: "illuminance".into(),
+                    label: "Illuminance".into(),
+                    kind: FunctionKind::Illuminance(MeasurementRange::new(0.0, 10000.0).unwrap()),
+                }],
+            )
+            .unwrap(),
+        );
+        assert!(receivers.is_empty());
+        add_device(&store, &physical.description());
+        registry.insert(physical.clone());
+        physical.functions()[0]
+            .observe_measurement(0.125, Some(100), 200)
+            .unwrap();
+        let output = handle_line(
+            &registry,
+            &store.devices(),
+            &status,
+            "status illuminance",
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            output.contains("illuminance (Illuminance): 0.12 lux"),
+            "{output}"
+        );
+        assert!(output.contains("upstream time 100"), "{output}");
+        assert!(output.contains("received at"), "{output}");
+        assert!(
+            terminal_command(&physical, "on")
+                .await
+                .unwrap()
+                .contains("does not support")
+        );
+    });
+}

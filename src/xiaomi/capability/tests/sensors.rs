@@ -670,3 +670,229 @@ fn co2_requires_its_declared_ppm_read_and_notify_capabilities_and_combines_with_
         );
     }
 }
+
+#[test]
+fn public_illuminance_descriptions_are_admitted_independently_of_host_services() {
+    // Sources: the official miot-spec.org instances named by each fixture.
+    for (fixture, siid, piid, format, max, battery) in [
+        (
+            include_str!("../../../../tests/fixtures/miot/izq-trio.json"),
+            2,
+            2,
+            NumericFormat::Uint16,
+            65535.0,
+            false,
+        ),
+        (
+            include_str!("../../../../tests/fixtures/miot/linp-hb01.json"),
+            2,
+            5,
+            NumericFormat::Float,
+            10000.0,
+            false,
+        ),
+        (
+            include_str!("../../../../tests/fixtures/miot/xiaomi-pir1.json"),
+            2,
+            1005,
+            NumericFormat::Float,
+            1000.0,
+            true,
+        ),
+        (
+            include_str!("../../../../tests/fixtures/miot/xiaomi-occupy-03.json"),
+            2,
+            1005,
+            NumericFormat::Float,
+            1000.0,
+            true,
+        ),
+        (
+            include_str!("../../../../tests/fixtures/miot/xiaomi-occupy-p1.json"),
+            2,
+            5,
+            NumericFormat::Float,
+            1000.0,
+            false,
+        ),
+        (
+            include_str!("../../../../tests/fixtures/miot/yeelink-nl1.json"),
+            4,
+            1,
+            NumericFormat::Float,
+            10000.0,
+            true,
+        ),
+    ] {
+        let instance: Value = serde_json::from_str(fixture).unwrap();
+        let device = parse_device(sensor_key(), &instance).unwrap();
+        assert_eq!(device.functions().len(), 1);
+        assert_eq!(device.functions()[0].id(), "illuminance");
+        assert!(device.is_read_only());
+        let measurement = device.functions()[0].measurement().unwrap();
+        assert_eq!(measurement.property(), PropertyBinding { siid, piid });
+        assert_eq!(measurement.format(), format);
+        assert_eq!(
+            measurement.range(),
+            MeasurementRange::new(0.0, max).unwrap()
+        );
+        assert_eq!(device.battery().is_some(), battery);
+    }
+    let enumerated: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/isa-dw2hl.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        parse_device(sensor_key(), &enumerated),
+        Err(CapabilityError::UnsupportedDevice)
+    );
+}
+
+#[test]
+fn all_fifteen_measurement_combinations_keep_independent_standard_keys() {
+    let mut instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/xiaomi-new3pr.json"
+    ))
+    .unwrap();
+    let occupancy: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/linp-hb01.json"
+    ))
+    .unwrap();
+    instance["services"].as_array_mut().unwrap().push(
+        occupancy["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|service| service["iid"] == 2)
+            .unwrap()
+            .clone(),
+    );
+    for mask in 1..16 {
+        let mut candidate = instance.clone();
+        for service in candidate["services"].as_array_mut().unwrap() {
+            if let Some(properties) = service["properties"].as_array_mut() {
+                properties.retain(|property| {
+                    match property["type"]
+                        .as_str()
+                        .unwrap()
+                        .split(':')
+                        .nth(3)
+                        .unwrap()
+                    {
+                        "temperature" => mask & 1 != 0,
+                        "relative-humidity" => mask & 2 != 0,
+                        "co2-density" => mask & 4 != 0,
+                        "illumination" => mask & 8 != 0,
+                        _ => true,
+                    }
+                });
+            }
+        }
+        let device = parse_device(sensor_key(), &candidate).unwrap();
+        let expected = ["temperature", "humidity", "co2", "illuminance"]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, id)| (mask & (1 << index) != 0).then_some(id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            device
+                .functions()
+                .iter()
+                .map(|function| function.id())
+                .collect::<Vec<_>>(),
+            expected,
+            "mask {mask}"
+        );
+        assert!(device.battery().is_some());
+    }
+}
+
+#[test]
+fn illuminance_uses_the_first_qualified_property_and_combines_with_supported_control() {
+    let night: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/yeelink-nl1.json"
+    ))
+    .unwrap();
+    let illumination = night["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|service| service["iid"] == 4)
+        .unwrap()
+        .clone();
+    let mut light: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/yeelink-light-light3.json"
+    ))
+    .unwrap();
+    light["services"]
+        .as_array_mut()
+        .unwrap()
+        .push(illumination.clone());
+    assert_eq!(
+        parse_device(sensor_key(), &light)
+            .unwrap()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>(),
+        ["main", "illuminance"]
+    );
+    for (field, value) in [
+        ("access", json!(["read"])),
+        ("access", json!(["notify"])),
+        ("unit", json!("percentage")),
+    ] {
+        let mut restricted = light.clone();
+        restricted["services"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|service| service["iid"] == 4)
+            .unwrap()["properties"][0][field] = value;
+        assert_eq!(
+            parse_device(sensor_key(), &restricted)
+                .unwrap()
+                .functions()
+                .len(),
+            1
+        );
+    }
+    let mut occupancy: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/linp-hb01.json"
+    ))
+    .unwrap();
+    occupancy["services"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|service| service["iid"] != 4);
+    occupancy["services"]
+        .as_array_mut()
+        .unwrap()
+        .push(illumination);
+    assert_eq!(
+        parse_device(sensor_key(), &occupancy).unwrap().functions()[0]
+            .measurement()
+            .unwrap()
+            .property(),
+        PropertyBinding { siid: 2, piid: 5 }
+    );
+    let first = occupancy["services"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|service| service["iid"] == 2)
+        .unwrap()["properties"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|property| property["iid"] == 5)
+        .unwrap();
+    first["access"] = json!(["read"]);
+    assert_eq!(
+        parse_device(sensor_key(), &occupancy).unwrap().functions()[0]
+            .measurement()
+            .unwrap()
+            .property(),
+        PropertyBinding { siid: 4, piid: 1 }
+    );
+}

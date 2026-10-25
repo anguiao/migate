@@ -96,6 +96,7 @@ fn measurement_notification_sources_switch_and_recover_independently() {
                         && sources().get("humidity") == Some(&Some(PathKind::Cloud))
                 })
                 .await;
+                peer.value("sensor", TEMPERATURE, json!(22.0));
                 peer.notify_value_at("sensor", TEMPERATURE, json!(22.0), Some(100), false);
                 cloud.property_at("sensor", 3, 1008, json!(46.0));
                 until(|| {
@@ -117,7 +118,15 @@ fn measurement_notification_sources_switch_and_recover_independently() {
                     .count();
                 peer.state.borrow_mut().sub_reject.clear();
                 peer.list_changed(&["sensor"]);
-                until(|| sources().get("humidity") == Some(&Some(PathKind::Local))).await;
+                until(|| {
+                    sources().get("humidity") == Some(&Some(PathKind::Local))
+                        && !work(&control.context, "sensor")
+                            .refresh
+                            .borrow()
+                            .contains("humidity", HUMIDITY)
+                })
+                .await;
+                peer.value("sensor", HUMIDITY, json!(47.0));
                 cloud.property_at("sensor", 3, 1008, json!(90.0));
                 peer.notify_value_at("sensor", HUMIDITY, json!(47.0), Some(101), false);
                 until(|| measurement(&control.context, "sensor", "humidity").value == Some(47.0))
@@ -1642,6 +1651,60 @@ fn co2_uses_independent_initial_reads_and_real_local_notifications() {
                 measurement(&control.context, "co2", "co2").value,
                 Some(700.0)
             );
+            assert!(control.cloud.lock().unwrap().property_writes.is_empty());
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn illuminance_keeps_sub_lux_readings_and_updates_from_real_local_notifications() {
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/yeelink-nl1.json"
+    ))
+    .unwrap();
+    let rig = Rig::custom_lights(&[("illuminance", "yeelink.light.nl1", instance)]);
+    let illuminance = PropertyBinding { siid: 4, piid: 1 };
+    let battery = PropertyBinding { siid: 3, piid: 1 };
+    block_on(rig.run(|c| async move {
+        assert_eq!(
+            measurement(&c.context, "illuminance", "illuminance").value,
+            None
+        );
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.value("illuminance", illuminance, json!(0.125));
+        peer.value("illuminance", battery, json!(55));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                measurement(&control.context, "illuminance", "illuminance").value == Some(0.125)
+                    && battery_status(&control.context, "illuminance")
+                        .functions
+                        .iter()
+                        .all(|function| function.notification_source == Some(PathKind::Local))
+            })
+            .await;
+            for (value, time) in [(0.5, 100), (10.0, 101)] {
+                peer.notify_value_at("illuminance", illuminance, json!(value), Some(time), false);
+                until(|| {
+                    measurement(&control.context, "illuminance", "illuminance").value == Some(value)
+                })
+                .await;
+                assert_eq!(
+                    measurement(&control.context, "illuminance", "illuminance").source_time,
+                    Some(time)
+                );
+            }
+            until(|| {
+                work(&control.context, "illuminance")
+                    .physical()
+                    .battery_snapshot()
+                    .unwrap()
+                    .value
+                    == Some(55.0)
+            })
+            .await;
             assert!(control.cloud.lock().unwrap().property_writes.is_empty());
         })
         .await;

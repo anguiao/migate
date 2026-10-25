@@ -15,8 +15,9 @@ use rs_matter::{
             decl::{
                 air_quality,
                 bridged_device_basic_information::{self as bridged, ClusterHandler as _},
-                carbon_dioxide_concentration_measurement, color_control, level_control,
-                power_source, relative_humidity_measurement, temperature_measurement,
+                carbon_dioxide_concentration_measurement, color_control, illuminance_measurement,
+                level_control, power_source, relative_humidity_measurement,
+                temperature_measurement,
             },
             desc::{self, ClusterHandler as _},
             groups::{self, ClusterHandler as _},
@@ -168,6 +169,16 @@ const CO2_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     <sensors::Co2Handler as carbon_dioxide_concentration_measurement::ClusterHandler>::CLUSTER
 );
 
+const LIGHT_SENSOR: DeviceType = DeviceType {
+    dtype: 0x0106,
+    drev: 3,
+};
+const ILLUMINANCE_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    <sensors::IlluminanceHandler as illuminance_measurement::ClusterHandler>::CLUSTER
+);
+
 pub(super) fn basic_info(identity: &Identity) -> BasicInfoConfig<'_> {
     BasicInfoConfig {
         product_name: "MiGate",
@@ -227,6 +238,7 @@ struct Versions {
     color: u32,
     temperature: u32,
     humidity: u32,
+    illuminance: u32,
     co2: u32,
     air_quality: u32,
     power_source: u32,
@@ -246,6 +258,7 @@ impl Versions {
             color: random.random(),
             temperature: random.random(),
             humidity: random.random(),
+            illuminance: random.random(),
             co2: random.random(),
             air_quality: random.random(),
             power_source: random.random(),
@@ -283,6 +296,7 @@ enum ControlKind {
     Light(Box<lighting::Lighting>),
     Temperature(sensors::TemperatureHandler),
     Humidity(sensors::HumidityHandler),
+    Illuminance(sensors::IlluminanceHandler),
     Co2(sensors::Co2Sensor),
 }
 impl Control {
@@ -309,6 +323,14 @@ impl Control {
             crate::device::FunctionKind::Humidity(_) => ControlKind::Humidity(
                 sensors::HumidityHandler::new(function, endpoint, Dataver::new(versions.humidity))
                     .expect("validated published humidity range"),
+            ),
+            crate::device::FunctionKind::Illuminance(_) => ControlKind::Illuminance(
+                sensors::IlluminanceHandler::new_illuminance(
+                    function,
+                    endpoint,
+                    Dataver::new(versions.illuminance),
+                )
+                .expect("published illuminance function has a measurement range"),
             ),
             crate::device::FunctionKind::CarbonDioxide(_) => ControlKind::Co2(
                 sensors::Co2Sensor::new(
@@ -337,13 +359,17 @@ impl Control {
             ControlKind::Outlet(_)
             | ControlKind::Temperature(_)
             | ControlKind::Humidity(_)
-            | ControlKind::Co2(_) => None,
+            | ControlKind::Co2(_)
+            | ControlKind::Illuminance(_) => None,
         }
     }
     fn is_sensor(&self) -> bool {
         matches!(
             self.kind,
-            ControlKind::Temperature(_) | ControlKind::Humidity(_) | ControlKind::Co2(_)
+            ControlKind::Temperature(_)
+                | ControlKind::Humidity(_)
+                | ControlKind::Co2(_)
+                | ControlKind::Illuminance(_)
         )
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
@@ -352,6 +378,7 @@ impl Control {
             ControlKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
             ControlKind::Temperature(_) => |_, cluster| cluster == 0x402,
             ControlKind::Humidity(_) => |_, cluster| cluster == 0x405,
+            ControlKind::Illuminance(_) => |_, cluster| cluster == 0x400,
             ControlKind::Co2(_) => |_, cluster| matches!(cluster, 0x040d | 0x005b),
         };
         let groups_matcher: fn(u16, u32) -> bool = if self.is_sensor() {
@@ -423,6 +450,14 @@ impl AsyncHandler for ControlKind {
                 )
                 .await
             }
+            Self::Illuminance(handler) => {
+                AsyncHandler::read(
+                    &Async(illuminance_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
         }
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
@@ -440,6 +475,13 @@ impl AsyncHandler for ControlKind {
             Self::Humidity(handler) => {
                 AsyncHandler::write(
                     &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                )
+                .await
+            }
+            Self::Illuminance(handler) => {
+                AsyncHandler::write(
+                    &Async(illuminance_measurement::HandlerAdaptor(handler)),
                     ctx,
                 )
                 .await
@@ -471,6 +513,14 @@ impl AsyncHandler for ControlKind {
                 )
                 .await
             }
+            Self::Illuminance(handler) => {
+                AsyncHandler::invoke(
+                    &Async(illuminance_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                    reply,
+                )
+                .await
+            }
         }
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
@@ -488,6 +538,13 @@ impl AsyncHandler for ControlKind {
             Self::Humidity(handler) => {
                 AsyncHandler::run(
                     &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
+                    ctx,
+                )
+                .await
+            }
+            Self::Illuminance(handler) => {
+                AsyncHandler::run(
+                    &Async(illuminance_measurement::HandlerAdaptor(handler)),
                     ctx,
                 )
                 .await
@@ -611,6 +668,10 @@ impl Entry {
                     Endpoint::new(self.endpoint, devices!(HUMIDITY_SENSOR), HUMIDITY_CLUSTERS)
                         .with_tags(tags)
                 }
+                ControlKind::Illuminance(_) => {
+                    Endpoint::new(self.endpoint, devices!(LIGHT_SENSOR), ILLUMINANCE_CLUSTERS)
+                        .with_tags(tags)
+                }
                 ControlKind::Co2(_) => {
                     Endpoint::new(self.endpoint, devices!(AIR_QUALITY_SENSOR), CO2_CLUSTERS)
                         .with_tags(tags)
@@ -682,6 +743,9 @@ impl Entry {
                 {
                     <sensors::HumidityHandler as
                         relative_humidity_measurement::ClusterHandler>::dataver_changed(handler)
+                }
+                ControlKind::Illuminance(handler) if cluster.is_none_or(|id| id == 0x400) => {
+                    <sensors::IlluminanceHandler as illuminance_measurement::ClusterHandler>::dataver_changed(handler)
                 }
                 ControlKind::Co2(handler) => handler.bump(cluster),
                 _ => {}

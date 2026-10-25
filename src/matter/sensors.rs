@@ -1,5 +1,5 @@
-//! Read-only Matter measurement clusters for temperature, humidity, CO₂ and the
-//! optional shared physical battery.
+//! Read-only Matter measurement clusters for temperature, humidity, CO₂,
+//! illuminance and the optional shared physical battery.
 //!
 //! Projection, range validation and report ownership live here. The source
 //! state is already validated at the Xiaomi boundary; these handlers never
@@ -16,8 +16,8 @@ use rs_matter::{
         clusters::decl::{
             air_quality, carbon_dioxide_concentration_measurement as co2,
             globals::{MeasurementMediumEnum, MeasurementUnitEnum},
-            power_source, relative_humidity_measurement as humidity,
-            temperature_measurement as temperature,
+            illuminance_measurement as illuminance, power_source,
+            relative_humidity_measurement as humidity, temperature_measurement as temperature,
         },
     },
     error::{Error, ErrorCode},
@@ -29,6 +29,7 @@ use std::cell::Cell;
 
 pub(super) type TemperatureHandler = MeasurementHandler<i16>;
 pub(super) type HumidityHandler = MeasurementHandler<u16>;
+pub(super) type IlluminanceHandler = MeasurementHandler<u16>;
 pub(super) type Co2Handler = MeasurementHandler<f32>;
 
 pub(crate) fn measurement_mapping_issue(function: &Function) -> Option<&'static str> {
@@ -41,6 +42,10 @@ pub(crate) fn measurement_mapping_issue(function: &Function) -> Option<&'static 
         crate::device::FunctionKind::Humidity(range) => (
             range.humidity_bounds().is_some(),
             value.is_none_or(|value| units::humidity_matter_value(value).is_some()),
+        ),
+        crate::device::FunctionKind::Illuminance(range) => (
+            units::illuminance_matter_bounds(range).is_some(),
+            value.is_none_or(|value| units::illuminance_matter_value(value).is_some()),
         ),
         crate::device::FunctionKind::CarbonDioxide(range) => (
             units::co2_matter_bounds(range).is_some(),
@@ -245,6 +250,58 @@ impl humidity::ClusterHandler for HumidityHandler {
             ctx,
             Self::CLUSTER.id,
             humidity::AttributeId::MeasuredValue as _,
+        )
+        .await
+    }
+}
+
+impl IlluminanceHandler {
+    pub(super) fn new_illuminance(
+        function: Function,
+        endpoint: u16,
+        dataver: Dataver,
+    ) -> Result<Self, Error> {
+        let range = function
+            .description()
+            .measurement_range()
+            .ok_or(ErrorCode::InvalidState)?;
+        Ok(Self::with_projection(
+            function,
+            endpoint,
+            dataver,
+            units::illuminance_matter_bounds(range),
+            units::illuminance_matter_value,
+        ))
+    }
+}
+
+impl illuminance::ClusterHandler for IlluminanceHandler {
+    const CLUSTER: Cluster<'static> = illuminance::FULL_CLUSTER
+        .with_features(0)
+        .with_attrs(|a, _, _| matches!(a.id, 0..=2 | 0xfff8..=0xfffd))
+        .with_cmds(with!());
+
+    fn dataver(&self) -> u32 {
+        self.sync_version();
+        self.dataver.get()
+    }
+    fn dataver_changed(&self) {
+        self.dataver.changed();
+    }
+    fn measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u16>, Error> {
+        self.measured_value()
+    }
+    fn min_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u16>, Error> {
+        self.min_measured_value()
+    }
+    fn max_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u16>, Error> {
+        self.max_measured_value()
+    }
+    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        self.run_measurement(
+            ctx,
+            Self::CLUSTER.id,
+            illuminance::AttributeId::MeasuredValue as _,
         )
         .await
     }

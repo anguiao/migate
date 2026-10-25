@@ -278,6 +278,11 @@ enum WireFunction {
         label: String,
         measurement: WireMeasurement,
     },
+    Illuminance {
+        id: String,
+        label: String,
+        measurement: WireMeasurement,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -550,6 +555,11 @@ impl WireFunction {
                     label: function.label().to_owned(),
                     measurement: wire,
                 },
+                crate::device::FunctionKind::Illuminance(_) => Self::Illuminance {
+                    id: function.id().to_owned(),
+                    label: function.label().to_owned(),
+                    measurement: wire,
+                },
                 _ => unreachable!("measurement functions have measurement kinds"),
             };
         }
@@ -631,6 +641,15 @@ impl WireFunction {
                 label,
                 measurement,
             } => Ok(ParsedFunction::co2(id, label, measurement.into_binding()?)),
+            Self::Illuminance {
+                id,
+                label,
+                measurement,
+            } => Ok(ParsedFunction::illuminance(
+                id,
+                label,
+                measurement.into_binding()?,
+            )),
             Self::Light {
                 id,
                 label,
