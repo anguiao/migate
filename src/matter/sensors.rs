@@ -1,4 +1,4 @@
-//! Read-only Matter measurement clusters for temperature, humidity and the
+//! Read-only Matter measurement clusters for temperature, humidity, CO₂ and the
 //! optional shared physical battery.
 //!
 //! Projection, range validation and report ownership live here. The source
@@ -11,8 +11,11 @@ use crate::{
 };
 use rs_matter::{
     dm::{
-        ArrayAttributeRead, Cluster, Dataver, HandlerContext, ReadContext,
+        ArrayAttributeRead, Async, AsyncHandler, Cluster, Dataver, EmptyHandler, HandlerContext,
+        InvokeContext, InvokeReply, MatchContext, ReadContext, ReadReply, WriteContext,
         clusters::decl::{
+            air_quality, carbon_dioxide_concentration_measurement as co2,
+            globals::{MeasurementMediumEnum, MeasurementUnitEnum},
             power_source, relative_humidity_measurement as humidity,
             temperature_measurement as temperature,
         },
@@ -26,6 +29,7 @@ use std::cell::Cell;
 
 pub(super) type TemperatureHandler = MeasurementHandler<i16>;
 pub(super) type HumidityHandler = MeasurementHandler<u16>;
+pub(super) type Co2Handler = MeasurementHandler<f32>;
 
 pub(crate) fn measurement_mapping_issue(function: &Function) -> Option<&'static str> {
     let value = function.snapshot().measurement()?.value;
@@ -37,6 +41,10 @@ pub(crate) fn measurement_mapping_issue(function: &Function) -> Option<&'static 
         crate::device::FunctionKind::Humidity(range) => (
             range.humidity_bounds().is_some(),
             value.is_none_or(|value| units::humidity_matter_value(value).is_some()),
+        ),
+        crate::device::FunctionKind::CarbonDioxide(range) => (
+            units::co2_matter_bounds(range).is_some(),
+            value.is_none_or(|value| units::co2_matter_value(value).is_some()),
         ),
         _ => return None,
     };
@@ -58,7 +66,7 @@ pub(super) struct MeasurementHandler<T> {
     versioned: Cell<Option<T>>,
     observed: Cell<Option<T>>,
 }
-impl<T: Copy + Eq> MeasurementHandler<T> {
+impl<T: Copy + PartialEq> MeasurementHandler<T> {
     fn with_projection(
         function: Function,
         endpoint: u16,
@@ -95,6 +103,34 @@ impl<T: Copy + Eq> MeasurementHandler<T> {
             self.dataver.changed();
         }
         current
+    }
+    fn measured_value(&self) -> Result<Nullable<T>, Error> {
+        if self.bounds.is_none() {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        let value = self.sync_version();
+        if value.is_none()
+            && self
+                .function
+                .snapshot()
+                .measurement()
+                .unwrap()
+                .value
+                .is_some()
+        {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        Ok(Nullable::new(value))
+    }
+    fn min_measured_value(&self) -> Result<Nullable<T>, Error> {
+        Ok(Nullable::new(Some(
+            self.bounds.ok_or(ErrorCode::ConstraintError)?.0,
+        )))
+    }
+    fn max_measured_value(&self) -> Result<Nullable<T>, Error> {
+        Ok(Nullable::new(Some(
+            self.bounds.ok_or(ErrorCode::ConstraintError)?.1,
+        )))
     }
     async fn run_measurement(
         &self,
@@ -164,32 +200,13 @@ impl temperature::ClusterHandler for TemperatureHandler {
         self.dataver.changed();
     }
     fn measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<i16>, Error> {
-        if self.bounds.is_none() {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        let value = self.sync_version();
-        if value.is_none()
-            && self
-                .function
-                .snapshot()
-                .measurement()
-                .unwrap()
-                .value
-                .is_some()
-        {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        Ok(Nullable::new(value))
+        self.measured_value()
     }
     fn min_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<i16>, Error> {
-        Ok(Nullable::new(Some(
-            self.bounds.ok_or(ErrorCode::ConstraintError)?.0,
-        )))
+        self.min_measured_value()
     }
     fn max_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<i16>, Error> {
-        Ok(Nullable::new(Some(
-            self.bounds.ok_or(ErrorCode::ConstraintError)?.1,
-        )))
+        self.max_measured_value()
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         self.run_measurement(
@@ -215,32 +232,13 @@ impl humidity::ClusterHandler for HumidityHandler {
         self.dataver.changed();
     }
     fn measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u16>, Error> {
-        if self.bounds.is_none() {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        let value = self.sync_version();
-        if value.is_none()
-            && self
-                .function
-                .snapshot()
-                .measurement()
-                .unwrap()
-                .value
-                .is_some()
-        {
-            return Err(ErrorCode::ConstraintError.into());
-        }
-        Ok(Nullable::new(value))
+        self.measured_value()
     }
     fn min_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u16>, Error> {
-        Ok(Nullable::new(Some(
-            self.bounds.ok_or(ErrorCode::ConstraintError)?.0,
-        )))
+        self.min_measured_value()
     }
     fn max_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u16>, Error> {
-        Ok(Nullable::new(Some(
-            self.bounds.ok_or(ErrorCode::ConstraintError)?.1,
-        )))
+        self.max_measured_value()
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         self.run_measurement(
@@ -249,6 +247,127 @@ impl humidity::ClusterHandler for HumidityHandler {
             humidity::AttributeId::MeasuredValue as _,
         )
         .await
+    }
+}
+
+impl Co2Handler {
+    pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Result<Self, Error> {
+        let range = function
+            .description()
+            .measurement_range()
+            .ok_or(ErrorCode::InvalidState)?;
+        Ok(Self::with_projection(
+            function,
+            endpoint,
+            dataver,
+            units::co2_matter_bounds(range),
+            units::co2_matter_value,
+        ))
+    }
+}
+impl co2::ClusterHandler for Co2Handler {
+    const CLUSTER: Cluster<'static> = co2::FULL_CLUSTER
+        .with_features(co2::Feature::NUMERIC_MEASUREMENT.bits())
+        .with_attrs(|attribute, _, _| matches!(attribute.id, 0..=2 | 8..=9 | 0xfff8..=0xfffd))
+        .with_cmds(with!());
+    fn dataver(&self) -> u32 {
+        self.sync_version();
+        self.dataver.get()
+    }
+    fn dataver_changed(&self) {
+        self.dataver.changed();
+    }
+    fn measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<f32>, Error> {
+        self.measured_value()
+    }
+    fn min_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<f32>, Error> {
+        self.min_measured_value()
+    }
+    fn max_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<f32>, Error> {
+        self.max_measured_value()
+    }
+    fn measurement_unit(&self, _ctx: impl ReadContext) -> Result<MeasurementUnitEnum, Error> {
+        Ok(MeasurementUnitEnum::PPM)
+    }
+    fn measurement_medium(&self, _ctx: impl ReadContext) -> Result<MeasurementMediumEnum, Error> {
+        Ok(MeasurementMediumEnum::Air)
+    }
+    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        self.run_measurement(ctx, Self::CLUSTER.id, co2::AttributeId::MeasuredValue as _)
+            .await
+    }
+}
+
+pub(super) struct AirQualityHandler {
+    dataver: Dataver,
+}
+impl air_quality::ClusterHandler for AirQualityHandler {
+    const CLUSTER: Cluster<'static> = air_quality::FULL_CLUSTER
+        .with_features(0)
+        .with_cmds(with!());
+    fn dataver(&self) -> u32 {
+        self.dataver.get()
+    }
+    fn dataver_changed(&self) {
+        self.dataver.changed();
+    }
+    fn air_quality(&self, _ctx: impl ReadContext) -> Result<air_quality::AirQualityEnum, Error> {
+        Ok(air_quality::AirQualityEnum::Unknown)
+    }
+}
+
+/// Both mandatory clusters belong to the same CO₂ function endpoint.
+pub(super) struct Co2Sensor {
+    concentration: Co2Handler,
+    air_quality: AirQualityHandler,
+}
+impl Co2Sensor {
+    pub(super) fn new(
+        function: Function,
+        endpoint: u16,
+        concentration: Dataver,
+        air_quality: Dataver,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            concentration: Co2Handler::new(function, endpoint, concentration)?,
+            air_quality: AirQualityHandler {
+                dataver: air_quality,
+            },
+        })
+    }
+    fn handler(&self) -> impl AsyncHandler + '_ {
+        EmptyHandler
+            .chain(
+                |_, cluster| cluster == 0x040d,
+                Async(co2::HandlerAdaptor(&self.concentration)),
+            )
+            .chain(
+                |_, cluster| cluster == 0x005b,
+                Async(air_quality::HandlerAdaptor(&self.air_quality)),
+            )
+    }
+    pub(super) fn bump(&self, cluster: Option<u32>) {
+        if cluster.is_none_or(|id| id == 0x040d) {
+            co2::ClusterHandler::dataver_changed(&self.concentration);
+        }
+        if cluster.is_none_or(|id| id == 0x005b) {
+            air_quality::ClusterHandler::dataver_changed(&self.air_quality);
+        }
+    }
+}
+impl AsyncHandler for Co2Sensor {
+    fn bump_dataver(&self, _ctx: impl MatchContext) {}
+    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        self.handler().read(ctx, reply).await
+    }
+    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+        self.handler().write(ctx).await
+    }
+    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
+        self.handler().invoke(ctx, reply).await
+    }
+    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        self.handler().run(ctx).await
     }
 }
 

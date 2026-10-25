@@ -154,3 +154,49 @@ fn status_shows_shared_battery_value_and_separate_times() {
         assert!(!list.contains("battery (Battery)"), "{list}");
     });
 }
+
+#[test]
+fn co2_terminal_status_shows_native_ppm_and_independent_times() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .local_status()
+            .unwrap();
+        let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
+        let registry = DeviceRegistry::new();
+        let (physical, receivers) = PhysicalDevice::new(
+            PhysicalDeviceDescription::new(
+                DeviceKey::new("xiaomi", "co2"),
+                "Air",
+                vec![FunctionDescription {
+                    id: "co2".into(),
+                    label: "CO₂".into(),
+                    kind: FunctionKind::CarbonDioxide(
+                        MeasurementRange::new(400.0, 5000.0).unwrap(),
+                    ),
+                }],
+            )
+            .unwrap(),
+        );
+        assert!(receivers.is_empty());
+        add_device(&store, &physical.description());
+        registry.insert(physical.clone());
+        physical.functions()[0]
+            .observe_measurement(650.125, Some(100), 200)
+            .unwrap();
+        let output = handle_line(&registry, &store.devices(), &status, "status co2", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(output.contains("co2 (CO₂): 650.12 ppm"), "{output}");
+        assert!(output.contains("upstream time 100"), "{output}");
+        assert!(output.contains("received at"), "{output}");
+        assert!(
+            terminal_command(&physical, "on")
+                .await
+                .unwrap()
+                .contains("does not support")
+        );
+    });
+}

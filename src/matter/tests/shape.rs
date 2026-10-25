@@ -85,3 +85,22 @@ fn battery_capability_is_part_of_the_fixed_physical_shape() {
         fixed_shape_with_battery(&functions, true)
     );
 }
+
+#[test]
+fn co2_fixed_shape_compares_the_published_single_precision_bounds() {
+    let measurement = |max| FunctionDescription {
+        id: "co2".into(),
+        label: "CO₂".into(),
+        kind: FunctionKind::CarbonDioxide(
+            crate::device::MeasurementRange::new(400.0, max).unwrap(),
+        ),
+    };
+    assert_eq!(
+        fixed_shape(&[measurement(5000.0)]),
+        fixed_shape(&[measurement(5000.000001)])
+    );
+    assert_ne!(
+        fixed_shape(&[measurement(5000.0)]),
+        fixed_shape(&[measurement(6000.0)])
+    );
+}

@@ -1565,3 +1565,85 @@ fn a_stale_battery_read_failure_cannot_replace_a_newer_valid_notification() {
         .await;
     }));
 }
+
+#[test]
+fn co2_uses_independent_initial_reads_and_real_local_notifications() {
+    let instance: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/xiaomi-new3pr.json"
+    ))
+    .unwrap();
+    let rig = Rig::custom_lights(&[("co2", "xiaomi.sensor_ht.new3pr", instance)]);
+    let co2 = PropertyBinding {
+        siid: 8,
+        piid: 1029,
+    };
+    let temperature = PropertyBinding {
+        siid: 7,
+        piid: 1001,
+    };
+    let humidity = PropertyBinding {
+        siid: 7,
+        piid: 1002,
+    };
+    let battery = PropertyBinding {
+        siid: 4,
+        piid: 1003,
+    };
+    block_on(rig.run(|c| async move {
+        assert_eq!(measurement(&c.context, "co2", "co2").value, None);
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        for (binding, value) in [
+            (co2, json!(650)),
+            (temperature, json!(21.5)),
+            (humidity, json!(45)),
+            (battery, json!(55)),
+        ] {
+            peer.value("co2", binding, value);
+        }
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                measurement(&control.context, "co2", "co2").value == Some(650.0)
+                    && measurement(&control.context, "co2", "temperature").value == Some(21.5)
+                    && battery_status(&control.context, "co2")
+                        .functions
+                        .iter()
+                        .all(|function| function.notification_source == Some(PathKind::Local))
+            })
+            .await;
+            let before_temperature = measurement(&control.context, "co2", "temperature");
+            peer.notify_value_at("co2", co2, json!(700), Some(100), false);
+            until(|| measurement(&control.context, "co2", "co2").value == Some(700.0)).await;
+            assert_eq!(
+                measurement(&control.context, "co2", "co2").source_time,
+                Some(100)
+            );
+            assert_eq!(
+                measurement(&control.context, "co2", "temperature"),
+                before_temperature
+            );
+            assert_eq!(
+                measurement(&control.context, "co2", "humidity").value,
+                Some(45.0)
+            );
+            until(|| {
+                work(&control.context, "co2")
+                    .physical()
+                    .battery_snapshot()
+                    .unwrap()
+                    .value
+                    == Some(55.0)
+            })
+            .await;
+            peer.notify_value_at("co2", temperature, json!(22.0), Some(101), false);
+            until(|| measurement(&control.context, "co2", "temperature").value == Some(22.0)).await;
+            assert_eq!(
+                measurement(&control.context, "co2", "co2").value,
+                Some(700.0)
+            );
+            assert!(control.cloud.lock().unwrap().property_writes.is_empty());
+        })
+        .await;
+    }));
+}

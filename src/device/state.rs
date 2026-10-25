@@ -394,6 +394,11 @@ impl Function {
                     measurement: *measurement,
                 }
             }
+            (super::FunctionKind::CarbonDioxide(_), RuntimeValue::Measurement(measurement)) => {
+                FunctionState::CarbonDioxide {
+                    measurement: *measurement,
+                }
+            }
             _ => unreachable!("runtime value matches the function kind"),
         };
         FunctionSnapshot {

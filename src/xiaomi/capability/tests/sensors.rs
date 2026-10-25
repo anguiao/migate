@@ -536,3 +536,137 @@ fn battery_diagnostics_do_not_change_native_capability_equality() {
     assert!(diagnosed.battery_issue().is_some());
     assert!(stored.battery_issue().is_none());
 }
+
+#[test]
+fn public_new3pr_extracts_co2_independently_in_standard_measurement_order() {
+    // Source: https://miot-spec.org/miot-spec-v2/instance?type=urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:xiaomi-new3pr:1:0000D063
+    let description: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/xiaomi-new3pr.json"
+    ))
+    .unwrap();
+    for mask in 1..8 {
+        let mut instance = description.clone();
+        instance["type"] = json!("urn:miot-spec-v2:device:air-conditioner:0000A004:sample:1");
+        for service in instance["services"].as_array_mut().unwrap() {
+            if let Some(properties) = service["properties"].as_array_mut() {
+                properties.retain(|property| {
+                    match property["type"]
+                        .as_str()
+                        .unwrap()
+                        .split(':')
+                        .nth(3)
+                        .unwrap()
+                    {
+                        "temperature" => mask & 1 != 0,
+                        "relative-humidity" => mask & 2 != 0,
+                        "co2-density" => mask & 4 != 0,
+                        _ => true,
+                    }
+                });
+            }
+        }
+        let device = parse_device(sensor_key(), &instance).unwrap();
+        let expected = ["temperature", "humidity", "co2"]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, id)| (mask & (1 << index) != 0).then_some(id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            device
+                .functions()
+                .iter()
+                .map(|function| function.id())
+                .collect::<Vec<_>>(),
+            expected,
+            "mask {mask}"
+        );
+        assert!(device.is_read_only());
+        assert!(device.battery().is_some());
+        if let Some(co2) = device
+            .functions()
+            .iter()
+            .find(|function| function.id() == "co2")
+        {
+            let measurement = co2.measurement().unwrap();
+            assert_eq!(
+                measurement.property(),
+                PropertyBinding {
+                    siid: 8,
+                    piid: 1029
+                }
+            );
+            assert_eq!(measurement.format(), NumericFormat::Uint16);
+            assert_eq!(
+                measurement.range(),
+                MeasurementRange::new(400.0, 5000.0).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn co2_requires_its_declared_ppm_read_and_notify_capabilities_and_combines_with_controls() {
+    let description: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/xiaomi-new3pr.json"
+    ))
+    .unwrap();
+    let mut co2_service = description["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|service| service["iid"] == 8)
+        .unwrap()
+        .clone();
+    co2_service["iid"] = json!(42);
+    let mut instance = public_description();
+    instance["services"]
+        .as_array_mut()
+        .unwrap()
+        .push(co2_service.clone());
+    let parsed = parse_device(sensor_key(), &instance).unwrap();
+    assert_eq!(
+        parsed
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>(),
+        ["main", "co2"]
+    );
+    assert_eq!(
+        parsed.functions()[0].power(),
+        Some(PropertyBinding { siid: 2, piid: 1 })
+    );
+    assert_eq!(
+        parsed.functions()[1].measurement().unwrap().unit(),
+        MeasurementUnit::Ppm
+    );
+    for (field, value) in [
+        ("access", json!(["read"])),
+        ("access", json!(["notify"])),
+        ("unit", json!("percentage")),
+    ] {
+        let mut instance = instance.clone();
+        let service = instance["services"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|service| service["iid"] == 42)
+            .unwrap();
+        let property = service["properties"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|property| property["iid"] == 1029)
+            .unwrap();
+        property[field] = value;
+        let parsed = parse_device(sensor_key(), &instance).unwrap();
+        assert_eq!(
+            parsed
+                .functions()
+                .iter()
+                .map(|function| function.id())
+                .collect::<Vec<_>>(),
+            ["main"]
+        );
+    }
+}

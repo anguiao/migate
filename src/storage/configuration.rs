@@ -273,6 +273,11 @@ enum WireFunction {
         label: String,
         measurement: WireMeasurement,
     },
+    CarbonDioxide {
+        id: String,
+        label: String,
+        measurement: WireMeasurement,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -540,6 +545,11 @@ impl WireFunction {
                     label: function.label().to_owned(),
                     measurement: wire,
                 },
+                crate::device::FunctionKind::CarbonDioxide(_) => Self::CarbonDioxide {
+                    id: function.id().to_owned(),
+                    label: function.label().to_owned(),
+                    measurement: wire,
+                },
                 _ => unreachable!("measurement functions have measurement kinds"),
             };
         }
@@ -616,6 +626,11 @@ impl WireFunction {
                 label,
                 measurement.into_binding()?,
             )),
+            Self::CarbonDioxide {
+                id,
+                label,
+                measurement,
+            } => Ok(ParsedFunction::co2(id, label, measurement.into_binding()?)),
             Self::Light {
                 id,
                 label,

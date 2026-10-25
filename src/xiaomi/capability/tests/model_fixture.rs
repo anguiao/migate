@@ -60,6 +60,20 @@ pub(crate) fn native_for(
                     )
                     .unwrap(),
                 ),
+                FunctionKind::CarbonDioxide(range) => ParsedFunction::co2(
+                    id,
+                    label,
+                    MeasurementBinding::new(
+                        PropertyBinding {
+                            siid: 8,
+                            piid: 1029,
+                        },
+                        NumericFormat::Float,
+                        MeasurementUnit::Ppm,
+                        range,
+                    )
+                    .unwrap(),
+                ),
                 FunctionKind::Outlet => {
                     let siid = match (multiple, id.as_str()) {
                         (true, "outlet_1") => 3,

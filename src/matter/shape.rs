@@ -39,6 +39,9 @@ enum FixedKind {
     Humidity {
         bounds: Option<(u16, u16)>,
     },
+    CarbonDioxide {
+        bounds: Option<(u32, u32)>,
+    },
 }
 
 /// Canonical shape of the functions as they will be published. The
@@ -66,6 +69,10 @@ pub(crate) fn fixed_shape_with_battery(
                     },
                     FunctionKind::Humidity(range) => FixedKind::Humidity {
                         bounds: range.humidity_bounds(),
+                    },
+                    FunctionKind::CarbonDioxide(range) => FixedKind::CarbonDioxide {
+                        bounds: units::co2_matter_bounds(range)
+                            .map(|(min, max)| (min.to_bits(), max.to_bits())),
                     },
                 },
                 child_label: multiple.then(|| function.label.clone()),

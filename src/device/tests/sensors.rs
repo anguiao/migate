@@ -280,3 +280,53 @@ fn multiple_physical_devices_keep_isolated_battery_state() {
     assert_eq!(first.battery_snapshot().unwrap().value, Some(10.0));
     assert_eq!(second.battery_snapshot().unwrap().value, Some(90.0));
 }
+
+#[test]
+fn co2_is_a_read_only_measurement_with_its_own_state_and_timestamps() {
+    let mut functions = sensor_description().functions().to_vec();
+    functions.push(FunctionDescription {
+        id: "co2".into(),
+        label: "CO₂".into(),
+        kind: FunctionKind::CarbonDioxide(MeasurementRange::new(400.0, 5000.0).unwrap()),
+    });
+    let (physical, receivers) = PhysicalDevice::new(
+        PhysicalDeviceDescription::new(DeviceKey::new("xiaomi", "combined"), "Combined", functions)
+            .unwrap()
+            .with_battery(),
+    );
+    assert!(receivers.is_empty());
+    let co2 = physical.function("co2").unwrap();
+    assert_eq!(co2.snapshot().measurement().unwrap().value, None);
+    co2.observe_measurement(650.0, Some(100), 200).unwrap();
+    assert!(matches!(
+        co2.snapshot().state,
+        FunctionState::CarbonDioxide { .. }
+    ));
+    assert_eq!(co2.snapshot().power(), None);
+    assert_eq!(co2.snapshot().lighting(), None);
+    assert_eq!(
+        co2.description().capabilities(),
+        [crate::device::Capability::CarbonDioxide]
+    );
+    assert_eq!(
+        co2.snapshot().measurement().unwrap(),
+        MeasurementSnapshot {
+            value: Some(650.0),
+            source_time: Some(100),
+            received_at: Some(200)
+        }
+    );
+    assert!(
+        physical.functions()[..2].iter().all(|function| function
+            .snapshot()
+            .measurement()
+            .unwrap()
+            .value
+            .is_none())
+    );
+    assert_eq!(physical.battery_snapshot().unwrap().value, None);
+    assert!(matches!(
+        block_on(co2.execute(Command::On)),
+        Err(CommandError::Unsupported)
+    ));
+}

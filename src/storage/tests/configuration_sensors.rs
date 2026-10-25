@@ -664,3 +664,91 @@ fn old_schema8_sensor_records_without_a_diagnostic_get_a_truthful_generic_reason
             .is_some_and(|issue| issue.contains("not declared"))
     );
 }
+
+#[test]
+fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readings() {
+    let directory = tempfile::tempdir().unwrap();
+    let original = fixture(
+        "co2",
+        "xiaomi.sensor_ht.new3pr",
+        include_str!("../../../tests/fixtures/miot/xiaomi-new3pr.json"),
+    );
+    let native = crate::xiaomi::capability::NativeDescription::new(
+        original.model().into(),
+        original.instance_type().into(),
+        crate::xiaomi::capability::ParsedDevice::new_with_battery(
+            original.device().key().clone(),
+            original
+                .device()
+                .functions()
+                .iter()
+                .filter(|function| function.id() == "co2")
+                .cloned()
+                .collect(),
+            None,
+            original.device().battery().cloned(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = crate::storage::Store::open(directory.path()).unwrap();
+    let planned = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![native],
+    )
+    .configuration;
+    save(&store, &planned);
+    let (physical, _) = crate::device::PhysicalDevice::new(
+        planned.derive().served[&DeviceKey::new("xiaomi", "co2")]
+            .description
+            .clone(),
+    );
+    physical.functions()[0]
+        .observe_measurement(700.0, Some(100), 200)
+        .unwrap();
+    let wire = raw(&store);
+    assert!(!wire.contains("received_at"));
+    assert!(!wire.contains("source_time"));
+    drop(store);
+    let reopened = crate::storage::Store::open(directory.path()).unwrap();
+    let restored = load(&reopened);
+    assert_eq!(restored, planned);
+    let device = &restored.devices[0];
+    assert_eq!(device.functions.len(), 1);
+    assert_ne!(device.functions[0].endpoint, device.endpoint);
+    let co2 = &device.native.as_ref().unwrap().device().functions()[0];
+    assert_eq!(co2.id(), "co2");
+    assert_eq!(
+        co2.kind(),
+        FunctionKind::CarbonDioxide(MeasurementRange::new(400.0, 5000.0).unwrap())
+    );
+    assert_eq!(co2.measurement().unwrap().unit(), MeasurementUnit::Ppm);
+    assert_eq!(
+        co2.measurement().unwrap().property(),
+        PropertyBinding {
+            siid: 8,
+            piid: 1029
+        }
+    );
+    let (restarted, _) = crate::device::PhysicalDevice::new(
+        restored.derive().served[&DeviceKey::new("xiaomi", "co2")]
+            .description
+            .clone(),
+    );
+    assert_eq!(
+        restarted.functions()[0]
+            .snapshot()
+            .measurement()
+            .unwrap()
+            .value,
+        None
+    );
+    let unchanged = next(
+        &restored,
+        scope("account", "home"),
+        vec![device.native.clone().unwrap()],
+    );
+    assert!(!unchanged.changed);
+    assert!(!unchanged.rebuild);
+}

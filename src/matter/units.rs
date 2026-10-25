@@ -97,3 +97,15 @@ pub(crate) fn battery_percent_matter_value(percent: f64) -> Option<u8> {
     let rounded = (percent * 2.0).round();
     (0.0..=200.0).contains(&rounded).then_some(rounded as u8)
 }
+
+/// Project native ppm to the concentration cluster's single-precision value.
+pub(crate) fn co2_matter_value(ppm: f64) -> Option<f32> {
+    let projected = ppm as f32;
+    projected.is_finite().then_some(projected)
+}
+
+pub(crate) fn co2_matter_bounds(range: crate::device::MeasurementRange) -> Option<(f32, f32)> {
+    let min = co2_matter_value(range.min())?;
+    let max = co2_matter_value(range.max())?;
+    (min < max).then_some((min, max))
+}

@@ -126,6 +126,7 @@ fn capabilities(description: &crate::device::FunctionDescription) -> String {
             Capability::ColorRgb => "RGB".into(),
             Capability::Temperature => "temperature".into(),
             Capability::Humidity => "humidity".into(),
+            Capability::CarbonDioxide => "co2".into(),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -255,6 +256,12 @@ fn render(view: &View, did: Option<&str>) -> String {
                     lines.push(format!(
                         "  {id} ({label}): {}",
                         measurement_text(measurement, "%")
+                    ));
+                }
+                crate::device::FunctionState::CarbonDioxide { measurement } => {
+                    lines.push(format!(
+                        "  {id} ({label}): {}",
+                        measurement_text(measurement, "ppm")
                     ));
                 }
             }
