@@ -117,15 +117,6 @@ impl FunctionKind {
                 | Self::Illuminance(_)
         )
     }
-    pub fn measurement_range(self) -> Option<MeasurementRange> {
-        match self {
-            Self::Temperature(range)
-            | Self::Humidity(range)
-            | Self::CarbonDioxide(range)
-            | Self::Illuminance(range) => Some(range),
-            Self::Outlet | Self::Light(_) => None,
-        }
-    }
     /// Derived only for diagnostics.
     pub fn capabilities(self) -> Vec<Capability> {
         match self {
@@ -190,9 +181,6 @@ impl FunctionDescription {
     }
     pub fn is_read_only(&self) -> bool {
         self.is_measurement()
-    }
-    pub fn measurement_range(&self) -> Option<MeasurementRange> {
-        self.kind.measurement_range()
     }
 }
 

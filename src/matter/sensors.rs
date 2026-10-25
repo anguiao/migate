@@ -6,7 +6,7 @@
 //! perform writes or fabricate optional capabilities.
 
 use crate::{
-    device::{BatterySnapshot, Function, PhysicalDevice},
+    device::{BatterySnapshot, Function, MeasurementRange, PhysicalDevice},
     matter::units,
 };
 use rs_matter::{
@@ -159,35 +159,35 @@ impl<T: Copy + PartialEq> MeasurementHandler<T> {
 }
 
 impl TemperatureHandler {
-    pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Result<Self, Error> {
-        let range = function
-            .description()
-            .measurement_range()
-            .ok_or(ErrorCode::InvalidState)?;
-        let bounds = units::temperature_matter_bounds(range);
-        Ok(Self::with_projection(
+    pub(super) fn new(
+        function: Function,
+        range: MeasurementRange,
+        endpoint: u16,
+        dataver: Dataver,
+    ) -> Self {
+        Self::with_projection(
             function,
             endpoint,
             dataver,
-            bounds,
+            units::temperature_matter_bounds(range),
             units::temperature_matter_value,
-        ))
+        )
     }
 }
 impl HumidityHandler {
-    pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Result<Self, Error> {
-        let range = function
-            .description()
-            .measurement_range()
-            .ok_or(ErrorCode::InvalidState)?;
-        let bounds = units::humidity_matter_bounds(range);
-        Ok(Self::with_projection(
+    pub(super) fn new(
+        function: Function,
+        range: MeasurementRange,
+        endpoint: u16,
+        dataver: Dataver,
+    ) -> Self {
+        Self::with_projection(
             function,
             endpoint,
             dataver,
-            bounds,
+            units::humidity_matter_bounds(range),
             units::humidity_matter_value,
-        ))
+        )
     }
 }
 
@@ -258,20 +258,17 @@ impl humidity::ClusterHandler for HumidityHandler {
 impl IlluminanceHandler {
     pub(super) fn new_illuminance(
         function: Function,
+        range: MeasurementRange,
         endpoint: u16,
         dataver: Dataver,
-    ) -> Result<Self, Error> {
-        let range = function
-            .description()
-            .measurement_range()
-            .ok_or(ErrorCode::InvalidState)?;
-        Ok(Self::with_projection(
+    ) -> Self {
+        Self::with_projection(
             function,
             endpoint,
             dataver,
             units::illuminance_matter_bounds(range),
             units::illuminance_matter_value,
-        ))
+        )
     }
 }
 
@@ -308,18 +305,19 @@ impl illuminance::ClusterHandler for IlluminanceHandler {
 }
 
 impl Co2Handler {
-    pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Result<Self, Error> {
-        let range = function
-            .description()
-            .measurement_range()
-            .ok_or(ErrorCode::InvalidState)?;
-        Ok(Self::with_projection(
+    pub(super) fn new(
+        function: Function,
+        range: MeasurementRange,
+        endpoint: u16,
+        dataver: Dataver,
+    ) -> Self {
+        Self::with_projection(
             function,
             endpoint,
             dataver,
             units::co2_matter_bounds(range),
             units::co2_matter_value,
-        ))
+        )
     }
 }
 impl co2::ClusterHandler for Co2Handler {
@@ -381,16 +379,17 @@ pub(super) struct Co2Sensor {
 impl Co2Sensor {
     pub(super) fn new(
         function: Function,
+        range: MeasurementRange,
         endpoint: u16,
         concentration: Dataver,
         air_quality: Dataver,
-    ) -> Result<Self, Error> {
-        Ok(Self {
-            concentration: Co2Handler::new(function, endpoint, concentration)?,
+    ) -> Self {
+        Self {
+            concentration: Co2Handler::new(function, range, endpoint, concentration),
             air_quality: AirQualityHandler {
                 dataver: air_quality,
             },
-        })
+        }
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
         EmptyHandler

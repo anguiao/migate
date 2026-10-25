@@ -1,5 +1,5 @@
 use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler, sensors};
-use crate::device::{Function, LightProfileKind, PhysicalDevice};
+use crate::device::{Function, FunctionKind, LightProfileKind, PhysicalDevice};
 use crate::storage::Identity;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use rand::RngExt as _;
@@ -272,7 +272,7 @@ struct Entry {
 }
 enum Role {
     Single {
-        control: Control,
+        function: FunctionHandler,
         bridged: BridgedHandler,
     },
     Parent {
@@ -281,17 +281,17 @@ enum Role {
         battery: Option<sensors::BatteryHandler>,
     },
     Child {
-        control: Control,
+        function: FunctionHandler,
         tag: u8,
         label: String,
     },
 }
-struct Control {
+struct FunctionHandler {
     groups: Dataver,
     identify: identify::IdentifyHandler,
-    kind: ControlKind,
+    kind: FunctionHandlerKind,
 }
-enum ControlKind {
+enum FunctionHandlerKind {
     Outlet(OnOffHandler),
     Light(Box<lighting::Lighting>),
     Temperature(sensors::TemperatureHandler),
@@ -299,10 +299,10 @@ enum ControlKind {
     Illuminance(sensors::IlluminanceHandler),
     Co2(sensors::Co2Sensor),
 }
-impl Control {
+impl FunctionHandler {
     fn new(function: Function, endpoint: u16, versions: Versions) -> Self {
         let kind = match function.description().kind {
-            crate::device::FunctionKind::Light(_) => ControlKind::Light(Box::new(
+            FunctionKind::Light(_) => FunctionHandlerKind::Light(Box::new(
                 lighting::Lighting::new(
                     function,
                     endpoint,
@@ -312,36 +312,40 @@ impl Control {
                 )
                 .expect("validated published lighting capabilities"),
             )),
-            crate::device::FunctionKind::Temperature(_) => ControlKind::Temperature(
-                sensors::TemperatureHandler::new(
+            FunctionKind::Temperature(range) => {
+                FunctionHandlerKind::Temperature(sensors::TemperatureHandler::new(
                     function,
+                    range,
                     endpoint,
                     Dataver::new(versions.temperature),
-                )
-                .expect("validated published temperature range"),
-            ),
-            crate::device::FunctionKind::Humidity(_) => ControlKind::Humidity(
-                sensors::HumidityHandler::new(function, endpoint, Dataver::new(versions.humidity))
-                    .expect("validated published humidity range"),
-            ),
-            crate::device::FunctionKind::Illuminance(_) => ControlKind::Illuminance(
-                sensors::IlluminanceHandler::new_illuminance(
+                ))
+            }
+            FunctionKind::Humidity(range) => {
+                FunctionHandlerKind::Humidity(sensors::HumidityHandler::new(
                     function,
+                    range,
+                    endpoint,
+                    Dataver::new(versions.humidity),
+                ))
+            }
+            FunctionKind::Illuminance(range) => {
+                FunctionHandlerKind::Illuminance(sensors::IlluminanceHandler::new_illuminance(
+                    function,
+                    range,
                     endpoint,
                     Dataver::new(versions.illuminance),
-                )
-                .expect("published illuminance function has a measurement range"),
-            ),
-            crate::device::FunctionKind::CarbonDioxide(_) => ControlKind::Co2(
-                sensors::Co2Sensor::new(
+                ))
+            }
+            FunctionKind::CarbonDioxide(range) => {
+                FunctionHandlerKind::Co2(sensors::Co2Sensor::new(
                     function,
+                    range,
                     endpoint,
                     Dataver::new(versions.co2),
                     Dataver::new(versions.air_quality),
-                )
-                .expect("published concentration function has a measurement range"),
-            ),
-            crate::device::FunctionKind::Outlet => ControlKind::Outlet(OnOffHandler::new(
+                ))
+            }
+            FunctionKind::Outlet => FunctionHandlerKind::Outlet(OnOffHandler::new(
                 function,
                 endpoint,
                 Dataver::new(versions.on_off),
@@ -355,31 +359,31 @@ impl Control {
     }
     fn light(&self) -> Option<&lighting::Lighting> {
         match &self.kind {
-            ControlKind::Light(light) => Some(light),
-            ControlKind::Outlet(_)
-            | ControlKind::Temperature(_)
-            | ControlKind::Humidity(_)
-            | ControlKind::Co2(_)
-            | ControlKind::Illuminance(_) => None,
+            FunctionHandlerKind::Light(light) => Some(light),
+            FunctionHandlerKind::Outlet(_)
+            | FunctionHandlerKind::Temperature(_)
+            | FunctionHandlerKind::Humidity(_)
+            | FunctionHandlerKind::Co2(_)
+            | FunctionHandlerKind::Illuminance(_) => None,
         }
     }
     fn is_sensor(&self) -> bool {
         matches!(
             self.kind,
-            ControlKind::Temperature(_)
-                | ControlKind::Humidity(_)
-                | ControlKind::Co2(_)
-                | ControlKind::Illuminance(_)
+            FunctionHandlerKind::Temperature(_)
+                | FunctionHandlerKind::Humidity(_)
+                | FunctionHandlerKind::Co2(_)
+                | FunctionHandlerKind::Illuminance(_)
         )
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
         let matcher: fn(u16, u32) -> bool = match &self.kind {
-            ControlKind::Outlet(_) => |_, cluster| cluster == 6,
-            ControlKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
-            ControlKind::Temperature(_) => |_, cluster| cluster == 0x402,
-            ControlKind::Humidity(_) => |_, cluster| cluster == 0x405,
-            ControlKind::Illuminance(_) => |_, cluster| cluster == 0x400,
-            ControlKind::Co2(_) => |_, cluster| matches!(cluster, 0x040d | 0x005b),
+            FunctionHandlerKind::Outlet(_) => |_, cluster| cluster == 6,
+            FunctionHandlerKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
+            FunctionHandlerKind::Temperature(_) => |_, cluster| cluster == 0x402,
+            FunctionHandlerKind::Humidity(_) => |_, cluster| cluster == 0x405,
+            FunctionHandlerKind::Illuminance(_) => |_, cluster| cluster == 0x400,
+            FunctionHandlerKind::Co2(_) => |_, cluster| matches!(cluster, 0x040d | 0x005b),
         };
         let groups_matcher: fn(u16, u32) -> bool = if self.is_sensor() {
             |_, _| false
@@ -404,7 +408,7 @@ impl Control {
             .chain(matcher, &self.kind)
     }
 }
-impl AsyncHandler for Control {
+impl AsyncHandler for FunctionHandler {
     fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
@@ -426,136 +430,48 @@ impl AsyncHandler for Control {
         self.handler().run(ctx).await
     }
 }
-impl AsyncHandler for ControlKind {
+macro_rules! dispatch_function {
+    ($kind:expr, $method:ident($($arg:expr),* $(,)?)) => {
+        match $kind {
+            FunctionHandlerKind::Outlet(handler) => AsyncHandler::$method(
+                &on_off::HandlerAsyncAdaptor(handler), $($arg),*
+            ).await,
+            FunctionHandlerKind::Light(light) => AsyncHandler::$method(
+                &lighting::Dispatch(light), $($arg),*
+            ).await,
+            FunctionHandlerKind::Temperature(handler) => AsyncHandler::$method(
+                &Async(temperature_measurement::HandlerAdaptor(handler)), $($arg),*
+            ).await,
+            FunctionHandlerKind::Humidity(handler) => AsyncHandler::$method(
+                &Async(relative_humidity_measurement::HandlerAdaptor(handler)), $($arg),*
+            ).await,
+            FunctionHandlerKind::Illuminance(handler) => AsyncHandler::$method(
+                &Async(illuminance_measurement::HandlerAdaptor(handler)), $($arg),*
+            ).await,
+            FunctionHandlerKind::Co2(handler) => AsyncHandler::$method(handler, $($arg),*).await,
+        }
+    };
+}
+impl AsyncHandler for FunctionHandlerKind {
     fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        match self {
-            Self::Outlet(handler) => on_off::HandlerAsyncAdaptor(handler).read(ctx, reply).await,
-            Self::Light(light) => lighting::Dispatch(light).read(ctx, reply).await,
-            Self::Co2(handler) => handler.read(ctx, reply).await,
-            Self::Temperature(handler) => {
-                AsyncHandler::read(
-                    &Async(temperature_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                    reply,
-                )
-                .await
-            }
-            Self::Humidity(handler) => {
-                AsyncHandler::read(
-                    &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                    reply,
-                )
-                .await
-            }
-            Self::Illuminance(handler) => {
-                AsyncHandler::read(
-                    &Async(illuminance_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                    reply,
-                )
-                .await
-            }
-        }
+        dispatch_function!(self, read(ctx, reply))
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        match self {
-            Self::Outlet(handler) => on_off::HandlerAsyncAdaptor(handler).write(ctx).await,
-            Self::Light(light) => lighting::Dispatch(light).write(ctx).await,
-            Self::Co2(handler) => handler.write(ctx).await,
-            Self::Temperature(handler) => {
-                AsyncHandler::write(
-                    &Async(temperature_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                )
-                .await
-            }
-            Self::Humidity(handler) => {
-                AsyncHandler::write(
-                    &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                )
-                .await
-            }
-            Self::Illuminance(handler) => {
-                AsyncHandler::write(
-                    &Async(illuminance_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                )
-                .await
-            }
-        }
+        dispatch_function!(self, write(ctx))
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        match self {
-            Self::Outlet(handler) => {
-                on_off::HandlerAsyncAdaptor(handler)
-                    .invoke(ctx, reply)
-                    .await
-            }
-            Self::Light(light) => lighting::Dispatch(light).invoke(ctx, reply).await,
-            Self::Co2(handler) => handler.invoke(ctx, reply).await,
-            Self::Temperature(handler) => {
-                AsyncHandler::invoke(
-                    &Async(temperature_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                    reply,
-                )
-                .await
-            }
-            Self::Humidity(handler) => {
-                AsyncHandler::invoke(
-                    &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                    reply,
-                )
-                .await
-            }
-            Self::Illuminance(handler) => {
-                AsyncHandler::invoke(
-                    &Async(illuminance_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                    reply,
-                )
-                .await
-            }
-        }
+        dispatch_function!(self, invoke(ctx, reply))
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
-        match self {
-            Self::Outlet(handler) => on_off::HandlerAsyncAdaptor(handler).run(ctx).await,
-            Self::Light(light) => lighting::Dispatch(light).run(ctx).await,
-            Self::Co2(handler) => handler.run(ctx).await,
-            Self::Temperature(handler) => {
-                AsyncHandler::run(
-                    &Async(temperature_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                )
-                .await
-            }
-            Self::Humidity(handler) => {
-                AsyncHandler::run(
-                    &Async(relative_humidity_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                )
-                .await
-            }
-            Self::Illuminance(handler) => {
-                AsyncHandler::run(
-                    &Async(illuminance_measurement::HandlerAdaptor(handler)),
-                    ctx,
-                )
-                .await
-            }
-        }
+        dispatch_function!(self, run(ctx))
     }
 }
 impl Role {
-    fn control(&self) -> Option<&Control> {
+    fn function(&self) -> Option<&FunctionHandler> {
         match self {
-            Self::Single { control, .. } | Self::Child { control, .. } => Some(control),
+            Self::Single { function, .. } | Self::Child { function, .. } => Some(function),
             Self::Parent { .. } => None,
         }
     }
@@ -576,11 +492,11 @@ impl Role {
 macro_rules! dispatch {
     ($entry:expr, $method:ident($($arg:expr),* $(,)?)) => {
         match &$entry.role {
-            Role::Single { control, bridged, .. } => AsyncHandler::$method(
+            Role::Single { function, bridged, .. } => AsyncHandler::$method(
                 &ChainedHandler::new(
                     |_, cluster| cluster == 0x39,
                     Async(bridged::HandlerAdaptor(bridged)),
-                    control,
+                    function,
                 ), $($arg),*
             ).await,
             Role::Parent { bridged, battery, .. } => match battery {
@@ -602,7 +518,7 @@ macro_rules! dispatch {
                     ), $($arg),*
                 ).await,
             },
-            Role::Child { control, .. } => control.$method($($arg),*).await,
+            Role::Child { function, .. } => function.$method($($arg),*).await,
         }
     };
 }
@@ -614,8 +530,8 @@ impl Entry {
     }
     fn metadata<'a>(&'a self, tags: &'a [SemanticTag<'a>]) -> Endpoint<'a> {
         match &self.role {
-            Role::Single { control, .. } => {
-                if let Some(light) = control.light() {
+            Role::Single { function, .. } => {
+                if let Some(light) = function.light() {
                     match light.profile().kind() {
                         LightProfileKind::ExtendedColor => Endpoint::new(
                             self.endpoint,
@@ -657,26 +573,26 @@ impl Entry {
                     )
                 }
             }
-            Role::Child { control, .. } => match &control.kind {
-                ControlKind::Temperature(_) => Endpoint::new(
+            Role::Child { function, .. } => match &function.kind {
+                FunctionHandlerKind::Temperature(_) => Endpoint::new(
                     self.endpoint,
                     devices!(TEMPERATURE_SENSOR),
                     TEMPERATURE_CLUSTERS,
                 )
                 .with_tags(tags),
-                ControlKind::Humidity(_) => {
+                FunctionHandlerKind::Humidity(_) => {
                     Endpoint::new(self.endpoint, devices!(HUMIDITY_SENSOR), HUMIDITY_CLUSTERS)
                         .with_tags(tags)
                 }
-                ControlKind::Illuminance(_) => {
+                FunctionHandlerKind::Illuminance(_) => {
                     Endpoint::new(self.endpoint, devices!(LIGHT_SENSOR), ILLUMINANCE_CLUSTERS)
                         .with_tags(tags)
                 }
-                ControlKind::Co2(_) => {
+                FunctionHandlerKind::Co2(_) => {
                     Endpoint::new(self.endpoint, devices!(AIR_QUALITY_SENSOR), CO2_CLUSTERS)
                         .with_tags(tags)
                 }
-                ControlKind::Light(light) => match light.profile().kind() {
+                FunctionHandlerKind::Light(light) => match light.profile().kind() {
                     LightProfileKind::OnOff => Endpoint::new(
                         self.endpoint,
                         devices!(DEV_TYPE_ON_OFF_LIGHT),
@@ -695,7 +611,7 @@ impl Entry {
                     }
                 }
                 .with_tags(tags),
-                ControlKind::Outlet(_) => {
+                FunctionHandlerKind::Outlet(_) => {
                     Endpoint::new(self.endpoint, devices!(ON_OFF_PLUG), CHILD_CLUSTERS)
                         .with_tags(tags)
                 }
@@ -719,39 +635,39 @@ impl Entry {
         if cluster.is_none_or(|id| id == 0x1d) {
             self.descriptor.changed();
         }
-        if let Some(control) = self.role.control() {
-            if !control.is_sensor() && cluster.is_none_or(|id| id == 4) {
-                control.groups.changed();
+        if let Some(function) = self.role.function() {
+            if !function.is_sensor() && cluster.is_none_or(|id| id == 4) {
+                function.groups.changed();
             }
             if cluster.is_none_or(|id| id == 3) {
-                control.identify.dataver_changed();
+                function.identify.dataver_changed();
             }
-            match &control.kind {
-                ControlKind::Outlet(handler)
+            match &function.kind {
+                FunctionHandlerKind::Outlet(handler)
                     if cluster.is_none_or(|id| id == 6) =>
                 {
                     handler.dataver_changed()
                 }
-                ControlKind::Temperature(handler)
+                FunctionHandlerKind::Temperature(handler)
                     if cluster.is_none_or(|id| id == 0x402) =>
                 {
                     <sensors::TemperatureHandler as
                         temperature_measurement::ClusterHandler>::dataver_changed(handler)
                 }
-                ControlKind::Humidity(handler)
+                FunctionHandlerKind::Humidity(handler)
                     if cluster.is_none_or(|id| id == 0x405) =>
                 {
                     <sensors::HumidityHandler as
                         relative_humidity_measurement::ClusterHandler>::dataver_changed(handler)
                 }
-                ControlKind::Illuminance(handler) if cluster.is_none_or(|id| id == 0x400) => {
+                FunctionHandlerKind::Illuminance(handler) if cluster.is_none_or(|id| id == 0x400) => {
                     <sensors::IlluminanceHandler as illuminance_measurement::ClusterHandler>::dataver_changed(handler)
                 }
-                ControlKind::Co2(handler) => handler.bump(cluster),
+                FunctionHandlerKind::Co2(handler) => handler.bump(cluster),
                 _ => {}
             }
         }
-        if let Some(light) = self.role.control().and_then(Control::light) {
+        if let Some(light) = self.role.function().and_then(FunctionHandler::light) {
             light.bump_version(cluster);
         }
         if let Some(handler) = self.role.bridged()
@@ -875,16 +791,16 @@ pub(super) fn handler_from(
                 Some((index, function)) => {
                     let function_device = device.function(&function.id).unwrap();
                     let label = function_device.description().label.clone();
-                    let control = Control::new(function_device, endpoint, versions);
+                    let function = FunctionHandler::new(function_device, endpoint, versions);
                     if multiple {
                         Role::Child {
-                            control,
+                            function,
                             tag: index as u8 + 1,
                             label,
                         }
                     } else {
                         Role::Single {
-                            control,
+                            function,
                             bridged: bridged(),
                         }
                     }

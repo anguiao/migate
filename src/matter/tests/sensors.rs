@@ -222,6 +222,7 @@ fn an_unsupported_measurement_range_has_a_stable_version_and_no_value_reports() 
     use rs_matter::dm::{Dataver, clusters::decl::temperature_measurement::ClusterHandler};
 
     setup!(_baseline, _model, im);
+    let range = MeasurementRange::new(-300.0, 500.0).unwrap();
     let (physical, _) = PhysicalDevice::new(
         PhysicalDeviceDescription::new(
             DeviceKey::new("xiaomi", "wide"),
@@ -229,13 +230,13 @@ fn an_unsupported_measurement_range_has_a_stable_version_and_no_value_reports() 
             vec![FunctionDescription {
                 id: "temperature".into(),
                 label: "Temperature".into(),
-                kind: FunctionKind::Temperature(MeasurementRange::new(-300.0, 500.0).unwrap()),
+                kind: FunctionKind::Temperature(range),
             }],
         )
         .unwrap(),
     );
     let function = &physical.functions()[0];
-    let handler = TemperatureHandler::new(function.clone(), 3, Dataver::new(100)).unwrap();
+    let handler = TemperatureHandler::new(function.clone(), range, 3, Dataver::new(100));
     block_on(async {
         let ctx = Context::at(&im, 3, 0x402, 0);
         let mut run = pin!(ClusterHandler::run(&handler, &ctx));
