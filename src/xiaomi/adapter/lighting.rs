@@ -16,9 +16,6 @@ pub(super) type PropertyKey = (String, u32, u32);
 pub(super) fn key(id: &str, binding: PropertyBinding) -> PropertyKey {
     (id.into(), binding.siid, binding.piid)
 }
-pub(super) fn bindings(function: &ParsedFunction) -> Vec<PropertyBinding> {
-    function.bindings()
-}
 pub(super) fn decode(
     function: &ParsedFunction,
     binding: PropertyBinding,

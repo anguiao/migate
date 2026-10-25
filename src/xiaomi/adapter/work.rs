@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     device::{ActionToken, DeviceKey, LightDimension, PhysicalDevice},
-    xiaomi::capability::NativeDescription,
+    xiaomi::capability::{NativeDescription, ParsedFunction},
     xiaomi::{capability::PropertyBinding, central::SessionHandle, cloud::NotificationHandle},
 };
 use event_listener::Event;
@@ -93,11 +93,10 @@ impl LightFrames {
 /// remains exhausted until an actual condition change reopens it.
 #[derive(Default)]
 struct Prepare {
-    subscribed: BTreeSet<(u32, u32)>,
-    problems: BTreeMap<(u32, u32), String>,
+    subscribed: BTreeSet<PropertyBinding>,
+    problems: BTreeMap<PropertyBinding, String>,
     running: bool,
     exhausted: bool,
-    problem: Option<String>,
     generation: u64,
 }
 impl Prepare {
@@ -113,7 +112,6 @@ impl Prepare {
         self.invalidate();
         self.problems.clear();
         self.exhausted = false;
-        self.problem = None;
     }
     fn begin(&mut self) -> Option<u64> {
         if self.running || self.exhausted {
@@ -123,35 +121,30 @@ impl Prepare {
         Some(self.generation)
     }
     fn subscribed(&mut self, binding: PropertyBinding) {
-        self.subscribed.insert((binding.siid, binding.piid));
-        self.problems.remove(&(binding.siid, binding.piid));
+        self.subscribed.insert(binding);
+        self.problems.remove(&binding);
     }
     /// Keep optional battery failures separate from required source readiness.
-    fn finish(
-        &mut self,
-        problem: Option<String>,
-        required: &[PropertyBinding],
-        battery: Option<PropertyBinding>,
-    ) -> Option<String> {
-        let battery_problem =
-            battery.and_then(|binding| self.problems.get(&(binding.siid, binding.piid)).cloned());
+    fn finish(&mut self, battery: Option<PropertyBinding>) -> Option<String> {
         self.running = false;
-        self.exhausted = problem.is_some();
-        self.problem = required
+        self.exhausted = !self.problems.is_empty();
+        battery.and_then(|binding| self.problems.get(&binding).cloned())
+    }
+    fn problem(&self, bindings: &[PropertyBinding]) -> Option<String> {
+        bindings
             .iter()
-            .find_map(|binding| self.problems.get(&(binding.siid, binding.piid)).cloned());
-        battery_problem
+            .find_map(|binding| self.problems.get(binding).cloned())
     }
     fn ready(&self, bindings: &[PropertyBinding]) -> bool {
         bindings
             .iter()
-            .all(|binding| self.subscribed.contains(&(binding.siid, binding.piid)))
+            .all(|binding| self.subscribed.contains(binding))
     }
     fn missing(&self, bindings: &[PropertyBinding]) -> Vec<PropertyBinding> {
         bindings
             .iter()
             .copied()
-            .filter(|binding| !self.subscribed.contains(&(binding.siid, binding.piid)))
+            .filter(|binding| !self.subscribed.contains(binding))
             .collect()
     }
 }
@@ -278,7 +271,7 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
-            .flat_map(super::lighting::bindings)
+            .flat_map(ParsedFunction::bindings)
             .collect::<Vec<_>>();
         if let Some(trigger) = self.native.device().refresh_trigger() {
             values.push(trigger);
@@ -475,7 +468,7 @@ impl DeviceWork {
             .find(|function| function.id() == id)
             .unwrap();
         if function.measurement().is_some() {
-            return super::lighting::bindings(function);
+            return function.bindings();
         }
         let mut bindings = self
             .native
@@ -483,7 +476,7 @@ impl DeviceWork {
             .functions()
             .iter()
             .filter(|function| function.measurement().is_none())
-            .flat_map(super::lighting::bindings)
+            .flat_map(ParsedFunction::bindings)
             .collect::<Vec<_>>();
         bindings.extend(self.native.device().refresh_trigger());
         bindings
@@ -507,7 +500,7 @@ impl DeviceWork {
             .functions()
             .iter()
             .find(|function| {
-                super::lighting::bindings(function).contains(&binding)
+                function.bindings().contains(&binding)
                     || function.measurement().is_none()
                         && self.native.device().refresh_trigger() == Some(binding)
             })
@@ -547,14 +540,13 @@ impl DeviceWork {
         let bindings = if id == BATTERY_CHANNEL {
             self.battery_binding().into_iter().collect()
         } else {
-            super::lighting::bindings(
-                self.native
-                    .device()
-                    .functions()
-                    .iter()
-                    .find(|function| function.id() == id)
-                    .unwrap(),
-            )
+            self.native
+                .device()
+                .functions()
+                .iter()
+                .find(|function| function.id() == id)
+                .unwrap()
+                .bindings()
         };
         for binding in bindings {
             self.refresh_property(id, binding);
@@ -598,7 +590,7 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
-            .find(|function| super::lighting::bindings(function).contains(&binding))
+            .find(|function| function.bindings().contains(&binding))
         else {
             return false;
         };
@@ -736,9 +728,7 @@ impl DeviceWork {
     ) {
         let record = |prepare: &mut Prepare| {
             if prepare.generation == generation {
-                prepare
-                    .problems
-                    .insert((binding.siid, binding.piid), problem);
+                prepare.problems.insert(binding, problem);
             }
         };
         match source {
@@ -752,37 +742,23 @@ impl DeviceWork {
         }
     }
     pub(super) fn function_subscription_problem(&self, id: &str) -> Option<String> {
-        let bindings = self.channel_bindings(id);
+        let local = self.local.borrow();
+        let cloud = self.cloud.borrow();
         let mut problems = Vec::new();
-        for binding in bindings {
-            if let Some(problem) = self
-                .local
-                .borrow()
-                .prepare
-                .problems
-                .get(&(binding.siid, binding.piid))
-            {
-                problems.push(problem.clone());
-            }
-            if let Some(problem) = self
-                .cloud
-                .borrow()
-                .prepare
-                .problems
-                .get(&(binding.siid, binding.piid))
-            {
-                problems.push(problem.clone());
-            }
+        for binding in self.channel_bindings(id) {
+            problems.extend(
+                [
+                    local.prepare.problems.get(&binding),
+                    cloud.prepare.problems.get(&binding),
+                ]
+                .into_iter()
+                .flatten()
+                .cloned(),
+            );
         }
         (!problems.is_empty()).then(|| problems.join("; "))
     }
-    pub(super) fn local_finished(
-        &self,
-        handle: &SessionHandle,
-        generation: u64,
-        problem: Option<String>,
-    ) {
-        let required = self.required_bindings();
+    pub(super) fn local_finished(&self, handle: &SessionHandle, generation: u64) {
         let battery = self.battery_binding();
         let mut local = self.local.borrow_mut();
         if local
@@ -790,7 +766,7 @@ impl DeviceWork {
             .as_ref()
             .is_some_and(|current| current.same_connection(handle))
             && local.prepare.generation == generation
-            && let Some(problem) = local.prepare.finish(problem, &required, battery)
+            && let Some(problem) = local.prepare.finish(battery)
         {
             self.set_battery_subscription_problem(Some(problem));
         }
@@ -867,13 +843,7 @@ impl DeviceWork {
             false
         }
     }
-    pub(super) fn cloud_finished(
-        &self,
-        handle: &NotificationHandle,
-        generation: u64,
-        problem: Option<String>,
-    ) {
-        let required = self.required_bindings();
+    pub(super) fn cloud_finished(&self, handle: &NotificationHandle, generation: u64) {
         let battery = self.battery_binding();
         let mut cloud = self.cloud.borrow_mut();
         if cloud
@@ -881,7 +851,7 @@ impl DeviceWork {
             .as_ref()
             .is_some_and(|current| current.same_connection(handle))
             && cloud.prepare.generation == generation
-            && let Some(problem) = cloud.prepare.finish(problem, &required, battery)
+            && let Some(problem) = cloud.prepare.finish(battery)
         {
             self.set_battery_subscription_problem(Some(problem));
         }
@@ -998,7 +968,7 @@ impl DeviceWork {
     }
     pub(super) fn refresh(&self) {
         for function in self.native.device().functions() {
-            for binding in super::lighting::bindings(function) {
+            for binding in function.bindings() {
                 self.refresh_property(function.id(), binding);
             }
         }
@@ -1027,9 +997,11 @@ impl DeviceWork {
         if id == BATTERY_CHANNEL {
             return self.battery_binding() == Some(binding);
         }
-        self.native.device().functions().iter().any(|function| {
-            function.id() == id && super::lighting::bindings(function).contains(&binding)
-        })
+        self.native
+            .device()
+            .functions()
+            .iter()
+            .any(|function| function.id() == id && function.bindings().contains(&binding))
     }
     pub(super) fn observe_read_at(
         &self,
@@ -1098,13 +1070,13 @@ impl DeviceWork {
         values
     }
     pub(super) fn diagnostic(&self) -> Option<String> {
+        let required = self.required_bindings();
         let local = self.local.borrow();
         let values = local
             .prepare
-            .problem
-            .clone()
+            .problem(&required)
             .into_iter()
-            .chain(self.cloud.borrow().prepare.problem.clone())
+            .chain(self.cloud.borrow().prepare.problem(&required))
             .chain(self.refresh.borrow().problems_except(BATTERY_CHANNEL))
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
@@ -1129,12 +1101,12 @@ impl DeviceWork {
         *self.battery_read_problem.borrow_mut() = problem;
     }
     pub(super) fn subscription_problem(&self) -> Option<String> {
+        let required = self.required_bindings();
         self.local
             .borrow()
             .prepare
-            .problem
-            .clone()
-            .or_else(|| self.cloud.borrow().prepare.problem.clone())
+            .problem(&required)
+            .or_else(|| self.cloud.borrow().prepare.problem(&required))
     }
     pub(super) fn report(&self, context: &Context, did: &str) {
         if self.life.is_closed() {
@@ -1251,7 +1223,6 @@ async fn subscriptions(
         };
         'attempts: for attempt in 0..4 {
             let mut failed = Vec::new();
-            let mut problem = None;
             for binding in pending {
                 if !current() {
                     break 'attempts;
@@ -1274,15 +1245,14 @@ async fn subscriptions(
                             &NotificationSource::Local(handle.clone()),
                             preparation,
                             binding,
-                            message.clone(),
+                            message,
                         );
-                        problem = Some(message);
                         failed.push(binding);
                     }
                 }
             }
             if failed.is_empty() || attempt == 3 {
-                work.local_finished(handle, preparation, problem);
+                work.local_finished(handle, preparation);
                 work.report(context, &did);
                 break;
             }

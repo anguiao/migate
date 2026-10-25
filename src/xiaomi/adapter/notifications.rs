@@ -498,7 +498,6 @@ async fn prepare_properties(
     };
     'attempts: for attempt in 0..4 {
         let mut failed = Vec::new();
-        let mut problem = None;
         for binding in pending {
             let Some(permit) = subscriptions
                 .acquire(&context.changed, &work.life, &current)
@@ -536,15 +535,14 @@ async fn prepare_properties(
                         &NotificationSource::Cloud(handle.clone()),
                         preparation,
                         binding,
-                        message.clone(),
+                        message,
                     );
-                    problem = Some(message);
                     failed.push(binding);
                 }
             }
         }
         if failed.is_empty() || attempt == 3 {
-            work.cloud_finished(&handle, preparation, problem);
+            work.cloud_finished(&handle, preparation);
             work.report(&context, &did);
             break;
         }

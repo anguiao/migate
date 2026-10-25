@@ -46,11 +46,7 @@ impl DeviceWork {
         &self,
         binding: PropertyBinding,
     ) -> bool {
-        self.local
-            .borrow()
-            .prepare
-            .subscribed
-            .contains(&(binding.siid, binding.piid))
+        self.local.borrow().prepare.subscribed.contains(&binding)
     }
     pub(in crate::xiaomi::adapter) fn test_local_subscribed_pair(
         &self,
@@ -61,7 +57,7 @@ impl DeviceWork {
             .borrow()
             .prepare
             .subscribed
-            .contains(&(siid, piid))
+            .contains(&PropertyBinding { siid, piid })
     }
     pub(in crate::xiaomi::adapter) fn test_local_subscribed_len(&self) -> usize {
         self.local.borrow().prepare.subscribed.len()

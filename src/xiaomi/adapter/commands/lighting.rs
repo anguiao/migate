@@ -172,7 +172,7 @@ fn refresh_after_write(
                 // Power can restore the member's remembered settings. Other
                 // writes refresh the affected value and its actual mode.
                 let bindings = if power {
-                    super::super::lighting::bindings(function)
+                    function.bindings()
                 } else {
                     [
                         light
