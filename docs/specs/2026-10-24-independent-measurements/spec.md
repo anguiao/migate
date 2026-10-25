@@ -163,6 +163,8 @@ CO₂ 端点启用浓度集群的 `NumericMeasurement`，单位为 `PPM`，测�
 
 验证命令：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 和 `cargo test`。
 
+Matter 测试按端点组合、公共测量行为、CO₂、照度和共享电量组织；来源适配测试按访问权限、测量观测、通知来源生命周期和电量组织。共享辅助代码保留在所属模块的测试目录，拆分不扩大生产代码可见性。
+
 ### 真机验收
 
 验收环境为 macOS Apple Silicon、现有账号和家庭，使用当前模型生成的配置，并记录实际 iOS／macOS 与家庭中枢版本。认证使用现有凭据；真实样本按有效能力选择，不预设设备名称。静态样例和一次缓存读取不能替代端到端验收。
