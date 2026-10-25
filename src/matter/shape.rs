@@ -2,8 +2,8 @@
 //!
 //! The frozen model and publication compare this exact surface when deciding
 //! root/endpoint ConfigurationVersion changes: the four standard light
-//! profiles with their published CT mired bounds, outlet function order (which
-//! fixes parent/child descriptor tags), and the physical battery capability
+//! profiles with their published CT mired bounds, projected measurement ranges,
+//! visible function order and child tags, and the physical battery capability
 //! that decides the parent Power Source topology. Endpoint numbers, bindings,
 //! live state and every generated attribute/command are deliberately excluded.
 //! Equivalent Kelvin encodings of the same mired span compare equal.
@@ -68,10 +68,10 @@ pub(crate) fn fixed_shape_with_battery(
                         mired: profile.temperature_interval().map(units::mired_bounds),
                     },
                     FunctionKind::Temperature(range) => FixedKind::Temperature {
-                        bounds: range.temperature_bounds(),
+                        bounds: units::temperature_matter_bounds(range),
                     },
                     FunctionKind::Humidity(range) => FixedKind::Humidity {
-                        bounds: range.humidity_bounds(),
+                        bounds: units::humidity_matter_bounds(range),
                     },
                     FunctionKind::Illuminance(range) => FixedKind::Illuminance {
                         bounds: units::illuminance_matter_bounds(range),

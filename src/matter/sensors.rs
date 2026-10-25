@@ -36,11 +36,11 @@ pub(crate) fn measurement_mapping_issue(function: &Function) -> Option<&'static 
     let value = function.snapshot().measurement()?.value;
     let (range_supported, value_supported) = match function.description().kind {
         crate::device::FunctionKind::Temperature(range) => (
-            range.temperature_bounds().is_some(),
+            units::temperature_matter_bounds(range).is_some(),
             value.is_none_or(|value| units::temperature_matter_value(value).is_some()),
         ),
         crate::device::FunctionKind::Humidity(range) => (
-            range.humidity_bounds().is_some(),
+            units::humidity_matter_bounds(range).is_some(),
             value.is_none_or(|value| units::humidity_matter_value(value).is_some()),
         ),
         crate::device::FunctionKind::Illuminance(range) => (
@@ -164,7 +164,7 @@ impl TemperatureHandler {
             .description()
             .measurement_range()
             .ok_or(ErrorCode::InvalidState)?;
-        let bounds = range.temperature_bounds();
+        let bounds = units::temperature_matter_bounds(range);
         Ok(Self::with_projection(
             function,
             endpoint,
@@ -180,7 +180,7 @@ impl HumidityHandler {
             .description()
             .measurement_range()
             .ok_or(ErrorCode::InvalidState)?;
-        let bounds = range.humidity_bounds();
+        let bounds = units::humidity_matter_bounds(range);
         Ok(Self::with_projection(
             function,
             endpoint,

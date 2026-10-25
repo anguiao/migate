@@ -316,38 +316,6 @@ impl MeasurementRange {
     pub fn contains(self, value: f64) -> bool {
         value.is_finite() && (self.min..=self.max).contains(&value)
     }
-    /// The standard Matter temperature bounds after the native unit is
-    /// projected by 100. Both the raw and rounded bounds must fit.
-    pub(crate) fn temperature_bounds(self) -> Option<(i16, i16)> {
-        const MIN_NATIVE: f64 = -273.15;
-        const MAX_NATIVE: f64 = 327.67;
-        const MIN: i64 = -27_315;
-        const MIN_UPPER: i64 = 32_766;
-        const MAX_UPPER: i64 = 32_767;
-        if self.min < MIN_NATIVE || self.max > MAX_NATIVE {
-            return None;
-        }
-        let (lo, hi) = (self.min * 100.0, self.max * 100.0);
-        if lo >= hi {
-            return None;
-        }
-        let (lo, hi) = (lo.round() as i64, hi.round() as i64);
-        ((MIN..=MIN_UPPER).contains(&lo) && (-27_314..=MAX_UPPER).contains(&hi) && lo < hi)
-            .then_some((lo as i16, hi as i16))
-    }
-    /// The relative-humidity limits are 0..=10000, with MinMeasuredValue at
-    /// most 9999 and MaxMeasuredValue at least 1.
-    pub(crate) fn humidity_bounds(self) -> Option<(u16, u16)> {
-        if self.min < 0.0 || self.max > 100.0 {
-            return None;
-        }
-        let (lo, hi) = (self.min * 100.0, self.max * 100.0);
-        if lo >= hi {
-            return None;
-        }
-        let (lo, hi) = (lo.round() as i64, hi.round() as i64);
-        (lo <= 9_999 && (1..=10_000).contains(&hi) && lo < hi).then_some((lo as u16, hi as u16))
-    }
 }
 impl PartialEq for MeasurementRange {
     fn eq(&self, other: &Self) -> bool {

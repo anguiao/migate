@@ -7,7 +7,7 @@
 //! is quantized exactly once, at the Xiaomi send boundary.
 //! Numeric measurements retain their source units until protocol projection.
 
-use crate::device::{CommandError, TemperatureInterval, mired_span};
+use crate::device::{CommandError, MeasurementRange, TemperatureInterval, mired_span};
 
 /// Matter nonzero level to device brightness percent.
 pub(crate) fn brightness_from_level(level: u8) -> Result<f64, CommandError> {
@@ -73,6 +73,13 @@ pub(crate) fn temperature_matter_value(celsius: f64) -> Option<i16> {
     Some(rounded as i16)
 }
 
+/// Project both bounds with the same rules as a temperature reading.
+pub(crate) fn temperature_matter_bounds(range: MeasurementRange) -> Option<(i16, i16)> {
+    let min = temperature_matter_value(range.min())?;
+    let max = temperature_matter_value(range.max())?;
+    (min < max).then_some((min, max))
+}
+
 /// Percentage to the Matter relative-humidity scale (0.01 %). Range checks
 /// apply both before and after rounding; the raw value is never clamped.
 pub(crate) fn humidity_matter_value(percent: f64) -> Option<u16> {
@@ -87,6 +94,13 @@ pub(crate) fn humidity_matter_value(percent: f64) -> Option<u16> {
         return None;
     }
     Some(rounded as u16)
+}
+
+/// Project both bounds with the same rules as a relative-humidity reading.
+pub(crate) fn humidity_matter_bounds(range: MeasurementRange) -> Option<(u16, u16)> {
+    let min = humidity_matter_value(range.min())?;
+    let max = humidity_matter_value(range.max())?;
+    (min < max).then_some((min, max))
 }
 
 /// Percentage to the Matter battery scale (0.5 %). Range checks apply both
@@ -105,7 +119,7 @@ pub(crate) fn co2_matter_value(ppm: f64) -> Option<f32> {
     projected.is_finite().then_some(projected)
 }
 
-pub(crate) fn co2_matter_bounds(range: crate::device::MeasurementRange) -> Option<(f32, f32)> {
+pub(crate) fn co2_matter_bounds(range: MeasurementRange) -> Option<(f32, f32)> {
     let min = co2_matter_value(range.min())?;
     let max = co2_matter_value(range.max())?;
     (min < max).then_some((min, max))
@@ -123,9 +137,7 @@ pub(crate) fn illuminance_matter_value(lux: f64) -> Option<u16> {
     (1.0..=65534.0).contains(&encoded).then_some(encoded as u16)
 }
 
-pub(crate) fn illuminance_matter_bounds(
-    range: crate::device::MeasurementRange,
-) -> Option<(u16, u16)> {
+pub(crate) fn illuminance_matter_bounds(range: MeasurementRange) -> Option<(u16, u16)> {
     if range.min() < 0.0 {
         return None;
     }
