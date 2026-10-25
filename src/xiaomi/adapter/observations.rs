@@ -4,13 +4,11 @@ use super::{
 };
 use crate::device::{CommandError, CommandRequest};
 use crate::xiaomi::capability::PropertyBinding;
-use std::{
-    cell::{Cell, RefCell},
-    collections::BTreeMap,
-};
+use std::{cell::RefCell, collections::BTreeMap};
 
 #[derive(Default)]
 struct Counts {
+    source: u64,
     observed: u64,
     notified: u64,
     refresh: u64,
@@ -19,12 +17,11 @@ struct Counts {
 }
 #[derive(Default)]
 pub(super) struct Observations {
-    source_epoch: Cell<u64>,
     channels: RefCell<BTreeMap<PropertyKey, Counts>>,
 }
 #[derive(Clone)]
 pub(super) struct ReadStamp {
-    source: u64,
+    channel_source: u64,
     observed: u64,
     refresh: u64,
 }
@@ -45,8 +42,12 @@ impl Observations {
             .get(&key(id, binding))
             .is_some_and(|counts| counts.unconfirmed_write)
     }
-    pub(super) fn source_changed(&self) {
-        self.source_epoch.set(self.source_epoch.get() + 1);
+    pub(super) fn function_source_changed(&self, id: &str) {
+        for ((channel, _, _), counts) in self.channels.borrow_mut().iter_mut() {
+            if channel == id {
+                counts.source = counts.source.wrapping_add(1);
+            }
+        }
     }
     pub(super) fn refresh(&self, id: &str, binding: PropertyBinding) {
         self.channels
@@ -59,7 +60,7 @@ impl Observations {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         ReadStamp {
-            source: self.source_epoch.get(),
+            channel_source: counts.source,
             observed: counts.observed,
             refresh: counts.refresh,
         }
@@ -83,7 +84,7 @@ impl Observations {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         !work.life.is_closed()
-            && self.source_epoch.get() == stamp.source
+            && counts.source == stamp.channel_source
             && counts.observed == stamp.observed
             && counts.refresh == stamp.refresh
     }

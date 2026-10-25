@@ -26,6 +26,78 @@ fn sensor(id: &str) -> crate::xiaomi::capability::NativeDescription {
 }
 
 #[test]
+fn single_measurements_and_mixed_controls_round_trip_with_current_parent_layout() {
+    for wanted in ["temperature", "humidity", "mixed"] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::storage::Store::open(directory.path()).unwrap();
+        let original = sensor("sensor");
+        let functions = if wanted == "mixed" {
+            let mut functions = fixture("sensor", "cuco.plug.v3", OUTLET)
+                .device()
+                .functions()
+                .to_vec();
+            functions.extend_from_slice(original.device().functions());
+            functions
+        } else {
+            original
+                .device()
+                .functions()
+                .iter()
+                .filter(|function| function.id() == wanted)
+                .cloned()
+                .collect()
+        };
+        let native = crate::xiaomi::capability::NativeDescription::new(
+            "sample".into(),
+            if wanted == "mixed" {
+                "urn:miot-spec-v2:device:outlet:0000A002:sample:1".into()
+            } else {
+                original.instance_type().into()
+            },
+            crate::xiaomi::capability::ParsedDevice::new_with_battery(
+                original.device().key().clone(),
+                functions,
+                None,
+                original.device().battery().cloned(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let planned = next(
+            &CommittedConfiguration::empty(),
+            scope("account", "home"),
+            vec![native],
+        )
+        .configuration;
+        save(&store, &planned);
+        let restored = load(&store);
+        assert_eq!(planned, restored);
+        assert!(
+            restored.devices[0]
+                .functions
+                .iter()
+                .all(|function| function.endpoint != restored.devices[0].endpoint)
+        );
+        assert!(
+            restored.devices[0]
+                .native
+                .as_ref()
+                .unwrap()
+                .device()
+                .battery()
+                .is_some()
+        );
+        let unchanged = next(
+            &restored,
+            scope("account", "home"),
+            vec![restored.devices[0].native.clone().unwrap()],
+        );
+        assert!(!unchanged.changed);
+        assert!(!unchanged.rebuild);
+    }
+}
+
+#[test]
 fn sensor_bindings_round_trip_with_parent_and_child_endpoints() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();

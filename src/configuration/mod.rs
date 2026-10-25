@@ -6,7 +6,7 @@
 //! explicitly and never reads storage, the network, randomness or time.
 
 use crate::{
-    device::{DeviceKey, FunctionKind, PhysicalDeviceDescription},
+    device::{DeviceKey, FunctionDescription, FunctionKind, PhysicalDeviceDescription},
     xiaomi::capability::{NativeDescription, RepairPlan},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -198,6 +198,17 @@ pub(crate) struct PlanInput {
     pub new_identities: BTreeMap<DeviceKey, String>,
 }
 
+impl DerivedConfiguration {
+    pub(crate) fn visible_functions(&self, key: &DeviceKey) -> Vec<&FunctionDescription> {
+        self.served[key]
+            .description
+            .functions()
+            .iter()
+            .filter(|function| !self.memberships.contains_key(&key.id) || !function.kind.is_light())
+            .collect()
+    }
+}
+
 impl CommittedConfiguration {
     pub(crate) fn empty() -> Self {
         Self {
@@ -278,7 +289,17 @@ impl CommittedConfiguration {
                 }
                 reserve_endpoint(&mut endpoints, function.endpoint, &device.key)?;
             }
-            let single = device.functions.len() == 1;
+            let single = device.functions.len() == 1
+                && device.native.as_ref().map_or_else(
+                    || own_endpoints.contains(&device.endpoint),
+                    |native| {
+                        !native
+                            .device()
+                            .functions()
+                            .iter()
+                            .any(|function| function.kind().is_measurement())
+                    },
+                );
             if own_endpoints.contains(&device.endpoint) != single {
                 return Err("Committed device endpoint does not match its function topology");
             }
@@ -436,6 +457,12 @@ fn derive_picture<'a>(
                 publishable.contains(&device.key.id)
             } else {
                 !hidden.contains(&device.key.id)
+                    || device
+                        .native
+                        .device()
+                        .functions()
+                        .iter()
+                        .any(|function| function.kind().is_measurement())
             }
         })
         .map(|device| device.key.clone())

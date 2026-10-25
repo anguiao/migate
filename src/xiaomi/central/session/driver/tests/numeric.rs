@@ -186,7 +186,7 @@ fn numeric_notifications_reuse_received_property_generation() {
             Packet::Publish(publish)
         };
         driver.packet(packet(80, 10), &mut on_event).unwrap();
-        handle.invalidate_received_properties("target");
+        handle.invalidate_received_property("target", BINDING);
         driver.drain_property_invalidations();
         driver
             .packet(

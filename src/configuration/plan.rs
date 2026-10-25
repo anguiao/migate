@@ -70,6 +70,20 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
                         });
                     }
                 }
+                if source.native.device().functions().len() > 1
+                    || source
+                        .native
+                        .device()
+                        .functions()
+                        .iter()
+                        .any(|function| function.kind().is_measurement())
+                {
+                    for function in &mut device.functions {
+                        if function.endpoint == device.endpoint {
+                            function.endpoint = allocator.allocate(&key)?;
+                        }
+                    }
+                }
                 device.native = Some(source.native.clone());
                 device
             }
@@ -77,7 +91,10 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
                 let unique_id = new_identities
                     .remove(&key)
                     .ok_or_else(|| PlanError::MissingIdentity { key: key.clone() })?;
-                let single = source.native.device().functions().len() == 1;
+                let single = source.native.device().functions().len() == 1
+                    && !source.native.device().functions()[0]
+                        .kind()
+                        .is_measurement();
                 let endpoint = allocator.allocate(&key)?;
                 let mut functions = Vec::new();
                 for function in source.native.device().functions() {

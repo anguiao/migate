@@ -82,18 +82,26 @@ impl RefreshState {
             false
         }
     }
-    fn next_due(&self) -> Option<Duration> {
+    fn next_due(&self, eligible: impl Fn(&str) -> bool) -> Option<Duration> {
         self.pending
             .iter()
-            .filter(|read| !self.inflight.contains_key(&read.key()))
+            .filter(|read| !self.inflight.contains_key(&read.key()) && eligible(&read.id))
             .map(|read| read.ready_at)
             .min()
     }
-    fn reserve(&mut self, now: Duration, path: ControlPath) -> Option<(Refresh, Rc<ReadFlight>)> {
-        let index = self
-            .pending
-            .iter()
-            .position(|read| read.ready_at <= now && !self.inflight.contains_key(&read.key()))?;
+    fn reserve(
+        &mut self,
+        now: Duration,
+        path_for: impl Fn(&str) -> Option<ControlPath>,
+        local: bool,
+    ) -> Option<(Refresh, Rc<ReadFlight>)> {
+        let (index, path) = self.pending.iter().enumerate().find_map(|(index, read)| {
+            if read.ready_at > now || self.inflight.contains_key(&read.key()) {
+                return None;
+            }
+            let path = path_for(&read.id)?;
+            (matches!(path, ControlPath::Local(_)) == local).then_some((index, path))
+        })?;
         let read = self.pending.remove(index).unwrap();
         let flight = Rc::new(ReadFlight {
             life: Lifetime::default(),
@@ -142,6 +150,15 @@ impl RefreshState {
             }
         }
     }
+    pub(super) fn problem_for(&self, id: &str) -> Option<String> {
+        let values = self
+            .problems
+            .iter()
+            .filter(|((channel, _, _), _)| channel == id)
+            .map(|(_, problem)| problem.clone())
+            .collect::<Vec<_>>();
+        (!values.is_empty()).then(|| values.join("; "))
+    }
     pub(super) fn problems_except(&self, id: &str) -> Vec<String> {
         self.problems
             .iter()
@@ -183,8 +200,8 @@ impl Refresh {
     }
 }
 impl ReadFlight {
-    fn current(&self, context: &Context, did: &str) -> bool {
-        match (&self.path, context.read_path(did)) {
+    fn current(&self, context: &Context, did: &str, id: &str) -> bool {
+        match (&self.path, context.read_path_for(did, id)) {
             (ControlPath::Local(old), Some(ControlPath::Local(new))) => old.same_connection(&new),
             (ControlPath::Cloud(old), Some(ControlPath::Cloud(new))) => {
                 old.uid == new.uid && old.access_token == new.access_token
@@ -208,11 +225,19 @@ pub(super) fn cancel(work: &DeviceWork) {
     }
     work.refresh_changed.notify(usize::MAX);
 }
+pub(super) fn cancel_function(work: &DeviceWork, id: &str) {
+    for ((channel, _, _), flight) in &work.refresh.borrow().inflight {
+        if channel == id {
+            flight.life.close();
+        }
+    }
+    work.refresh_changed.notify(usize::MAX);
+}
 fn retire(context: &Context) {
     for work in works(context) {
         let did = &work.key.id;
-        for flight in work.refresh.borrow().inflight.values() {
-            if work.life.is_closed() || !flight.current(context, did) {
+        for ((id, _, _), flight) in &work.refresh.borrow().inflight {
+            if work.life.is_closed() || !flight.current(context, did, id) {
                 flight.life.close();
             }
         }
@@ -226,11 +251,11 @@ fn reserve(
     if work.life.is_closed() {
         return None;
     }
-    let path = context.read_path(&work.key.id)?;
-    if matches!(path, ControlPath::Local(_)) != local {
-        return None;
-    }
-    work.refresh.borrow_mut().reserve(context.clock.now(), path)
+    work.refresh.borrow_mut().reserve(
+        context.clock.now(),
+        |id| context.read_path_for(&work.key.id, id),
+        local,
+    )
 }
 
 pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result<(), AdapterError> {
@@ -242,7 +267,11 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
         let ready = candidates
             .iter()
             .filter(|work| context.local_reads_allowed(&work.key.id, &handle))
-            .filter_map(|work| work.refresh.borrow().next_due())
+            .filter_map(|work| {
+                work.refresh
+                    .borrow()
+                    .next_due(|id| context.local_function_reads_allowed(&work.key.id, id, &handle))
+            })
             .min();
         let Some(ready) = ready else {
             next_round = None;
@@ -293,7 +322,14 @@ pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
         let due = works(&context)
             .iter()
             .filter(|work| matches!(context.read_path(&work.key.id), Some(ControlPath::Cloud(_))))
-            .filter_map(|work| work.refresh.borrow().next_due())
+            .filter_map(|work| {
+                work.refresh.borrow().next_due(|id| {
+                    matches!(
+                        context.read_path_for(&work.key.id, id),
+                        Some(ControlPath::Cloud(_))
+                    )
+                })
+            })
             .min();
         let wake = future::or(
             async {
@@ -372,7 +408,7 @@ fn read_one(
             });
         let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
         let reading = async {
-            if flight.life.is_closed() || !flight.current(&context, &did) {
+            if flight.life.is_closed() || !flight.current(&context, &did, &read.id) {
                 return Ok(ReadResult::Retired);
             }
             match &flight.path {
@@ -404,15 +440,16 @@ fn read_one(
                                         || !guard_context.current_local(&guard_handle)
                                     {
                                         SendDecision::Cancel
-                                    } else if !guard_context
-                                        .local_reads_allowed(&guard_did, &guard_handle)
-                                        || !guard_work.observations.read_is_current(
-                                            &guard_work,
-                                            &guard_id,
-                                            read.binding,
-                                            &guard_stamp,
-                                        )
-                                    {
+                                    } else if !guard_context.local_function_reads_allowed(
+                                        &guard_did,
+                                        &guard_id,
+                                        &guard_handle,
+                                    ) || !guard_work.observations.read_is_current(
+                                        &guard_work,
+                                        &guard_id,
+                                        read.binding,
+                                        &guard_stamp,
+                                    ) {
                                         SendDecision::Withdraw
                                     } else {
                                         SendDecision::Send
@@ -431,7 +468,11 @@ fn read_one(
                                 }
                                 if !result_flight.life.is_closed()
                                     && !observing.life.is_closed()
-                                    && result_flight.current(&result_context, &observing.key.id)
+                                    && result_flight.current(
+                                        &result_context,
+                                        &observing.key.id,
+                                        &observed_id,
+                                    )
                                     && let Ok(value) = outcome.result
                                 {
                                     *observed_validation.borrow_mut() = observing.observe_read_at(
@@ -450,7 +491,7 @@ fn read_one(
                         )
                         .await;
                     match outcome.result {
-                        Ok(_) => Ok(if flight.current(&context, &did) {
+                        Ok(_) => Ok(if flight.current(&context, &did, &read.id) {
                             match &*validation.borrow() {
                                 Ok(()) => ReadResult::Observed,
                                 Err(error) => {
@@ -480,7 +521,7 @@ fn read_one(
                     {
                         Ok(reading) => {
                             let mut validation = Ok(());
-                            if !work.life.is_closed() && flight.current(&context, &did) {
+                            if !work.life.is_closed() && flight.current(&context, &did, &read.id) {
                                 validation = work.observe_read_at(
                                     &read.id,
                                     read.binding,
@@ -493,7 +534,7 @@ fn read_one(
                                     context.refresh_group_states(&did);
                                 }
                             }
-                            Ok(if flight.current(&context, &did) {
+                            Ok(if flight.current(&context, &did, &read.id) {
                                 match validation {
                                     Ok(()) => ReadResult::Observed,
                                     Err(error) => ReadResult::Failed(work.problem(

@@ -1,9 +1,9 @@
 use super::{
     BatteryBinding, CapabilityError, MeasurementBinding, MeasurementUnit, NumericFormat,
-    ParsedDevice, ParsedFunction, PropertyBinding,
-    description::{Description, Service, Urn, array, string},
+    ParsedFunction, PropertyBinding,
+    description::{Description, array, string},
 };
-use crate::device::{DeviceKey, MeasurementRange};
+use crate::device::MeasurementRange;
 
 const TEMPERATURE: u32 = 0x0000_0020;
 const RELATIVE_HUMIDITY: u32 = 0x0000_000C;
@@ -11,80 +11,52 @@ const SENSOR_SERVICE: u32 = 0x0000_7814;
 const BATTERY_SERVICE: u32 = 0x0000_7805;
 const BATTERY_LEVEL: u32 = 0x0000_0014;
 
-pub(super) fn parse_sensor(
-    key: DeviceKey,
-    instance: &Description<'_>,
-) -> Result<ParsedDevice, CapabilityError> {
-    if !instance
-        .urn
-        .standard("device", "temperature-humidity-sensor", 0x0000_A00A)
-    {
-        return Err(CapabilityError::UnsupportedDevice);
+pub(super) fn measurements(instance: &Description<'_>) -> Vec<ParsedFunction> {
+    let mut functions = Vec::new();
+    for (name, property_name, type_id, unit) in [
+        (
+            "temperature",
+            "temperature",
+            TEMPERATURE,
+            MeasurementUnit::Celsius,
+        ),
+        (
+            "humidity",
+            "relative-humidity",
+            RELATIVE_HUMIDITY,
+            MeasurementUnit::Percentage,
+        ),
+    ] {
+        let candidate = instance
+            .services
+            .iter()
+            .filter(|service| {
+                name != "temperature"
+                    || service.urn.standard(
+                        "service",
+                        "temperature-humidity-sensor",
+                        SENSOR_SERVICE,
+                    )
+                    || service.urn.standard("service", "environment", 0x0000_780A)
+            })
+            .find_map(|service| {
+                service
+                    .properties
+                    .iter()
+                    .filter(|property| property.urn.standard("property", property_name, type_id))
+                    .find_map(|property| {
+                        measurement_binding(service.iid, property.iid, property.value, unit).ok()
+                    })
+            });
+        if let Some(binding) = candidate {
+            functions.push(match name {
+                "temperature" => ParsedFunction::temperature(name, "Temperature", binding),
+                "humidity" => ParsedFunction::humidity(name, "Humidity", binding),
+                _ => unreachable!(),
+            });
+        }
     }
-    let services = instance
-        .services
-        .iter()
-        .filter(|service| {
-            service
-                .urn
-                .standard("service", "temperature-humidity-sensor", SENSOR_SERVICE)
-        })
-        .collect::<Vec<_>>();
-    let service = match services.as_slice() {
-        [service] => *service,
-        [] => return Err(CapabilityError::MissingMeasurement("temperature")),
-        _ => return Err(CapabilityError::InvalidMeasurement("service")),
-    };
-    let temperature = measurement_property(service, "temperature", "temperature", TEMPERATURE)?;
-    let humidity =
-        measurement_property(service, "relative-humidity", "humidity", RELATIVE_HUMIDITY)?;
-    let temperature = measurement_binding(
-        temperature.0,
-        temperature.1,
-        temperature.2,
-        MeasurementUnit::Celsius,
-    )?;
-    let humidity = measurement_binding(
-        humidity.0,
-        humidity.1,
-        humidity.2,
-        MeasurementUnit::Percentage,
-    )?;
-    let (battery, battery_issue) = battery(instance);
-    ParsedDevice::new_with_battery_diagnostic(
-        key,
-        vec![
-            ParsedFunction::temperature("temperature", "Temperature", temperature),
-            ParsedFunction::humidity("humidity", "Humidity", humidity),
-        ],
-        None,
-        battery,
-        battery_issue,
-    )
-}
-
-pub(crate) fn is_type(value: &str) -> bool {
-    Urn::parse(value)
-        .is_ok_and(|urn| urn.standard("device", "temperature-humidity-sensor", 0x0000_A00A))
-}
-
-fn measurement_property<'a>(
-    service: &Service<'a>,
-    urn_name: &str,
-    name: &'static str,
-    type_id: u32,
-) -> Result<(u32, u32, &'a serde_json::Value), CapabilityError> {
-    let properties = service
-        .properties
-        .iter()
-        .filter(|property| property.urn.standard("property", urn_name, type_id))
-        .map(|property| (service.iid, property.iid, property.value))
-        .collect::<Vec<_>>();
-    match properties.as_slice() {
-        [] => Err(CapabilityError::MissingMeasurement(name)),
-        [(siid, piid, value)] => Ok((*siid, *piid, *value)),
-        _ => Err(CapabilityError::InvalidMeasurement(name)),
-    }
+    functions
 }
 
 fn measurement_binding(
@@ -123,27 +95,21 @@ fn measurement_binding(
     if string(value, "unit")? != expected_unit {
         return Err(CapabilityError::InvalidMeasurement("unit"));
     }
-    let range = array(value, "value-range")?
-        .iter()
-        .map(|value| {
-            value
-                .as_f64()
-                .filter(|value| value.is_finite())
-                .ok_or(CapabilityError::InvalidMeasurement("range"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let [min, max, step] = range.as_slice() else {
-        return Err(CapabilityError::InvalidMeasurement("range"));
-    };
-    let range = MeasurementRange::new(*min, *max)
+    let range = array(value, "value-range")?;
+    let min = range
+        .first()
+        .and_then(serde_json::Value::as_f64)
+        .ok_or(CapabilityError::InvalidMeasurement("range"))?;
+    let max = range
+        .get(1)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or(CapabilityError::InvalidMeasurement("range"))?;
+    let range = MeasurementRange::new(min, max)
         .map_err(|_| CapabilityError::InvalidMeasurement("range"))?;
-    if *step <= 0.0 || *step > range.max() - range.min() {
-        return Err(CapabilityError::InvalidMeasurement("range"));
-    }
     MeasurementBinding::new(PropertyBinding { siid, piid }, format, unit, range)
 }
 
-fn battery(instance: &Description<'_>) -> (Option<BatteryBinding>, Option<String>) {
+pub(super) fn battery(instance: &Description<'_>) -> (Option<BatteryBinding>, Option<String>) {
     let services = instance
         .services
         .iter()

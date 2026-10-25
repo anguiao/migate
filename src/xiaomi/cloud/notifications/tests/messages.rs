@@ -113,7 +113,7 @@ fn received_property_invalidation_keeps_ready_subscriptions_and_online_delivery(
                         .iter()
                         .map(|(topic, registration)| (topic.clone(), registration.generation))
                         .collect::<Vec<_>>();
-                    handle.invalidate_received_properties("target");
+                    handle.invalidate_received_property("target", POWER);
                     for (topic, generation) in generations {
                         let registrations = handle.shared.registrations.borrow();
                         assert!(registrations[&topic].ready);
@@ -191,7 +191,7 @@ fn received_property_invalidation_keeps_a_pending_suback_current() {
                     let topic = "device/target/up/properties_changed/2/1";
                     let generation = handle.shared.registrations.borrow()[topic].generation;
                     assert!(!handle.shared.registrations.borrow()[topic].ready);
-                    handle.invalidate_received_properties("target");
+                    handle.invalidate_received_property("target", POWER);
                     assert_eq!(
                         handle.shared.registrations.borrow()[topic].generation,
                         generation

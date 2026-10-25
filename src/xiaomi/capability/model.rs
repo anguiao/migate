@@ -7,7 +7,7 @@ use crate::device::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct PropertyBinding {
     pub siid: u32,
     pub piid: u32,
@@ -221,51 +221,53 @@ impl ParsedDevice {
                 return Err(CapabilityError::InvalidDescription("function bindings"));
             }
         }
+        let controls = functions
+            .iter()
+            .filter(|function| function.measurement().is_none())
+            .collect::<Vec<_>>();
         let measurements = functions
             .iter()
             .filter(|function| function.measurement().is_some())
-            .count();
-        let lights = functions
-            .iter()
-            .filter(|function| function.lighting().is_some())
-            .count();
-        if measurements > 0 {
-            let ids = functions.iter().map(ParsedFunction::id).collect::<Vec<_>>();
-            let semantic = functions.iter().all(|function| {
-                let Some(measurement) = function.measurement() else {
-                    return false;
-                };
-                matches!(
-                    (function.id(), function.kind(), measurement.unit()),
-                    (
-                        "temperature",
-                        FunctionKind::Temperature(_),
-                        MeasurementUnit::Celsius
-                    ) | (
-                        "humidity",
-                        FunctionKind::Humidity(_),
-                        MeasurementUnit::Percentage
-                    )
+            .collect::<Vec<_>>();
+        for function in &measurements {
+            let measurement = function.measurement().unwrap();
+            if !matches!(
+                (function.id(), function.kind(), measurement.unit()),
+                (
+                    "temperature",
+                    FunctionKind::Temperature(_),
+                    MeasurementUnit::Celsius
+                ) | (
+                    "humidity",
+                    FunctionKind::Humidity(_),
+                    MeasurementUnit::Percentage
                 )
-            });
-            if ids != ["temperature", "humidity"] || !semantic || refresh_trigger.is_some() {
+            ) {
                 return Err(CapabilityError::InvalidDescription("sensor topology"));
             }
-        } else if battery.is_some() {
+        }
+        if measurements.is_empty() && battery.is_some() {
             return Err(CapabilityError::InvalidDescription("battery topology"));
-        } else if lights > 0 {
-            if functions.len() != 1 || functions[0].id() != "main" || refresh_trigger.is_some() {
+        }
+        if controls
+            .iter()
+            .any(|function| function.lighting().is_some())
+        {
+            if controls.len() != 1 || controls[0].id() != "main" || refresh_trigger.is_some() {
                 return Err(CapabilityError::InvalidDescription("light topology"));
             }
-        } else {
-            // Outlets support only a single main channel or the concrete
-            // cuco.plug.cp7pd three-channel layout with its master trigger.
-            let ids = functions.iter().map(ParsedFunction::id).collect::<Vec<_>>();
+        } else if !controls.is_empty() {
+            let ids = controls
+                .iter()
+                .map(|function| function.id())
+                .collect::<Vec<_>>();
             let single_main = ids == ["main"] && refresh_trigger.is_none();
             let cp7pd = ids == ["outlet_1", "outlet_2", "usb"] && refresh_trigger.is_some();
             if !(single_main || cp7pd) {
                 return Err(CapabilityError::InvalidDescription("outlet topology"));
             }
+        } else if refresh_trigger.is_some() {
+            return Err(CapabilityError::InvalidDescription("sensor topology"));
         }
         Ok(Self {
             key,
@@ -433,7 +435,7 @@ pub enum MeasurementUnit {
 }
 
 /// One real read-only measurement binding. Format, unit, range and access are
-/// fixed at the source boundary; the range is already representable in Matter.
+/// fixed at the source boundary; Matter projects its own target representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeasurementBinding {
     property: PropertyBinding,
@@ -454,13 +456,6 @@ impl MeasurementBinding {
         if let Some((min, max)) = format.measurement_bounds()
             && (range.min() < min || range.max() > max)
         {
-            return Err(CapabilityError::InvalidMeasurement("range"));
-        }
-        let representable = match unit {
-            MeasurementUnit::Celsius => range.temperature_bounds().is_some(),
-            MeasurementUnit::Percentage => range.humidity_bounds().is_some(),
-        };
-        if !representable {
             return Err(CapabilityError::InvalidMeasurement("range"));
         }
         Ok(Self {
@@ -512,7 +507,10 @@ pub struct BatteryBinding {
 }
 impl BatteryBinding {
     pub(crate) fn new(measurement: MeasurementBinding) -> Result<Self, CapabilityError> {
-        if measurement.unit() != MeasurementUnit::Percentage {
+        if measurement.unit() != MeasurementUnit::Percentage
+            || measurement.range().min() < 0.0
+            || measurement.range().max() > 100.0
+        {
             return Err(CapabilityError::InvalidMeasurement("battery"));
         }
         Ok(Self { measurement })

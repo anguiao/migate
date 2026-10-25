@@ -158,11 +158,11 @@ pub struct NotificationHandle {
 }
 
 impl NotificationHandle {
-    /// Retire only previously received property deliveries. Keep subscription
-    /// readiness, pending handshakes, and online notifications unchanged.
-    pub(crate) fn invalidate_received_properties(&self, did: &str) {
+    /// Retire received deliveries for one function's property while preserving
+    /// other property generations, subscription readiness and online reports.
+    pub(crate) fn invalidate_received_property(&self, did: &str, binding: PropertyBinding) {
         for registration in self.shared.registrations.borrow_mut().values_mut() {
-            if matches!(&registration.target, Target::Property { did: target, .. } if target == did)
+            if matches!(&registration.target, Target::Property { did: target, binding: property } if target == did && *property == binding)
             {
                 registration.delivery_generation = registration.delivery_generation.wrapping_add(1);
             }

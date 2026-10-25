@@ -21,7 +21,6 @@ pub(crate) use outlet::is_outlet_type;
 pub(crate) use repair::{
     RepairPlan, effective_temperature_range, narrowed_profile, plan_rgb_repair, repaired_profile,
 };
-pub(crate) use sensor::is_type as is_temperature_humidity_sensor_type;
 
 pub(crate) fn is_light_group(key: &crate::device::DeviceKey, model: &str) -> bool {
     key.id.starts_with("group.") || model == "mijia.light.group3"
@@ -35,24 +34,30 @@ pub fn parse_device_for_model(
     // Groups are never classified here: admission comes only from confirmed
     // catalog relations, which call `parse_group` directly.
     let description = description::Description::parse(instance)?;
-    if model == ls2307::MODEL
-        && !instance
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(is_ls2307_type)
-    {
-        return Err(CapabilityError::IncompatibleModel(ls2307::MODEL));
-    }
-    if description
-        .urn
-        .standard("device", "temperature-humidity-sensor", 0x0000_A00A)
-    {
-        sensor::parse_sensor(key, &description)
+    let control = if model == ls2307::MODEL && !is_ls2307_type(instance["type"].as_str().unwrap()) {
+        Err(CapabilityError::IncompatibleModel(ls2307::MODEL))
     } else if description.urn.standard("device", "light", 0x0000a001) {
-        light::parse_light(key, model, &description)
+        light::parse_light(key.clone(), model, &description)
     } else {
-        outlet::parse_outlet(key, &description)
+        outlet::parse_outlet(key.clone(), &description)
+    };
+    let measurements = sensor::measurements(&description);
+    if measurements.is_empty() {
+        return control;
     }
+    let (mut functions, refresh_trigger) = match control {
+        Ok(control) => (control.functions().to_vec(), control.refresh_trigger()),
+        Err(_) => (Vec::new(), None),
+    };
+    functions.extend(measurements);
+    let (battery, battery_issue) = sensor::battery(&description);
+    ParsedDevice::new_with_battery_diagnostic(
+        key,
+        functions,
+        refresh_trigger,
+        battery,
+        battery_issue,
+    )
 }
 
 #[cfg(test)]

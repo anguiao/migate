@@ -130,10 +130,15 @@ impl Context {
             .devices
             .get(did)
             .and_then(|slot| slot.admitted.clone())?;
-        let source = work.observer();
-        let source = source
-            .as_ref()
-            .filter(|source| self.source_valid(did, source))?;
+        let source = work
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find_map(|function| {
+                work.function_observer(function.id())
+                    .filter(|source| self.source_valid_for(did, function.id(), source))
+            })?;
         Some(match source {
             NotificationSource::Local(_) => super::model::PathKind::Local,
             NotificationSource::Cloud(_) => super::model::PathKind::Cloud,
@@ -145,7 +150,7 @@ impl Context {
                 && connection_key(self).is_some_and(|key| key == session.key)
         })
     }
-    pub(super) fn notification_source(&self, did: &str) -> Option<NotificationSource> {
+    pub(super) fn notification_source(&self, did: &str, id: &str) -> Option<NotificationSource> {
         // Virtual groups derive their state from ordinary member subscriptions.
         if self.is_virtual_group(did) {
             return None;
@@ -164,7 +169,7 @@ impl Context {
                     .is_some_and(|work| work.local_attached(handle))
             })
             .map(NotificationSource::Local);
-        let cloud = if self.cloud_candidate(did, false).is_ok() {
+        let cloud = if self.function_cloud_candidate(did, id, false).is_ok() {
             self.notifications
                 .borrow()
                 .as_ref()
@@ -177,8 +182,18 @@ impl Context {
         } else {
             None
         };
-        let local_failed = work.as_ref().is_some_and(|work| work.local_exhausted());
-        let cloud_failed = work.as_ref().is_some_and(|work| work.cloud_exhausted());
+        let local_failed = work.as_ref().is_some_and(|work| {
+            work.local_exhausted()
+                && !local
+                    .as_ref()
+                    .is_some_and(|source| work.source_ready(id, source))
+        });
+        let cloud_failed = work.as_ref().is_some_and(|work| {
+            work.cloud_exhausted()
+                && !cloud
+                    .as_ref()
+                    .is_some_and(|source| work.source_ready(id, source))
+        });
         let local = local.filter(|_| !local_failed);
         let cloud = cloud.filter(|_| !cloud_failed);
         match self.priority() {
@@ -186,7 +201,12 @@ impl Context {
             PathPriority::CloudFirst => cloud.or(local),
         }
     }
-    fn source_valid(&self, did: &str, source: &NotificationSource) -> bool {
+    pub(super) fn source_valid_for(
+        &self,
+        did: &str,
+        id: &str,
+        source: &NotificationSource,
+    ) -> bool {
         if self.is_virtual_group(did) {
             return false;
         }
@@ -205,7 +225,7 @@ impl Context {
                         .is_some_and(|work| work.local_attached(handle))
             }
             NotificationSource::Cloud(handle) => {
-                self.cloud_candidate(did, false).is_ok()
+                self.function_cloud_candidate(did, id, false).is_ok()
                     && self.current_notifications(handle)
                     && work
                         .as_ref()
@@ -222,9 +242,6 @@ impl Context {
         update_time: Option<i64>,
         cached_report: bool,
     ) {
-        if !self.source_valid(did, source) {
-            return;
-        }
         let work = self
             .live
             .borrow()
@@ -232,7 +249,11 @@ impl Context {
             .get(did)
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = work
-            && work.observer_is(source)
+            && let Some(id) = work.binding_channel(binding)
+            && self.source_valid_for(did, id, source)
+            && work
+                .function_observer(id)
+                .is_some_and(|active| active.same(source))
         {
             let battery_problem = work.battery_problem();
             let changed = work.notify_value_at(
@@ -277,9 +298,9 @@ impl Context {
         self.refresh_changed.notify(usize::MAX);
     }
 }
-fn activate(context: &Context, work: &DeviceWork, source: NotificationSource) {
+fn activate(context: &Context, work: &DeviceWork, id: &str, source: NotificationSource) {
     let did = &work.key.id;
-    work.install_observer(source);
+    work.install_observer(id, source);
     context.update_device_availability(did);
     context.refresh_group_states(did);
     context.note_notification_switch(did, "notification subscriptions ready; source activated");
@@ -308,41 +329,43 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     if work.life.is_closed() {
         return;
     }
-    let old = work.observer();
-    if let Some(old) = old
-        && !context.source_valid(&did, &old)
-    {
-        work.revoke_observer();
-        context.update_device_availability(&did);
-        context.refresh_group_states(&did);
-        context.update_routing("notification source access conditions invalidated");
+    let retry = work.take_subscription_retry();
+    let mut keep_local = false;
+    let mut keep_cloud = false;
+    for id in work.channels() {
+        if let Some(old) = work.function_observer(&id)
+            && !context.source_valid_for(&did, &id, &old)
+        {
+            work.revoke_observer(&id);
+            context.update_device_availability(&did);
+            context.refresh_group_states(&did);
+            context.update_routing("notification source access conditions invalidated");
+        }
+        let desired = context.notification_source(&did, &id);
+        if let Some(desired) = desired {
+            keep_local |= matches!(desired, NotificationSource::Local(_));
+            keep_cloud |= matches!(desired, NotificationSource::Cloud(_));
+            let active = work.function_observer(&id);
+            let same = active.as_ref().is_some_and(|active| active.same(&desired));
+            if !same && work.source_ready(&id, &desired) {
+                activate(context, &work, &id, desired.clone());
+            } else if !same || retry {
+                prepare_source(context, work.clone(), desired);
+            }
+        }
+        if let Some(active) = work.function_observer(&id) {
+            keep_local |= matches!(active, NotificationSource::Local(_));
+            keep_cloud |= matches!(active, NotificationSource::Cloud(_));
+        }
     }
-    let desired = context.notification_source(&did);
-    // Keep the desired preparation and the active source while handing over to it.
-    let keep_local = matches!(desired, Some(NotificationSource::Local(_)))
-        || (desired.is_some() && matches!(work.observer(), Some(NotificationSource::Local(_))));
-    let keep_cloud = matches!(desired, Some(NotificationSource::Cloud(_)))
-        || (desired.is_some() && matches!(work.observer(), Some(NotificationSource::Cloud(_))));
     if !keep_local && work.local_preparation_active() {
         work.retire_local_notifications();
     }
     if !keep_cloud && work.cloud_preparation_active() {
         work.retire_cloud_notifications();
     }
-    let Some(desired) = desired else { return };
-
-    if work.observer_is(&desired) {
-        if work.take_optional_retry() {
-            prepare_source(context, work, desired);
-        }
-        return;
-    }
-    if work.source_ready(&desired) {
-        activate(context, &work, desired);
-        return;
-    }
-    prepare_source(context, work, desired);
 }
+
 fn prepare_source(context: &Rc<Context>, work: Rc<DeviceWork>, source: NotificationSource) {
     match source {
         NotificationSource::Local(_) => {
@@ -467,7 +490,7 @@ async fn prepare_properties(
     let current = || {
         work.cloud_current(&handle, preparation)
             && context.current_notifications(&handle)
-            && context.cloud_candidate(&did, false).is_ok()
+            && context.cloud_observation_candidate(&did, false).is_ok()
     };
     let Some(mut pending) = work.cloud_pending(&handle, preparation) else {
         work.cloud_abandoned(&handle, preparation);
@@ -505,10 +528,17 @@ async fn prepare_properties(
                     break 'attempts;
                 }
                 Err(error) => {
-                    problem = Some(format!(
+                    let message = format!(
                         "{did} cloud subscribe {}.{}: {error}",
                         binding.siid, binding.piid
-                    ));
+                    );
+                    work.subscription_failed(
+                        &NotificationSource::Cloud(handle.clone()),
+                        preparation,
+                        binding,
+                        message.clone(),
+                    );
+                    problem = Some(message);
                     failed.push(binding);
                 }
             }

@@ -33,7 +33,7 @@ pub(crate) fn unique(id: &str) -> String {
 /// One committed identity with the current functions of a description and no
 /// native facts (a historical reservation).
 pub(crate) fn identity(description: &PhysicalDeviceDescription, endpoint: u16) -> CommittedDevice {
-    let single = description.functions().len() == 1;
+    let single = description.functions().len() == 1 && !description.functions()[0].is_measurement();
     let functions = description
         .functions()
         .iter()

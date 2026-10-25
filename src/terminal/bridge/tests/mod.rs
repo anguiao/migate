@@ -498,6 +498,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             devices: ["one", "multi"]
                 .into_iter()
                 .map(|did| DeviceStatus {
+                    functions: vec![],
                     did: did.into(),
                     read_only: false,
                     usable_control_paths: vec![PathKind::Local, PathKind::Cloud],

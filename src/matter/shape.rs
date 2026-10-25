@@ -21,8 +21,8 @@ pub(crate) struct FixedShape {
 struct FixedFunction {
     id: String,
     kind: FixedKind,
-    /// Only multi-function outlets publish child labels in the Descriptor
-    /// TagList; a single function's label is not part of the fixed surface.
+    /// Compound controls and all measurement layouts publish child labels in
+    /// Descriptor TagList; a single control keeps its combined endpoint.
     child_label: Option<String>,
 }
 
@@ -34,12 +34,10 @@ enum FixedKind {
         mired: Option<(u16, u16)>,
     },
     Temperature {
-        min: i16,
-        max: i16,
+        bounds: Option<(i16, i16)>,
     },
     Humidity {
-        min: u16,
-        max: u16,
+        bounds: Option<(u16, u16)>,
     },
 }
 
@@ -49,7 +47,8 @@ pub(crate) fn fixed_shape_with_battery(
     functions: &[FunctionDescription],
     battery: bool,
 ) -> FixedShape {
-    let multiple = functions.len() > 1;
+    let multiple =
+        functions.len() > 1 || functions.iter().any(|function| function.is_measurement());
     FixedShape {
         battery,
         functions: functions
@@ -62,16 +61,12 @@ pub(crate) fn fixed_shape_with_battery(
                         profile: profile.kind(),
                         mired: profile.temperature_interval().map(units::mired_bounds),
                     },
-                    FunctionKind::Temperature(range) => {
-                        let (min, max) = range
-                            .temperature_bounds()
-                            .expect("validated temperature range");
-                        FixedKind::Temperature { min, max }
-                    }
-                    FunctionKind::Humidity(range) => {
-                        let (min, max) = range.humidity_bounds().expect("validated humidity range");
-                        FixedKind::Humidity { min, max }
-                    }
+                    FunctionKind::Temperature(range) => FixedKind::Temperature {
+                        bounds: range.temperature_bounds(),
+                    },
+                    FunctionKind::Humidity(range) => FixedKind::Humidity {
+                        bounds: range.humidity_bounds(),
+                    },
                 },
                 child_label: multiple.then(|| function.label.clone()),
             })

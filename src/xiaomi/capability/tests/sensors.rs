@@ -44,6 +44,94 @@ fn measurement_property_mut(description: &mut Value, piid: u32) -> &mut Value {
 }
 
 #[test]
+fn measurements_are_independent_of_each_other_and_the_host_category() {
+    for host in [
+        "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:sample:1",
+        "urn:miot-spec-v2:device:night-light:0000A0AB:sample:1",
+        "urn:miot-spec-v2:device:air-conditioner:0000A004:sample:1",
+    ] {
+        for wanted in [[true, false], [false, true], [true, true]] {
+            let mut description = sensor_description();
+            description["type"] = json!(host);
+            measurement_service_mut(&mut description)["properties"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|property| match property["iid"].as_u64().unwrap() {
+                    1001 => wanted[0],
+                    1008 => wanted[1],
+                    _ => true,
+                });
+            let device = parse_device(sensor_key(), &description).unwrap();
+            assert_eq!(
+                device.functions().len(),
+                wanted.into_iter().filter(|value| *value).count()
+            );
+            assert!(device.is_read_only());
+        }
+    }
+}
+
+#[test]
+fn environment_temperature_is_selected_by_service_semantics() {
+    let mut description = sensor_description();
+    measurement_service_mut(&mut description)["type"] =
+        json!("urn:miot-spec-v2:service:environment:0000780A:sample:1");
+    let device = parse_device(sensor_key(), &description).unwrap();
+    assert_eq!(device.functions()[0].id(), "temperature");
+
+    measurement_service_mut(&mut description)["type"] =
+        json!("urn:miot-spec-v2:service:outlet:00007802:sample:1");
+    let device = parse_device(sensor_key(), &description).unwrap();
+    assert_eq!(device.functions().len(), 1);
+    assert_eq!(device.functions()[0].id(), "humidity");
+}
+
+#[test]
+fn supported_controls_and_measurements_share_one_physical_device() {
+    let mut description = public_description();
+    let mut environment = measurement_service_mut(&mut sensor_description()).clone();
+    environment["iid"] = json!(42);
+    description["services"]
+        .as_array_mut()
+        .unwrap()
+        .push(environment);
+    let device = parse_device(sensor_key(), &description).unwrap();
+    assert_eq!(
+        device
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>(),
+        ["main", "temperature", "humidity"]
+    );
+    assert!(!device.is_read_only());
+}
+
+#[test]
+fn first_qualified_measurement_wins_and_measurement_steps_are_ignored() {
+    let mut description = sensor_description();
+    measurement_property_mut(&mut description, 1001)["access"] = json!(["read"]);
+    let mut second = measurement_service_mut(&mut sensor_description()).clone();
+    second["iid"] = json!(42);
+    description["services"].as_array_mut().unwrap().push(second);
+    let device = parse_device(sensor_key(), &description).unwrap();
+    assert_eq!(
+        device.functions()[0].measurement().unwrap().property().siid,
+        42
+    );
+
+    let mut other = description.clone();
+    for service in other["services"].as_array_mut().unwrap() {
+        for property in service["properties"].as_array_mut().unwrap() {
+            if property["value-range"].is_array() {
+                property["value-range"][2] = json!(0);
+            }
+        }
+    }
+    assert_eq!(parse_device(sensor_key(), &other).unwrap(), device);
+}
+
+#[test]
 fn standard_sensor_admits_independent_temperature_and_humidity_bindings() {
     let device = parse_device(sensor_key(), &sensor_description()).unwrap();
     assert_eq!(*device.key(), sensor_key());
@@ -124,33 +212,6 @@ fn official_t6_uses_the_standard_temperature_property_semantics() {
 }
 
 #[test]
-fn measurement_service_semantics_are_required_but_the_service_iid_is_not_fixed() {
-    let mut description = sensor_description();
-    measurement_service_mut(&mut description)["type"] =
-        json!("urn:miot-spec-v2:service:device-information:00007801:miaomiaoce-t6:1");
-    assert_eq!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::MissingMeasurement("temperature"))
-    );
-
-    let mut description = sensor_description();
-    measurement_service_mut(&mut description)["iid"] = json!(42);
-    assert!(parse_device(sensor_key(), &description).is_ok());
-
-    let mut description = sensor_description();
-    let mut duplicate = measurement_service_mut(&mut description).clone();
-    duplicate["iid"] = json!(4);
-    description["services"]
-        .as_array_mut()
-        .unwrap()
-        .push(duplicate);
-    assert_eq!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::InvalidMeasurement("service"))
-    );
-}
-
-#[test]
 fn optional_battery_is_ignored_and_does_not_create_a_function() {
     let device = parse_device(sensor_key(), &sensor_description()).unwrap();
     assert_eq!(device.functions().len(), 2);
@@ -179,10 +240,11 @@ fn both_measurements_need_read_and_notify_access_but_not_write() {
                     .filter(|value| *value != permission)
                     .collect::<Vec<_>>()
             );
-            assert_eq!(
-                parse_device(sensor_key(), &description),
-                Err(CapabilityError::MissingAccess(permission)),
-                "{piid} without {permission}"
+            let device = parse_device(sensor_key(), &description).unwrap();
+            assert_eq!(device.functions().len(), 1, "{piid} without {permission}");
+            assert_ne!(
+                device.functions()[0].measurement().unwrap().property().piid,
+                piid
             );
         }
         let mut description = sensor_description();
@@ -194,124 +256,6 @@ fn both_measurements_need_read_and_notify_access_but_not_write() {
         .as_array_mut()
         .unwrap()
         .retain(|service| service["iid"] != 2);
-    assert!(parse_device(sensor_key(), &description).is_ok());
-}
-
-#[test]
-fn missing_or_duplicated_required_measurements_are_rejected() {
-    let mut description = sensor_description();
-    measurement_service_mut(&mut description)["properties"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|property| property["iid"] != 1001);
-    assert!(matches!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::MissingMeasurement("temperature"))
-    ));
-
-    let mut description = sensor_description();
-    measurement_service_mut(&mut description)["properties"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|property| property["iid"] != 1008);
-    assert!(matches!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::MissingMeasurement("humidity"))
-    ));
-
-    let mut description = sensor_description();
-    let duplicate = measurement_property_mut(&mut description, 1001).clone();
-    measurement_service_mut(&mut description)["properties"]
-        .as_array_mut()
-        .unwrap()
-        .push(duplicate);
-    assert!(matches!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::InvalidDescription(
-            "duplicate property iid"
-        ))
-    ));
-}
-
-#[test]
-fn format_unit_range_and_matter_representability_are_enforced() {
-    let cases = [
-        (Some("format"), json!("bool"), "format"),
-        (Some("unit"), json!("fahrenheit"), "unit"),
-        (Some("value-range"), json!([-30, 100]), "range"),
-        (Some("value-range"), json!([100, -30, 0.1]), "range"),
-        (Some("value-range"), json!([-30, 100, 0]), "range"),
-        (Some("value-range"), json!([-30, 100, -0.1]), "range"),
-        (Some("value-range"), json!([-30, 100, 131]), "range"),
-        (Some("value-range"), json!([-30, "100", 0.1]), "range"),
-        (Some("value-range"), json!([-274, 100, 0.1]), "range"),
-        (Some("value-range"), json!([-30, 328, 0.1]), "range"),
-    ];
-    for (field, value, reason) in cases {
-        let mut description = sensor_description();
-        let property = measurement_property_mut(&mut description, 1001);
-        if let Some(field) = field {
-            property[field] = value.clone();
-        }
-        assert_eq!(
-            parse_device(sensor_key(), &description),
-            Err(CapabilityError::InvalidMeasurement(reason)),
-            "{field:?} {value}"
-        );
-    }
-
-    let mut description = sensor_description();
-    measurement_property_mut(&mut description, 1001)["format"] = json!("uint8");
-    assert_eq!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::InvalidMeasurement("range"))
-    );
-
-    let cases = [
-        (Some("unit"), json!("celsius"), "unit"),
-        (Some("value-range"), json!([-0.001, 100, 0.1]), "range"),
-        (Some("value-range"), json!([0, 100.1, 0.1]), "range"),
-        (Some("value-range"), json!([100, 100, 0.1]), "range"),
-    ];
-    for (field, value, reason) in cases {
-        let mut description = sensor_description();
-        let property = measurement_property_mut(&mut description, 1008);
-        if let Some(field) = field {
-            property[field] = value.clone();
-        }
-        assert_eq!(
-            parse_device(sensor_key(), &description),
-            Err(CapabilityError::InvalidMeasurement(reason)),
-            "{field:?} {value}"
-        );
-    }
-}
-
-#[test]
-fn native_boundaries_are_strict_before_matter_rounding() {
-    for (piid, range) in [
-        (1001, json!([-273.1500000001, 100, 0.1])),
-        (1001, json!([-30, 327.6700000001, 0.1])),
-        (1001, json!([-30, 327.671, 0.1])),
-        (1001, json!([-30, 327.68, 0.1])),
-        (1008, json!([-1e-12, 100, 0.1])),
-        (1008, json!([-0.001, 100, 0.1])),
-        (1008, json!([0, 100.0000000001, 0.1])),
-    ] {
-        let mut description = sensor_description();
-        measurement_property_mut(&mut description, piid)["value-range"] = range.clone();
-        assert_eq!(
-            parse_device(sensor_key(), &description),
-            Err(CapabilityError::InvalidMeasurement("range")),
-            "{piid}: {range}"
-        );
-    }
-
-    let mut description = sensor_description();
-    measurement_property_mut(&mut description, 1001)["value-range"] = json!([-273.15, 327.67, 0.1]);
-    assert!(parse_device(sensor_key(), &description).is_ok());
-    let mut description = sensor_description();
-    measurement_property_mut(&mut description, 1008)["value-range"] = json!([0, 100, 0.1]);
     assert!(parse_device(sensor_key(), &description).is_ok());
 }
 
@@ -335,24 +279,6 @@ fn measured_values_at_the_native_boundaries_are_strict() {
             );
         }
     }
-}
-
-#[test]
-fn attached_measurements_on_other_device_categories_are_not_admitted() {
-    let mut description = sensor_description();
-    description["type"] = json!("urn:miot-spec-v2:device:light:0000A001:miaomiaoce-t6:1");
-    assert_eq!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::UnsupportedDevice)
-    );
-
-    let mut description = sensor_description();
-    description["type"] =
-        json!("urn:miot-spec-v2:device:environment-sensor:0000A00B:miaomiaoce-t6:1");
-    assert_eq!(
-        parse_device(sensor_key(), &description),
-        Err(CapabilityError::UnsupportedDevice)
-    );
 }
 
 #[test]
@@ -517,9 +443,6 @@ fn invalid_battery_format_unit_range_and_duplicates_are_not_published() {
         ("unit", json!("percentage-points")),
         ("value-range", json!([0, 101, 1])),
         ("value-range", json!([-1, 100, 1])),
-        ("value-range", json!([0, 100, 0])),
-        ("value-range", json!([0, 100, -1])),
-        ("value-range", json!([0, 100, 101])),
     ] {
         let mut description = sensor_description();
         battery_property_mut(&mut description)[field] = value.clone();
@@ -578,7 +501,7 @@ fn battery_values_follow_the_declared_integer_percentage_range() {
 }
 
 #[test]
-fn a_battery_binding_is_only_valid_on_the_two_measurement_sensor_topology() {
+fn a_battery_binding_alone_cannot_create_a_device() {
     use crate::xiaomi::capability::ParsedFunction;
     let battery = parse_device(sensor_key(), &sensor_description())
         .unwrap()

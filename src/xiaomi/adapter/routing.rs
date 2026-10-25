@@ -44,6 +44,15 @@ impl Context {
         self.priority() == PathPriority::LocalFirst
             && matches!(self.read_path(did), Some(ControlPath::Local(selected)) if selected.same_connection(handle))
     }
+    pub(super) fn local_function_reads_allowed(
+        &self,
+        did: &str,
+        id: &str,
+        handle: &SessionHandle,
+    ) -> bool {
+        self.priority() == PathPriority::LocalFirst
+            && matches!(self.read_path_for(did, id), Some(ControlPath::Local(selected)) if selected.same_connection(handle))
+    }
     pub(super) fn local_device_outcome<T>(
         &self,
         handle: &SessionHandle,
@@ -282,6 +291,51 @@ impl Context {
             .is_some_and(|native| native.device().is_read_only())
     }
     pub(super) fn cloud_candidate(&self, did: &str, http: bool) -> Result<(), String> {
+        self.cloud_candidate_for(did, http, self.is_read_only(did))
+    }
+    pub(super) fn function_cloud_candidate(
+        &self,
+        did: &str,
+        id: &str,
+        http: bool,
+    ) -> Result<(), String> {
+        self.cloud_candidate_for(did, http, self.measurement_function(did, id))
+    }
+    pub(super) fn cloud_observation_candidate(&self, did: &str, http: bool) -> Result<(), String> {
+        self.cloud_candidate_for(did, http, self.has_measurements(did))
+    }
+    pub(super) fn has_measurements(&self, did: &str) -> bool {
+        self.live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.admitted.as_ref())
+            .is_some_and(|work| {
+                work.native
+                    .device()
+                    .functions()
+                    .iter()
+                    .any(|function| function.measurement().is_some())
+            })
+    }
+    fn measurement_function(&self, did: &str, id: &str) -> bool {
+        self.live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.admitted.as_ref())
+            .is_some_and(|work| {
+                if id == "battery" {
+                    return work.native.device().battery().is_some();
+                }
+                work.native
+                    .device()
+                    .functions()
+                    .iter()
+                    .any(|function| function.id() == id && function.measurement().is_some())
+            })
+    }
+    fn cloud_candidate_for(&self, did: &str, http: bool, measurement: bool) -> Result<(), String> {
         self.cloud_authentication()?;
         if http && self.http_paused.get() {
             return Err("HTTP temporarily paused".into());
@@ -308,7 +362,7 @@ impl Context {
         // BLE and proxy-child devices have no reliable cloud state signal.
         // Account, membership, authorization, retirement and explicitly
         // forbidden access still decide here; ordinary devices stay offline.
-        if !(access.online || self.is_read_only(did) && unreliable_cloud_online(did)) {
+        if !(access.online || measurement && unreliable_cloud_online(did)) {
             return Err("device offline".into());
         }
         Ok(())
@@ -318,13 +372,13 @@ impl Context {
         if self.is_virtual_group(did) {
             return None;
         }
-        if !self.is_read_only(did) {
+        if !self.has_measurements(did) {
             return self.control_path(did);
         }
         let local = self.local_candidate(did, false).ok();
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
-            _ if self.cloud_candidate(did, true).is_ok() => {
+            _ if self.cloud_observation_candidate(did, true).is_ok() => {
                 self.live.borrow().credentials.as_ref().map(|credentials| {
                     ControlPath::Cloud(CloudPath {
                         uid: credentials.uid.clone(),
@@ -358,8 +412,21 @@ impl Context {
         if self.is_virtual_group(did) {
             return None;
         }
-        if self.is_read_only(did) {
+        if self.has_measurements(did) {
             return self.observation_path(did);
+        }
+        self.control_read_path(did)
+    }
+    pub(super) fn read_path_for(&self, did: &str, id: &str) -> Option<ControlPath> {
+        if self.measurement_function(did, id) {
+            self.observation_path(did)
+        } else {
+            self.control_read_path(did)
+        }
+    }
+    fn control_read_path(&self, did: &str) -> Option<ControlPath> {
+        if self.is_virtual_group(did) {
+            return None;
         }
         match self.control_path(did) {
             Some(ControlPath::Local(_)) if self.priority() == PathPriority::CloudFirst => None,
@@ -410,11 +477,30 @@ impl Context {
         self.update_device_availability(did);
         self.refresh_group_states(did);
     }
-    pub(super) fn update_device_availability(&self, did: &str) {
-        let read_only = self.is_read_only(did);
-        let available = self.control_path(did).is_some()
+    pub(super) fn device_path_available(&self, did: &str) -> bool {
+        self.control_path(did).is_some()
             || self.observation_path(did).is_some()
-            || (read_only && self.active_notification(did).is_some());
+            || self
+                .live
+                .borrow()
+                .devices
+                .get(did)
+                .and_then(|slot| slot.admitted.as_ref())
+                .is_some_and(|work| {
+                    work.native
+                        .device()
+                        .functions()
+                        .iter()
+                        .filter(|function| function.measurement().is_some())
+                        .any(|function| {
+                            work.function_observer(function.id()).is_some_and(|source| {
+                                self.source_valid_for(did, function.id(), &source)
+                            })
+                        })
+                })
+    }
+    pub(super) fn update_device_availability(&self, did: &str) {
+        let available = self.device_path_available(did);
         let (work, blocked) = {
             let live = self.live.borrow();
             let slot = &live.devices[did];

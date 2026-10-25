@@ -207,6 +207,14 @@ pub struct ChannelCommands {
     pub last: Option<CommandStatus>,
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct FunctionStatus {
+    pub function: String,
+    pub selected_read: Option<PathKind>,
+    pub notification_source: Option<PathKind>,
+    pub sync_limited_reason: Option<String>,
+    pub read_problem: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct DeviceStatus {
     pub did: String,
     pub read_only: bool,
@@ -222,6 +230,7 @@ pub struct DeviceStatus {
     pub battery_problem: Option<String>,
     pub last_switch_reason: Option<String>,
     pub commands: Vec<ChannelCommands>,
+    pub functions: Vec<FunctionStatus>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdapterStatus {

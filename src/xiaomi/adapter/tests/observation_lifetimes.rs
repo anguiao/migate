@@ -103,7 +103,7 @@ fn a_source_change_and_new_read_do_not_invalidate_a_held_write_without_notificat
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
 
-            device_work(control, "one").observations.source_changed();
+            device_work(control, "one").test_source_changed();
             peer.state.borrow_mut().hold_reads = true;
             refresh_read(control, &peer, "one", 2).await;
             release_operation(&peer, "get", "one", 2, json!({"value":false})).await;

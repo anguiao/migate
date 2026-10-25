@@ -91,6 +91,35 @@ const OBCR_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = light_clusters!(
     <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER,
     <lighting::ColorHandler<true> as color_control::ClusterAsyncHandler>::CLUSTER
 );
+const CHILD_O_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    lighting::IDENTIFY,
+    lighting::OnOffHandler::CLUSTER
+);
+const CHILD_OB_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    lighting::IDENTIFY,
+    lighting::OnOffHandler::CLUSTER,
+    <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER
+);
+const CHILD_OBC_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    lighting::IDENTIFY,
+    lighting::OnOffHandler::CLUSTER,
+    <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER,
+    <lighting::ColorHandler<false> as color_control::ClusterAsyncHandler>::CLUSTER
+);
+const CHILD_OBCR_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    lighting::IDENTIFY,
+    lighting::OnOffHandler::CLUSTER,
+    <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER,
+    <lighting::ColorHandler<true> as color_control::ClusterAsyncHandler>::CLUSTER
+);
 const PARENT_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
     clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER);
 const POWER_SOURCE: DeviceType = DeviceType {
@@ -548,7 +577,26 @@ impl Entry {
                     Endpoint::new(self.endpoint, devices!(HUMIDITY_SENSOR), HUMIDITY_CLUSTERS)
                         .with_tags(tags)
                 }
-                ControlKind::Outlet(_) | ControlKind::Light(_) => {
+                ControlKind::Light(light) => match light.profile().kind() {
+                    LightProfileKind::OnOff => Endpoint::new(
+                        self.endpoint,
+                        devices!(DEV_TYPE_ON_OFF_LIGHT),
+                        CHILD_O_CLUSTERS,
+                    ),
+                    LightProfileKind::Dimmable => Endpoint::new(
+                        self.endpoint,
+                        devices!(DEV_TYPE_DIMMABLE_LIGHT),
+                        CHILD_OB_CLUSTERS,
+                    ),
+                    LightProfileKind::ColorTemperature => {
+                        Endpoint::new(self.endpoint, devices!(CT_LIGHT), CHILD_OBC_CLUSTERS)
+                    }
+                    LightProfileKind::ExtendedColor => {
+                        Endpoint::new(self.endpoint, devices!(RGB_LIGHT), CHILD_OBCR_CLUSTERS)
+                    }
+                }
+                .with_tags(tags),
+                ControlKind::Outlet(_) => {
                     Endpoint::new(self.endpoint, devices!(ON_OFF_PLUG), CHILD_CLUSTERS)
                         .with_tags(tags)
                 }
@@ -679,7 +727,11 @@ pub(super) fn handler_from(
     let mut built = Vec::new();
     for FrozenEntry { device, identity } in entries {
         let versions = Versions::new(&mut random);
-        let multiple = identity.functions.len() > 1;
+        let multiple = identity.functions.len() > 1
+            || device
+                .functions()
+                .iter()
+                .any(|function| function.description().is_measurement());
         let parent = multiple.then_some((identity.endpoint, None));
         let functions = identity
             .functions

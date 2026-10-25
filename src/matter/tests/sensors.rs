@@ -82,6 +82,186 @@ macro_rules! setup {
 }
 
 #[test]
+fn a_single_measurement_keeps_a_physical_parent_and_battery() {
+    for kind in [
+        FunctionKind::Temperature(MeasurementRange::new(-30.0, 100.0).unwrap()),
+        FunctionKind::Humidity(MeasurementRange::new(0.0, 100.0).unwrap()),
+    ] {
+        let (device, _) = PhysicalDevice::new(
+            PhysicalDeviceDescription::new(
+                DeviceKey::new("xiaomi", "single"),
+                "Single",
+                vec![FunctionDescription {
+                    id: "measurement".into(),
+                    label: "Measurement".into(),
+                    kind,
+                }],
+            )
+            .unwrap()
+            .with_battery(),
+        );
+        let handler = model_handler(vec![entry(&device, 2, &[("measurement", 3)])]);
+        handler.access(|node| {
+            let parent = node
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == 2)
+                .unwrap();
+            assert!(parent.clusters.iter().any(|cluster| cluster.id == 0x2f));
+            let child = node
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == 3)
+                .unwrap();
+            assert_eq!(child.device_types.len(), 1);
+            assert!(
+                child
+                    .clusters
+                    .iter()
+                    .any(|cluster| cluster.id == 0x402 || cluster.id == 0x405)
+            );
+        });
+    }
+}
+
+#[test]
+fn mixed_light_children_publish_their_real_light_profiles() {
+    use crate::device::{LightProfile, TemperatureInterval};
+    let interval = TemperatureInterval::new(2700, 6500).unwrap();
+    for (profile, device_type, expected_clusters) in [
+        (LightProfile::OnOff, 0x0100, vec![6]),
+        (LightProfile::Dimmable, 0x0101, vec![6, 8]),
+        (
+            LightProfile::ColorTemperature(interval),
+            0x010c,
+            vec![6, 8, 0x300],
+        ),
+        (
+            LightProfile::ExtendedColor(interval),
+            0x010d,
+            vec![6, 8, 0x300],
+        ),
+    ] {
+        let (device, _) = PhysicalDevice::new(
+            PhysicalDeviceDescription::new(
+                DeviceKey::new("xiaomi", "mixed"),
+                "Mixed",
+                vec![
+                    FunctionDescription {
+                        id: "main".into(),
+                        label: "Light".into(),
+                        kind: FunctionKind::Light(profile),
+                    },
+                    FunctionDescription {
+                        id: "temperature".into(),
+                        label: "Temperature".into(),
+                        kind: FunctionKind::Temperature(
+                            MeasurementRange::new(-30.0, 100.0).unwrap(),
+                        ),
+                    },
+                ],
+            )
+            .unwrap(),
+        );
+        let handler = model_handler(vec![entry(&device, 2, &[("main", 3), ("temperature", 4)])]);
+        handler.access(|node| {
+            let light = node
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == 3)
+                .unwrap();
+            assert_eq!(
+                light
+                    .device_types
+                    .iter()
+                    .map(|kind| kind.dtype)
+                    .collect::<Vec<_>>(),
+                [device_type]
+            );
+            for cluster in [6, 8, 0x300] {
+                assert_eq!(
+                    light.clusters.iter().any(|metadata| metadata.id == cluster),
+                    expected_clusters.contains(&cluster)
+                );
+            }
+            assert!(!light.clusters.iter().any(|cluster| cluster.id == 0x39));
+            assert!(light.clusters.iter().any(|cluster| cluster.id == 0x1d));
+            assert!(light.clusters.iter().any(|cluster| cluster.id == 3));
+        });
+    }
+}
+
+#[test]
+fn unrepresentable_temperature_keeps_native_state_and_reports_unsupported_mapping() {
+    let (device, _) = PhysicalDevice::new(
+        PhysicalDeviceDescription::new(
+            DeviceKey::new("xiaomi", "wide"),
+            "Wide temperature",
+            vec![FunctionDescription {
+                id: "temperature".into(),
+                label: "Temperature".into(),
+                kind: FunctionKind::Temperature(MeasurementRange::new(-300.0, 500.0).unwrap()),
+            }],
+        )
+        .unwrap(),
+    );
+    let function = &device.functions()[0];
+    function.observe_measurement(400.0, None, 1).unwrap();
+    let handler = model_handler(vec![entry(&device, 2, &[("temperature", 3)])]);
+    handler.access(|node| assert!(node.endpoints.iter().any(|endpoint| endpoint.id == 3)));
+    assert_eq!(
+        function.snapshot().measurement().unwrap().value,
+        Some(400.0)
+    );
+    assert!(super::super::measurement_mapping_issue(function).is_some());
+}
+
+#[test]
+fn an_unsupported_measurement_range_has_a_stable_version_and_no_value_reports() {
+    use crate::matter::sensors::TemperatureHandler;
+    use rs_matter::dm::{Dataver, clusters::decl::temperature_measurement::ClusterHandler};
+
+    setup!(_baseline, _model, im);
+    let (physical, _) = PhysicalDevice::new(
+        PhysicalDeviceDescription::new(
+            DeviceKey::new("xiaomi", "wide"),
+            "Wide temperature",
+            vec![FunctionDescription {
+                id: "temperature".into(),
+                label: "Temperature".into(),
+                kind: FunctionKind::Temperature(MeasurementRange::new(-300.0, 500.0).unwrap()),
+            }],
+        )
+        .unwrap(),
+    );
+    let function = &physical.functions()[0];
+    let handler = TemperatureHandler::new(function.clone(), 3, Dataver::new(100)).unwrap();
+    block_on(async {
+        let ctx = Context::at(&im, 3, 0x402, 0);
+        let mut run = pin!(ClusterHandler::run(&handler, &ctx));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        let version = ClusterHandler::dataver(&handler);
+        for (value, received) in [(10.0, 1), (20.0, 2)] {
+            function.observe_measurement(value, None, received).unwrap();
+            assert!(poll_once(run.as_mut()).await.is_none());
+            assert_eq!(ClusterHandler::dataver(&handler), version);
+            assert!(ctx.changes.borrow().is_empty());
+            assert_eq!(
+                ClusterHandler::measured_value(&handler, &ctx)
+                    .unwrap_err()
+                    .code(),
+                ErrorCode::ConstraintError
+            );
+            assert_eq!(
+                function.snapshot().measurement().unwrap().value,
+                Some(value)
+            );
+            assert!(super::super::measurement_mapping_issue(function).is_some());
+        }
+    });
+}
+
+#[test]
 fn sensor_publishes_parent_and_two_measurement_child_endpoints() {
     setup!(device, handler, _im);
     handler.access(|node| {

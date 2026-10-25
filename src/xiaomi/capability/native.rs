@@ -1,8 +1,7 @@
 //! A native device description validated once at the source boundary.
 
 use super::{
-    CapabilityError, ParsedDevice, is_light_type, is_ls2307_type, is_outlet_type,
-    is_temperature_humidity_sensor_type, ls2307, outlet,
+    CapabilityError, ParsedDevice, is_light_type, is_ls2307_type, is_outlet_type, ls2307, outlet,
 };
 use crate::device::PhysicalDeviceDescription;
 
@@ -60,20 +59,16 @@ fn validate_model_topology(
     model: &str,
     instance_type: &str,
 ) -> Result<(), &'static str> {
-    if device.battery_issue().is_some() && !is_temperature_humidity_sensor_type(instance_type) {
-        return Err("Xiaomi battery diagnostic is invalid");
-    }
-    if is_temperature_humidity_sensor_type(instance_type) {
-        if model == ls2307::MODEL || model == outlet::CP7PD_MODEL {
-            return Err("Xiaomi device model is incompatible with its instance type");
-        }
-        if device.functions().len() != 2 || !device.is_read_only() {
-            return Err("Xiaomi sensor topology is invalid");
-        }
+    let controls = device
+        .functions()
+        .iter()
+        .filter(|function| function.measurement().is_none())
+        .collect::<Vec<_>>();
+    if controls.is_empty() {
         return Ok(());
     }
     if is_light_type(instance_type) {
-        let function = &device.functions()[0];
+        let function = controls[0];
         let Some(lighting) = function.lighting() else {
             return Err("Xiaomi light topology is invalid");
         };
@@ -124,9 +119,8 @@ fn validate_model_topology(
                 Err("Xiaomi outlet topology is invalid")
             };
         }
-        let single_main = device.functions().len() == 1
-            && device.functions()[0].id() == "main"
-            && device.refresh_trigger().is_none();
+        let single_main =
+            controls.len() == 1 && controls[0].id() == "main" && device.refresh_trigger().is_none();
         return if single_main {
             Ok(())
         } else {

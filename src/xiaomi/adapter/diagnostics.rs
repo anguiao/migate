@@ -1,7 +1,7 @@
 use super::{
     model::{
-        AdapterStatus, DeviceStatus, GatewayStatus, PathKind, PendingDevice, RecoveryStatus,
-        RoutingStatus,
+        AdapterStatus, DeviceStatus, FunctionStatus, GatewayStatus, PathKind, PendingDevice,
+        RecoveryStatus, RoutingStatus,
     },
     routing::ControlPath,
     state::Context,
@@ -87,25 +87,26 @@ impl Context {
             if self.local_candidate(&did, false).is_ok() {
                 usable_read.push(PathKind::Local);
             }
-            if self.cloud_candidate(&did, true).is_ok() {
+            if self.cloud_observation_candidate(&did, true).is_ok() {
                 usable_read.push(PathKind::Cloud);
             }
             let selected_read = self.read_path(&did).map(path_kind);
-            let physical_online = if read_only && super::routing::unreliable_cloud_online(&did) {
-                None
-            } else {
-                let live = self.live.borrow();
-                let slot = live.devices.get(&did).unwrap();
-                slot.cloud_access
-                    .as_ref()
-                    .map(|access| access.online)
-                    .or_else(|| {
-                        slot.access
-                            .as_ref()
-                            .and_then(|access| access.as_ref().ok())
-                            .map(|access| access.online)
-                    })
-            };
+            let physical_online =
+                if self.has_measurements(&did) && super::routing::unreliable_cloud_online(&did) {
+                    None
+                } else {
+                    let live = self.live.borrow();
+                    let slot = live.devices.get(&did).unwrap();
+                    slot.cloud_access
+                        .as_ref()
+                        .map(|access| access.online)
+                        .or_else(|| {
+                            slot.access
+                                .as_ref()
+                                .and_then(|access| access.as_ref().ok())
+                                .map(|access| access.online)
+                        })
+                };
             let notification = self.active_notification(&did);
             let old = previous.devices.iter().find(|device| device.did == did);
             let switched = old.is_some_and(|old| {
@@ -121,29 +122,16 @@ impl Context {
                 }
                 slot.last_switch_reason.clone()
             };
-            let unavailable_reason = if read_only {
-                (selected_read.is_none() && notification.is_none()).then(|| {
-                    format!(
-                        "local: {}; cloud: {}",
-                        self.local_candidate(&did, false)
-                            .err()
-                            .expect("no local read path"),
-                        self.cloud_candidate(&did, true)
-                            .expect_err("no cloud read path")
-                    )
-                })
-            } else {
-                selected.is_none().then(|| {
-                    format!(
-                        "local: {}; cloud: {}",
-                        self.local_candidate(&did, false)
-                            .err()
-                            .expect("no local control path"),
-                        self.cloud_candidate(&did, true)
-                            .expect_err("no cloud control path")
-                    )
-                })
-            };
+            let unavailable_reason = (!self.device_path_available(&did)).then(|| {
+                format!(
+                    "local: {}; cloud: {}",
+                    self.local_candidate(&did, false)
+                        .err()
+                        .expect("no local device path"),
+                    self.cloud_observation_candidate(&did, true)
+                        .expect_err("no cloud device path")
+                )
+            });
             let sync_limited_reason = notification
                 .is_none()
                 .then(|| self.notification_reason(&did));
@@ -152,6 +140,31 @@ impl Context {
                 .as_ref()
                 .unwrap()
                 .clone();
+            let functions = work
+                .native
+                .device()
+                .functions()
+                .iter()
+                .map(|function| {
+                    let notification_source = work
+                        .function_observer(function.id())
+                        .filter(|source| self.source_valid_for(&did, function.id(), source))
+                        .map(|source| match source {
+                            super::notifications::NotificationSource::Local(_) => PathKind::Local,
+                            super::notifications::NotificationSource::Cloud(_) => PathKind::Cloud,
+                        });
+                    FunctionStatus {
+                        function: function.id().to_owned(),
+                        selected_read: self.read_path_for(&did, function.id()).map(path_kind),
+                        notification_source,
+                        sync_limited_reason: notification_source.is_none().then(|| {
+                            work.function_subscription_problem(function.id())
+                                .unwrap_or_else(|| self.notification_reason(&did))
+                        }),
+                        read_problem: work.refresh.borrow().problem_for(function.id()),
+                    }
+                })
+                .collect();
             let battery_problem = work.battery_problem();
             let channels = work
                 .native
@@ -182,6 +195,7 @@ impl Context {
                 battery_problem,
                 last_switch_reason,
                 commands,
+                functions,
             });
         }
         let mut current = self.status.borrow_mut();

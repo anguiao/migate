@@ -46,13 +46,19 @@ pub(crate) fn is_cp7pd_topology(device: &ParsedDevice) -> bool {
         ("usb", PropertyBinding { siid: 9, piid: 1 }),
     ];
     if device.refresh_trigger() != Some(PropertyBinding { siid: 2, piid: 1 })
-        || device.functions().len() != CHANNELS.len()
+        || device
+            .functions()
+            .iter()
+            .filter(|function| function.measurement().is_none())
+            .count()
+            != CHANNELS.len()
     {
         return false;
     }
     device
         .functions()
         .iter()
+        .filter(|function| function.measurement().is_none())
         .zip(CHANNELS)
         .all(|(function, (id, power))| {
             function.lighting().is_none() && function.id() == id && function.power() == Some(power)

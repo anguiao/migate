@@ -468,6 +468,9 @@ fn exhausted_local_preparation_uses_cloud_and_diagnostic_wakes_do_not_restart_it
     let (rig, listener, cloud) = with_cloud_peer(&["multi"]);
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
+            // Establish the shared cloud connection before opening the local
+            // retry window; its real attachment change may otherwise reopen it.
+            until(|| cloud_active(&c, "multi")).await;
             c.announce();
             let control = &c;
             let cloud = &cloud;

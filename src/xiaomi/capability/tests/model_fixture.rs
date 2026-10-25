@@ -15,7 +15,12 @@ use crate::{
 pub(crate) fn native_for(
     description: &crate::device::PhysicalDeviceDescription,
 ) -> NativeDescription {
-    let multiple = description.functions().len() > 1;
+    let controls = description
+        .functions()
+        .iter()
+        .filter(|function| !function.is_measurement())
+        .count();
+    let multiple = controls > 1;
     let sensor = description
         .functions()
         .iter()
@@ -117,7 +122,18 @@ pub(crate) fn native_for(
         });
         return NativeDescription::new(
             "test.sensor".into(),
-            "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:test-v1:1".into(),
+            if description
+                .functions()
+                .iter()
+                .any(|function| function.kind.is_light())
+            {
+                "urn:miot-spec-v2:device:light:0000A001:test-v1:1"
+            } else if controls > 0 {
+                "urn:miot-spec-v2:device:outlet:0000A002:test-v1:1"
+            } else {
+                "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:test-v1:1"
+            }
+            .into(),
             ParsedDevice::new_with_battery(key, functions, None, battery).unwrap(),
         )
         .unwrap();

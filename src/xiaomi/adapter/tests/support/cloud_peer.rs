@@ -237,7 +237,7 @@ pub(in super::super) fn with_cloud_sensors(
 ) -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
     with_cloud_rig(Rig::sensors(members))
 }
-fn with_cloud_rig(rig: Rig) -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
+pub(in super::super) fn with_cloud_rig(rig: Rig) -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
     let members = rig.cloud.lock().unwrap().members.clone();
     rig.cloud.lock().unwrap().online.extend(members);
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();

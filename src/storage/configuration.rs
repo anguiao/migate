@@ -16,7 +16,7 @@ use crate::{
     xiaomi::capability::{
         BatteryBinding, BrightnessBinding, ColorBinding, LightBindings, MeasurementBinding,
         MeasurementUnit, ModeBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
-        TemperatureBinding, is_temperature_humidity_sensor_type,
+        TemperatureBinding,
     },
 };
 use rusqlite::params;
@@ -500,15 +500,18 @@ impl WireNative {
             .battery
             .map(WireMeasurement::into_battery)
             .transpose()?;
-        let battery_issue = self.battery_issue.or_else(|| {
-            (battery.is_none() && is_temperature_humidity_sensor_type(&self.instance_type))
-                .then(|| "battery capability not declared".into())
-        });
         let functions = self
             .functions
             .into_iter()
             .map(WireFunction::into_parsed)
             .collect::<Result<Vec<_>, _>>()?;
+        let battery_issue = self.battery_issue.or_else(|| {
+            (battery.is_none()
+                && functions
+                    .iter()
+                    .any(|function| function.measurement().is_some()))
+            .then(|| "battery capability not declared".into())
+        });
         let device = ParsedDevice::new_with_battery_diagnostic(
             key.clone(),
             functions,

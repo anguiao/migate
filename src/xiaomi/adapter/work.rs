@@ -15,7 +15,7 @@ use event_listener::Event;
 use futures_lite::future;
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     rc::Rc,
     time::Duration,
 };
@@ -94,6 +94,7 @@ impl LightFrames {
 #[derive(Default)]
 struct Prepare {
     subscribed: BTreeSet<(u32, u32)>,
+    problems: BTreeMap<(u32, u32), String>,
     running: bool,
     exhausted: bool,
     problem: Option<String>,
@@ -110,6 +111,7 @@ impl Prepare {
     /// Start a fresh connection preparation, including a new retry window.
     fn reset(&mut self) {
         self.invalidate();
+        self.problems.clear();
         self.exhausted = false;
         self.problem = None;
     }
@@ -120,27 +122,24 @@ impl Prepare {
         self.running = true;
         Some(self.generation)
     }
-    fn subscribed(&mut self, binding: PropertyBinding, required: &[PropertyBinding]) -> bool {
+    fn subscribed(&mut self, binding: PropertyBinding) {
         self.subscribed.insert((binding.siid, binding.piid));
-        self.ready(required)
+        self.problems.remove(&(binding.siid, binding.piid));
     }
     /// Keep optional battery failures separate from required source readiness.
     fn finish(
         &mut self,
-        mut problem: Option<String>,
+        problem: Option<String>,
         required: &[PropertyBinding],
         battery: Option<PropertyBinding>,
     ) -> Option<String> {
-        let required_ready = self.ready(required);
         let battery_problem =
-            if required_ready && battery.is_some_and(|binding| !self.ready(&[binding])) {
-                problem.take()
-            } else {
-                None
-            };
+            battery.and_then(|binding| self.problems.get(&(binding.siid, binding.piid)).cloned());
         self.running = false;
-        self.exhausted = problem.is_some() && !required_ready;
-        self.problem = problem;
+        self.exhausted = problem.is_some();
+        self.problem = required
+            .iter()
+            .find_map(|binding| self.problems.get(&(binding.siid, binding.piid)).cloned());
         battery_problem
     }
     fn ready(&self, bindings: &[PropertyBinding]) -> bool {
@@ -204,14 +203,14 @@ pub(super) struct DeviceWork {
     sink: RefCell<Rc<LogicalSink>>,
     local: RefCell<LocalAttachment>,
     cloud: RefCell<CloudAttachment>,
-    active: RefCell<Option<NotificationSource>>,
+    active: RefCell<BTreeMap<String, NotificationSource>>,
     condition_generation: Cell<u64>,
     pub(super) refresh: RefCell<RefreshState>,
     pub(super) refresh_changed: Rc<Event>,
     pub(super) light_frames: RefCell<LightFrames>,
     battery_subscription_problem: RefCell<Option<String>>,
     battery_read_problem: RefCell<Option<String>>,
-    retry_optional: Cell<bool>,
+    retry_requested: Cell<bool>,
     changed: Event,
 }
 impl DeviceWork {
@@ -231,14 +230,14 @@ impl DeviceWork {
             sink: RefCell::new(sink),
             local: RefCell::new(LocalAttachment::default()),
             cloud: RefCell::new(CloudAttachment::default()),
-            active: RefCell::new(None),
+            active: RefCell::new(BTreeMap::new()),
             condition_generation: Cell::new(0),
             refresh: RefCell::new(RefreshState::default()),
             refresh_changed,
             light_frames: RefCell::new(LightFrames::default()),
             battery_subscription_problem: RefCell::new(None),
             battery_read_problem: RefCell::new(None),
-            retry_optional: Cell::new(false),
+            retry_requested: Cell::new(false),
             changed: Event::new(),
         }
     }
@@ -430,67 +429,136 @@ impl DeviceWork {
         }
     }
     fn local_source_retired(&self) {
-        let active = matches!(*self.active.borrow(), Some(NotificationSource::Local(_)));
-        if active {
-            self.active.borrow_mut().take();
-            self.source_changed();
+        let ids = self
+            .active
+            .borrow()
+            .iter()
+            .filter(|(_, source)| matches!(source, NotificationSource::Local(_)))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.revoke_observer(&id);
         }
         self.changed.notify(usize::MAX);
     }
     fn cloud_source_retired(&self) {
-        let active = matches!(*self.active.borrow(), Some(NotificationSource::Cloud(_)));
-        if active {
-            self.active.borrow_mut().take();
-            self.source_changed();
+        let ids = self
+            .active
+            .borrow()
+            .iter()
+            .filter(|(_, source)| matches!(source, NotificationSource::Cloud(_)))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.revoke_observer(&id);
         }
         self.changed.notify(usize::MAX);
     }
+    pub(super) fn channels(&self) -> Vec<String> {
+        self.native
+            .device()
+            .functions()
+            .iter()
+            .map(|function| function.id().to_owned())
+            .chain(self.battery_binding().map(|_| BATTERY_CHANNEL.to_owned()))
+            .collect()
+    }
+    fn channel_bindings(&self, id: &str) -> Vec<PropertyBinding> {
+        if id == BATTERY_CHANNEL {
+            return self.battery_binding().into_iter().collect();
+        }
+        let function = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == id)
+            .unwrap();
+        if function.measurement().is_some() {
+            return super::lighting::bindings(function);
+        }
+        let mut bindings = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .filter(|function| function.measurement().is_none())
+            .flat_map(super::lighting::bindings)
+            .collect::<Vec<_>>();
+        bindings.extend(self.native.device().refresh_trigger());
+        bindings
+    }
     pub(super) fn observer(&self) -> Option<NotificationSource> {
-        self.active.borrow().clone()
+        self.native
+            .device()
+            .functions()
+            .iter()
+            .find_map(|function| self.function_observer(function.id()))
     }
-    pub(super) fn observer_is(&self, source: &NotificationSource) -> bool {
-        self.active
-            .borrow()
-            .as_ref()
-            .is_some_and(|active| active.same(source))
+    pub(super) fn function_observer(&self, id: &str) -> Option<NotificationSource> {
+        self.active.borrow().get(id).cloned()
     }
-    pub(super) fn install_observer(&self, source: NotificationSource) {
-        let did = &self.key.id;
-        // Invalidate received QoS2 values before granting delivery; keep handshakes and ready SUBACKs.
-        match &source {
-            NotificationSource::Local(handle) => handle.invalidate_received_properties(did),
-            NotificationSource::Cloud(handle) => handle.invalidate_received_properties(did),
+    pub(super) fn binding_channel(&self, binding: PropertyBinding) -> Option<&str> {
+        if self.battery_binding() == Some(binding) {
+            return Some(BATTERY_CHANNEL);
         }
-        let old = self.active.borrow_mut().replace(source);
-        if let Some(old) = old {
-            self.retire_observer_subscriptions(old);
-        }
-        self.source_changed();
+        self.native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| {
+                super::lighting::bindings(function).contains(&binding)
+                    || function.measurement().is_none()
+                        && self.native.device().refresh_trigger() == Some(binding)
+            })
+            .map(|function| function.id())
     }
-    pub(super) fn revoke_observer(&self) {
-        if let Some(old) = self.observer() {
-            self.retire_observer_subscriptions(old);
-            self.active.borrow_mut().take();
-            self.source_changed();
-        }
-    }
-    fn retire_observer_subscriptions(&self, source: NotificationSource) {
-        match source {
-            NotificationSource::Local(handle) => {
-                drop(handle.unsubscribe_properties(&self.key.id));
-                self.retire_local_preparation();
-            }
-            NotificationSource::Cloud(handle) => {
-                drop(handle.unsubscribe_properties(&self.key.id));
-                self.retire_cloud_preparation();
+    pub(super) fn install_observer(&self, id: &str, source: NotificationSource) {
+        for binding in self.channel_bindings(id) {
+            match &source {
+                NotificationSource::Local(handle) => {
+                    handle.invalidate_received_property(&self.key.id, binding)
+                }
+                NotificationSource::Cloud(handle) => {
+                    handle.invalidate_received_property(&self.key.id, binding)
+                }
             }
         }
+        self.active.borrow_mut().insert(id.to_owned(), source);
+        self.function_source_changed(id);
     }
-    fn source_changed(&self) {
-        self.observations.source_changed();
-        self.physical().clear_light_state();
-        super::refresh::cancel(self);
-        self.refresh();
+    pub(super) fn revoke_observer(&self, id: &str) {
+        if self.active.borrow_mut().remove(id).is_some() {
+            self.function_source_changed(id);
+        }
+    }
+    fn function_source_changed(&self, id: &str) {
+        self.observations.function_source_changed(id);
+        if self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .any(|function| function.id() == id && function.lighting().is_some())
+        {
+            self.physical().clear_light_state();
+        }
+        super::refresh::cancel_function(self, id);
+        let bindings = if id == BATTERY_CHANNEL {
+            self.battery_binding().into_iter().collect()
+        } else {
+            super::lighting::bindings(
+                self.native
+                    .device()
+                    .functions()
+                    .iter()
+                    .find(|function| function.id() == id)
+                    .unwrap(),
+            )
+        };
+        for binding in bindings {
+            self.refresh_property(id, binding);
+        }
     }
     pub(super) fn notify_value_at(
         &self,
@@ -653,10 +721,60 @@ impl DeviceWork {
             if self.battery_binding() == Some(binding) {
                 self.set_battery_subscription_problem(None);
             }
-            local.prepare.subscribed(binding, &self.required_bindings())
+            local.prepare.subscribed(binding);
+            true
         } else {
             false
         }
+    }
+    pub(super) fn subscription_failed(
+        &self,
+        source: &NotificationSource,
+        generation: u64,
+        binding: PropertyBinding,
+        problem: String,
+    ) {
+        let record = |prepare: &mut Prepare| {
+            if prepare.generation == generation {
+                prepare
+                    .problems
+                    .insert((binding.siid, binding.piid), problem);
+            }
+        };
+        match source {
+            NotificationSource::Local(handle) if self.local_attached(handle) => {
+                record(&mut self.local.borrow_mut().prepare)
+            }
+            NotificationSource::Cloud(handle) if self.cloud_attached(handle) => {
+                record(&mut self.cloud.borrow_mut().prepare)
+            }
+            _ => {}
+        }
+    }
+    pub(super) fn function_subscription_problem(&self, id: &str) -> Option<String> {
+        let bindings = self.channel_bindings(id);
+        let mut problems = Vec::new();
+        for binding in bindings {
+            if let Some(problem) = self
+                .local
+                .borrow()
+                .prepare
+                .problems
+                .get(&(binding.siid, binding.piid))
+            {
+                problems.push(problem.clone());
+            }
+            if let Some(problem) = self
+                .cloud
+                .borrow()
+                .prepare
+                .problems
+                .get(&(binding.siid, binding.piid))
+            {
+                problems.push(problem.clone());
+            }
+        }
+        (!problems.is_empty()).then(|| problems.join("; "))
     }
     pub(super) fn local_finished(
         &self,
@@ -743,7 +861,8 @@ impl DeviceWork {
             if self.battery_binding() == Some(binding) {
                 self.set_battery_subscription_problem(None);
             }
-            cloud.prepare.subscribed(binding, &self.required_bindings())
+            cloud.prepare.subscribed(binding);
+            true
         } else {
             false
         }
@@ -778,8 +897,8 @@ impl DeviceWork {
             cloud.prepare.running = false;
         }
     }
-    pub(super) fn source_ready(&self, source: &NotificationSource) -> bool {
-        let bindings = self.required_bindings();
+    pub(super) fn source_ready(&self, id: &str, source: &NotificationSource) -> bool {
+        let bindings = self.channel_bindings(id);
         match source {
             NotificationSource::Local(handle) => {
                 let local = self.local.borrow();
@@ -845,13 +964,11 @@ impl DeviceWork {
             .set(self.condition_generation.get() + 1);
         self.local.borrow_mut().prepare.exhausted = false;
         self.cloud.borrow_mut().prepare.exhausted = false;
-        if self.observer().is_some() && self.battery_binding().is_some() {
-            self.retry_optional.set(true);
-        }
+        self.retry_requested.set(true);
         self.changed.notify(usize::MAX);
     }
-    pub(super) fn take_optional_retry(&self) -> bool {
-        self.retry_optional.replace(false)
+    pub(super) fn take_subscription_retry(&self) -> bool {
+        self.retry_requested.replace(false)
     }
     /// End this runtime's authority and notification preparation. Sent
     /// requests keep their own receipt task; only unsent reads and queued
@@ -874,7 +991,7 @@ impl DeviceWork {
             drop(cloud.unsubscribe_device(&self.key.id));
         }
         self.retire_cloud_preparation();
-        self.active.borrow_mut().take();
+        self.active.borrow_mut().clear();
         super::refresh::cancel(self);
         self.light_frames.borrow_mut().cancel_all();
         self.changed.notify(usize::MAX);
@@ -1152,7 +1269,14 @@ async fn subscriptions(
                         }
                     }
                     Err(error) => {
-                        problem = Some(work.problem("subscribe", binding, &error));
+                        let message = work.problem("subscribe", binding, &error);
+                        work.subscription_failed(
+                            &NotificationSource::Local(handle.clone()),
+                            preparation,
+                            binding,
+                            message.clone(),
+                        );
+                        problem = Some(message);
                         failed.push(binding);
                     }
                 }

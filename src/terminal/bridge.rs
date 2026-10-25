@@ -187,6 +187,9 @@ fn render(view: &View, did: Option<&str>) -> String {
             ));
         }
         for function in physical.functions() {
+            if current_hidden_light(view, physical.key(), function.description()) {
+                continue;
+            }
             let id = &function.function_key().id;
             let label = &function.description().label;
             let snapshot = function.snapshot();
@@ -255,6 +258,9 @@ fn render(view: &View, did: Option<&str>) -> String {
                     ));
                 }
             }
+            if let Some(issue) = crate::matter::measurement_mapping_issue(function) {
+                lines.push(format!("    Matter mapping unsupported: {issue}."));
+            }
         }
     }
     if lines.is_empty() {
@@ -262,6 +268,14 @@ fn render(view: &View, did: Option<&str>) -> String {
     } else {
         lines.join("\n")
     }
+}
+
+fn current_hidden_light(
+    view: &View,
+    key: &DeviceKey,
+    function: &crate::device::FunctionDescription,
+) -> bool {
+    function.kind.is_light() && view.current.derived.memberships.contains_key(&key.id)
 }
 
 fn power_text(power: Power) -> &'static str {
@@ -350,10 +364,24 @@ impl View {
                     log::info!("terminal {did} {verb}: unsupported read-only device");
                     return Ok(Some(format!("{did}: {}", CommandError::Unsupported)));
                 }
+                let controls = physical
+                    .functions()
+                    .iter()
+                    .filter(|function| {
+                        !function.description().is_read_only()
+                            && !current_hidden_light(
+                                registry,
+                                physical.key(),
+                                function.description(),
+                            )
+                    })
+                    .collect::<Vec<_>>();
                 let function = if let Some(channel) = channel.first() {
-                    physical.function(channel)
-                } else if let [function] = physical.functions() {
-                    Some(function.clone())
+                    physical.function(channel).filter(|function| {
+                        !current_hidden_light(registry, physical.key(), function.description())
+                    })
+                } else if let [function] = controls.as_slice() {
+                    Some((*function).clone())
                 } else {
                     return Ok(Some(invalid(
                         registry,

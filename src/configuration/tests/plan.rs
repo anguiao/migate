@@ -104,7 +104,8 @@ fn committed_at(
     configuration_version: u32,
     endpoint: u16,
 ) -> CommittedDevice {
-    let single = native.device().functions().len() == 1;
+    let single = native.device().functions().len() == 1
+        && !native.device().functions()[0].kind().is_measurement();
     let functions = native
         .device()
         .functions()
@@ -170,12 +171,100 @@ fn shapes(derived: &DerivedConfiguration) -> BTreeMap<DeviceKey, FixedShape> {
             (
                 key.clone(),
                 matter::fixed_shape_with_battery(
-                    served.description.functions(),
+                    &derived
+                        .visible_functions(key)
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
                     served.description.has_battery(),
                 ),
             )
         })
         .collect()
+}
+
+#[test]
+fn grouping_a_mixed_light_hides_only_control_and_preserves_measurements_and_battery() {
+    let light = ct_light_native("member", 2700, 6500);
+    let sensor: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/miot/miaomiaoce-t6.json"
+    ))
+    .unwrap();
+    let sensor =
+        crate::xiaomi::capability::parse_device_for_model(key("member"), "sample", &sensor)
+            .unwrap();
+    let mut functions = light.device().functions().to_vec();
+    functions.extend_from_slice(sensor.functions());
+    let mixed = NativeDescription::new(
+        "vendor.light".into(),
+        LIGHT_TYPE.into(),
+        ParsedDevice::new_with_battery(key("member"), functions, None, sensor.battery().cloned())
+            .unwrap(),
+    )
+    .unwrap();
+    let source_devices = vec![
+        source("member", mixed, None),
+        source("group", ct_light_native("group", 2700, 6500), None),
+    ];
+    let initial = plan(input(
+        CommittedConfiguration::empty(),
+        facts(scope(), source_devices.clone(), vec![]),
+        BTreeMap::from([
+            (key("member"), unique("member")),
+            (key("group"), unique("group")),
+        ]),
+    ))
+    .unwrap();
+    let grouped = plan(input(
+        initial.configuration.clone(),
+        facts(
+            scope(),
+            source_devices,
+            vec![GroupRelation {
+                group_did: "group".into(),
+                record_did: "group".into(),
+                model: "vendor.group".into(),
+                instance_type: Some(LIGHT_TYPE.into()),
+                is_physical: true,
+                active: true,
+                error: None,
+                members: vec!["member".into()],
+            }],
+        ),
+        BTreeMap::new(),
+    ))
+    .unwrap();
+    assert!(grouped.derived.published.contains(&key("member")));
+    assert!(
+        grouped.derived.served[&key("member")]
+            .description
+            .has_battery()
+    );
+    assert_eq!(
+        grouped
+            .derived
+            .visible_functions(&key("member"))
+            .iter()
+            .map(|function| function.id.as_str())
+            .collect::<Vec<_>>(),
+        ["temperature", "humidity"]
+    );
+    assert_eq!(
+        grouped.derived.served[&key("member")]
+            .description
+            .functions()
+            .len(),
+        3
+    );
+    let before = initial.configuration.device(&key("member")).unwrap();
+    let after = grouped.configuration.device(&key("member")).unwrap();
+    assert_eq!(before.endpoint, after.endpoint);
+    assert_eq!(before.functions, after.functions);
+    assert_eq!(
+        after.configuration_version,
+        before.configuration_version + 1
+    );
+    grouped.configuration.validate().unwrap();
 }
 
 fn input(

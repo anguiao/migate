@@ -208,7 +208,7 @@ pub(super) struct Shared {
     pub(super) closed: Cell<bool>,
     pub(super) outstanding: Cell<usize>,
     pub(super) cancellations: RefCell<VecDeque<Cancellation>>,
-    pub(super) property_invalidations: RefCell<BTreeSet<String>>,
+    pub(super) property_invalidations: RefCell<BTreeSet<(String, PropertyBinding)>>,
     pub(super) cancel_unsent_business: Cell<bool>,
 }
 
@@ -233,13 +233,13 @@ pub struct SessionHandle {
     pub(super) timing: Timing,
 }
 impl SessionHandle {
-    /// Retire property deliveries already received, preserving subscriptions
-    /// and business requests. The driver applies this before its next frame.
-    pub(crate) fn invalidate_received_properties(&self, did: &str) {
+    /// Retire deliveries already received for one real property while keeping
+    /// subscriptions, other functions and business requests intact.
+    pub(crate) fn invalidate_received_property(&self, did: &str, binding: PropertyBinding) {
         self.shared
             .property_invalidations
             .borrow_mut()
-            .insert(did.into());
+            .insert((did.into(), binding));
         self.shared.event.notify(usize::MAX);
     }
 

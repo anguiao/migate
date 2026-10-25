@@ -45,7 +45,7 @@ mod peer;
 mod rig;
 
 pub(super) use cloud_peer::{
-    CloudBroker, CloudPeer, cloud_active, with_cloud_peer, with_cloud_sensors,
+    CloudBroker, CloudPeer, cloud_active, with_cloud_peer, with_cloud_rig, with_cloud_sensors,
 };
 pub(super) use groups::{
     MEMBER_COLOR, MEMBER_MODE, confirmed_for, group_instance, group_record, ls2307_instance,

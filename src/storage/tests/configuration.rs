@@ -66,7 +66,11 @@ pub(super) fn next(
                 (
                     key.clone(),
                     matter::fixed_shape_with_battery(
-                        served.description.functions(),
+                        &derived
+                            .visible_functions(key)
+                            .into_iter()
+                            .cloned()
+                            .collect::<Vec<_>>(),
                         served.description.has_battery(),
                     ),
                 )

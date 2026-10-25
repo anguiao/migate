@@ -135,17 +135,12 @@ impl App {
                     .configuration
                     .device(key)
                     .expect("a published device keeps its committed identity");
-                let served = current
-                    .derived
-                    .served
-                    .get(key)
-                    .expect("a published device keeps its served description");
                 // The served function order is the stable directory structure
                 // order; every current function keeps its reserved endpoint.
-                let functions = served
-                    .description
-                    .functions()
-                    .iter()
+                let functions = current
+                    .derived
+                    .visible_functions(key)
+                    .into_iter()
                     .map(|function| matter::PublishedFunction {
                         id: function.id.clone(),
                         endpoint: committed
@@ -342,7 +337,11 @@ fn shapes(derived: &DerivedConfiguration) -> BTreeMap<DeviceKey, FixedShape> {
             (
                 key.clone(),
                 matter::fixed_shape_with_battery(
-                    served.description.functions(),
+                    &derived
+                        .visible_functions(key)
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
                     served.description.has_battery(),
                 ),
             )

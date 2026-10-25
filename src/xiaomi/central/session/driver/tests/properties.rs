@@ -35,7 +35,7 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
             .packet(received_property("target", 55, true), &mut on_event)
             .unwrap();
         let outputs_before = driver.output.len();
-        handle.invalidate_received_properties("target");
+        handle.invalidate_received_property("target", BINDING);
         for packet in [
             Packet::PubRel(mqttbytes::v5::PubRel::new(55)),
             received_property("target", 56, false),
@@ -124,7 +124,7 @@ fn received_property_invalidation_takes_effect_between_buffered_frames_in_one_po
         let events = Rc::new(RefCell::new(Vec::new()));
         let mut on_event = |event| {
             if matches!(&event, CentralEvent::PropertyValue { did, .. } if did == "other") {
-                handle.invalidate_received_properties("target");
+                handle.invalidate_received_property("target", BINDING);
             }
             events.borrow_mut().push(event);
         };

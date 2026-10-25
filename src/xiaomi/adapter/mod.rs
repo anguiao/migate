@@ -22,7 +22,8 @@ mod work;
 
 pub use model::{
     AdapterError, AdapterStatus, ChannelCommands, CommandStatus, CommandTarget, DeviceStatus,
-    GatewayStatus, PathKind, PendingDevice, RecoveryStatus, RoutingStatus, TopologyReady,
+    FunctionStatus, GatewayStatus, PathKind, PendingDevice, RecoveryStatus, RoutingStatus,
+    TopologyReady,
 };
 pub use publication::SourceHandle;
 pub use routing::PathPriority;

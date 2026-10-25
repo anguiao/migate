@@ -27,12 +27,33 @@ use std::cell::Cell;
 pub(super) type TemperatureHandler = MeasurementHandler<i16>;
 pub(super) type HumidityHandler = MeasurementHandler<u16>;
 
+pub(crate) fn measurement_mapping_issue(function: &Function) -> Option<&'static str> {
+    let value = function.snapshot().measurement()?.value;
+    let (range_supported, value_supported) = match function.description().kind {
+        crate::device::FunctionKind::Temperature(range) => (
+            range.temperature_bounds().is_some(),
+            value.is_none_or(|value| units::temperature_matter_value(value).is_some()),
+        ),
+        crate::device::FunctionKind::Humidity(range) => (
+            range.humidity_bounds().is_some(),
+            value.is_none_or(|value| units::humidity_matter_value(value).is_some()),
+        ),
+        _ => return None,
+    };
+    if !range_supported {
+        Some("native range cannot be represented")
+    } else if !value_supported {
+        Some("native reading cannot be represented")
+    } else {
+        None
+    }
+}
+
 pub(super) struct MeasurementHandler<T> {
     function: Function,
     endpoint: u16,
     dataver: Dataver,
-    min: T,
-    max: T,
+    bounds: Option<(T, T)>,
     project: fn(f64) -> Option<T>,
     versioned: Cell<Option<T>>,
     observed: Cell<Option<T>>,
@@ -42,32 +63,34 @@ impl<T: Copy + Eq> MeasurementHandler<T> {
         function: Function,
         endpoint: u16,
         dataver: Dataver,
-        (min, max): (T, T),
+        bounds: Option<(T, T)>,
         project: fn(f64) -> Option<T>,
     ) -> Self {
-        let versioned = function
-            .snapshot()
-            .measurement()
-            .and_then(|measurement| measurement.value)
-            .and_then(project);
+        let versioned = bounds.and_then(|_| {
+            function
+                .snapshot()
+                .measurement()
+                .and_then(|measurement| measurement.value)
+                .and_then(project)
+        });
         Self {
             function,
             endpoint,
             dataver,
-            min,
-            max,
+            bounds,
             project,
             versioned: Cell::new(versioned),
             observed: Cell::new(versioned),
         }
     }
     fn sync_version(&self) -> Option<T> {
-        let current = self
-            .function
-            .snapshot()
-            .measurement()
-            .and_then(|measurement| measurement.value)
-            .and_then(self.project);
+        let current = self.bounds.and_then(|_| {
+            self.function
+                .snapshot()
+                .measurement()
+                .and_then(|measurement| measurement.value)
+                .and_then(self.project)
+        });
         if self.versioned.replace(current) != current {
             self.dataver.changed();
         }
@@ -100,7 +123,7 @@ impl TemperatureHandler {
             .description()
             .measurement_range()
             .ok_or(ErrorCode::InvalidState)?;
-        let bounds = range.temperature_bounds().ok_or(ErrorCode::InvalidState)?;
+        let bounds = range.temperature_bounds();
         Ok(Self::with_projection(
             function,
             endpoint,
@@ -116,7 +139,7 @@ impl HumidityHandler {
             .description()
             .measurement_range()
             .ok_or(ErrorCode::InvalidState)?;
-        let bounds = range.humidity_bounds().ok_or(ErrorCode::InvalidState)?;
+        let bounds = range.humidity_bounds();
         Ok(Self::with_projection(
             function,
             endpoint,
@@ -141,13 +164,32 @@ impl temperature::ClusterHandler for TemperatureHandler {
         self.dataver.changed();
     }
     fn measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<i16>, Error> {
-        Ok(Nullable::new(self.sync_version()))
+        if self.bounds.is_none() {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        let value = self.sync_version();
+        if value.is_none()
+            && self
+                .function
+                .snapshot()
+                .measurement()
+                .unwrap()
+                .value
+                .is_some()
+        {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        Ok(Nullable::new(value))
     }
     fn min_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<i16>, Error> {
-        Ok(Nullable::new(Some(self.min)))
+        Ok(Nullable::new(Some(
+            self.bounds.ok_or(ErrorCode::ConstraintError)?.0,
+        )))
     }
     fn max_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<i16>, Error> {
-        Ok(Nullable::new(Some(self.max)))
+        Ok(Nullable::new(Some(
+            self.bounds.ok_or(ErrorCode::ConstraintError)?.1,
+        )))
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         self.run_measurement(
@@ -173,13 +215,32 @@ impl humidity::ClusterHandler for HumidityHandler {
         self.dataver.changed();
     }
     fn measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u16>, Error> {
-        Ok(Nullable::new(self.sync_version()))
+        if self.bounds.is_none() {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        let value = self.sync_version();
+        if value.is_none()
+            && self
+                .function
+                .snapshot()
+                .measurement()
+                .unwrap()
+                .value
+                .is_some()
+        {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        Ok(Nullable::new(value))
     }
     fn min_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u16>, Error> {
-        Ok(Nullable::new(Some(self.min)))
+        Ok(Nullable::new(Some(
+            self.bounds.ok_or(ErrorCode::ConstraintError)?.0,
+        )))
     }
     fn max_measured_value(&self, _ctx: impl ReadContext) -> Result<Nullable<u16>, Error> {
-        Ok(Nullable::new(Some(self.max)))
+        Ok(Nullable::new(Some(
+            self.bounds.ok_or(ErrorCode::ConstraintError)?.1,
+        )))
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         self.run_measurement(

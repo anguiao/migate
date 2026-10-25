@@ -287,6 +287,21 @@ fn format_device(status: &DeviceStatus) -> String {
     if let Some(reason) = &status.last_switch_reason {
         let _ = write!(report, "\n  Device last switch: {reason}.");
     }
+    for function in &status.functions {
+        let _ = write!(
+            report,
+            "\n  {}: selected read {}; notification source {}.",
+            function.function,
+            function.selected_read.map(path).unwrap_or("none"),
+            function.notification_source.map(path).unwrap_or("none")
+        );
+        if let Some(reason) = &function.sync_limited_reason {
+            let _ = write!(report, "\n    State synchronization limited: {reason}.");
+        }
+        if let Some(reason) = &function.read_problem {
+            let _ = write!(report, "\n    Read: {reason}.");
+        }
+    }
     for ChannelCommands {
         channel,
         inflight,
