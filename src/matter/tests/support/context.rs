@@ -3,9 +3,8 @@ use rs_matter::{
     crypto::Crypto,
     dm::{
         AsyncHandler, AttrChangeNotifier, AttrDetails, CmdDetails, EventEmitter, EventNumber,
-        HandlerContext, InvokeContext, MatchContext, Metadata, OperationContext,
+        HandlerContext, InvokeContext, LifecycleOp, MatchContext, Metadata, OperationContext,
         OwnAttrChangeNotifier, OwnEventEmitter, ReadContext, WriteContext,
-        clusters::net_comm::NetworksAccess,
     },
     error::Error,
     im::{
@@ -65,9 +64,6 @@ impl<H: HandlerContext> HandlerContext for Context<'_, H> {
     fn kv(&self) -> impl KvBlobStoreAccess + '_ {
         self.base.kv()
     }
-    fn networks(&self) -> impl NetworksAccess + '_ {
-        self.base.networks()
-    }
     fn metadata(&self) -> impl Metadata + '_ {
         self.base.metadata()
     }
@@ -82,6 +78,9 @@ impl<H: HandlerContext> HandlerContext for Context<'_, H> {
     }
     fn notify_fabric_removed(&self, fab_idx: NonZeroU8) {
         self.base.notify_fabric_removed(fab_idx);
+    }
+    fn broadcast_lifecycle(&self, op: LifecycleOp) -> Result<(), Error> {
+        self.base.broadcast_lifecycle(op)
     }
 }
 impl<H: HandlerContext> AttrChangeNotifier for Context<'_, H> {

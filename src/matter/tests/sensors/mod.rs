@@ -15,10 +15,9 @@ use rs_matter::{
     dm::{
         AsyncHandler, Metadata,
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
-        networks::eth::EthNetwork,
     },
     error::ErrorCode,
-    im::{EthInteractionModelState, InteractionModel},
+    im::{InteractionModel, InteractionModelState},
     tlv::TLVElement,
     transport::exchange::MatterBuffers,
 };
@@ -71,8 +70,7 @@ macro_rules! setup {
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
-        let state: EthInteractionModelState =
-            EthInteractionModelState::new(EthNetwork::new_default());
+        let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new(store.matter()));
         let functions = $device.functions().iter().enumerate().map(|(index, function)| (function.function_key().id.as_str(), index as u16 + 3)).collect::<Vec<_>>();

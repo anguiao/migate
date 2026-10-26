@@ -266,7 +266,7 @@ fn multiple_sensor_parents_keep_isolated_battery_state_and_endpoint_lists() {
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let state: InteractionModelState = InteractionModelState::new();
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
     let first = battery_sensor_named("one", "Sensor One", true);

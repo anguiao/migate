@@ -17,10 +17,9 @@ use rs_matter::{
         AsyncHandler, Dataver, HandlerContext, InvokeReplyInstance, Metadata, ReadReplyInstance,
         clusters::decl::bridged_device_basic_information::{self as bridged, ClusterHandler as _},
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
-        networks::eth::EthNetwork,
     },
     error::{Error, ErrorCode},
-    im::{EthInteractionModelState, InteractionModel},
+    im::{InteractionModel, InteractionModelState},
     tlv::{TLVElement, TLVTag, TLVWrite, TLVWriteParent, Utf8StrBuilder},
     transport::exchange::MatterBuffers,
     utils::storage::WriteBuf,
@@ -36,7 +35,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let state: InteractionModelState = InteractionModelState::new();
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
     let handler = crate::matter::tests::support::model_handler(vec![
@@ -163,7 +162,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let state: InteractionModelState = InteractionModelState::new();
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
     let entry = app.frozen().remove(0);
@@ -234,8 +233,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
-        let state: EthInteractionModelState =
-            EthInteractionModelState::new(EthNetwork::new_default());
+        let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let protocol = StoreAdapter::new(store.matter());
         let kv = matter.kv(protocol.clone());
@@ -510,8 +508,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_preserves_names() {
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
-        let state: EthInteractionModelState =
-            EthInteractionModelState::new(EthNetwork::new_default());
+        let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let protocol = StoreAdapter::new(store.matter());
         let kv = matter.kv(protocol.clone());

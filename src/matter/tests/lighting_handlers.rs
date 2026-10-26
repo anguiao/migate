@@ -14,10 +14,9 @@ use rs_matter::{
     dm::{
         AsyncHandler, InvokeReplyInstance, Metadata,
         devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
-        networks::eth::EthNetwork,
     },
     error::ErrorCode,
-    im::{EthInteractionModelState, InteractionModel},
+    im::{InteractionModel, InteractionModelState},
     tlv::TLVElement,
     transport::exchange::MatterBuffers,
     utils::storage::WriteBuf,
@@ -37,7 +36,7 @@ macro_rules! setup_light {
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
         let buffers: MatterBuffers = MatterBuffers::new();
-        let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+        let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new(store.matter()));
         let im = InteractionModel::new(&matter, &crypto, &buffers, &$handler, &kv, &state);
@@ -661,7 +660,7 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_uses_new_bounds() {
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let state: InteractionModelState = InteractionModelState::new();
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);

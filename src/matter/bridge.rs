@@ -12,11 +12,8 @@ use crate::{
 use rs_matter::{
     Matter,
     crypto::{Crypto, default_crypto},
-    dm::{
-        devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
-        networks::eth::EthNetwork,
-    },
-    im::{EthInteractionModelState, InteractionModel},
+    dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
+    im::{InteractionModel, InteractionModelState},
     respond::DefaultResponder,
     transport::{
         MATTER_SOCKET_BIND_ADDR, exchange::MatterBuffers, network::mdns::astro::AstroMdns,
@@ -104,10 +101,9 @@ impl<'a> Bridge<'a> {
         let info = basic_info(self.identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, bound_port);
         let kv = matter.kv(store.clone());
-        // Validate every persisted protocol blob first (loads only). Then align
-        // the in-memory BasicInfoSettings to the committed root, start the
-        // interaction model, and persist the complete settings only after all
-        // protocol data has loaded; corruption never leaves a write behind.
+        // Restore protocol records with rs-matter's recovery policy, then align
+        // BasicInfoSettings to the committed root version. StoreAdapter keeps
+        // database failures fatal throughout startup and serving.
         store.with_context("restore Matter data", matter.startup(&kv))?;
         let settings = store.with_context(
             "prepare the root ConfigurationVersion",
@@ -115,8 +111,7 @@ impl<'a> Bridge<'a> {
         )?;
         matter.with_state(|state| state.basic_info_settings = settings.clone());
         let buffers: MatterBuffers = MatterBuffers::new();
-        let state: EthInteractionModelState =
-            EthInteractionModelState::new(EthNetwork::new_default());
+        let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let handler = model::handler_from(frozen, crypto.rand()?, self.renamer.clone());
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);

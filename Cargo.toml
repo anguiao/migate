@@ -6,7 +6,7 @@ rust-version = "1.96"
 
 [dependencies]
 event-listener = "5"
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.23"
 isahc = { version = "2", default-features = false, features = ["rustls-tls-webpki-roots"] }
@@ -24,11 +24,11 @@ futures-rustls = { version = "0.26", default-features = false, features = ["aws-
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-platform-verifier = "0.7.1"
 mqttbytes = "0.6"
-mdns-sd = "0.21.5"
+mdns-sd = "0.21.6"
 bytes = "1"
 async-io = "2"
 rand = "0.10"
-rs-matter = { git = "https://github.com/project-chip/rs-matter.git", rev = "c69916a5a78957d46500145486df375acf4ab490", features = ["astro-dnssd", "groups", "persistent-subscriptions"] }
+rs-matter = { git = "https://github.com/project-chip/rs-matter.git", rev = "319c791044d9aac352ac5afbbe31c3aa623842be", features = ["astro-dnssd", "groups", "persistent-subscriptions"] }
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 log = "0.4"
 blocking = "1"

@@ -7,7 +7,7 @@ use rs_matter::{
 };
 use std::{cell::RefCell, rc::Rc};
 
-/// Forget the subscription slots used by EthInteractionModelState before
+/// Forget the subscription slots used by InteractionModelState before
 /// committing a configuration that replaces the stopped Matter instance.
 /// Clearing first also prevents a process restart from resuming the old set
 /// against the new configuration. All other protocol records stay intact.

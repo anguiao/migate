@@ -17,13 +17,12 @@ use rs_matter::{
         Privilege,
         clusters::{decl::bridged_device_basic_information as bridged, groups},
         devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET},
-        networks::eth::EthNetwork,
     },
     error::Error,
     fabric::GroupKeyMapping,
     im::{
-        AttrPath, AttrResp, CmdDataTag, CmdResp, EthInteractionModelState, EventPath, EventResp,
-        GenericPath, IMStatusCode, InteractionModel, OpCode, StatusResp,
+        AttrPath, AttrResp, CmdDataTag, CmdResp, EventPath, EventResp, GenericPath, IMStatusCode,
+        InteractionModel, InteractionModelState, OpCode, StatusResp,
         client::{ImClient, SubscribeOutcome, TxOutcome},
         encoding::ReportDataResp,
     },
@@ -219,7 +218,7 @@ async fn expect_report(
     exchange.acknowledge().await
 }
 
-async fn wait_committed(state: &EthInteractionModelState) {
+async fn wait_committed(state: &InteractionModelState) {
     // SubscribeResponse can reach the client before the server commits its
     // priming report. Start device operations after that transaction completes.
     while !state
@@ -260,7 +259,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     connect(&client, CLIENT_ID, SERVER_ID, boot);
     let crypto = test_only_crypto();
     let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let state: InteractionModelState = InteractionModelState::new();
     let (device, mut receiver) = super::test_device();
     let command_function = device.functions()[0].clone();
     let initial = boot == 3;
@@ -479,7 +478,7 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
     }
     let crypto = test_only_crypto();
     let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let state: InteractionModelState = InteractionModelState::new();
     let (device, _receiver) = super::test_device();
     device.set_availability(Availability::Available);
     device.functions()[0].observe(false);
@@ -1019,7 +1018,7 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
     connect(&client, CLIENT_ID, SERVER_ID, boot + 20);
     let crypto = test_only_crypto();
     let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let state: InteractionModelState = InteractionModelState::new();
     let (single, _single_receivers) = super::physical("dynamic-single", false);
     let (multi, _multi_receivers) = super::physical("dynamic-multi", true);
     for device in [&single, &multi] {
@@ -1199,8 +1198,7 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
             connect(&client, CLIENT_ID, SERVER_ID, 31);
             let crypto = test_only_crypto();
             let buffers: MatterBuffers = MatterBuffers::new();
-            let state: EthInteractionModelState =
-                EthInteractionModelState::new(EthNetwork::new_default());
+            let state: InteractionModelState = InteractionModelState::new();
             let (device, _receiver) = super::support::light(true);
             device.set_availability(Availability::Available);
             let function = device.functions()[0].clone();
@@ -1524,7 +1522,7 @@ fn frozen_light_boot(directory: &Path, boot: u16, previous: Option<u32>) -> (u32
     connect(&client, CLIENT_ID, SERVER_ID, boot + 30);
     let crypto = test_only_crypto();
     let buffers: MatterBuffers = MatterBuffers::new();
-    let state: EthInteractionModelState = EthInteractionModelState::new(EthNetwork::new_default());
+    let state: InteractionModelState = InteractionModelState::new();
     let interval = if boot == 1 {
         (2700, 6500)
     } else {
@@ -1784,7 +1782,7 @@ async fn expect_battery_report(
 
 fn with_sensor_subscription(
     battery: bool,
-    scenario: impl AsyncFnOnce(&Matter<'_>, &EthInteractionModelState, &crate::device::PhysicalDevice)
+    scenario: impl AsyncFnOnce(&Matter<'_>, &InteractionModelState, &crate::device::PhysicalDevice)
     + Send
     + 'static,
 ) {
@@ -1804,8 +1802,7 @@ fn with_sensor_subscription(
             connect(&client, CLIENT_ID, SERVER_ID, 71);
             let crypto = test_only_crypto();
             let buffers: MatterBuffers = MatterBuffers::new();
-            let state: EthInteractionModelState =
-                EthInteractionModelState::new(EthNetwork::new_default());
+            let state: InteractionModelState = InteractionModelState::new();
             let device = if battery {
                 battery_sensor_device()
             } else {

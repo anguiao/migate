@@ -268,34 +268,44 @@ fn pairing_codes_use_the_same_passcode() {
 }
 
 #[test]
-fn protocol_corruption_exits_with_path_without_overwriting() {
+fn corrupt_protocol_records_recover_without_changing_identity() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
             for key in [
                 rs_matter::persist::BASIC_INFO_KEY,
                 rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START,
+                rs_matter::persist::FABRIC_KEYS_START + 1,
             ] {
                 let dir = tempfile::tempdir().unwrap();
                 let store = Store::open(dir.path()).unwrap();
                 store.matter().put(key, &[0xff, 0x11]).unwrap();
                 let identity = store.load_identity().unwrap();
-                let error = startup_error(&store);
-                assert!(error.to_string().contains(dir.path().to_str().unwrap()));
-                assert!(error.source().unwrap().is::<rs_matter::error::Error>());
-                let reopened = Store::open(dir.path()).unwrap();
-                assert_eq!(reopened.load_identity().unwrap(), identity);
-                let db = rusqlite::Connection::open(dir.path().join("state.db")).unwrap();
-                let blobs = db
-                    .prepare("SELECT key, value FROM blobs")
-                    .unwrap()
-                    .query_map([], |row| {
-                        Ok((row.get::<_, u16>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })
-                    .unwrap()
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .unwrap();
-                assert_eq!(blobs, [(key, vec![0xff, 0x11])]);
+                let (device, _receiver) = test_device();
+                let bridge = Bridge::new(
+                    vec![single_entry(&device)],
+                    7,
+                    &store,
+                    &identity,
+                    std::rc::Rc::new(NoLabels),
+                );
+                let opened = std::cell::Cell::new(false);
+                let result = block_on(futures_lite::future::poll_once(bridge.run(0, |event| {
+                    if matches!(event, PairingEvent::Opened { .. }) {
+                        opened.set(true);
+                    }
+                    Ok(())
+                })));
+                assert!(result.is_none(), "bridge must keep serving: {result:?}");
+                assert!(opened.get(), "no valid fabric remains after recovery");
+                bridge.check_failure().unwrap();
+                assert_eq!(store.load_identity().unwrap(), identity);
+                let settings = load_basic_info(&mut StoreAdapter::new(store.matter()));
+                assert_eq!(settings.configuration_version, 7);
+                assert_eq!(settings.node_label.as_str(), "MiGate");
+                if key != rs_matter::persist::BASIC_INFO_KEY {
+                    assert_eq!(store.matter().get(key).unwrap(), Some(vec![0xff, 0x11]));
+                }
             }
         })
         .unwrap()

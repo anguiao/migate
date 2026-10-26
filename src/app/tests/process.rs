@@ -135,23 +135,25 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
 }
 
 #[test]
-fn shared_runtime_reports_corrupt_matter_storage_without_overwriting_it() {
+fn shared_runtime_recovers_corrupt_matter_settings_and_keeps_identity() {
     let directory = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(directory.path()).unwrap();
+    let identity = store.load_identity().unwrap();
     store
         .matter()
         .put(rs_matter::persist::BASIC_INFO_KEY, &[0xff, 0x11])
         .unwrap();
-    let result = helper_command(directory.path()).output().unwrap();
-    assert!(!result.status.success());
-    let stderr = String::from_utf8(result.stderr).unwrap();
+    let (mut process, _) = TestProcess::bridge(directory.path(), false);
+    process.send("on test-outlet\n");
+    process.wait_for_output(Stream::Stdout, "test-outlet: command accepted\n");
+    let (_, stderr) = process.interrupt();
     assert!(
-        stderr.contains(directory.path().to_str().unwrap()),
+        stderr.contains("Ignoring the persisted value under key 0x100"),
         "{stderr}"
     );
-    assert!(stderr.contains("restore Matter data"), "{stderr}");
     assert!(stderr.contains("Fake source stopped"), "{stderr}");
-    assert_eq!(
+    assert_eq!(store.load_identity().unwrap(), identity);
+    assert_ne!(
         store
             .matter()
             .get(rs_matter::persist::BASIC_INFO_KEY)

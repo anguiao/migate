@@ -189,11 +189,10 @@ pub(super) fn basic_info(identity: &Identity) -> BasicInfoConfig<'_> {
         ..TEST_DEV_DET
     }
 }
-/// Read the upstream BasicInfoSettings and align it to the committed root
-/// version, preserving every other field. A blob newer than the committed
-/// root or a malformed blob is current-format corruption and is never
-/// overwritten. This does not write; the caller installs the returned value
-/// in the Matter state and persists it only after protocol validation.
+/// Restore BasicInfoSettings using upstream recovery and align it to the
+/// committed root version, preserving other fields of a valid record.
+/// A valid record newer than the committed root is rejected. This does not
+/// write; the caller installs and persists the settings after model startup.
 pub(super) fn prepare_basic_info(
     kv: impl KvBlobStoreAccess,
     root_version: u32,
@@ -219,12 +218,12 @@ pub(super) fn prepare_basic_info(
     }
 }
 
-/// Persist the complete prepared settings after every protocol blob loaded.
+/// Persist the prepared settings, propagating serialization and storage errors.
 pub(super) fn persist_basic_info(
     kv: impl KvBlobStoreAccess,
     settings: &BasicInfoSettings,
 ) -> Result<(), Error> {
-    persist::Persist::new(kv).store_tlv(persist::BASIC_INFO_KEY, settings)
+    persist::Persist::strict(kv).store_tlv(persist::BASIC_INFO_KEY, settings)
 }
 
 #[derive(Clone, Copy)]
