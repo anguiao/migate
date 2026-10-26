@@ -737,3 +737,78 @@ fn unsent_stop_keeps_its_actual_result_in_command_diagnostics() {
         .await;
     }));
 }
+
+#[test]
+fn a_state_notification_satisfies_a_reserved_baseline_before_its_first_socket_bytes() {
+    use crate::xiaomi::capability::{EventBinding, PropertyBinding};
+    let instance = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/xiaomi-pir1.json"
+    ))
+    .unwrap();
+    block_on(
+        Rig::custom_lights(&[("one", "xiaomi.motion.pir1", instance)]).run(|c| async move {
+            let wire = Rc::new(Wire::default());
+            let (handle, driver) = local(&c, wire.clone());
+            let work = c.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let binding = PropertyBinding {
+                siid: 2,
+                piid: 1024,
+            };
+            for _ in 0..20 {
+                future::yield_now().await;
+            }
+            *work.refresh.borrow_mut() = Default::default();
+            work.refresh
+                .borrow_mut()
+                .request_baseline("motion", binding);
+            let reads = crate::xiaomi::adapter::refresh::local(c.context.clone(), handle);
+            future::or(
+                async {
+                    driver.run(|_| {}).await.unwrap();
+                    panic!("driver unexpectedly stopped");
+                },
+                future::or(
+                    async {
+                        reads.await.unwrap();
+                        panic!("refresh task unexpectedly stopped");
+                    },
+                    async {
+                        until(|| wire.polls.get() > 0).await;
+                        c.clock
+                            .automatic
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        assert!(wire.written.borrow().is_empty());
+                        work.notify_event(
+                            EventBinding {
+                                siid: 2,
+                                eiid: 1008,
+                            },
+                            Some(1),
+                            2,
+                        );
+                        wire.allow(usize::MAX);
+                        until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;
+                        assert!(work.refresh.borrow().snapshot().pending.is_empty());
+                        c.clock.advance(Duration::from_millis(200));
+                        for _ in 0..20 {
+                            future::yield_now().await;
+                        }
+                        assert!(wire.written.borrow().is_empty());
+                        assert_eq!(
+                            function(&c.context.registry, "one", "motion")
+                                .snapshot()
+                                .state_sensor()
+                                .unwrap()
+                                .active,
+                            Some(true)
+                        );
+                    },
+                ),
+            )
+            .await;
+        }),
+    );
+}

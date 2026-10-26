@@ -50,7 +50,7 @@ fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
         |handle, driver| async move {
             let work = async {
                 handle
-                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
+                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})
                     .await
                     .unwrap();
                 assert_eq!(
@@ -124,7 +124,7 @@ fn duplicate_inflight_qos2_publication_is_delivered_once() {
         |handle, driver| async move {
             let work = async {
                 handle
-                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
+                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})
                     .await
                     .unwrap();
                 async_io::Timer::after(Duration::from_millis(15)).await;
@@ -343,8 +343,14 @@ fn invalid_device_messages_do_not_disconnect_the_shared_session() {
             move |handle, driver| async move {
                 let binding = PropertyBinding { siid: 2, piid: 1 };
                 let work = async {
-                    handle.subscribe_property("target", binding).await.unwrap();
-                    handle.subscribe_property("other", binding).await.unwrap();
+                    handle
+                        .subscribe_property("target", binding, |_| {})
+                        .await
+                        .unwrap();
+                    handle
+                        .subscribe_property("other", binding, |_| {})
+                        .await
+                        .unwrap();
                     assert_eq!(
                         handle
                             .read_property_value("other", binding, |_| {})

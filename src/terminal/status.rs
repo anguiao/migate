@@ -295,6 +295,29 @@ fn format_device(status: &DeviceStatus) -> String {
             function.selected_read.map(path).unwrap_or("none"),
             function.notification_source.map(path).unwrap_or("none")
         );
+        if !function.subscriptions.is_empty() {
+            let _ = write!(
+                report,
+                "\n    Observation source: {}.",
+                function.observation_source.map(path).unwrap_or("unknown")
+            );
+            for subscription in &function.subscriptions {
+                let _ = write!(
+                    report,
+                    "\n    {} {}: {}.",
+                    path(subscription.source),
+                    subscription.binding,
+                    if subscription.ready {
+                        "ready"
+                    } else {
+                        "not ready"
+                    }
+                );
+                if let Some(problem) = &subscription.problem {
+                    let _ = write!(report, " {problem}.");
+                }
+            }
+        }
         if let Some(reason) = &function.sync_limited_reason {
             let _ = write!(report, "\n    State synchronization limited: {reason}.");
         }

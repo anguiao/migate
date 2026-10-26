@@ -5,7 +5,8 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
     block_on(async {
         let (handle, mut driver, budget, _) = rig();
         ready_property(&handle, &mut driver, "target").await;
-        let pending = handle.subscribe_property("target", PropertyBinding { siid: 3, piid: 1 });
+        let pending =
+            handle.subscribe_property("target", PropertyBinding { siid: 3, piid: 1 }, |_| {});
         let read = handle.read_property_value("target", BINDING, |_| {});
         let write = handle.set_property("target", BINDING, true, |_| {});
         driver.drain_requests().unwrap();
@@ -147,7 +148,7 @@ fn received_property_invalidation_takes_effect_between_buffered_frames_in_one_po
 fn property_unsubscription_keeps_business_writes_and_retires_late_subacks() {
     block_on(async {
         let (handle, mut driver, budget, _) = rig();
-        let subscribed = handle.subscribe_property("target", BINDING);
+        let subscribed = handle.subscribe_property("target", BINDING, |_| {});
         driver.drain_requests().unwrap();
         let pkid = *driver.subscriptions.keys().next().unwrap();
         write_ready(&mut driver, &budget, usize::MAX).await;
@@ -158,7 +159,8 @@ fn property_unsubscription_keeps_business_writes_and_retires_late_subacks() {
             )
             .unwrap();
         subscribed.await.unwrap();
-        let pending = handle.subscribe_property("target", PropertyBinding { siid: 3, piid: 1 });
+        let pending =
+            handle.subscribe_property("target", PropertyBinding { siid: 3, piid: 1 }, |_| {});
         let write = handle.set_property("target", BINDING, true, |_| {});
         driver.drain_requests().unwrap();
         let subscription_id = *driver.subscriptions.keys().next().unwrap();
@@ -215,7 +217,7 @@ fn property_unsubscription_keeps_business_writes_and_retires_late_subacks() {
 fn a_qos2_property_received_before_unsubscription_cannot_reappear_after_resubscription() {
     block_on(async {
         let (handle, mut driver, budget, _) = rig();
-        let subscribed = handle.subscribe_property("target", BINDING);
+        let subscribed = handle.subscribe_property("target", BINDING, |_| {});
         driver.drain_requests().unwrap();
         let pkid = *driver.subscriptions.keys().next().unwrap();
         write_ready(&mut driver, &budget, usize::MAX).await;
@@ -250,7 +252,7 @@ fn a_qos2_property_received_before_unsubscription_cannot_reappear_after_resubscr
         ack.reasons = vec![mqttbytes::v5::UnsubAckReason::Success];
         driver.packet(Packet::UnsubAck(ack), &mut on_event).unwrap();
         unsubscribe.await.unwrap();
-        let subscribed = handle.subscribe_property("target", BINDING);
+        let subscribed = handle.subscribe_property("target", BINDING, |_| {});
         driver.drain_requests().unwrap();
         let subscription_id = *driver.subscriptions.keys().next().unwrap();
         driver

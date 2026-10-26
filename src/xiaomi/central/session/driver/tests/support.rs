@@ -95,7 +95,7 @@ pub(super) fn received_property(did: &str, pkid: u16, value: bool) -> Packet {
 }
 
 pub(super) async fn ready_property(handle: &SessionHandle, driver: &mut SessionDriver, did: &str) {
-    let subscribed = handle.subscribe_property(did, BINDING);
+    let subscribed = handle.subscribe_property(did, BINDING, |_| {});
     driver.drain_requests().unwrap();
     let pkid = *driver.subscriptions.keys().next().unwrap();
     driver

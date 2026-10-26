@@ -25,6 +25,8 @@ pub(super) struct Refresh {
     pub(super) binding: PropertyBinding,
     pub(super) attempts: u8,
     pub(super) ready_at: Duration,
+    // Reserved reads and cleanup leases retain the notification baseline generation.
+    baseline: Option<u64>,
 }
 enum ReadResult {
     Observed,
@@ -38,21 +40,44 @@ pub(super) struct RefreshState {
     inflight: BTreeMap<super::lighting::PropertyKey, Rc<ReadFlight>>,
     dirty_again: BTreeSet<super::lighting::PropertyKey>,
     problems: BTreeMap<super::lighting::PropertyKey, String>,
+    baseline_generations: BTreeMap<String, u64>,
 }
 impl RefreshState {
     pub(super) fn request(&mut self, id: &str, binding: PropertyBinding) {
-        if !self
+        self.queue(id, binding, false);
+    }
+    pub(super) fn request_baseline(&mut self, id: &str, binding: PropertyBinding) {
+        self.queue(id, binding, true);
+    }
+    fn queue(&mut self, id: &str, binding: PropertyBinding, baseline: bool) {
+        let baseline = baseline.then(|| *self.baseline_generations.entry(id.into()).or_default());
+        if let Some(pending) = self
             .pending
-            .iter()
-            .any(|read| read.id == id && read.binding == binding)
+            .iter_mut()
+            .find(|read| read.id == id && read.binding == binding)
         {
+            if pending.baseline.is_some() {
+                pending.baseline = baseline;
+            }
+        } else {
             self.pending.push_back(Refresh {
                 id: id.into(),
                 binding,
                 attempts: 0,
                 ready_at: Duration::ZERO,
+                baseline,
             });
         }
+    }
+    pub(super) fn satisfy_baseline(&mut self, id: &str) {
+        let generation = self.baseline_generations.entry(id.into()).or_default();
+        *generation = generation.wrapping_add(1);
+        self.pending
+            .retain(|read| read.id != id || read.baseline.is_none());
+    }
+    fn required(&self, read: &Refresh) -> bool {
+        read.baseline
+            .is_none_or(|generation| self.baseline_generations[&read.id] == generation)
     }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
         self.inflight
@@ -111,7 +136,18 @@ impl RefreshState {
         Some((read, flight))
     }
     fn requeue(&mut self, read: Refresh) {
-        if !self.pending.iter().any(|queued| queued.key() == read.key()) {
+        if !self.required(&read) {
+            return;
+        }
+        if let Some(pending) = self
+            .pending
+            .iter_mut()
+            .find(|queued| queued.key() == read.key())
+        {
+            if read.baseline.is_none() {
+                pending.baseline = None;
+            }
+        } else {
             self.pending.push_back(read);
         }
     }
@@ -122,6 +158,9 @@ impl RefreshState {
         now: Duration,
         cloud_first: bool,
     ) {
+        if !self.required(&read) {
+            return;
+        }
         match result {
             ReadResult::Observed => {
                 self.problems.remove(&read.key());
@@ -230,6 +269,29 @@ pub(super) fn cancel_function(work: &DeviceWork, id: &str) {
         if channel == id {
             flight.life.close();
         }
+    }
+    work.refresh_changed.notify(usize::MAX);
+}
+/// A route change retires only reads whose captured route actually ended.
+pub(super) fn reconcile_state_read(
+    work: &DeviceWork,
+    context: &Context,
+    id: &str,
+    binding: PropertyBinding,
+    available: bool,
+) {
+    let current = {
+        let refresh = work.refresh.borrow();
+        let flight = refresh.inflight.get(&super::lighting::key(id, binding));
+        if let Some(flight) = flight
+            && !flight.current(context, &work.key.id, id)
+        {
+            flight.life.close();
+        }
+        flight.is_some_and(|flight| flight.current(context, &work.key.id, id))
+    };
+    if available && !current {
+        work.refresh_property(id, binding);
     }
     work.refresh_changed.notify(usize::MAX);
 }
@@ -404,11 +466,14 @@ fn read_one(
             .is_some_and(|battery| read.id == "battery" && read.binding == battery.property())
             || work.native.device().functions().iter().any(|function| {
                 function.id() == read.id
-                    && (function.lighting().is_some() || function.measurement().is_some())
+                    && (function.lighting().is_some() || function.kind().is_read_only())
             });
         let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
         let reading = async {
-            if flight.life.is_closed() || !flight.current(&context, &did, &read.id) {
+            if flight.life.is_closed()
+                || !flight.current(&context, &did, &read.id)
+                || !work.refresh.borrow().required(&read)
+            {
                 return Ok(ReadResult::Retired);
             }
             match &flight.path {
@@ -475,6 +540,12 @@ fn read_one(
                                     )
                                     && let Ok(value) = outcome.result
                                 {
+                                    let accepted = observing.observations.read_is_current(
+                                        &observing,
+                                        &observed_id,
+                                        read.binding,
+                                        &observed_stamp,
+                                    );
                                     *observed_validation.borrow_mut() = observing.observe_read_at(
                                         &observed_id,
                                         read.binding,
@@ -484,6 +555,12 @@ fn read_one(
                                         result_context.clock.unix_now(),
                                     );
                                     if observed_validation.borrow().is_ok() {
+                                        if accepted && observing.state_function(&observed_id) {
+                                            observing.record_observation_source(
+                                                &observed_id,
+                                                super::model::PathKind::Local,
+                                            );
+                                        }
                                         result_context.refresh_group_states(&observing.key.id);
                                     }
                                 }
@@ -522,6 +599,12 @@ fn read_one(
                         Ok(reading) => {
                             let mut validation = Ok(());
                             if !work.life.is_closed() && flight.current(&context, &did, &read.id) {
+                                let accepted = work.observations.read_is_current(
+                                    &work,
+                                    &read.id,
+                                    read.binding,
+                                    &stamp,
+                                );
                                 validation = work.observe_read_at(
                                     &read.id,
                                     read.binding,
@@ -531,6 +614,12 @@ fn read_one(
                                     context.clock.unix_now(),
                                 );
                                 if validation.is_ok() {
+                                    if accepted && work.state_function(&read.id) {
+                                        work.record_observation_source(
+                                            &read.id,
+                                            super::model::PathKind::Cloud,
+                                        );
+                                    }
                                     context.refresh_group_states(&did);
                                 }
                             }

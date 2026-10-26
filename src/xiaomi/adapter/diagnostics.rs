@@ -92,7 +92,7 @@ impl Context {
             }
             let selected_read = self.read_path(&did).map(path_kind);
             let physical_online =
-                if self.has_measurements(&did) && super::routing::unreliable_cloud_online(&did) {
+                if self.has_sensors(&did) && super::routing::unreliable_cloud_online(&did) {
                     None
                 } else {
                     let live = self.live.borrow();
@@ -162,6 +162,12 @@ impl Context {
                                 .unwrap_or_else(|| self.notification_reason(&did))
                         }),
                         read_problem: work.refresh.borrow().problem_for(function.id()),
+                        observation_source: work.observation_source(function.id()),
+                        subscriptions: if function.state().is_some() {
+                            work.subscription_status(function.id())
+                        } else {
+                            Vec::new()
+                        },
                     }
                 })
                 .collect();
@@ -171,6 +177,7 @@ impl Context {
                 .device()
                 .functions()
                 .iter()
+                .filter(|function| function.kind().is_control())
                 .map(|function| function.id().to_owned())
                 .collect::<Vec<_>>();
             let mut commands = self.commands.snapshot(&did, channels.into_iter());

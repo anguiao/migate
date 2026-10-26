@@ -121,8 +121,17 @@ pub(super) async fn run(
             let driving = async {
                 driver
                     .run(move |event| match event {
-                        // State event delivery is connected by the source-runtime slice.
-                        CentralEvent::EventOccurred { .. } => {}
+                        CentralEvent::EventOccurred {
+                            did,
+                            binding,
+                            arguments: _arguments,
+                            source_time,
+                        } => events.native_event(
+                            &super::notifications::NotificationSource::Local(event_handle.clone()),
+                            &did,
+                            binding,
+                            source_time,
+                        ),
                         CentralEvent::DeviceListChanged { dids } => {
                             events
                                 .live

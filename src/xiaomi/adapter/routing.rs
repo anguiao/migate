@@ -10,16 +10,27 @@ use crate::{
 use std::{rc::Rc, time::Duration};
 
 /// Official Xiaomi source omits state subscriptions for BLE and proxy-child
-/// identities; their cloud online flag is not a measurement eligibility signal.
+/// identities; their cloud online flag is not a sensor eligibility signal.
 pub(super) fn unreliable_cloud_online(did: &str) -> bool {
     did.starts_with("blt.") || did.starts_with("proxy.")
 }
 
+#[derive(Clone)]
 pub(super) enum ControlPath {
     Local(SessionHandle),
     Cloud(CloudPath),
 }
+impl ControlPath {
+    pub(super) fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local(a), Self::Local(b)) => a.same_connection(b),
+            (Self::Cloud(a), Self::Cloud(b)) => a.uid == b.uid && a.access_token == b.access_token,
+            _ => false,
+        }
+    }
+}
 /// Only the account and token identify an HTTP route; local credentials stay in account state.
+#[derive(Clone)]
 pub(super) struct CloudPath {
     pub(super) uid: String,
     pub(super) access_token: String,
@@ -299,12 +310,12 @@ impl Context {
         id: &str,
         http: bool,
     ) -> Result<(), String> {
-        self.cloud_candidate_for(did, http, self.measurement_function(did, id))
+        self.cloud_candidate_for(did, http, self.sensor_function(did, id))
     }
     pub(super) fn cloud_observation_candidate(&self, did: &str, http: bool) -> Result<(), String> {
-        self.cloud_candidate_for(did, http, self.has_measurements(did))
+        self.cloud_candidate_for(did, http, self.has_sensors(did))
     }
-    pub(super) fn has_measurements(&self, did: &str) -> bool {
+    pub(super) fn has_sensors(&self, did: &str) -> bool {
         self.live
             .borrow()
             .devices
@@ -315,10 +326,10 @@ impl Context {
                     .device()
                     .functions()
                     .iter()
-                    .any(|function| function.measurement().is_some())
+                    .any(|function| function.kind().is_read_only())
             })
     }
-    fn measurement_function(&self, did: &str, id: &str) -> bool {
+    fn sensor_function(&self, did: &str, id: &str) -> bool {
         self.live
             .borrow()
             .devices
@@ -332,10 +343,10 @@ impl Context {
                     .device()
                     .functions()
                     .iter()
-                    .any(|function| function.id() == id && function.measurement().is_some())
+                    .any(|function| function.id() == id && function.kind().is_read_only())
             })
     }
-    fn cloud_candidate_for(&self, did: &str, http: bool, measurement: bool) -> Result<(), String> {
+    fn cloud_candidate_for(&self, did: &str, http: bool, sensor: bool) -> Result<(), String> {
         self.cloud_authentication()?;
         if http && self.http_paused.get() {
             return Err("HTTP temporarily paused".into());
@@ -362,17 +373,17 @@ impl Context {
         // BLE and proxy-child devices have no reliable cloud state signal.
         // Account, membership, authorization, retirement and explicitly
         // forbidden access still decide here; ordinary devices stay offline.
-        if !(access.online || measurement && unreliable_cloud_online(did)) {
+        if !(access.online || sensor && unreliable_cloud_online(did)) {
             return Err("device offline".into());
         }
         Ok(())
     }
-    /// Read/measurement eligibility is independent of a native write path.
+    /// Read-only eligibility is independent of a native write path.
     pub(super) fn observation_path(&self, did: &str) -> Option<ControlPath> {
         if self.is_virtual_group(did) {
             return None;
         }
-        if !self.has_measurements(did) {
+        if !self.has_sensors(did) {
             return self.control_path(did);
         }
         let local = self.local_candidate(did, false).ok();
@@ -412,13 +423,13 @@ impl Context {
         if self.is_virtual_group(did) {
             return None;
         }
-        if self.has_measurements(did) {
+        if self.has_sensors(did) {
             return self.observation_path(did);
         }
         self.control_read_path(did)
     }
     pub(super) fn read_path_for(&self, did: &str, id: &str) -> Option<ControlPath> {
-        if self.measurement_function(did, id) {
+        if self.sensor_function(did, id) {
             self.observation_path(did)
         } else {
             self.control_read_path(did)
@@ -491,7 +502,7 @@ impl Context {
                         .device()
                         .functions()
                         .iter()
-                        .filter(|function| function.measurement().is_some())
+                        .filter(|function| function.kind().is_read_only())
                         .any(|function| {
                             work.function_observer(function.id()).is_some_and(|source| {
                                 self.source_valid_for(did, function.id(), &source)

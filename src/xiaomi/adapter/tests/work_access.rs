@@ -8,6 +8,14 @@ use super::DeviceWork;
 use crate::xiaomi::capability::PropertyBinding;
 
 impl DeviceWork {
+    pub(in crate::xiaomi::adapter) fn bindings(&self) -> Vec<PropertyBinding> {
+        let mut values = self.required_bindings();
+        if let Some(battery) = self.battery_binding() {
+            values.push(battery);
+        }
+        values
+    }
+
     pub(in crate::xiaomi::adapter) fn test_source_changed(&self) {
         for id in self.channels() {
             self.function_source_changed(&id);
@@ -46,7 +54,11 @@ impl DeviceWork {
         &self,
         binding: PropertyBinding,
     ) -> bool {
-        self.local.borrow().prepare.subscribed.contains(&binding)
+        self.local
+            .borrow()
+            .prepare
+            .subscribed
+            .contains(&binding.into())
     }
     pub(in crate::xiaomi::adapter) fn test_local_subscribed_pair(
         &self,
@@ -57,7 +69,7 @@ impl DeviceWork {
             .borrow()
             .prepare
             .subscribed
-            .contains(&PropertyBinding { siid, piid })
+            .contains(&PropertyBinding { siid, piid }.into())
     }
     pub(in crate::xiaomi::adapter) fn test_local_subscribed_len(&self) -> usize {
         self.local.borrow().prepare.subscribed.len()

@@ -27,7 +27,7 @@ fn cancellation_precedes_a_late_suback_in_the_same_received_buffer() {
         },
         |handle, driver| async move {
             let subscribed =
-                handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 });
+                handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {});
             let cancelling = handle.clone();
             let work = async {
                 assert_eq!(subscribed.await, Err(CentralError::Cancelled));
@@ -124,8 +124,9 @@ fn cancel_and_unsubscribe_end_target_requests_ignore_late_results_and_keep_other
         move |handle, driver| async move {
             let callbacks = Rc::new(RefCell::new(Vec::new()));
             let subscribed =
-                handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 });
-            let other = handle.subscribe_property("other", PropertyBinding { siid: 2, piid: 1 });
+                handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {});
+            let other =
+                handle.subscribe_property("other", PropertyBinding { siid: 2, piid: 1 }, |_| {});
             let writing = callbacks.clone();
             let write = handle.set_property(
                 "target",
@@ -158,7 +159,7 @@ fn cancel_and_unsubscribe_end_target_requests_ignore_late_results_and_keep_other
                 );
                 assert_eq!(*values.borrow(), [("other".to_owned(), false)]);
                 handle
-                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
+                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})
                     .await
                     .unwrap();
                 while values.borrow().len() < 2 {

@@ -58,7 +58,7 @@ fn business_acceptance_precedes_pubcomp_and_callbacks_preserve_notification_orde
             });
             let work = async {
                 handle
-                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
+                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})
                     .await
                     .unwrap();
                 handle
@@ -143,7 +143,7 @@ fn coalesced_read_and_access_callbacks_run_before_later_notifications() {
         |handle, driver| async move {
             let work = async {
                 handle
-                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
+                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})
                     .await
                     .unwrap();
                 let entries = handle

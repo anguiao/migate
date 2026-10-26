@@ -17,7 +17,7 @@ fn cancelled_and_expired_subscriptions_reserve_packet_ids_until_their_late_ack()
             driver.output.clear();
             driver.ready = true;
             let subscribe =
-                handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 });
+                handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {});
             driver.drain_requests().unwrap();
             let mut old_id = *driver.subscriptions.keys().next().unwrap();
             // Treat this frame as sent; its acknowledgement can still arrive.
@@ -67,8 +67,11 @@ fn cancelled_and_expired_subscriptions_reserve_packet_ids_until_their_late_ack()
             }
             // Force the allocator to revisit the old id without 65,535 requests.
             driver.pkid = old_id.wrapping_sub(1);
-            let mut rejoined =
-                Box::pin(handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }));
+            let mut rejoined = Box::pin(handle.subscribe_property(
+                "target",
+                PropertyBinding { siid: 2, piid: 1 },
+                |_| {},
+            ));
             driver.drain_requests().unwrap();
             let new_id = *driver
                 .subscriptions

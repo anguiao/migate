@@ -23,7 +23,7 @@ mod work;
 pub use model::{
     AdapterError, AdapterStatus, ChannelCommands, CommandStatus, CommandTarget, DeviceStatus,
     FunctionStatus, GatewayStatus, PathKind, PendingDevice, RecoveryStatus, RoutingStatus,
-    TopologyReady,
+    SubscriptionBinding, SubscriptionStatus, TopologyReady,
 };
 pub use publication::SourceHandle;
 pub use routing::PathPriority;

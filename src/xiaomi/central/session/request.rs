@@ -385,25 +385,41 @@ impl SessionHandle {
         async move { result?.await }
     }
 
-    pub fn subscribe_event(
-        &self,
-        did: &str,
-        binding: EventBinding,
-    ) -> impl Future<Output = Result<(), CentralError>> + use<> {
-        self.submit_subscription(RequestKind::SubscribeEvent {
-            did: did.into(),
-            binding,
-        })
-    }
-    pub fn subscribe_property(
+    pub fn subscribe_property<F: FnOnce(Result<(), CentralError>) + 'static>(
         &self,
         did: &str,
         binding: PropertyBinding,
-    ) -> impl Future<Output = Result<(), CentralError>> + use<> {
-        self.submit_subscription(RequestKind::Subscribe {
-            did: did.into(),
-            binding,
-        })
+        on_result: F,
+    ) -> impl Future<Output = Result<(), CentralError>> + use<F> {
+        let submitted = self.submit(
+            RequestKind::Subscribe {
+                did: did.into(),
+                binding,
+            },
+            self.timing.request,
+            None,
+            |_| (),
+            move |outcome| on_result(outcome.result),
+        );
+        async move { submitted.await.result }
+    }
+    pub fn subscribe_event<F: FnOnce(Result<(), CentralError>) + 'static>(
+        &self,
+        did: &str,
+        binding: EventBinding,
+        on_result: F,
+    ) -> impl Future<Output = Result<(), CentralError>> + use<F> {
+        let submitted = self.submit(
+            RequestKind::SubscribeEvent {
+                did: did.into(),
+                binding,
+            },
+            self.timing.request,
+            None,
+            |_| (),
+            move |outcome| on_result(outcome.result),
+        );
+        async move { submitted.await.result }
     }
     pub fn set_property_guarded<F: FnOnce(RequestOutcome<()>) + 'static>(
         &self,

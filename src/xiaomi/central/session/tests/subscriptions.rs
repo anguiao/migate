@@ -41,10 +41,13 @@ fn mismatched_subscription_ack_finishes_the_request_before_disconnecting() {
                 let work = async {
                     let binding = PropertyBinding { siid: 2, piid: 1 };
                     if unsubscribe {
-                        handle.subscribe_property("target", binding).await.unwrap();
+                        handle
+                            .subscribe_property("target", binding, |_| {})
+                            .await
+                            .unwrap();
                         handle.unsubscribe_device("target").await
                     } else {
-                        handle.subscribe_property("target", binding).await
+                        handle.subscribe_property("target", binding, |_| {}).await
                     }
                 };
                 let (driver_result, request_result) = future::zip(driver.run(|_| {}), work).await;
@@ -108,7 +111,11 @@ fn baseline_and_property_subscription_rejections_are_observed() {
                 let work = async {
                     assert_eq!(
                         handle
-                            .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
+                            .subscribe_property(
+                                "target",
+                                PropertyBinding { siid: 2, piid: 1 },
+                                |_| {}
+                            )
                             .await,
                         Err(CentralError::Rejected(135))
                     );
@@ -178,7 +185,8 @@ fn receive_maximum_does_not_block_subscription_control_packets() {
                     outcome.result.unwrap();
                 },
             );
-            let sub = handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 });
+            let sub =
+                handle.subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {});
             let work = async {
                 sub.await.unwrap();
                 assert_eq!(first.await.result.unwrap(), json!(true));

@@ -151,7 +151,7 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
     for native in natives {
         let id = native.device().key().id.clone();
         let single = native.device().functions().len() == 1
-            && !native.device().functions()[0].kind().is_measurement();
+            && !native.device().functions()[0].kind().is_read_only();
         let functions = native
             .device()
             .functions()

@@ -9,9 +9,11 @@ use std::{
     time::Instant,
 };
 
+type CompletionObserver = Box<dyn FnOnce(Result<(), NotificationError>)>;
 pub(super) struct Completion {
     result: RefCell<Option<Result<(), NotificationError>>>,
     event: Event,
+    observers: RefCell<Vec<CompletionObserver>>,
 }
 
 impl Completion {
@@ -19,13 +21,17 @@ impl Completion {
         Rc::new(Self {
             result: RefCell::new(None),
             event: Event::new(),
+            observers: RefCell::new(Vec::new()),
         })
     }
     pub(super) fn finish(&self, result: Result<(), NotificationError>) -> bool {
         if self.result.borrow().is_some() {
             return false;
         }
-        *self.result.borrow_mut() = Some(result);
+        *self.result.borrow_mut() = Some(result.clone());
+        for observer in std::mem::take(&mut *self.observers.borrow_mut()) {
+            observer(result.clone());
+        }
         self.event.notify(usize::MAX);
         true
     }
@@ -194,21 +200,7 @@ impl NotificationHandle {
         did: &str,
         binding: PropertyBinding,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
-        let completion = if binding.siid == 0 || binding.piid == 0 {
-            Err(NotificationError::InvalidInput)
-        } else {
-            self.subscribe(
-                format!(
-                    "device/{did}/up/properties_changed/{}/{}",
-                    binding.siid, binding.piid
-                ),
-                Target::Property {
-                    did: did.into(),
-                    binding,
-                },
-            )
-        };
-        async move { completion?.wait().await }
+        self.subscribe_property_with_result(did, binding, |_| {})
     }
 
     pub fn subscribe_online(
@@ -233,6 +225,41 @@ impl NotificationHandle {
         did: &str,
         binding: EventBinding,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
+        self.subscribe_event_with_result(did, binding, |_| {})
+    }
+
+    pub(crate) fn subscribe_property_with_result<
+        F: FnOnce(Result<(), NotificationError>) + 'static,
+    >(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        on_result: F,
+    ) -> impl Future<Output = Result<(), NotificationError>> + use<F> {
+        let completion = if binding.siid == 0 || binding.piid == 0 {
+            Err(NotificationError::InvalidInput)
+        } else {
+            self.subscribe(
+                format!(
+                    "device/{did}/up/properties_changed/{}/{}",
+                    binding.siid, binding.piid
+                ),
+                Target::Property {
+                    did: did.into(),
+                    binding,
+                },
+            )
+        };
+        Self::observed_subscription(completion, on_result)
+    }
+    pub(crate) fn subscribe_event_with_result<
+        F: FnOnce(Result<(), NotificationError>) + 'static,
+    >(
+        &self,
+        did: &str,
+        binding: EventBinding,
+        on_result: F,
+    ) -> impl Future<Output = Result<(), NotificationError>> + use<F> {
         let completion = if binding.siid == 0 || binding.eiid == 0 {
             Err(NotificationError::InvalidInput)
         } else {
@@ -247,9 +274,25 @@ impl NotificationHandle {
                 },
             )
         };
+        Self::observed_subscription(completion, on_result)
+    }
+    fn observed_subscription(
+        completion: Result<Rc<Completion>, NotificationError>,
+        on_result: impl FnOnce(Result<(), NotificationError>) + 'static,
+    ) -> impl Future<Output = Result<(), NotificationError>> {
+        match &completion {
+            Ok(completion) => {
+                let result = completion.result.borrow().clone();
+                if let Some(result) = result {
+                    on_result(result);
+                } else {
+                    completion.observers.borrow_mut().push(Box::new(on_result));
+                }
+            }
+            Err(error) => on_result(Err(error.clone())),
+        }
         async move { completion?.wait().await }
     }
-
     fn immediate(
         &self,
         result: Result<(), NotificationError>,

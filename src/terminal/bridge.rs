@@ -273,11 +273,7 @@ fn render(view: &View, did: Option<&str>) -> String {
                 | crate::device::FunctionState::Occupancy { state } => {
                     lines.push(format!(
                         "  {id} ({label}): {}",
-                        state.active.map_or("unknown", |active| if active {
-                            "active"
-                        } else {
-                            "inactive"
-                        })
+                        state_text(function.description().kind, state)
                     ));
                 }
                 crate::device::FunctionState::Illuminance { measurement } => {
@@ -313,6 +309,32 @@ fn power_text(power: Power) -> &'static str {
         Power::On => "on",
         Power::Off => "off",
     }
+}
+
+fn state_text(kind: crate::device::FunctionKind, state: crate::device::StateSnapshot) -> String {
+    use crate::device::{FunctionKind, StateInput};
+    let value = match (kind, state.active) {
+        (_, None) => "unknown",
+        (FunctionKind::Contact, Some(true)) => "open",
+        (FunctionKind::Contact, Some(false)) => "closed",
+        (FunctionKind::Motion, Some(true)) => "motion detected",
+        (FunctionKind::Motion, Some(false)) => "no motion",
+        (FunctionKind::Occupancy, Some(true)) => "occupied",
+        (FunctionKind::Occupancy, Some(false)) => "unoccupied",
+        _ => unreachable!("state text is only used for state functions"),
+    };
+    let input = match state.input {
+        None => "native input unknown".into(),
+        Some(StateInput::Property(value)) => format!("native property {value}"),
+        Some(StateInput::Event { siid, eiid }) => format!("native event {siid}.{eiid}"),
+    };
+    let source = state
+        .source_time
+        .map_or_else(|| "unknown".into(), |value| value.to_string());
+    let received = state
+        .received_at
+        .map_or_else(|| "unknown".into(), timestamp);
+    format!("{value}; {input}; upstream time {source}; received at {received}")
 }
 
 fn measurement_text(measurement: crate::device::MeasurementSnapshot, unit: &str) -> String {

@@ -18,7 +18,7 @@ fn event(retain: bool, payload: serde_json::Value) -> Packet {
 fn local_event_notifications_match_eiid_and_ignore_retained_events() {
     block_on(async {
         let (handle, mut driver, _, _) = rig();
-        let subscribed = handle.subscribe_event("target", EVENT);
+        let subscribed = handle.subscribe_event("target", EVENT, |_| {});
         driver.drain_requests().unwrap();
         let mut frames = Frames::default();
         frames
@@ -95,7 +95,7 @@ fn local_event_notifications_match_eiid_and_ignore_retained_events() {
 }
 
 async fn ready_event(handle: &SessionHandle, driver: &mut SessionDriver) {
-    let subscribed = handle.subscribe_event("target", EVENT);
+    let subscribed = handle.subscribe_event("target", EVENT, |_| {});
     driver.drain_requests().unwrap();
     let pkid = *driver
         .subscriptions
@@ -240,7 +240,7 @@ fn local_event_generations_and_scoped_unsubscription_preserve_other_work() {
 fn local_late_event_subacks_and_failures_cannot_restore_retired_subscriptions() {
     block_on(async {
         let (handle, mut driver, budget, _) = rig();
-        let pending = handle.subscribe_event("target", EVENT);
+        let pending = handle.subscribe_event("target", EVENT, |_| {});
         driver.drain_requests().unwrap();
         let pkid = *driver.subscriptions.keys().next().unwrap();
         write_ready(&mut driver, &budget, usize::MAX).await;
@@ -257,7 +257,7 @@ fn local_late_event_subacks_and_failures_cannot_restore_retired_subscriptions() 
         driver.drain_requests().unwrap();
         acknowledge_unsubscribe(&mut driver);
         unsubscribe.await.unwrap();
-        let rejected = handle.subscribe_event("target", EVENT);
+        let rejected = handle.subscribe_event("target", EVENT, |_| {});
         driver.drain_requests().unwrap();
         let pkid = *driver.subscriptions.keys().next().unwrap();
         driver
@@ -280,11 +280,11 @@ fn local_event_timeouts_do_not_accept_late_subacks_and_requests_are_bounded() {
         let (handle, mut driver, _, _) = rig();
         assert_eq!(
             handle
-                .subscribe_event("target", EventBinding { siid: 0, eiid: 1 })
+                .subscribe_event("target", EventBinding { siid: 0, eiid: 1 }, |_| {})
                 .await,
             Err(CentralError::InvalidInput)
         );
-        let expired = handle.subscribe_event("target", EVENT);
+        let expired = handle.subscribe_event("target", EVENT, |_| {});
         driver.drain_requests().unwrap();
         let pkid = *driver.subscriptions.keys().next().unwrap();
         driver.subscriptions.get_mut(&pkid).unwrap().deadline =
@@ -306,11 +306,12 @@ fn local_event_timeouts_do_not_accept_late_subacks_and_requests_are_bounded() {
                         siid: 2,
                         eiid: eiid as u32,
                     },
+                    |_| {},
                 )
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            handle.subscribe_event("other", EVENT).await,
+            handle.subscribe_event("other", EVENT, |_| {}).await,
             Err(CentralError::QueueFull)
         );
         driver.finish_all(CentralError::Cancelled);
@@ -319,7 +320,7 @@ fn local_event_timeouts_do_not_accept_late_subacks_and_requests_are_bounded() {
         }
         assert_eq!(handle.shared.outstanding.get(), 0);
         assert_eq!(
-            handle.subscribe_event("target", EVENT).await,
+            handle.subscribe_event("target", EVENT, |_| {}).await,
             Err(CentralError::Cancelled)
         );
     });

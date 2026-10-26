@@ -1,5 +1,5 @@
 use super::{
-    model::AdapterError,
+    model::{AdapterError, PathKind, SubscriptionBinding},
     routing::PathPriority,
     state::{Backoff, Context, Lifetime},
     tasks::TaskSet,
@@ -27,6 +27,13 @@ pub(super) enum NotificationSource {
     Cloud(NotificationHandle),
 }
 impl NotificationSource {
+    pub(super) fn kind(&self) -> PathKind {
+        match self {
+            Self::Local(_) => PathKind::Local,
+            Self::Cloud(_) => PathKind::Cloud,
+        }
+    }
+
     pub(super) fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Local(a), Self::Local(b)) => a.same_connection(b),
@@ -248,6 +255,34 @@ impl Context {
             .devices
             .get(did)
             .and_then(|slot| slot.admitted.clone());
+        if let Some(work) = &work
+            && let Some(function) = work.native.device().functions().iter().find(|function| {
+                function
+                    .state()
+                    .is_some_and(|state| state.property() == binding)
+            })
+        {
+            if let Ok(active) = function.state().unwrap().read_value(value)
+                && self.accept_state_notification(work, function.id(), source)
+            {
+                work.observe_state_property(
+                    function,
+                    active,
+                    value,
+                    update_time,
+                    self.clock.unix_now(),
+                    if cached_report {
+                        super::lighting::Origin::Cache
+                    } else {
+                        super::lighting::Origin::Notification
+                    },
+                );
+                work.record_observation_source(function.id(), source.kind());
+                self.update_routing("state property observed");
+                self.status_changed.notify(usize::MAX);
+            }
+            return;
+        }
         if let Some(work) = work
             && let Some(id) = work.binding_channel(binding)
             && self.source_valid_for(did, id, source)
@@ -270,6 +305,57 @@ impl Context {
             if changed && !self.is_group(did) {
                 self.refresh_group_states(did);
             }
+        }
+    }
+    fn accept_state_notification(
+        &self,
+        work: &DeviceWork,
+        id: &str,
+        source: &NotificationSource,
+    ) -> bool {
+        let did = &work.key.id;
+        if !self.source_valid_for(did, id, source) {
+            return false;
+        }
+        if work
+            .function_observer(id)
+            .is_some_and(|active| active.same(source))
+        {
+            return true;
+        }
+        if self
+            .notification_source(did, id)
+            .is_some_and(|desired| desired.same(source))
+            && work.source_ready(id, source)
+        {
+            work.install_state_observer(id, source.clone());
+            self.update_device_availability(did);
+            self.note_notification_switch(did, "state notification established source baseline");
+            return true;
+        }
+        false
+    }
+    pub(super) fn native_event(
+        &self,
+        source: &NotificationSource,
+        did: &str,
+        binding: crate::xiaomi::capability::EventBinding,
+        source_time: Option<i64>,
+    ) {
+        let work = self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.admitted.clone());
+        if let Some(work) = work
+            && let Some(id) = work.event_channel(binding)
+            && self.accept_state_notification(&work, id, source)
+        {
+            work.notify_event(binding, source_time, self.clock.unix_now());
+            work.record_observation_source(id, source.kind());
+            self.update_routing("native motion event observed");
+            self.status_changed.notify(usize::MAX);
         }
     }
     fn online_event(&self, handle: &NotificationHandle, did: &str, online: bool) {
@@ -329,6 +415,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     if work.life.is_closed() {
         return;
     }
+    work.reconcile_state_reads(context);
     let retry = work.take_subscription_retry();
     let mut keep_local = false;
     let mut keep_cloud = false;
@@ -508,17 +595,35 @@ async fn prepare_properties(
             if !current() {
                 break 'attempts;
             }
-            let result = handle.subscribe_property(&did, binding).await;
+            let receipt_work = work.clone();
+            let receipt_context = context.clone();
+            let receipt_handle = handle.clone();
+            let on_result = move |result: Result<(), NotificationError>| {
+                if result.is_ok()
+                    && receipt_context.current_notifications(&receipt_handle)
+                    && receipt_work.cloud_subscribed(&receipt_handle, preparation, binding)
+                {
+                    receipt_context.changed.notify(usize::MAX);
+                }
+            };
+            let result = match binding {
+                SubscriptionBinding::Property(binding) => {
+                    handle
+                        .subscribe_property_with_result(&did, binding, on_result)
+                        .await
+                }
+                SubscriptionBinding::Event(binding) => {
+                    handle
+                        .subscribe_event_with_result(&did, binding, on_result)
+                        .await
+                }
+            };
             drop(permit);
             if !current() {
                 break 'attempts;
             }
             match result {
-                Ok(()) => {
-                    if work.cloud_subscribed(&handle, preparation, binding) {
-                        context.changed.notify(usize::MAX);
-                    }
-                }
+                Ok(()) => {}
                 Err(NotificationError::Unauthorized) => {
                     context.token_rejected(
                         &token,
@@ -527,10 +632,7 @@ async fn prepare_properties(
                     break 'attempts;
                 }
                 Err(error) => {
-                    let message = format!(
-                        "{did} cloud subscribe {}.{}: {error}",
-                        binding.siid, binding.piid
-                    );
+                    let message = format!("{did} cloud subscribe {binding}: {error}");
                     work.subscription_failed(
                         &NotificationSource::Cloud(handle.clone()),
                         preparation,
@@ -634,10 +736,10 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                 {
                     work.attach_cloud(handle.clone());
                     work.retry_subscriptions();
-                    // HTTP feedback must also recover when property
-                    // subscriptions never became active in the old session.
+                    // State inputs recover with their independent read route and
+                    // notification baseline; other feedback keeps this connection demand.
                     if work.observer().is_none() && !context.is_virtual_group(&work.key.id) {
-                        work.refresh();
+                        work.refresh_connection();
                     }
                 }
                 context.update_all_availability();
@@ -648,8 +750,17 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                 let driving = async {
                     let result = driver
                         .run(move |event| match event {
-                            // State event delivery is connected by the source-runtime slice.
-                            NotificationEvent::EventOccurred { .. } => {}
+                            NotificationEvent::EventOccurred {
+                                did,
+                                binding,
+                                arguments: _arguments,
+                                source_time,
+                            } => events.native_event(
+                                &NotificationSource::Cloud(event_handle.clone()),
+                                &did,
+                                binding,
+                                source_time,
+                            ),
                             NotificationEvent::Online { did, online } => {
                                 events.online_event(&event_handle, &did, online)
                             }

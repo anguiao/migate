@@ -53,7 +53,9 @@ fn a_native_replacement_clears_its_previous_subscription_failure() {
                     .borrow()
                     .pending
                     .iter()
-                    .any(|pending| pending.did == "one" && pending.reason.contains("subscribe 2.3"))
+                    .any(|pending| {
+                        pending.did == "one" && pending.reason.contains("subscribe property 2.3")
+                    })
             })
             .await;
             peer.state.borrow_mut().sub_reject.clear();
@@ -90,7 +92,7 @@ fn a_native_replacement_clears_its_previous_subscription_failure() {
                     .pending
                     .iter()
                     .all(|pending| {
-                        pending.did != "one" || !pending.reason.contains("subscribe 2.3")
+                        pending.did != "one" || !pending.reason.contains("subscribe property 2.3")
                     })
             );
             let current = device_work(control, "one");

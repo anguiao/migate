@@ -12,7 +12,7 @@ fn cancelling_unsent_business_keeps_writes_and_subscriptions() {
             let device = handle.get_devices_filtered(&["target".into()], count_result(&callbacks));
             let read = handle.read_property_value("target", BINDING, count_result(&callbacks));
             let write = handle.set_property("target", BINDING, true, |_| {});
-            let subscription = handle.subscribe_property("target", BINDING);
+            let subscription = handle.subscribe_property("target", BINDING, |_| {});
             if dispatched {
                 driver.drain_requests().unwrap();
             }
@@ -112,7 +112,7 @@ fn cancelling_unsent_business_releases_capacity_once() {
                 drop(handle.read_property_value("target", BINDING, count_result(&callbacks)));
             }
             let write = handle.set_property("target", BINDING, true, |_| {});
-            let subscription = handle.subscribe_property("target", BINDING);
+            let subscription = handle.subscribe_property("target", BINDING, |_| {});
             assert_eq!(handle.shared.outstanding.get(), LIMIT);
             assert_eq!(
                 handle.set_property("full", BINDING, false, |_| {}).await,

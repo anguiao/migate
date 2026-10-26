@@ -3,7 +3,7 @@ use crate::{
     storage::StorageError,
     xiaomi::{
         auth::{AuthError, AuthReport},
-        capability::PropertyBinding,
+        capability::{EventBinding, PropertyBinding},
         catalog::CatalogError,
         central::CentralError,
         cloud::CloudError,
@@ -206,6 +206,31 @@ pub struct ChannelCommands {
     pub inflight: Option<CommandStatus>,
     pub last: Option<CommandStatus>,
 }
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum SubscriptionBinding {
+    Property(PropertyBinding),
+    Event(EventBinding),
+}
+impl From<PropertyBinding> for SubscriptionBinding {
+    fn from(binding: PropertyBinding) -> Self {
+        Self::Property(binding)
+    }
+}
+impl fmt::Display for SubscriptionBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Property(binding) => write!(f, "property {}.{}", binding.siid, binding.piid),
+            Self::Event(binding) => write!(f, "event {}.{}", binding.siid, binding.eiid),
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubscriptionStatus {
+    pub binding: SubscriptionBinding,
+    pub source: PathKind,
+    pub ready: bool,
+    pub problem: Option<String>,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionStatus {
     pub function: String,
@@ -213,6 +238,8 @@ pub struct FunctionStatus {
     pub notification_source: Option<PathKind>,
     pub sync_limited_reason: Option<String>,
     pub read_problem: Option<String>,
+    pub observation_source: Option<PathKind>,
+    pub subscriptions: Vec<SubscriptionStatus>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceStatus {

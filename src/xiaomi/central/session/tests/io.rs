@@ -36,7 +36,7 @@ fn short_writes_preserve_offsets_and_partial_timeout_closes_without_replay() {
             move |handle, driver| async move {
                 let work = async {
                     handle
-                        .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
+                        .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})
                         .await
                         .unwrap();
                     control.set(if stalls { 2 } else { 1 });
@@ -118,7 +118,7 @@ fn write_gate_opening_at_deadline_does_not_send_expired_request() {
         move |handle, driver| async move {
             let work = async {
                 handle
-                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 })
+                    .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})
                     .await
                     .unwrap();
                 gate.set(Some(Instant::now() + Duration::from_millis(30)));

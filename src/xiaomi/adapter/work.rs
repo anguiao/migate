@@ -1,6 +1,6 @@
 use super::{
     commands::LightWriteGate,
-    model::AdapterError,
+    model::{AdapterError, PathKind, SubscriptionBinding, SubscriptionStatus},
     notifications::NotificationSource,
     observations::Observations,
     refresh::RefreshState,
@@ -9,7 +9,11 @@ use super::{
 use crate::{
     device::{ActionToken, DeviceKey, LightDimension, PhysicalDevice},
     xiaomi::capability::{NativeDescription, ParsedFunction},
-    xiaomi::{capability::PropertyBinding, central::SessionHandle, cloud::NotificationHandle},
+    xiaomi::{
+        capability::{EventBinding, PropertyBinding},
+        central::SessionHandle,
+        cloud::NotificationHandle,
+    },
 };
 use event_listener::Event;
 use futures_lite::future;
@@ -93,8 +97,8 @@ impl LightFrames {
 /// remains exhausted until an actual condition change reopens it.
 #[derive(Default)]
 struct Prepare {
-    subscribed: BTreeSet<PropertyBinding>,
-    problems: BTreeMap<PropertyBinding, String>,
+    subscribed: BTreeSet<SubscriptionBinding>,
+    problems: BTreeMap<SubscriptionBinding, String>,
     running: bool,
     exhausted: bool,
     generation: u64,
@@ -120,7 +124,7 @@ impl Prepare {
         self.running = true;
         Some(self.generation)
     }
-    fn subscribed(&mut self, binding: PropertyBinding) {
+    fn subscribed(&mut self, binding: SubscriptionBinding) {
         self.subscribed.insert(binding);
         self.problems.remove(&binding);
     }
@@ -128,19 +132,19 @@ impl Prepare {
     fn finish(&mut self, battery: Option<PropertyBinding>) -> Option<String> {
         self.running = false;
         self.exhausted = !self.problems.is_empty();
-        battery.and_then(|binding| self.problems.get(&binding).cloned())
+        battery.and_then(|binding| self.problems.get(&binding.into()).cloned())
     }
-    fn problem(&self, bindings: &[PropertyBinding]) -> Option<String> {
+    fn problem(&self, bindings: &[SubscriptionBinding]) -> Option<String> {
         bindings
             .iter()
             .find_map(|binding| self.problems.get(binding).cloned())
     }
-    fn ready(&self, bindings: &[PropertyBinding]) -> bool {
+    fn ready(&self, bindings: &[SubscriptionBinding]) -> bool {
         bindings
             .iter()
             .all(|binding| self.subscribed.contains(binding))
     }
-    fn missing(&self, bindings: &[PropertyBinding]) -> Vec<PropertyBinding> {
+    fn missing(&self, bindings: &[SubscriptionBinding]) -> Vec<SubscriptionBinding> {
         bindings
             .iter()
             .copied()
@@ -197,6 +201,8 @@ pub(super) struct DeviceWork {
     local: RefCell<LocalAttachment>,
     cloud: RefCell<CloudAttachment>,
     active: RefCell<BTreeMap<String, NotificationSource>>,
+    observation_sources: RefCell<BTreeMap<String, PathKind>>,
+    state_read_paths: RefCell<BTreeMap<String, Option<super::routing::ControlPath>>>,
     condition_generation: Cell<u64>,
     pub(super) refresh: RefCell<RefreshState>,
     pub(super) refresh_changed: Rc<Event>,
@@ -224,6 +230,8 @@ impl DeviceWork {
             local: RefCell::new(LocalAttachment::default()),
             cloud: RefCell::new(CloudAttachment::default()),
             active: RefCell::new(BTreeMap::new()),
+            observation_sources: RefCell::new(BTreeMap::new()),
+            state_read_paths: RefCell::new(BTreeMap::new()),
             condition_generation: Cell::new(0),
             refresh: RefCell::new(RefreshState::default()),
             refresh_changed,
@@ -303,6 +311,7 @@ impl DeviceWork {
         drop(local);
         if let Some(previous) = previous {
             drop(previous.unsubscribe_properties(&self.key.id));
+            drop(previous.unsubscribe_events(&self.key.id));
         }
         self.local_source_retired();
         true
@@ -467,7 +476,7 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
-        if function.measurement().is_some() {
+        if function.kind().is_read_only() {
             return function.bindings();
         }
         let mut bindings = self
@@ -475,11 +484,191 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
-            .filter(|function| function.measurement().is_none())
+            .filter(|function| function.kind().is_control())
             .flat_map(ParsedFunction::bindings)
             .collect::<Vec<_>>();
         bindings.extend(self.native.device().refresh_trigger());
         bindings
+    }
+    fn channel_subscriptions(&self, id: &str) -> Vec<SubscriptionBinding> {
+        let mut subscriptions = self
+            .channel_bindings(id)
+            .into_iter()
+            .map(SubscriptionBinding::Property)
+            .collect::<Vec<_>>();
+        if let Some(event) = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == id)
+            .and_then(ParsedFunction::motion)
+            .map(|motion| motion.event())
+        {
+            subscriptions.push(SubscriptionBinding::Event(event));
+        }
+        subscriptions
+    }
+    fn required_subscriptions(&self) -> Vec<SubscriptionBinding> {
+        let mut values = self
+            .required_bindings()
+            .into_iter()
+            .map(SubscriptionBinding::Property)
+            .collect::<Vec<_>>();
+        values.extend(
+            self.native
+                .device()
+                .functions()
+                .iter()
+                .filter_map(ParsedFunction::motion)
+                .map(|motion| SubscriptionBinding::Event(motion.event())),
+        );
+        values
+    }
+    fn subscriptions(&self) -> Vec<SubscriptionBinding> {
+        let mut values = self.required_subscriptions();
+        values.extend(self.battery_binding().map(SubscriptionBinding::Property));
+        values
+    }
+    pub(super) fn reconcile_state_reads(&self, context: &Context) {
+        for function in self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .filter(|function| function.state().is_some())
+        {
+            let id = function.id();
+            let path = context.read_path_for(&self.key.id, id);
+            let changed = {
+                let mut paths = self.state_read_paths.borrow_mut();
+                let changed =
+                    paths
+                        .get(id)
+                        .is_some_and(|old| match (old.as_ref(), path.as_ref()) {
+                            (Some(old), Some(new)) => !old.same(new),
+                            (None, None) => false,
+                            _ => true,
+                        });
+                paths.insert(id.into(), path.clone());
+                changed
+            };
+            if changed {
+                super::refresh::reconcile_state_read(
+                    self,
+                    context,
+                    id,
+                    function.state().unwrap().property(),
+                    path.is_some(),
+                );
+            }
+        }
+    }
+    pub(super) fn observation_source(&self, id: &str) -> Option<PathKind> {
+        self.observation_sources.borrow().get(id).copied()
+    }
+    pub(super) fn record_observation_source(&self, id: &str, source: PathKind) {
+        self.observation_sources
+            .borrow_mut()
+            .insert(id.into(), source);
+    }
+    pub(super) fn subscription_status(&self, id: &str) -> Vec<SubscriptionStatus> {
+        let bindings = self.channel_subscriptions(id);
+        let local = self.local.borrow();
+        let cloud = self.cloud.borrow();
+        [
+            (PathKind::Local, &local.prepare),
+            (PathKind::Cloud, &cloud.prepare),
+        ]
+        .into_iter()
+        .flat_map(|(source, prepare)| {
+            bindings.iter().map(move |binding| SubscriptionStatus {
+                binding: *binding,
+                source,
+                ready: prepare.subscribed.contains(binding),
+                problem: prepare.problems.get(binding).cloned(),
+            })
+        })
+        .collect()
+    }
+    pub(super) fn event_channel(&self, binding: EventBinding) -> Option<&str> {
+        self.native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| {
+                function
+                    .motion()
+                    .is_some_and(|motion| motion.event() == binding)
+            })
+            .map(ParsedFunction::id)
+    }
+    pub(super) fn state_function(&self, id: &str) -> bool {
+        self.native
+            .device()
+            .functions()
+            .iter()
+            .any(|function| function.id() == id && function.state().is_some())
+    }
+    pub(super) fn observe_state_property(
+        &self,
+        function: &ParsedFunction,
+        active: Option<bool>,
+        value: &serde_json::Value,
+        source_time: Option<i64>,
+        received_at: i64,
+        origin: super::lighting::Origin,
+    ) {
+        let state = function.state().unwrap();
+        self.observations
+            .observed(self, function.id(), state.property(), origin);
+        if !matches!(origin, super::lighting::Origin::Read) {
+            self.refresh.borrow_mut().satisfy_baseline(function.id());
+        }
+        self.physical()
+            .function(function.id())
+            .unwrap()
+            .observe_state(
+                active,
+                crate::device::StateInput::Property(value.clone()),
+                source_time,
+                received_at,
+            )
+            .expect("state function");
+    }
+    pub(super) fn notify_event(
+        &self,
+        binding: EventBinding,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) {
+        let id = self.event_channel(binding).unwrap();
+        let property = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == id)
+            .unwrap()
+            .state()
+            .unwrap()
+            .property();
+        self.observations
+            .observed(self, id, property, super::lighting::Origin::Notification);
+        self.refresh.borrow_mut().satisfy_baseline(id);
+        self.physical()
+            .function(id)
+            .unwrap()
+            .observe_state(
+                Some(true),
+                crate::device::StateInput::Event {
+                    siid: binding.siid,
+                    eiid: binding.eiid,
+                },
+                source_time,
+                received_at,
+            )
+            .expect("motion function");
     }
     pub(super) fn observer(&self) -> Option<NotificationSource> {
         self.native
@@ -501,24 +690,40 @@ impl DeviceWork {
             .iter()
             .find(|function| {
                 function.bindings().contains(&binding)
-                    || function.measurement().is_none()
+                    || function.kind().is_control()
                         && self.native.device().refresh_trigger() == Some(binding)
             })
             .map(|function| function.id())
     }
     pub(super) fn install_observer(&self, id: &str, source: NotificationSource) {
-        for binding in self.channel_bindings(id) {
-            match &source {
-                NotificationSource::Local(handle) => {
+        self.install_observer_with_baseline(id, source, true);
+    }
+    pub(super) fn install_state_observer(&self, id: &str, source: NotificationSource) {
+        self.install_observer_with_baseline(id, source, false);
+    }
+    fn install_observer_with_baseline(&self, id: &str, source: NotificationSource, baseline: bool) {
+        for binding in self.channel_subscriptions(id) {
+            match (&source, binding) {
+                (NotificationSource::Local(handle), SubscriptionBinding::Property(binding)) => {
                     handle.invalidate_received_property(&self.key.id, binding)
                 }
-                NotificationSource::Cloud(handle) => {
+                (NotificationSource::Local(handle), SubscriptionBinding::Event(binding)) => {
+                    handle.invalidate_received_event(&self.key.id, binding)
+                }
+                (NotificationSource::Cloud(handle), SubscriptionBinding::Property(binding)) => {
                     handle.invalidate_received_property(&self.key.id, binding)
+                }
+                (NotificationSource::Cloud(handle), SubscriptionBinding::Event(binding)) => {
+                    handle.invalidate_received_event(&self.key.id, binding)
                 }
             }
         }
         self.active.borrow_mut().insert(id.to_owned(), source);
-        self.function_source_changed(id);
+        if baseline {
+            self.function_source_changed(id);
+        } else {
+            self.observations.function_source_changed(id);
+        }
     }
     pub(super) fn revoke_observer(&self, id: &str) {
         if self.active.borrow_mut().remove(id).is_some() {
@@ -527,6 +732,21 @@ impl DeviceWork {
     }
     fn function_source_changed(&self, id: &str) {
         self.observations.function_source_changed(id);
+        if self.state_function(id) {
+            let binding = self
+                .native
+                .device()
+                .functions()
+                .iter()
+                .find(|function| function.id() == id)
+                .unwrap()
+                .state()
+                .unwrap()
+                .property();
+            self.refresh.borrow_mut().request_baseline(id, binding);
+            self.refresh_changed.notify(usize::MAX);
+            return;
+        }
         if self
             .native
             .device()
@@ -630,6 +850,28 @@ impl DeviceWork {
                     false
                 }
             }
+        } else if let Some(state) = function.state() {
+            match state.read_value(value) {
+                Ok(active) => {
+                    self.observe_state_property(
+                        function,
+                        active,
+                        value,
+                        update_time,
+                        received_at,
+                        if cached_report {
+                            super::lighting::Origin::Cache
+                        } else {
+                            super::lighting::Origin::Notification
+                        },
+                    );
+                    false
+                }
+                Err(error) => {
+                    log::warn!("Ignoring invalid state property: {error}");
+                    false
+                }
+            }
         } else {
             if let Some(value) = value.as_bool() {
                 self.observations.notify(self, &id, value);
@@ -686,7 +928,7 @@ impl DeviceWork {
         &self,
         handle: &SessionHandle,
         generation: u64,
-    ) -> Option<Vec<PropertyBinding>> {
+    ) -> Option<Vec<SubscriptionBinding>> {
         let local = self.local.borrow();
         let current = local
             .connection
@@ -694,13 +936,13 @@ impl DeviceWork {
             .is_some_and(|current| current.same_connection(handle))
             && local.prepare.generation == generation
             && !self.life.is_closed();
-        current.then(|| local.prepare.missing(&self.bindings()))
+        current.then(|| local.prepare.missing(&self.subscriptions()))
     }
     pub(super) fn local_subscribed(
         &self,
         handle: &SessionHandle,
         generation: u64,
-        binding: PropertyBinding,
+        binding: SubscriptionBinding,
     ) -> bool {
         let mut local = self.local.borrow_mut();
         if local
@@ -710,7 +952,7 @@ impl DeviceWork {
             && local.prepare.generation == generation
             && !self.life.is_closed()
         {
-            if self.battery_binding() == Some(binding) {
+            if self.battery_binding().map(SubscriptionBinding::Property) == Some(binding) {
                 self.set_battery_subscription_problem(None);
             }
             local.prepare.subscribed(binding);
@@ -723,7 +965,7 @@ impl DeviceWork {
         &self,
         source: &NotificationSource,
         generation: u64,
-        binding: PropertyBinding,
+        binding: SubscriptionBinding,
         problem: String,
     ) {
         let record = |prepare: &mut Prepare| {
@@ -745,7 +987,7 @@ impl DeviceWork {
         let local = self.local.borrow();
         let cloud = self.cloud.borrow();
         let mut problems = Vec::new();
-        for binding in self.channel_bindings(id) {
+        for binding in self.channel_subscriptions(id) {
             problems.extend(
                 [
                     local.prepare.problems.get(&binding),
@@ -810,7 +1052,7 @@ impl DeviceWork {
         &self,
         handle: &NotificationHandle,
         generation: u64,
-    ) -> Option<Vec<PropertyBinding>> {
+    ) -> Option<Vec<SubscriptionBinding>> {
         let cloud = self.cloud.borrow();
         let current = cloud
             .connection
@@ -818,13 +1060,13 @@ impl DeviceWork {
             .is_some_and(|current| current.same_connection(handle))
             && cloud.prepare.generation == generation
             && !self.life.is_closed();
-        current.then(|| cloud.prepare.missing(&self.bindings()))
+        current.then(|| cloud.prepare.missing(&self.subscriptions()))
     }
     pub(super) fn cloud_subscribed(
         &self,
         handle: &NotificationHandle,
         generation: u64,
-        binding: PropertyBinding,
+        binding: SubscriptionBinding,
     ) -> bool {
         let mut cloud = self.cloud.borrow_mut();
         if cloud
@@ -834,7 +1076,7 @@ impl DeviceWork {
             && cloud.prepare.generation == generation
             && !self.life.is_closed()
         {
-            if self.battery_binding() == Some(binding) {
+            if self.battery_binding().map(SubscriptionBinding::Property) == Some(binding) {
                 self.set_battery_subscription_problem(None);
             }
             cloud.prepare.subscribed(binding);
@@ -868,7 +1110,7 @@ impl DeviceWork {
         }
     }
     pub(super) fn source_ready(&self, id: &str, source: &NotificationSource) -> bool {
-        let bindings = self.channel_bindings(id);
+        let bindings = self.channel_subscriptions(id);
         match source {
             NotificationSource::Local(handle) => {
                 let local = self.local.borrow();
@@ -910,6 +1152,7 @@ impl DeviceWork {
         let handle = self.local.borrow().connection.clone();
         if let Some(handle) = handle {
             drop(handle.unsubscribe_properties(&self.key.id));
+            drop(handle.unsubscribe_events(&self.key.id));
         }
         self.retire_local_preparation();
     }
@@ -917,6 +1160,7 @@ impl DeviceWork {
         let handle = self.cloud.borrow().connection.clone();
         if let Some(handle) = handle {
             drop(handle.unsubscribe_properties(&self.key.id));
+            drop(handle.unsubscribe_events(&self.key.id));
         }
         self.retire_cloud_preparation();
     }
@@ -950,6 +1194,7 @@ impl DeviceWork {
         if let Some(local) = local {
             if self.is_light() {
                 drop(local.unsubscribe_properties(&self.key.id));
+                drop(local.unsubscribe_events(&self.key.id));
             } else {
                 drop(local.unsubscribe_device(&self.key.id));
             }
@@ -967,7 +1212,19 @@ impl DeviceWork {
         self.changed.notify(usize::MAX);
     }
     pub(super) fn refresh(&self) {
-        for function in self.native.device().functions() {
+        self.refresh_functions(true);
+    }
+    pub(super) fn refresh_connection(&self) {
+        self.refresh_functions(false);
+    }
+    fn refresh_functions(&self, include_states: bool) {
+        for function in self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .filter(|function| include_states || function.state().is_none())
+        {
             for binding in function.bindings() {
                 self.refresh_property(function.id(), binding);
             }
@@ -1051,6 +1308,16 @@ impl DeviceWork {
                 received_at,
                 super::lighting::Origin::Read,
             )?;
+        } else if let Some(state) = function.state() {
+            let active = state.read_value(value)?;
+            self.observe_state_property(
+                function,
+                active,
+                value,
+                update_time,
+                received_at,
+                super::lighting::Origin::Read,
+            );
         } else {
             let value =
                 value
@@ -1062,15 +1329,8 @@ impl DeviceWork {
         }
         Ok(())
     }
-    pub(super) fn bindings(&self) -> Vec<PropertyBinding> {
-        let mut values = self.required_bindings();
-        if let Some(battery) = self.battery_binding() {
-            values.push(battery);
-        }
-        values
-    }
     pub(super) fn diagnostic(&self) -> Option<String> {
-        let required = self.required_bindings();
+        let required = self.required_subscriptions();
         let local = self.local.borrow();
         let values = local
             .prepare
@@ -1101,7 +1361,7 @@ impl DeviceWork {
         *self.battery_read_problem.borrow_mut() = problem;
     }
     pub(super) fn subscription_problem(&self) -> Option<String> {
-        let required = self.required_bindings();
+        let required = self.required_subscriptions();
         self.local
             .borrow()
             .prepare
@@ -1198,9 +1458,9 @@ pub(super) async fn run(
     .await
 }
 async fn subscriptions(
-    work: &DeviceWork,
+    work: &Rc<DeviceWork>,
     handle: &SessionHandle,
-    context: &Context,
+    context: &Rc<Context>,
 ) -> Result<(), AdapterError> {
     let did = work.key.id.clone();
     loop {
@@ -1227,20 +1487,32 @@ async fn subscriptions(
                 if !current() {
                     break 'attempts;
                 }
-                let result = handle.subscribe_property(&did, binding).await;
+                let receipt_work = work.clone();
+                let receipt_context = context.clone();
+                let receipt_handle = handle.clone();
+                let on_result = move |result: Result<(), crate::xiaomi::central::CentralError>| {
+                    if result.is_ok()
+                        && receipt_context.current_local(&receipt_handle)
+                        && receipt_work.local_subscribed(&receipt_handle, preparation, binding)
+                    {
+                        receipt_context.changed.notify(usize::MAX);
+                    }
+                };
+                let result = match binding {
+                    SubscriptionBinding::Property(binding) => {
+                        handle.subscribe_property(&did, binding, on_result).await
+                    }
+                    SubscriptionBinding::Event(binding) => {
+                        handle.subscribe_event(&did, binding, on_result).await
+                    }
+                };
                 if !current() {
                     break 'attempts;
                 }
                 match result {
-                    Ok(()) => {
-                        if work.local_subscribed(handle, preparation, binding) {
-                            // Measurement links become active without waiting
-                            // for the optional battery subscription.
-                            context.changed.notify(usize::MAX);
-                        }
-                    }
+                    Ok(()) => {}
                     Err(error) => {
-                        let message = work.problem("subscribe", binding, &error);
+                        let message = format!("{did} subscribe {binding}: {error}");
                         work.subscription_failed(
                             &NotificationSource::Local(handle.clone()),
                             preparation,
