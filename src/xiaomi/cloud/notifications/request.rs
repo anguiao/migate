@@ -1,5 +1,5 @@
 use super::{LIMIT, NotificationError, Timing};
-use crate::xiaomi::capability::PropertyBinding;
+use crate::xiaomi::capability::{EventBinding, PropertyBinding};
 use event_listener::Event;
 use std::{
     cell::{Cell, RefCell},
@@ -42,6 +42,10 @@ impl Completion {
 
 #[derive(Clone)]
 pub(super) enum Target {
+    Event {
+        did: String,
+        binding: EventBinding,
+    },
     Property {
         did: String,
         binding: PropertyBinding,
@@ -54,7 +58,7 @@ pub(super) enum Target {
 impl Target {
     pub(super) fn did(&self) -> &str {
         match self {
-            Self::Property { did, .. } | Self::Online { did } => did,
+            Self::Property { did, .. } | Self::Event { did, .. } | Self::Online { did } => did,
         }
     }
     fn retired_by(&self, did: &str, scope: Retire) -> bool {
@@ -64,16 +68,18 @@ impl Target {
         match scope {
             Retire::Device => true,
             Retire::Properties => matches!(self, Self::Property { .. }),
+            Retire::Events => matches!(self, Self::Event { .. }),
             Retire::Online => matches!(self, Self::Online { .. }),
         }
     }
 }
 
-/// Property and online subscriptions have independent ownership.
+/// Property, event and online subscriptions have independent ownership.
 #[derive(Clone, Copy)]
 pub(super) enum Retire {
     Device,
     Properties,
+    Events,
     Online,
 }
 
@@ -158,6 +164,16 @@ pub struct NotificationHandle {
 }
 
 impl NotificationHandle {
+    /// Retire received event deliveries without changing subscription readiness.
+    pub(crate) fn invalidate_received_event(&self, did: &str, binding: EventBinding) {
+        for registration in self.shared.registrations.borrow_mut().values_mut() {
+            if matches!(&registration.target, Target::Event { did: target, binding: event } if target == did && *event == binding)
+            {
+                registration.delivery_generation = registration.delivery_generation.wrapping_add(1);
+            }
+        }
+    }
+
     /// Retire received deliveries for one function's property while preserving
     /// other property generations, subscription readiness and online reports.
     pub(crate) fn invalidate_received_property(&self, did: &str, binding: PropertyBinding) {
@@ -207,6 +223,28 @@ impl NotificationHandle {
             self.subscribe(
                 format!("device/{did}/state/#"),
                 Target::Online { did: did.into() },
+            )
+        };
+        async move { completion?.wait().await }
+    }
+
+    pub fn subscribe_event(
+        &self,
+        did: &str,
+        binding: EventBinding,
+    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
+        let completion = if binding.siid == 0 || binding.eiid == 0 {
+            Err(NotificationError::InvalidInput)
+        } else {
+            self.subscribe(
+                format!(
+                    "device/{did}/up/event_occured/{}/{}",
+                    binding.siid, binding.eiid
+                ),
+                Target::Event {
+                    did: did.into(),
+                    binding,
+                },
             )
         };
         async move { completion?.wait().await }
@@ -270,6 +308,14 @@ impl NotificationHandle {
         did: &str,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
         let completion = self.unsubscribe(did, Retire::Properties);
+        async move { completion?.wait().await }
+    }
+
+    pub fn unsubscribe_events(
+        &self,
+        did: &str,
+    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
+        let completion = self.unsubscribe(did, Retire::Events);
         async move { completion?.wait().await }
     }
 

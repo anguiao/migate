@@ -2,11 +2,12 @@ use super::super::{CentralError, wire};
 use super::{
     CentralEvent,
     driver::{
-        PropertySubscription, PublicationStage, SessionDriver, Subscription, SubscriptionKind,
+        EventSubscription, PropertySubscription, PublicationStage, SessionDriver, Subscription,
+        SubscriptionKind,
     },
     request::{
-        RequestKind, RequestStage, RequestTimeout, Response, parse_response, property_topic,
-        valid_identifier, validate_identity,
+        RequestKind, RequestStage, RequestTimeout, Response, event_topic, parse_response,
+        property_topic, valid_identifier, validate_identity,
     },
 };
 use crate::xiaomi::mqtt;
@@ -66,13 +67,26 @@ impl SessionDriver {
                         self.finish_timeout(request, RequestTimeout::Subscription);
                     } else {
                         if let RequestKind::Subscribe { did, binding } = &request.kind {
-                            self.property_generation = self.property_generation.wrapping_add(1);
+                            self.notification_generation =
+                                self.notification_generation.wrapping_add(1);
                             self.property_topics.insert(
                                 property_topic(&self.client_id, did, *binding),
                                 PropertySubscription {
                                     did: did.clone(),
                                     binding: *binding,
-                                    generation: self.property_generation,
+                                    generation: self.notification_generation,
+                                },
+                            );
+                        }
+                        if let RequestKind::SubscribeEvent { did, binding } = &request.kind {
+                            self.notification_generation =
+                                self.notification_generation.wrapping_add(1);
+                            self.event_topics.insert(
+                                event_topic(&self.client_id, did, *binding),
+                                EventSubscription {
+                                    did: did.clone(),
+                                    binding: *binding,
+                                    generation: self.notification_generation,
                                 },
                             );
                         }
@@ -163,11 +177,17 @@ impl SessionDriver {
                     }
                     QoS::ExactlyOnce => {
                         let property_topics = &self.property_topics;
+                        let event_topics = &self.event_topics;
                         self.incoming
                             .receive(&publish, || {
                                 property_topics
                                     .get(&publish.topic)
                                     .map(|property| property.generation)
+                                    .or_else(|| {
+                                        event_topics
+                                            .get(&publish.topic)
+                                            .map(|event| event.generation)
+                                    })
                             })
                             .map_err(|_| CentralError::Protocol)?;
                         self.enqueue(
@@ -192,6 +212,10 @@ impl SessionDriver {
                             self.property_topics
                                 .get(topic)
                                 .is_some_and(|property| property.generation == generation)
+                                || self
+                                    .event_topics
+                                    .get(topic)
+                                    .is_some_and(|event| event.generation == generation)
                         });
                     if current {
                         self.message(received.publish, on_event);
@@ -237,7 +261,8 @@ impl SessionDriver {
         let reply = topic == self.reply_topic;
         let list = topic == self.list_topic;
         let property = self.property_topics.get(topic).cloned();
-        if !reply && !list && property.is_none() {
+        let event = self.event_topics.get(topic).cloned();
+        if !reply && !list && property.is_none() && event.is_none() {
             return Ok(());
         }
         let message = wire::decode_mips(&publish.payload)?;
@@ -288,6 +313,28 @@ impl SessionDriver {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             on_event(CentralEvent::DeviceListChanged { dids });
+        } else if let Some(EventSubscription { did, binding, .. }) = event {
+            if publish.retain {
+                return Ok(());
+            }
+            let payload = &message.payload;
+            if payload.get("did").and_then(Value::as_str) != Some(&did)
+                || payload.get("siid").and_then(Value::as_u64) != Some(u64::from(binding.siid))
+                || payload.get("eiid").and_then(Value::as_u64) != Some(u64::from(binding.eiid))
+            {
+                return Err(CentralError::Protocol);
+            }
+            let arguments = match payload.get("arguments") {
+                Some(arguments) => arguments.as_array().ok_or(CentralError::Protocol)?.clone(),
+                // The local protocol also sends parameterless events without this field.
+                None => Vec::new(),
+            };
+            on_event(CentralEvent::EventOccurred {
+                did,
+                binding,
+                arguments,
+                source_time: payload.get("timestamp").and_then(Value::as_i64),
+            });
         } else if let Some(PropertySubscription { did, binding, .. }) = property {
             validate_identity(&message.payload, &did, binding, true)?;
             let value = message

@@ -24,6 +24,7 @@ use std::{
 use support::*;
 
 mod connection;
+mod events;
 mod messages;
 mod subscriptions;
 pub(crate) mod support;

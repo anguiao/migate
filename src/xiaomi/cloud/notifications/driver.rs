@@ -566,6 +566,38 @@ impl NotificationDriver {
             serde_json::from_slice(&publish.payload).map_err(|_| NotificationError::Protocol)?;
         self.validate_uid(&payload)?;
         match target {
+            Target::Event { did, binding } => {
+                if publish.retain {
+                    return Ok(());
+                }
+                let params = payload
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .ok_or(NotificationError::Protocol)?;
+                for candidate in [payload.get("did"), params.get("did")] {
+                    if let Some(candidate) = candidate
+                        && candidate.as_str() != Some(&did)
+                    {
+                        return Err(NotificationError::Protocol);
+                    }
+                }
+                if params.get("siid").and_then(Value::as_u64) != Some(u64::from(binding.siid))
+                    || params.get("eiid").and_then(Value::as_u64) != Some(u64::from(binding.eiid))
+                {
+                    return Err(NotificationError::Protocol);
+                }
+                let arguments = params
+                    .get("arguments")
+                    .and_then(Value::as_array)
+                    .ok_or(NotificationError::Protocol)?
+                    .clone();
+                on_event(NotificationEvent::EventOccurred {
+                    did,
+                    binding,
+                    arguments,
+                    source_time: payload.get("timestamp").and_then(Value::as_i64),
+                });
+            }
             Target::Property { did, binding } => {
                 let params = payload
                     .get("params")

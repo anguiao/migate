@@ -1,7 +1,10 @@
 use super::super::CentralError;
 use super::{
     driver::{Publication, PublicationStage, SessionDriver, Subscription, SubscriptionKind},
-    request::{Request, RequestKind, RequestTimeout, ResultValue, next_mips_id, property_topic},
+    request::{
+        CancellationScope, Request, RequestKind, RequestTimeout, ResultValue, event_topic,
+        next_mips_id, property_topic,
+    },
 };
 use mqttbytes::{
     QoS,
@@ -66,7 +69,9 @@ impl SessionDriver {
                     let index = queue.iter().position(|request| {
                         matches!(
                             request.kind,
-                            RequestKind::Subscribe { .. } | RequestKind::Unsubscribe { .. }
+                            RequestKind::Subscribe { .. }
+                                | RequestKind::SubscribeEvent { .. }
+                                | RequestKind::Unsubscribe { .. }
                         )
                     });
                     index.and_then(|index| queue.remove(index))
@@ -105,13 +110,36 @@ impl SessionDriver {
                 self.enqueue(Packet::Subscribe(subscribe), deadline, None, Some(pkid))?;
                 continue;
             }
-            if let RequestKind::Unsubscribe { did } = &request.kind {
-                let filters = self
-                    .retired_topics
-                    .remove(did)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect::<Vec<_>>();
+            if let RequestKind::SubscribeEvent { did, binding } = &request.kind {
+                let mut subscribe =
+                    Subscribe::new(event_topic("master", did, *binding), QoS::ExactlyOnce);
+                subscribe.pkid = pkid;
+                let deadline = request.deadline;
+                let kind = SubscriptionKind::Event {
+                    did: did.clone(),
+                    binding: *binding,
+                };
+                self.subscriptions.insert(
+                    pkid,
+                    Subscription {
+                        request: Some(request),
+                        deadline,
+                        count: 1,
+                        kind,
+                    },
+                );
+                self.enqueue(Packet::Subscribe(subscribe), deadline, None, Some(pkid))?;
+                continue;
+            }
+            if let RequestKind::Unsubscribe { did, scope } = &request.kind {
+                let mut filters = std::collections::BTreeSet::new();
+                if *scope != CancellationScope::Events {
+                    filters.extend(self.retired_topics.remove(did).unwrap_or_default());
+                }
+                if *scope != CancellationScope::Properties {
+                    filters.extend(self.retired_event_topics.remove(did).unwrap_or_default());
+                }
+                let filters = filters.into_iter().collect::<Vec<_>>();
                 if filters.is_empty() {
                     self.finish(request, Ok(super::request::Response::Unit));
                     continue;
@@ -158,12 +186,19 @@ impl SessionDriver {
         Ok(())
     }
 
-    pub(super) fn drain_property_invalidations(&mut self) {
+    pub(super) fn drain_notification_invalidations(&mut self) {
         let dids = std::mem::take(&mut *self.shared.property_invalidations.borrow_mut());
         for property in self.property_topics.values_mut() {
             if dids.contains(&(property.did.clone(), property.binding)) {
-                self.property_generation = self.property_generation.wrapping_add(1);
-                property.generation = self.property_generation;
+                self.notification_generation = self.notification_generation.wrapping_add(1);
+                property.generation = self.notification_generation;
+            }
+        }
+        let events = std::mem::take(&mut *self.shared.event_invalidations.borrow_mut());
+        for event in self.event_topics.values_mut() {
+            if events.contains(&(event.did.clone(), event.binding)) {
+                self.notification_generation = self.notification_generation.wrapping_add(1);
+                event.generation = self.notification_generation;
             }
         }
     }
@@ -181,8 +216,17 @@ impl SessionDriver {
             let did = cancellation.did;
             let topics = self.retired_topics.entry(did.clone()).or_default();
             self.property_topics.retain(|_, property| {
-                if property.did == did {
+                if property.did == did && cancellation.scope != CancellationScope::Events {
                     topics.insert(property_topic("master", &property.did, property.binding));
+                    false
+                } else {
+                    true
+                }
+            });
+            let topics = self.retired_event_topics.entry(did.clone()).or_default();
+            self.event_topics.retain(|_, event| {
+                if event.did == did && cancellation.scope != CancellationScope::Properties {
+                    topics.insert(event_topic("master", &event.did, event.binding));
                     false
                 } else {
                     true
@@ -206,7 +250,21 @@ impl SessionDriver {
             let subscriptions = self
                 .subscriptions
                 .iter()
-                .filter_map(|(pkid, subscription)| matches!(&subscription.kind, SubscriptionKind::Property { did: subscribed_did, .. } if *subscribed_did == did).then_some(*pkid))
+                .filter_map(|(pkid, subscription)| {
+                    let matching = match &subscription.kind {
+                        SubscriptionKind::Property {
+                            did: subscribed, ..
+                        } => subscribed == &did && cancellation.scope != CancellationScope::Events,
+                        SubscriptionKind::Event {
+                            did: subscribed, ..
+                        } => {
+                            subscribed == &did
+                                && cancellation.scope != CancellationScope::Properties
+                        }
+                        _ => false,
+                    };
+                    matching.then_some(*pkid)
+                })
                 .collect::<Vec<_>>();
             for pkid in &subscriptions {
                 let subscription = self.subscriptions.get_mut(pkid).unwrap();
@@ -215,6 +273,12 @@ impl SessionDriver {
                         .entry(did.clone())
                         .or_default()
                         .insert(property_topic("master", did, *binding));
+                }
+                if let SubscriptionKind::Event { did, binding } = &subscription.kind {
+                    self.retired_event_topics
+                        .entry(did.clone())
+                        .or_default()
+                        .insert(event_topic("master", did, *binding));
                 }
                 if let Some(request) = subscription.request.take() {
                     self.finish(request, Err(CentralError::Cancelled));

@@ -121,6 +121,8 @@ pub(super) async fn run(
             let driving = async {
                 driver
                     .run(move |event| match event {
+                        // State event delivery is connected by the source-runtime slice.
+                        CentralEvent::EventOccurred { .. } => {}
                         CentralEvent::DeviceListChanged { dids } => {
                             events
                                 .live

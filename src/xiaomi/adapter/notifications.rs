@@ -648,6 +648,8 @@ async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
                 let driving = async {
                     let result = driver
                         .run(move |event| match event {
+                            // State event delivery is connected by the source-runtime slice.
+                            NotificationEvent::EventOccurred { .. } => {}
                             NotificationEvent::Online { did, online } => {
                                 events.online_event(&event_handle, &did, online)
                             }

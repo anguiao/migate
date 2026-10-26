@@ -187,7 +187,7 @@ fn numeric_notifications_reuse_received_property_generation() {
         };
         driver.packet(packet(80, 10), &mut on_event).unwrap();
         handle.invalidate_received_property("target", BINDING);
-        driver.drain_property_invalidations();
+        driver.drain_notification_invalidations();
         driver
             .packet(
                 Packet::PubRel(mqttbytes::v5::PubRel::new(80)),

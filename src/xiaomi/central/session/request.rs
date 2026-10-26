@@ -1,7 +1,7 @@
 use super::super::{CentralError, wire};
 use super::{LIMIT, Timing};
 use crate::xiaomi::{
-    capability::PropertyBinding,
+    capability::{EventBinding, PropertyBinding},
     property::{
         PropertyReading, PropertyResults, correlate, update_time, valid_bindings, valid_value,
     },
@@ -119,8 +119,13 @@ pub(super) enum RequestKind {
         did: String,
         binding: PropertyBinding,
     },
+    SubscribeEvent {
+        did: String,
+        binding: EventBinding,
+    },
     Unsubscribe {
         did: String,
+        scope: CancellationScope,
     },
     Read {
         did: String,
@@ -163,7 +168,7 @@ impl RequestKind {
                 value,
             } => write_payload(did, &[(*binding, json!(value))]),
             Self::WriteProperties { did, properties } => write_payload(did, properties),
-            Self::Subscribe { .. } | Self::Unsubscribe { .. } => {
+            Self::Subscribe { .. } | Self::SubscribeEvent { .. } | Self::Unsubscribe { .. } => {
                 unreachable!("subscriptions do not publish MIPS requests")
             }
         };
@@ -178,6 +183,7 @@ impl RequestKind {
         match self {
             Self::ListAll | Self::ListFiltered { .. } => "getDevList",
             Self::Subscribe { .. } => "subscribe",
+            Self::SubscribeEvent { .. } => "subscribe event",
             Self::Unsubscribe { .. } => "unsubscribe",
             Self::Read { .. } => "get",
             Self::Write { .. } | Self::WriteProperties { .. } => "set",
@@ -187,7 +193,8 @@ impl RequestKind {
         match self {
             Self::ListAll | Self::ListFiltered { .. } => "*",
             Self::Subscribe { did, .. }
-            | Self::Unsubscribe { did }
+            | Self::SubscribeEvent { did, .. }
+            | Self::Unsubscribe { did, .. }
             | Self::Read { did, .. }
             | Self::Write { did, .. }
             | Self::WriteProperties { did, .. } => did,
@@ -199,7 +206,11 @@ impl RequestKind {
             self,
             Self::ListAll | Self::ListFiltered { .. } | Self::Unsubscribe { .. }
         ) && self.did() == did
-            && (scope == CancellationScope::Device || matches!(self, Self::Subscribe { .. }))
+            && match scope {
+                CancellationScope::Device => true,
+                CancellationScope::Properties => matches!(self, Self::Subscribe { .. }),
+                CancellationScope::Events => matches!(self, Self::SubscribeEvent { .. }),
+            }
     }
 }
 pub(super) struct Shared {
@@ -209,6 +220,7 @@ pub(super) struct Shared {
     pub(super) outstanding: Cell<usize>,
     pub(super) cancellations: RefCell<VecDeque<Cancellation>>,
     pub(super) property_invalidations: RefCell<BTreeSet<(String, PropertyBinding)>>,
+    pub(super) event_invalidations: RefCell<BTreeSet<(String, EventBinding)>>,
     pub(super) cancel_unsent_business: Cell<bool>,
 }
 
@@ -222,6 +234,7 @@ pub(super) struct Cancellation {
 pub(super) enum CancellationScope {
     Device,
     Properties,
+    Events,
 }
 
 /// Requests are enqueued when these methods are called. Business callbacks and
@@ -233,6 +246,15 @@ pub struct SessionHandle {
     pub(super) timing: Timing,
 }
 impl SessionHandle {
+    /// Retire already received event deliveries, preserving their subscriptions.
+    pub(crate) fn invalidate_received_event(&self, did: &str, binding: EventBinding) {
+        self.shared
+            .event_invalidations
+            .borrow_mut()
+            .insert((did.into(), binding));
+        self.shared.event.notify(usize::MAX);
+    }
+
     /// Retire deliveries already received for one real property while keeping
     /// subscriptions, other functions and business requests intact.
     pub(crate) fn invalidate_received_property(&self, did: &str, binding: PropertyBinding) {
@@ -325,9 +347,12 @@ impl SessionHandle {
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), CentralError>> + use<> {
-        let result = self
-            .cancel_device(did)
-            .map(|()| self.submit_subscription(RequestKind::Unsubscribe { did: did.into() }));
+        let result = self.cancel_device(did).map(|()| {
+            self.submit_subscription(RequestKind::Unsubscribe {
+                did: did.into(),
+                scope: CancellationScope::Device,
+            })
+        });
         async move { result?.await }
     }
 
@@ -337,10 +362,38 @@ impl SessionHandle {
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), CentralError>> + use<> {
-        let result = self
-            .cancel(did, CancellationScope::Properties)
-            .map(|()| self.submit_subscription(RequestKind::Unsubscribe { did: did.into() }));
+        let result = self.cancel(did, CancellationScope::Properties).map(|()| {
+            self.submit_subscription(RequestKind::Unsubscribe {
+                did: did.into(),
+                scope: CancellationScope::Properties,
+            })
+        });
         async move { result?.await }
+    }
+
+    /// Retire event subscriptions without cancelling properties or business requests.
+    pub fn unsubscribe_events(
+        &self,
+        did: &str,
+    ) -> impl Future<Output = Result<(), CentralError>> + use<> {
+        let result = self.cancel(did, CancellationScope::Events).map(|()| {
+            self.submit_subscription(RequestKind::Unsubscribe {
+                did: did.into(),
+                scope: CancellationScope::Events,
+            })
+        });
+        async move { result?.await }
+    }
+
+    pub fn subscribe_event(
+        &self,
+        did: &str,
+        binding: EventBinding,
+    ) -> impl Future<Output = Result<(), CentralError>> + use<> {
+        self.submit_subscription(RequestKind::SubscribeEvent {
+            did: did.into(),
+            binding,
+        })
     }
     pub fn subscribe_property(
         &self,
@@ -501,7 +554,10 @@ fn valid_request(kind: &RequestKind) -> bool {
         RequestKind::ListFiltered { dids } => {
             return !dids.is_empty() && dids.iter().all(|did| valid_identifier(did));
         }
-        RequestKind::Unsubscribe { did } => (did, None),
+        RequestKind::Unsubscribe { did, .. } => (did, None),
+        RequestKind::SubscribeEvent { did, binding } => {
+            return valid_identifier(did) && binding.siid > 0 && binding.eiid > 0;
+        }
         RequestKind::WriteProperties { did, properties } => {
             return valid_identifier(did)
                 && valid_bindings(
@@ -540,6 +596,13 @@ pub(super) fn property_topic(prefix: &str, did: &str, binding: PropertyBinding) 
     format!(
         "{prefix}/appMsg/notify/iot/{did}/property/{}.{}",
         binding.siid, binding.piid
+    )
+}
+
+pub(super) fn event_topic(prefix: &str, did: &str, binding: EventBinding) -> String {
+    format!(
+        "{prefix}/appMsg/notify/iot/{did}/event/{}.{}",
+        binding.siid, binding.eiid
     )
 }
 
@@ -647,9 +710,9 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
             }
             Ok(Response::Devices(entries))
         }
-        RequestKind::Subscribe { .. } | RequestKind::Unsubscribe { .. } => {
-            Err(CentralError::Protocol)
-        }
+        RequestKind::Subscribe { .. }
+        | RequestKind::SubscribeEvent { .. }
+        | RequestKind::Unsubscribe { .. } => Err(CentralError::Protocol),
     }
 }
 

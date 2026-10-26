@@ -16,6 +16,7 @@ pub(super) fn queued_handle(timing: Timing) -> SessionHandle {
             outstanding: Cell::new(0),
             cancellations: Default::default(),
             property_invalidations: Default::default(),
+            event_invalidations: Default::default(),
             cancel_unsent_business: Default::default(),
         }),
         timing,

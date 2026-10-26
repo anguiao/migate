@@ -3,7 +3,7 @@ use super::{
     CentralEvent, LIMIT, SessionHandle, Timing, Transport,
     request::{Request, RequestStage, RequestTimeout, Shared},
 };
-use crate::xiaomi::capability::PropertyBinding;
+use crate::xiaomi::capability::{EventBinding, PropertyBinding};
 use crate::xiaomi::mqtt;
 use event_listener::Event;
 use futures_lite::{future, io::AsyncRead};
@@ -47,12 +47,23 @@ pub(super) struct PropertySubscription {
     pub(super) generation: u64,
 }
 
+#[derive(Clone)]
+pub(super) struct EventSubscription {
+    pub(super) did: String,
+    pub(super) binding: EventBinding,
+    pub(super) generation: u64,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub(super) enum SubscriptionKind {
     Baseline,
     Property {
         did: String,
         binding: PropertyBinding,
+    },
+    Event {
+        did: String,
+        binding: EventBinding,
     },
     Unsubscribe,
 }
@@ -73,8 +84,10 @@ pub struct SessionDriver {
     pub(super) subscriptions: HashMap<u16, Subscription>,
     pub(super) incoming: mqtt::QoS2<Option<u64>>,
     pub(super) property_topics: HashMap<String, PropertySubscription>,
-    pub(super) property_generation: u64,
+    pub(super) event_topics: HashMap<String, EventSubscription>,
+    pub(super) notification_generation: u64,
     pub(super) retired_topics: HashMap<String, BTreeSet<String>>,
+    pub(super) retired_event_topics: HashMap<String, BTreeSet<String>>,
     pub(super) ready: bool,
     pkid: u16,
     pub(super) keepalive: mqtt::Keepalive,
@@ -98,6 +111,7 @@ impl SessionDriver {
             outstanding: Default::default(),
             cancellations: Default::default(),
             property_invalidations: Default::default(),
+            event_invalidations: Default::default(),
             cancel_unsent_business: Default::default(),
         });
         let now = Instant::now();
@@ -115,8 +129,10 @@ impl SessionDriver {
             subscriptions: HashMap::new(),
             incoming: mqtt::QoS2::new(LIMIT),
             property_topics: HashMap::new(),
-            property_generation: 0,
+            event_topics: HashMap::new(),
+            notification_generation: 0,
             retired_topics: HashMap::new(),
+            retired_event_topics: HashMap::new(),
             ready: false,
             pkid: 0,
             keepalive: mqtt::Keepalive::new(now),
@@ -153,7 +169,7 @@ impl SessionDriver {
                 return Ok(());
             }
             self.expire()?;
-            self.drain_property_invalidations();
+            self.drain_notification_invalidations();
             // Process one complete frame at a time; callback completion never
             // depends on scheduling a separate request future.
             if let Some(packet) = self
@@ -343,6 +359,12 @@ impl SessionDriver {
                     .entry(did.clone())
                     .or_default()
                     .insert(super::request::property_topic("master", did, *binding));
+            }
+            if let SubscriptionKind::Event { did, binding } = &subscription.kind {
+                self.retired_event_topics
+                    .entry(did.clone())
+                    .or_default()
+                    .insert(super::request::event_topic("master", did, *binding));
             }
             if let Some(request) = subscription.request.take() {
                 self.finish_timeout(request, RequestTimeout::Subscription);

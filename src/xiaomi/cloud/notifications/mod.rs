@@ -7,7 +7,7 @@ pub use connection::connect_notifications;
 pub use driver::NotificationDriver;
 pub use request::NotificationHandle;
 
-use crate::xiaomi::capability::PropertyBinding;
+use crate::xiaomi::capability::{EventBinding, PropertyBinding};
 use futures_lite::io::{AsyncRead, AsyncWrite};
 use std::{error::Error, fmt, time::Duration};
 
@@ -15,6 +15,12 @@ const LIMIT: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NotificationEvent {
+    EventOccurred {
+        did: String,
+        binding: EventBinding,
+        arguments: Vec<serde_json::Value>,
+        source_time: Option<i64>,
+    },
     PropertySnapshot {
         did: String,
         binding: PropertyBinding,
