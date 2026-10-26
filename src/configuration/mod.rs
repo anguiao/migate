@@ -592,7 +592,7 @@ fn with_light_kind(
     }
 }
 
-/// True when two native descriptions use the same real control bindings.
+/// True when two native descriptions use the same bindings and input semantics.
 /// Model and instance type are metadata: a URN-only change reuses the served
 /// instance.
 pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescription) -> bool {
@@ -608,6 +608,8 @@ pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescript
                     && left.power() == right.power()
                     && left.lighting() == right.lighting()
                     && left.measurement() == right.measurement()
+                    && left.state() == right.state()
+                    && left.motion() == right.motion()
             })
 }
 

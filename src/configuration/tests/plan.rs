@@ -860,3 +860,86 @@ fn group_directory_metadata_change_does_not_rebuild() {
     assert_eq!(plan.configuration.root_version, 2);
     assert_eq!(plan.configuration.groups, [renamed]);
 }
+
+fn state_native_from_instance(model: &str, instance: &serde_json::Value) -> NativeDescription {
+    NativeDescription::new(
+        model.into(),
+        instance["type"].as_str().unwrap().into(),
+        crate::xiaomi::capability::parse_device_for_model(key("state"), model, instance).unwrap(),
+    )
+    .unwrap()
+}
+
+fn assert_state_semantics_replaced(before: NativeDescription, after: NativeDescription) {
+    let initial = plan(input(
+        CommittedConfiguration::empty(),
+        facts(
+            scope(),
+            vec![source("state", before, Some("Entry sensor"))],
+            Vec::new(),
+        ),
+        BTreeMap::from([(key("state"), unique("state"))]),
+    ))
+    .unwrap()
+    .configuration;
+    let updated = plan(input(
+        initial.clone(),
+        facts(
+            scope(),
+            vec![source("state", after.clone(), None)],
+            Vec::new(),
+        ),
+        BTreeMap::new(),
+    ))
+    .unwrap();
+    assert_eq!(
+        updated.operations,
+        [PlanOperation {
+            key: key("state"),
+            kind: OperationKind::ReplacedNative,
+        }]
+    );
+    assert!(updated.changed);
+    assert!(updated.rebuild);
+    assert_eq!(updated.configuration.root_version, initial.root_version);
+    let old = initial.device(&key("state")).unwrap();
+    let new = updated.configuration.device(&key("state")).unwrap();
+    assert_eq!(new.key, old.key);
+    assert_eq!(new.unique_id, old.unique_id);
+    assert_eq!(new.label, old.label);
+    assert_eq!(new.endpoint, old.endpoint);
+    assert_eq!(new.functions, old.functions);
+    assert_eq!(new.configuration_version, old.configuration_version);
+    assert_eq!(new.native.as_ref(), Some(&after));
+    updated.configuration.validate().unwrap();
+}
+
+#[test]
+fn native_state_semantics_mapping_change_replaces_runtime_without_changing_publication() {
+    let before: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/miot/linp-m1.json")).unwrap();
+    let mut after = before.clone();
+    // Keep the property and native values; the new description changes their meaning.
+    after["services"][1]["properties"][0]["value-list"][0]["description"] =
+        serde_json::json!("Closed");
+    after["services"][1]["properties"][0]["value-list"][1]["description"] =
+        serde_json::json!("Open");
+    assert_state_semantics_replaced(
+        state_native_from_instance("linp.magnet.m1", &before),
+        state_native_from_instance("linp.magnet.m1", &after),
+    );
+}
+
+#[test]
+fn native_state_semantics_event_arguments_change_replaces_runtime_without_changing_publication() {
+    let after: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/miot/xiaomi-pir1.json"
+    ))
+    .unwrap();
+    let mut before = after.clone();
+    before["services"][1]["events"][1]["arguments"] = serde_json::json!([]);
+    assert_state_semantics_replaced(
+        state_native_from_instance("xiaomi.motion.pir1", &before),
+        state_native_from_instance("xiaomi.motion.pir1", &after),
+    );
+}
