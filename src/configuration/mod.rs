@@ -297,7 +297,7 @@ impl CommittedConfiguration {
                             .device()
                             .functions()
                             .iter()
-                            .any(|function| function.kind().is_measurement())
+                            .any(|function| function.kind().is_read_only())
                     },
                 );
             if own_endpoints.contains(&device.endpoint) != single {
@@ -462,7 +462,7 @@ fn derive_picture<'a>(
                         .device()
                         .functions()
                         .iter()
-                        .any(|function| function.kind().is_measurement())
+                        .any(|function| function.kind().is_read_only())
             }
         })
         .map(|device| device.key.clone())

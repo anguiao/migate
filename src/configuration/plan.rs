@@ -76,7 +76,7 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
                         .device()
                         .functions()
                         .iter()
-                        .any(|function| function.kind().is_measurement())
+                        .any(|function| function.kind().is_read_only())
                 {
                     for function in &mut device.functions {
                         if function.endpoint == device.endpoint {
@@ -92,9 +92,7 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
                     .remove(&key)
                     .ok_or_else(|| PlanError::MissingIdentity { key: key.clone() })?;
                 let single = source.native.device().functions().len() == 1
-                    && !source.native.device().functions()[0]
-                        .kind()
-                        .is_measurement();
+                    && !source.native.device().functions()[0].kind().is_read_only();
                 let endpoint = allocator.allocate(&key)?;
                 let mut functions = Vec::new();
                 for function in source.native.device().functions() {

@@ -726,7 +726,14 @@ fn public_illuminance_descriptions_are_admitted_independently_of_host_services()
     ] {
         let instance: Value = serde_json::from_str(fixture).unwrap();
         let device = parse_device(sensor_key(), &instance).unwrap();
-        assert_eq!(device.functions().len(), 1);
+        assert_eq!(
+            device
+                .functions()
+                .iter()
+                .filter(|function| function.measurement().is_some())
+                .count(),
+            1
+        );
         assert_eq!(device.functions()[0].id(), "illuminance");
         assert!(device.is_read_only());
         let measurement = device.functions()[0].measurement().unwrap();
@@ -742,9 +749,12 @@ fn public_illuminance_descriptions_are_admitted_independently_of_host_services()
         "../../../../tests/fixtures/miot/isa-dw2hl.json"
     ))
     .unwrap();
-    assert_eq!(
-        parse_device(sensor_key(), &enumerated),
-        Err(CapabilityError::UnsupportedDevice)
+    assert!(
+        parse_device(sensor_key(), &enumerated)
+            .unwrap()
+            .functions()
+            .iter()
+            .all(|function| function.measurement().is_none())
     );
 }
 
@@ -798,6 +808,7 @@ fn all_fifteen_measurement_combinations_keep_independent_standard_keys() {
             device
                 .functions()
                 .iter()
+                .filter(|function| function.measurement().is_some())
                 .map(|function| function.id())
                 .collect::<Vec<_>>(),
             expected,

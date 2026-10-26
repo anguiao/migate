@@ -4,8 +4,9 @@ use crate::{
     device::{FunctionKind, LightProfile},
     xiaomi::capability::NativeDescription,
     xiaomi::capability::{
-        BatteryBinding, BrightnessBinding, ColorBinding, LightBindings, MeasurementBinding,
-        MeasurementUnit, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+        BatteryBinding, BrightnessBinding, ColorBinding, EventBinding, LightBindings,
+        MeasurementBinding, MeasurementUnit, MotionBinding, NumericFormat, ParsedDevice,
+        ParsedFunction, PropertyBinding, StateBinding, StateMapping, StateValue,
         TemperatureBinding,
     },
 };
@@ -18,13 +19,13 @@ pub(crate) fn native_for(
     let controls = description
         .functions()
         .iter()
-        .filter(|function| !function.is_measurement())
+        .filter(|function| !function.is_read_only())
         .count();
     let multiple = controls > 1;
     let sensor = description
         .functions()
         .iter()
-        .any(|function| function.kind.is_measurement());
+        .any(|function| function.kind.is_read_only());
     let functions = description
         .functions()
         .iter()
@@ -82,6 +83,56 @@ pub(crate) fn native_for(
                         NumericFormat::Float,
                         MeasurementUnit::Lux,
                         range,
+                    )
+                    .unwrap(),
+                ),
+                FunctionKind::Contact => ParsedFunction::contact(
+                    id,
+                    label,
+                    StateBinding::new(
+                        PropertyBinding { siid: 50, piid: 1 },
+                        StateMapping::ContactBoolean,
+                    )
+                    .unwrap(),
+                ),
+                FunctionKind::Motion => ParsedFunction::motion_sensor(
+                    id,
+                    label,
+                    MotionBinding::new(
+                        StateBinding::new(
+                            PropertyBinding { siid: 51, piid: 1 },
+                            StateMapping::NoMotionDuration {
+                                format: NumericFormat::Uint16,
+                            },
+                        )
+                        .unwrap(),
+                        EventBinding { siid: 51, eiid: 1 },
+                        vec![],
+                    )
+                    .unwrap(),
+                ),
+                FunctionKind::Occupancy => ParsedFunction::occupancy(
+                    id,
+                    label,
+                    StateBinding::new(
+                        PropertyBinding { siid: 52, piid: 1 },
+                        StateMapping::Enumerated {
+                            format: NumericFormat::Uint8,
+                            values: vec![
+                                StateValue {
+                                    native: 0,
+                                    active: Some(false),
+                                },
+                                StateValue {
+                                    native: 1,
+                                    active: Some(true),
+                                },
+                                StateValue {
+                                    native: 2,
+                                    active: None,
+                                },
+                            ],
+                        },
                     )
                     .unwrap(),
                 ),

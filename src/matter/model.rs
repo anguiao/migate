@@ -1,4 +1,4 @@
-use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler, sensors};
+use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler, sensors, states};
 use crate::device::{Function, FunctionKind, LightProfileKind, PhysicalDevice};
 use crate::storage::Identity;
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -13,10 +13,10 @@ use rs_matter::{
             app::on_off::{self, ClusterAsyncHandler as _},
             basic_info::{BasicInfoConfig, BasicInfoSettings},
             decl::{
-                air_quality,
+                air_quality, boolean_state,
                 bridged_device_basic_information::{self as bridged, ClusterHandler as _},
                 carbon_dioxide_concentration_measurement, color_control, illuminance_measurement,
-                level_control, power_source, relative_humidity_measurement,
+                level_control, occupancy_sensing, power_source, relative_humidity_measurement,
                 temperature_measurement,
             },
             desc::{self, ClusterHandler as _},
@@ -179,6 +179,25 @@ const ILLUMINANCE_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     <sensors::IlluminanceHandler as illuminance_measurement::ClusterHandler>::CLUSTER
 );
 
+const CONTACT_SENSOR: DeviceType = DeviceType {
+    dtype: 0x0015,
+    drev: 2,
+};
+const OCCUPANCY_SENSOR: DeviceType = DeviceType {
+    dtype: 0x0107,
+    drev: 4,
+};
+const CONTACT_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    <states::ContactHandler as boolean_state::ClusterHandler>::CLUSTER
+);
+const OCCUPANCY_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    <states::OccupancyHandler as occupancy_sensing::ClusterHandler>::CLUSTER
+);
+
 pub(super) fn basic_info(identity: &Identity) -> BasicInfoConfig<'_> {
     BasicInfoConfig {
         product_name: "MiGate",
@@ -241,6 +260,7 @@ struct Versions {
     co2: u32,
     air_quality: u32,
     power_source: u32,
+    state: u32,
 }
 impl Versions {
     /// Each new instance seeds independent random per-cluster DataVersions so
@@ -261,6 +281,7 @@ impl Versions {
             co2: random.random(),
             air_quality: random.random(),
             power_source: random.random(),
+            state: random.random(),
         }
     }
 }
@@ -297,10 +318,20 @@ enum FunctionHandlerKind {
     Humidity(sensors::HumidityHandler),
     Illuminance(sensors::IlluminanceHandler),
     Co2(sensors::Co2Sensor),
+    Contact(states::ContactHandler),
+    Occupancy(states::OccupancyHandler),
 }
 impl FunctionHandler {
     fn new(function: Function, endpoint: u16, versions: Versions) -> Self {
         let kind = match function.description().kind {
+            FunctionKind::Contact => FunctionHandlerKind::Contact(states::ContactHandler::new(
+                function,
+                endpoint,
+                Dataver::new(versions.state),
+            )),
+            FunctionKind::Motion | FunctionKind::Occupancy => FunctionHandlerKind::Occupancy(
+                states::OccupancyHandler::new(function, endpoint, Dataver::new(versions.state)),
+            ),
             FunctionKind::Light(_) => FunctionHandlerKind::Light(Box::new(
                 lighting::Lighting::new(
                     function,
@@ -363,7 +394,9 @@ impl FunctionHandler {
             | FunctionHandlerKind::Temperature(_)
             | FunctionHandlerKind::Humidity(_)
             | FunctionHandlerKind::Co2(_)
-            | FunctionHandlerKind::Illuminance(_) => None,
+            | FunctionHandlerKind::Illuminance(_)
+            | FunctionHandlerKind::Contact(_)
+            | FunctionHandlerKind::Occupancy(_) => None,
         }
     }
     fn is_sensor(&self) -> bool {
@@ -373,10 +406,14 @@ impl FunctionHandler {
                 | FunctionHandlerKind::Humidity(_)
                 | FunctionHandlerKind::Co2(_)
                 | FunctionHandlerKind::Illuminance(_)
+                | FunctionHandlerKind::Contact(_)
+                | FunctionHandlerKind::Occupancy(_)
         )
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
         let matcher: fn(u16, u32) -> bool = match &self.kind {
+            FunctionHandlerKind::Contact(_) => |_, cluster| cluster == 0x45,
+            FunctionHandlerKind::Occupancy(_) => |_, cluster| cluster == 0x406,
             FunctionHandlerKind::Outlet(_) => |_, cluster| cluster == 6,
             FunctionHandlerKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
             FunctionHandlerKind::Temperature(_) => |_, cluster| cluster == 0x402,
@@ -432,6 +469,8 @@ impl AsyncHandler for FunctionHandler {
 macro_rules! dispatch_function {
     ($kind:expr, $method:ident($($arg:expr),* $(,)?)) => {
         match $kind {
+            FunctionHandlerKind::Contact(handler) => AsyncHandler::$method(&Async(boolean_state::HandlerAdaptor(handler)), $($arg),*).await,
+            FunctionHandlerKind::Occupancy(handler) => AsyncHandler::$method(&Async(occupancy_sensing::HandlerAdaptor(handler)), $($arg),*).await,
             FunctionHandlerKind::Outlet(handler) => AsyncHandler::$method(
                 &on_off::HandlerAsyncAdaptor(handler), $($arg),*
             ).await,
@@ -573,6 +612,16 @@ impl Entry {
                 }
             }
             Role::Child { function, .. } => match &function.kind {
+                FunctionHandlerKind::Contact(_) => {
+                    Endpoint::new(self.endpoint, devices!(CONTACT_SENSOR), CONTACT_CLUSTERS)
+                        .with_tags(tags)
+                }
+                FunctionHandlerKind::Occupancy(_) => Endpoint::new(
+                    self.endpoint,
+                    devices!(OCCUPANCY_SENSOR),
+                    OCCUPANCY_CLUSTERS,
+                )
+                .with_tags(tags),
                 FunctionHandlerKind::Temperature(_) => Endpoint::new(
                     self.endpoint,
                     devices!(TEMPERATURE_SENSOR),
@@ -662,6 +711,8 @@ impl Entry {
                 FunctionHandlerKind::Illuminance(handler) if cluster.is_none_or(|id| id == 0x400) => {
                     <sensors::IlluminanceHandler as illuminance_measurement::ClusterHandler>::dataver_changed(handler)
                 }
+                FunctionHandlerKind::Contact(handler) if cluster.is_none_or(|id| id == 0x45) => <states::ContactHandler as boolean_state::ClusterHandler>::dataver_changed(handler),
+                FunctionHandlerKind::Occupancy(handler) if cluster.is_none_or(|id| id == 0x406) => <states::OccupancyHandler as occupancy_sensing::ClusterHandler>::dataver_changed(handler),
                 FunctionHandlerKind::Co2(handler) => handler.bump(cluster),
                 _ => {}
             }
@@ -749,7 +800,7 @@ pub(super) fn handler_from(
             || device
                 .functions()
                 .iter()
-                .any(|function| function.description().is_measurement());
+                .any(|function| function.description().is_read_only());
         let parent = multiple.then_some((identity.endpoint, None));
         let functions = identity
             .functions

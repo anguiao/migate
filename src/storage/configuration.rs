@@ -14,9 +14,10 @@ use crate::{
     },
     device::{DeviceKey, MeasurementRange, NumericRange},
     xiaomi::capability::{
-        BatteryBinding, BrightnessBinding, ColorBinding, LightBindings, MeasurementBinding,
-        MeasurementUnit, ModeBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
-        TemperatureBinding,
+        BatteryBinding, BrightnessBinding, ColorBinding, EventArgument, EventBinding,
+        LightBindings, MeasurementBinding, MeasurementUnit, ModeBinding, MotionBinding,
+        NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, StateBinding, StateMapping,
+        StateValue, TemperatureBinding,
     },
 };
 use rusqlite::params;
@@ -283,6 +284,106 @@ enum WireFunction {
         label: String,
         measurement: WireMeasurement,
     },
+    Contact {
+        id: String,
+        label: String,
+        state: WireState,
+    },
+    Motion {
+        id: String,
+        label: String,
+        state: WireState,
+        event: WireEvent,
+        arguments: Vec<WireEventArgument>,
+    },
+    Occupancy {
+        id: String,
+        label: String,
+        state: WireState,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireState {
+    property: WireBinding,
+    mapping: WireStateMapping,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum WireStateMapping {
+    ContactBoolean,
+    Enumerated {
+        format: NumericFormat,
+        values: Vec<WireStateValue>,
+    },
+    NoMotionDuration {
+        format: NumericFormat,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireStateValue {
+    native: i64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    active: Option<bool>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireEvent {
+    siid: u32,
+    eiid: u32,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireEventArgument {
+    property: WireBinding,
+    format: String,
+    unit: Option<String>,
+}
+impl WireState {
+    fn from_binding(state: &StateBinding) -> Self {
+        let mapping = match state.mapping() {
+            StateMapping::ContactBoolean => WireStateMapping::ContactBoolean,
+            StateMapping::NoMotionDuration { format } => {
+                WireStateMapping::NoMotionDuration { format: *format }
+            }
+            StateMapping::Enumerated { format, values } => WireStateMapping::Enumerated {
+                format: *format,
+                values: values
+                    .iter()
+                    .map(|value| WireStateValue {
+                        native: value.native,
+                        active: value.active,
+                    })
+                    .collect(),
+            },
+        };
+        Self {
+            property: state.property().into(),
+            mapping,
+        }
+    }
+    fn into_binding(self) -> Result<StateBinding, &'static str> {
+        let mapping = match self.mapping {
+            WireStateMapping::ContactBoolean => StateMapping::ContactBoolean,
+            WireStateMapping::NoMotionDuration { format } => {
+                StateMapping::NoMotionDuration { format }
+            }
+            WireStateMapping::Enumerated { format, values } => StateMapping::Enumerated {
+                format,
+                values: values
+                    .into_iter()
+                    .map(|value| StateValue {
+                        native: value.native,
+                        active: value.active,
+                    })
+                    .collect(),
+            },
+        };
+        StateBinding::new(self.property.into(), mapping)
+            .map_err(|_| "Stored state binding is invalid")
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -519,7 +620,7 @@ impl WireNative {
             (battery.is_none()
                 && functions
                     .iter()
-                    .any(|function| function.measurement().is_some()))
+                    .any(|function| function.kind().is_read_only()))
             .then(|| "battery capability not declared".into())
         });
         let device = ParsedDevice::new_with_battery_diagnostic(
@@ -537,6 +638,38 @@ impl WireNative {
 
 impl WireFunction {
     fn from_parsed(function: &ParsedFunction) -> Self {
+        if let Some(state) = function.state() {
+            let id = function.id().to_owned();
+            let label = function.label().to_owned();
+            let state = WireState::from_binding(state);
+            return match function.kind() {
+                crate::device::FunctionKind::Contact => Self::Contact { id, label, state },
+                crate::device::FunctionKind::Occupancy => Self::Occupancy { id, label, state },
+                crate::device::FunctionKind::Motion => {
+                    let motion = function.motion().unwrap();
+                    let binding = motion.event();
+                    Self::Motion {
+                        id,
+                        label,
+                        state,
+                        event: WireEvent {
+                            siid: binding.siid,
+                            eiid: binding.eiid,
+                        },
+                        arguments: motion
+                            .arguments()
+                            .iter()
+                            .map(|argument| WireEventArgument {
+                                property: argument.property.into(),
+                                format: argument.format.clone(),
+                                unit: argument.unit.clone(),
+                            })
+                            .collect(),
+                    }
+                }
+                _ => unreachable!("state functions have state kinds"),
+            };
+        }
         if let Some(measurement) = function.measurement() {
             let wire = WireMeasurement::from_binding(measurement);
             return match function.kind() {
@@ -615,6 +748,37 @@ impl WireFunction {
 
     fn into_parsed(self) -> Result<ParsedFunction, &'static str> {
         match self {
+            Self::Contact { id, label, state } => {
+                Ok(ParsedFunction::contact(id, label, state.into_binding()?))
+            }
+            Self::Occupancy { id, label, state } => {
+                Ok(ParsedFunction::occupancy(id, label, state.into_binding()?))
+            }
+            Self::Motion {
+                id,
+                label,
+                state,
+                event,
+                arguments,
+            } => {
+                let binding = MotionBinding::new(
+                    state.into_binding()?,
+                    EventBinding {
+                        siid: event.siid,
+                        eiid: event.eiid,
+                    },
+                    arguments
+                        .into_iter()
+                        .map(|argument| EventArgument {
+                            property: argument.property.into(),
+                            format: argument.format,
+                            unit: argument.unit,
+                        })
+                        .collect(),
+                )
+                .map_err(|_| "Stored motion binding is invalid")?;
+                Ok(ParsedFunction::motion_sensor(id, label, binding))
+            }
             Self::Outlet { id, label, power } => {
                 Ok(ParsedFunction::outlet(id, label, power.into()))
             }

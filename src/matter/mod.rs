@@ -6,6 +6,7 @@ mod on_off;
 mod pairing;
 mod sensors;
 mod shape;
+mod states;
 mod storage;
 pub(crate) mod units;
 

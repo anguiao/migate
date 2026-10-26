@@ -62,7 +62,7 @@ fn validate_model_topology(
     let controls = device
         .functions()
         .iter()
-        .filter(|function| function.measurement().is_none())
+        .filter(|function| function.kind().is_control())
         .collect::<Vec<_>>();
     if controls.is_empty() {
         return Ok(());

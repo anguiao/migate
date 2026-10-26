@@ -96,6 +96,13 @@ pub(super) struct Service<'a> {
     pub iid: u32,
     pub urn: Urn<'a>,
     pub properties: Vec<Property<'a>>,
+    pub events: Vec<Event<'a>>,
+}
+
+pub(super) struct Event<'a> {
+    pub iid: u32,
+    pub urn: Urn<'a>,
+    pub arguments: Vec<u32>,
 }
 
 pub(super) struct Property<'a> {
@@ -133,10 +140,37 @@ impl<'a> Description<'a> {
                     });
                 }
             }
+            let mut events = Vec::new();
+            let mut event_ids = HashSet::new();
+            if service.get("events").is_some() {
+                for event in array(service, "events")? {
+                    let urn = typed_urn(event, "event")?;
+                    let iid = instance_id(event)?;
+                    if !event_ids.insert(iid) {
+                        return Err(CapabilityError::InvalidDescription("duplicate event iid"));
+                    }
+                    let arguments = array(event, "arguments")?
+                        .iter()
+                        .map(|argument| {
+                            argument
+                                .as_u64()
+                                .and_then(|id| u32::try_from(id).ok())
+                                .filter(|id| property_ids.contains(id))
+                                .ok_or(CapabilityError::InvalidDescription("event arguments"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    events.push(Event {
+                        iid,
+                        urn,
+                        arguments,
+                    });
+                }
+            }
             services.push(Service {
                 iid,
                 urn,
                 properties,
+                events,
             });
         }
         Ok(Self { urn, services })

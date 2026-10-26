@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 enum RuntimeValue {
     Control(Box<ControlRuntime>),
     Measurement(MeasurementSnapshot),
+    StateSensor(super::StateSnapshot),
 }
 struct ControlRuntime {
     power: Power,
@@ -41,25 +42,36 @@ impl RuntimeState {
             revision: 0,
         }
     }
+    fn state_sensor() -> Self {
+        Self {
+            value: RuntimeValue::StateSensor(super::StateSnapshot {
+                active: None,
+                input: None,
+                source_time: None,
+                received_at: None,
+            }),
+            revision: 0,
+        }
+    }
     fn has_control_state(&self) -> bool {
         matches!(self.value, RuntimeValue::Control(_))
     }
     pub(super) fn commands(&self) -> Option<&CommandCoordinator> {
         match &self.value {
             RuntimeValue::Control(control) => Some(&control.commands),
-            RuntimeValue::Measurement(_) => None,
+            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
         }
     }
     pub(super) fn commands_mut(&mut self) -> Option<&mut CommandCoordinator> {
         match &mut self.value {
             RuntimeValue::Control(control) => Some(&mut control.commands),
-            RuntimeValue::Measurement(_) => None,
+            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
         }
     }
     pub(super) fn power(&self) -> Option<Power> {
         match &self.value {
             RuntimeValue::Control(control) => Some(control.power),
-            RuntimeValue::Measurement(_) => None,
+            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
         }
     }
     fn set_power(&mut self, new: Power) {
@@ -70,7 +82,7 @@ impl RuntimeState {
     fn control_parts(&self) -> Option<(Power, Option<super::LightSnapshot>)> {
         match &self.value {
             RuntimeValue::Control(control) => Some((control.power, control.lighting)),
-            RuntimeValue::Measurement(_) => None,
+            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
         }
     }
     fn set_control_parts(&mut self, power: Power, lighting: Option<super::LightSnapshot>) {
@@ -82,13 +94,13 @@ impl RuntimeState {
     fn lighting_mut(&mut self) -> Option<&mut super::LightSnapshot> {
         match &mut self.value {
             RuntimeValue::Control(control) => control.lighting.as_mut(),
-            RuntimeValue::Measurement(_) => None,
+            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
         }
     }
     fn measurement_mut(&mut self) -> Option<&mut MeasurementSnapshot> {
         match &mut self.value {
             RuntimeValue::Measurement(measurement) => Some(measurement),
-            RuntimeValue::Control(_) => None,
+            RuntimeValue::Control(_) | RuntimeValue::StateSensor(_) => None,
         }
     }
 }
@@ -138,7 +150,7 @@ fn clear_light_state(description: &FunctionDescription, state: &mut RuntimeState
     }
 }
 
-/// A channel's shared state and command boundary for every protocol adapter.
+/// A function's shared state and optional command boundary for every adapter.
 #[derive(Clone)]
 pub struct Function(pub(super) Arc<Inner>);
 
@@ -336,6 +348,8 @@ impl Function {
         });
         let state = if description.kind.is_measurement() {
             RuntimeState::measurement_state()
+        } else if description.kind.is_state_sensor() {
+            RuntimeState::state_sensor()
         } else {
             RuntimeState::control(lighting)
         };
@@ -404,6 +418,21 @@ impl Function {
                     measurement: *measurement,
                 }
             }
+            (super::FunctionKind::Contact, RuntimeValue::StateSensor(state)) => {
+                FunctionState::Contact {
+                    state: state.clone(),
+                }
+            }
+            (super::FunctionKind::Motion, RuntimeValue::StateSensor(state)) => {
+                FunctionState::Motion {
+                    state: state.clone(),
+                }
+            }
+            (super::FunctionKind::Occupancy, RuntimeValue::StateSensor(state)) => {
+                FunctionState::Occupancy {
+                    state: state.clone(),
+                }
+            }
             _ => unreachable!("runtime value matches the function kind"),
         };
         FunctionSnapshot {
@@ -439,8 +468,33 @@ impl Function {
         }
         Ok(self.snapshot_locked(&state))
     }
+    /// Apply one state observation already interpreted at the source boundary.
+    pub fn observe_state(
+        &self,
+        active: Option<bool>,
+        input: super::StateInput,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) -> Result<FunctionSnapshot, super::CommandError> {
+        let mut state = self.0.state.lock().unwrap();
+        let RuntimeValue::StateSensor(current) = &mut state.value else {
+            return Err(super::CommandError::Unsupported);
+        };
+        let observed = super::StateSnapshot {
+            active,
+            input: Some(input),
+            source_time,
+            received_at: Some(received_at),
+        };
+        if *current != observed {
+            *current = observed;
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+        Ok(self.snapshot_locked(&state))
+    }
     pub fn observe(&self, power: bool) {
-        if self.description().is_measurement() {
+        if self.description().is_read_only() {
             return;
         }
         let mut state = self.0.state.lock().unwrap();

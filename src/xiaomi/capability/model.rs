@@ -1,5 +1,6 @@
 use std::{error::Error, fmt};
 
+use super::{MotionBinding, StateBinding, StateMapping};
 use crate::device::{
     DeviceKey, FunctionDescription, FunctionKind, LightMode, LightProfile, MeasurementRange,
     NumericRange, PhysicalDeviceDescription, TemperatureInterval,
@@ -40,8 +41,65 @@ enum FunctionBindings {
     Illuminance {
         measurement: MeasurementBinding,
     },
+    Contact {
+        state: StateBinding,
+    },
+    Motion {
+        motion: MotionBinding,
+    },
+    Occupancy {
+        state: StateBinding,
+    },
 }
 impl ParsedFunction {
+    pub(crate) fn contact(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        state: StateBinding,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Contact { state },
+        }
+    }
+    pub(crate) fn motion_sensor(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        motion: MotionBinding,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Motion { motion },
+        }
+    }
+    pub(crate) fn occupancy(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        state: StateBinding,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Occupancy { state },
+        }
+    }
+    pub fn state(&self) -> Option<&StateBinding> {
+        match &self.bindings {
+            FunctionBindings::Contact { state } | FunctionBindings::Occupancy { state } => {
+                Some(state)
+            }
+            FunctionBindings::Motion { motion } => Some(motion.state()),
+            _ => None,
+        }
+    }
+    pub fn motion(&self) -> Option<&MotionBinding> {
+        match &self.bindings {
+            FunctionBindings::Motion { motion } => Some(motion),
+            _ => None,
+        }
+    }
     pub(crate) fn outlet(
         id: impl Into<String>,
         label: impl Into<String>,
@@ -123,7 +181,10 @@ impl ParsedFunction {
             FunctionBindings::Temperature { .. }
             | FunctionBindings::Humidity { .. }
             | FunctionBindings::CarbonDioxide { .. }
-            | FunctionBindings::Illuminance { .. } => None,
+            | FunctionBindings::Illuminance { .. }
+            | FunctionBindings::Contact { .. }
+            | FunctionBindings::Motion { .. }
+            | FunctionBindings::Occupancy { .. } => None,
         }
     }
     pub fn lighting(&self) -> Option<&LightBindings> {
@@ -132,7 +193,10 @@ impl ParsedFunction {
             | FunctionBindings::Temperature { .. }
             | FunctionBindings::Humidity { .. }
             | FunctionBindings::CarbonDioxide { .. }
-            | FunctionBindings::Illuminance { .. } => None,
+            | FunctionBindings::Illuminance { .. }
+            | FunctionBindings::Contact { .. }
+            | FunctionBindings::Motion { .. }
+            | FunctionBindings::Occupancy { .. } => None,
             FunctionBindings::Light { lighting, .. } => Some(lighting),
         }
     }
@@ -142,11 +206,18 @@ impl ParsedFunction {
             | FunctionBindings::Humidity { measurement }
             | FunctionBindings::CarbonDioxide { measurement }
             | FunctionBindings::Illuminance { measurement } => Some(measurement),
-            FunctionBindings::Outlet { .. } | FunctionBindings::Light { .. } => None,
+            FunctionBindings::Outlet { .. }
+            | FunctionBindings::Light { .. }
+            | FunctionBindings::Contact { .. }
+            | FunctionBindings::Motion { .. }
+            | FunctionBindings::Occupancy { .. } => None,
         }
     }
     pub fn kind(&self) -> FunctionKind {
         match &self.bindings {
+            FunctionBindings::Contact { .. } => FunctionKind::Contact,
+            FunctionBindings::Motion { .. } => FunctionKind::Motion,
+            FunctionBindings::Occupancy { .. } => FunctionKind::Occupancy,
             FunctionBindings::Outlet { .. } => FunctionKind::Outlet,
             FunctionBindings::Light { lighting, .. } => FunctionKind::Light(lighting.profile()),
             FunctionBindings::Temperature { measurement } => {
@@ -175,6 +246,9 @@ impl ParsedFunction {
     pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {
         if let Some(measurement) = self.measurement() {
             return vec![measurement.property()];
+        }
+        if let Some(state) = self.state() {
+            return vec![state.property()];
         }
         let mut bindings = vec![self.power().expect("control functions have power")];
         if let Some(lighting) = self.lighting() {
@@ -264,7 +338,7 @@ impl ParsedDevice {
         }
         let controls = functions
             .iter()
-            .filter(|function| function.measurement().is_none())
+            .filter(|function| function.kind().is_control())
             .collect::<Vec<_>>();
         let measurements = functions
             .iter()
@@ -292,7 +366,39 @@ impl ParsedDevice {
                 return Err(CapabilityError::InvalidDescription("sensor topology"));
             }
         }
-        if measurements.is_empty() && battery.is_some() {
+        for function in functions
+            .iter()
+            .filter(|function| function.kind().is_state_sensor())
+        {
+            let valid = matches!(
+                (
+                    function.id(),
+                    function.kind(),
+                    function.state().unwrap().mapping(),
+                ),
+                (
+                    "contact",
+                    FunctionKind::Contact,
+                    StateMapping::ContactBoolean | StateMapping::Enumerated { .. }
+                ) | (
+                    "motion",
+                    FunctionKind::Motion,
+                    StateMapping::NoMotionDuration { .. }
+                ) | (
+                    "occupancy",
+                    FunctionKind::Occupancy,
+                    StateMapping::Enumerated { .. }
+                )
+            );
+            if !valid {
+                return Err(CapabilityError::InvalidDescription("state topology"));
+            }
+        }
+        if functions
+            .iter()
+            .all(|function| function.kind().is_control())
+            && battery.is_some()
+        {
             return Err(CapabilityError::InvalidDescription("battery topology"));
         }
         if controls
@@ -343,7 +449,7 @@ impl ParsedDevice {
             && self
                 .functions
                 .iter()
-                .all(|function| function.measurement().is_some())
+                .all(|function| function.kind().is_read_only())
     }
     pub(crate) fn physical_description(
         &self,

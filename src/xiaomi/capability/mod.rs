@@ -7,7 +7,7 @@ mod native;
 mod outlet;
 mod repair;
 mod sensor;
-
+mod state_sensor;
 pub(crate) use group::parse_group;
 pub(crate) use light::is_light_type;
 pub(crate) use ls2307::is_type as is_ls2307_type;
@@ -20,6 +20,9 @@ pub(crate) use native::NativeDescription;
 pub(crate) use outlet::is_outlet_type;
 pub(crate) use repair::{
     RepairPlan, effective_temperature_range, narrowed_profile, plan_rgb_repair, repaired_profile,
+};
+pub use state_sensor::{
+    EventArgument, EventBinding, MotionBinding, StateBinding, StateMapping, StateValue,
 };
 
 pub(crate) fn is_light_group(key: &crate::device::DeviceKey, model: &str) -> bool {
@@ -41,15 +44,16 @@ pub fn parse_device_for_model(
     } else {
         outlet::parse_outlet(key.clone(), &description)
     };
-    let measurements = sensor::measurements(&description);
-    if measurements.is_empty() {
+    let mut sensors = sensor::measurements(&description);
+    sensors.extend(state_sensor::functions(&description));
+    if sensors.is_empty() {
         return control;
     }
     let (mut functions, refresh_trigger) = match control {
         Ok(control) => (control.functions().to_vec(), control.refresh_trigger()),
         Err(_) => (Vec::new(), None),
     };
-    functions.extend(measurements);
+    functions.extend(sensors);
     let (battery, battery_issue) = sensor::battery(&description);
     ParsedDevice::new_with_battery_diagnostic(
         key,

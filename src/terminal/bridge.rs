@@ -128,6 +128,9 @@ fn capabilities(description: &crate::device::FunctionDescription) -> String {
             Capability::Humidity => "humidity".into(),
             Capability::CarbonDioxide => "co2".into(),
             Capability::Illuminance => "illuminance".into(),
+            Capability::Contact => "contact".into(),
+            Capability::Motion => "motion".into(),
+            Capability::Occupancy => "occupancy".into(),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -263,6 +266,18 @@ fn render(view: &View, did: Option<&str>) -> String {
                     lines.push(format!(
                         "  {id} ({label}): {}",
                         measurement_text(measurement, "ppm")
+                    ));
+                }
+                crate::device::FunctionState::Contact { state }
+                | crate::device::FunctionState::Motion { state }
+                | crate::device::FunctionState::Occupancy { state } => {
+                    lines.push(format!(
+                        "  {id} ({label}): {}",
+                        state.active.map_or("unknown", |active| if active {
+                            "active"
+                        } else {
+                            "inactive"
+                        })
                     ));
                 }
                 crate::device::FunctionState::Illuminance { measurement } => {

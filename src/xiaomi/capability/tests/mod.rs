@@ -509,3 +509,5 @@ pub(crate) fn parse_device(
 }
 
 mod sensors;
+
+mod states;

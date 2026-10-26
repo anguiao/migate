@@ -184,7 +184,7 @@ fn shapes(derived: &DerivedConfiguration) -> BTreeMap<DeviceKey, FixedShape> {
 }
 
 #[test]
-fn grouping_a_mixed_light_hides_only_control_and_preserves_measurements_and_battery() {
+fn grouping_a_mixed_light_hides_only_control_and_preserves_sensors_and_battery() {
     let light = ct_light_native("member", 2700, 6500);
     let sensor: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/miot/miaomiaoce-t6.json"
@@ -195,6 +195,12 @@ fn grouping_a_mixed_light_hides_only_control_and_preserves_measurements_and_batt
             .unwrap();
     let mut functions = light.device().functions().to_vec();
     functions.extend_from_slice(sensor.functions());
+    let contact: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/miot/isa-dw2hl.json")).unwrap();
+    let contact =
+        crate::xiaomi::capability::parse_device_for_model(key("member"), "sample", &contact)
+            .unwrap();
+    functions.extend_from_slice(contact.functions());
     let mixed = NativeDescription::new(
         "vendor.light".into(),
         LIGHT_TYPE.into(),
@@ -247,14 +253,14 @@ fn grouping_a_mixed_light_hides_only_control_and_preserves_measurements_and_batt
             .iter()
             .map(|function| function.id.as_str())
             .collect::<Vec<_>>(),
-        ["temperature", "humidity"]
+        ["temperature", "humidity", "contact"]
     );
     assert_eq!(
         grouped.derived.served[&key("member")]
             .description
             .functions()
             .len(),
-        3
+        4
     );
     let before = initial.configuration.device(&key("member")).unwrap();
     let after = grouped.configuration.device(&key("member")).unwrap();

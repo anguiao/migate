@@ -33,6 +33,9 @@ pub enum Capability {
     Humidity,
     CarbonDioxide,
     Illuminance,
+    Contact,
+    Motion,
+    Occupancy,
 }
 
 /// The four standard light profiles without their interval, for comparisons
@@ -93,8 +96,20 @@ pub enum FunctionKind {
     Humidity(MeasurementRange),
     CarbonDioxide(MeasurementRange),
     Illuminance(MeasurementRange),
+    Contact,
+    Motion,
+    Occupancy,
 }
 impl FunctionKind {
+    pub fn is_control(self) -> bool {
+        matches!(self, Self::Outlet | Self::Light(_))
+    }
+    pub fn is_state_sensor(self) -> bool {
+        matches!(self, Self::Contact | Self::Motion | Self::Occupancy)
+    }
+    pub fn is_read_only(self) -> bool {
+        !self.is_control()
+    }
     pub fn is_light(self) -> bool {
         matches!(self, Self::Light(_))
     }
@@ -105,7 +120,10 @@ impl FunctionKind {
             | Self::Temperature(_)
             | Self::Humidity(_)
             | Self::CarbonDioxide(_)
-            | Self::Illuminance(_) => None,
+            | Self::Illuminance(_)
+            | Self::Contact
+            | Self::Motion
+            | Self::Occupancy => None,
         }
     }
     pub fn is_measurement(self) -> bool {
@@ -124,6 +142,9 @@ impl FunctionKind {
             Self::Humidity(_) => vec![Capability::Humidity],
             Self::CarbonDioxide(_) => vec![Capability::CarbonDioxide],
             Self::Illuminance(_) => vec![Capability::Illuminance],
+            Self::Contact => vec![Capability::Contact],
+            Self::Motion => vec![Capability::Motion],
+            Self::Occupancy => vec![Capability::Occupancy],
             Self::Outlet => vec![Capability::OnOff],
             Self::Light(profile) => {
                 let mut capabilities = vec![Capability::OnOff];
@@ -180,7 +201,7 @@ impl FunctionDescription {
         self.kind.is_measurement()
     }
     pub fn is_read_only(&self) -> bool {
-        self.is_measurement()
+        self.kind.is_read_only()
     }
 }
 
@@ -328,6 +349,22 @@ pub struct MeasurementSnapshot {
 }
 impl Eq for MeasurementSnapshot {}
 
+/// The native input participating in the latest binary-state observation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StateInput {
+    Property(serde_json::Value),
+    Event { siid: u32, eiid: u32 },
+}
+
+/// Active means open, motion detected, or occupied for the respective kind.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StateSnapshot {
+    pub active: Option<bool>,
+    pub input: Option<StateInput>,
+    pub source_time: Option<i64>,
+    pub received_at: Option<i64>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionSnapshot {
     pub state: FunctionState,
@@ -356,15 +393,35 @@ pub enum FunctionState {
     Illuminance {
         measurement: MeasurementSnapshot,
     },
+    Contact {
+        state: StateSnapshot,
+    },
+    Motion {
+        state: StateSnapshot,
+    },
+    Occupancy {
+        state: StateSnapshot,
+    },
 }
 impl FunctionSnapshot {
+    pub fn state_sensor(&self) -> Option<StateSnapshot> {
+        match &self.state {
+            FunctionState::Contact { state }
+            | FunctionState::Motion { state }
+            | FunctionState::Occupancy { state } => Some(state.clone()),
+            _ => None,
+        }
+    }
     pub fn power(&self) -> Option<Power> {
         match &self.state {
             FunctionState::Outlet { power } | FunctionState::Light { power, .. } => Some(*power),
             FunctionState::Temperature { .. }
             | FunctionState::Humidity { .. }
             | FunctionState::CarbonDioxide { .. }
-            | FunctionState::Illuminance { .. } => None,
+            | FunctionState::Illuminance { .. }
+            | FunctionState::Contact { .. }
+            | FunctionState::Motion { .. }
+            | FunctionState::Occupancy { .. } => None,
         }
     }
     pub fn lighting(&self) -> Option<LightSnapshot> {
@@ -374,7 +431,10 @@ impl FunctionSnapshot {
             | FunctionState::Temperature { .. }
             | FunctionState::Humidity { .. }
             | FunctionState::CarbonDioxide { .. }
-            | FunctionState::Illuminance { .. } => None,
+            | FunctionState::Illuminance { .. }
+            | FunctionState::Contact { .. }
+            | FunctionState::Motion { .. }
+            | FunctionState::Occupancy { .. } => None,
         }
     }
     pub fn measurement(&self) -> Option<MeasurementSnapshot> {
@@ -383,7 +443,11 @@ impl FunctionSnapshot {
             | FunctionState::Humidity { measurement }
             | FunctionState::CarbonDioxide { measurement }
             | FunctionState::Illuminance { measurement } => Some(*measurement),
-            FunctionState::Outlet { .. } | FunctionState::Light { .. } => None,
+            FunctionState::Outlet { .. }
+            | FunctionState::Light { .. }
+            | FunctionState::Contact { .. }
+            | FunctionState::Motion { .. }
+            | FunctionState::Occupancy { .. } => None,
         }
     }
 }

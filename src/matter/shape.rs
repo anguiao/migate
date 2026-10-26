@@ -21,7 +21,7 @@ pub(crate) struct FixedShape {
 struct FixedFunction {
     id: String,
     kind: FixedKind,
-    /// Compound controls and all measurement layouts publish child labels in
+    /// Compound controls and all sensor layouts publish child labels in
     /// Descriptor TagList; a single control keeps its combined endpoint.
     child_label: Option<String>,
 }
@@ -29,6 +29,9 @@ struct FixedFunction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FixedKind {
     Outlet,
+    Contact,
+    Motion,
+    Occupancy,
     Light {
         profile: LightProfileKind,
         mired: Option<(u16, u16)>,
@@ -53,8 +56,7 @@ pub(crate) fn fixed_shape_with_battery(
     functions: &[FunctionDescription],
     battery: bool,
 ) -> FixedShape {
-    let multiple =
-        functions.len() > 1 || functions.iter().any(|function| function.is_measurement());
+    let multiple = functions.len() > 1 || functions.iter().any(|function| function.is_read_only());
     FixedShape {
         battery,
         functions: functions
@@ -63,6 +65,9 @@ pub(crate) fn fixed_shape_with_battery(
                 id: function.id.clone(),
                 kind: match function.kind {
                     FunctionKind::Outlet => FixedKind::Outlet,
+                    FunctionKind::Contact => FixedKind::Contact,
+                    FunctionKind::Motion => FixedKind::Motion,
+                    FunctionKind::Occupancy => FixedKind::Occupancy,
                     FunctionKind::Light(profile) => FixedKind::Light {
                         profile: profile.kind(),
                         mired: profile.temperature_interval().map(units::mired_bounds),

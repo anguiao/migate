@@ -49,7 +49,7 @@ pub(crate) fn is_cp7pd_topology(device: &ParsedDevice) -> bool {
         || device
             .functions()
             .iter()
-            .filter(|function| function.measurement().is_none())
+            .filter(|function| function.kind().is_control())
             .count()
             != CHANNELS.len()
     {
@@ -58,7 +58,7 @@ pub(crate) fn is_cp7pd_topology(device: &ParsedDevice) -> bool {
     device
         .functions()
         .iter()
-        .filter(|function| function.measurement().is_none())
+        .filter(|function| function.kind().is_control())
         .zip(CHANNELS)
         .all(|(function, (id, power))| {
             function.lighting().is_none() && function.id() == id && function.power() == Some(power)
