@@ -88,6 +88,10 @@ fn reconnect_discards_inflight_and_waiting_startup_subscription_budget() {
             c.clock.advance(Duration::from_secs(10));
             until(|| peer.state.borrow().connects.len() == 2).await;
             until(|| peer.state.borrow().held.len() == 16).await;
+            // This lifecycle test must tolerate a scheduling pause while ACKs are held.
+            // Request expiration is covered by the notification driver's own tests.
+            async_io::Timer::after(Duration::from_millis(200)).await;
+            assert_eq!(peer.state.borrow().held.len(), 16);
             release_startup_subscriptions(&peer, paths.len()).await;
             until(|| members.iter().all(|did| cloud_active(&c, did))).await;
             for path in &paths {

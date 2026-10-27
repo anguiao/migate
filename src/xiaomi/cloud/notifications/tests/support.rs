@@ -106,13 +106,7 @@ pub(super) async fn exercise<S: Future<Output = ()>, C: Future<Output = ()>>(
                     .await;
                 },
                 async {
-                    let (handle, driver) =
-                        crate::xiaomi::cloud::notification_test_support::connect(
-                            address,
-                            &credentials(),
-                            timing.request,
-                            timing.keepalive,
-                        )
+                    let (handle, driver) = connect_with_timing(address, &credentials(), timing)
                         .await
                         .unwrap();
                     client(handle, driver).await;
@@ -148,10 +142,26 @@ pub(super) fn received_property(pkid: u16, value: bool) -> Packet {
 pub(crate) async fn connect(
     address: SocketAddr,
     credentials: &XiaomiRecord,
-    request: Duration,
-    keepalive: Option<Duration>,
 ) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
-    let prepared = PreparedConnection::new(credentials, Timing { request, keepalive })?;
+    // Adapter scenarios exercise lifecycle behavior with the production request
+    // deadline. Short protocol deadlines belong to the driver tests in exercise.
+    connect_with_timing(
+        address,
+        credentials,
+        Timing {
+            keepalive: None,
+            ..Timing::default()
+        },
+    )
+    .await
+}
+
+async fn connect_with_timing(
+    address: SocketAddr,
+    credentials: &XiaomiRecord,
+    timing: Timing,
+) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
+    let prepared = PreparedConnection::new(credentials, timing)?;
     let stream = Async::<std::net::TcpStream>::connect(address)
         .await
         .map_err(|_| NotificationError::Io)?;
