@@ -118,10 +118,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                     panic!("missing level request")
                 };
                 let percent = request.target.brightness_percent().unwrap();
-                assert_eq!(
-                    percent,
-                    crate::matter::units::brightness_from_level(111).unwrap()
-                );
+                assert_eq!(percent, crate::matter::units::brightness_from_level(111));
                 let raw = binding.brightness().unwrap().brightness_to_raw(percent);
                 let actual = binding
                     .brightness()
@@ -141,7 +138,7 @@ fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_tempera
                     report_value(&read_bytes(&handler, &ctx).await.unwrap())
                         .u8()
                         .unwrap(),
-                    crate::matter::units::level_from_brightness(actual).unwrap()
+                    crate::matter::units::level_from_brightness(actual)
                 );
                 if binding.brightness().unwrap().range().max() == 65535 {
                     assert!(actual.fract() > 0.0);

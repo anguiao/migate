@@ -1,6 +1,6 @@
 use crate::device::{
-    Availability, CommandError, CommandReceiver, DeviceKey, DeviceRequest, Function,
-    FunctionDescription, FunctionKind, LightDimension, LightPatch, LightProfile, PhysicalDevice,
+    Availability, CommandReceiver, DeviceKey, DeviceRequest, Function, FunctionDescription,
+    FunctionKind, LightDimension, LightPatch, LightProfile, PhysicalDevice,
     PhysicalDeviceDescription, TemperatureInterval,
 };
 use crate::lighting::{Scheduler, Task, clock::Clock, level};
@@ -8,8 +8,8 @@ use futures_lite::future::{block_on, poll_once};
 use std::{cell::Cell, future::Future, pin::Pin, rc::Rc};
 
 /// Test-only unit seam: the real level conversion lives at the Matter boundary.
-fn brightness(level: u8) -> Result<f64, CommandError> {
-    Ok(1.0 + (level as f64 - 1.0) * 99.0 / 253.0)
+fn brightness(level: u8) -> f64 {
+    1.0 + (level as f64 - 1.0) * 99.0 / 253.0
 }
 
 fn temperature(mireds: u16) -> f64 {

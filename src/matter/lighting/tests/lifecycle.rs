@@ -110,7 +110,7 @@ fn later_failure_takeover_and_new_relative_start_keep_observed_state() {
         let before = function.snapshot().lighting().unwrap().brightness_percent;
         assert_eq!(
             light.refresh().level,
-            Some(crate::matter::units::level_from_brightness(before.unwrap()).unwrap())
+            Some(crate::matter::units::level_from_brightness(before.unwrap()))
         );
         let action = light
             .begin(

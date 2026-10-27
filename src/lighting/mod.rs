@@ -52,13 +52,13 @@ impl Task {
     fn target(
         self,
         elapsed: u64,
-        brightness: fn(u8) -> Result<f64, CommandError>,
+        brightness: fn(u8) -> f64,
         temperature: fn(u16) -> f64,
     ) -> Result<(LightTarget, bool), CommandError> {
         match self {
             Self::Level(task) => {
                 let (level, end, power) = task.frame(elapsed);
-                Ok((LightTarget::brightness(power, brightness(level)?)?, end))
+                Ok((LightTarget::brightness(power, brightness(level))?, end))
             }
             Self::Color(task) => {
                 let (target, end) = task.frame(elapsed);
@@ -113,7 +113,7 @@ fn index(dimension: LightDimension) -> usize {
 pub(crate) struct Scheduler {
     function: Function,
     clock: Rc<dyn Clock>,
-    brightness: fn(u8) -> Result<f64, CommandError>,
+    brightness: fn(u8) -> f64,
     temperature: fn(u16) -> f64,
     active: RefCell<[Option<Active>; 2]>,
     remaining: Cell<[u64; 2]>,
@@ -122,7 +122,7 @@ impl Scheduler {
     pub(crate) fn new(
         function: Function,
         clock: Rc<dyn Clock>,
-        brightness: fn(u8) -> Result<f64, CommandError>,
+        brightness: fn(u8) -> f64,
         temperature: fn(u16) -> f64,
     ) -> Self {
         Self {

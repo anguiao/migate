@@ -128,9 +128,9 @@ impl Report {
         let lighting = snapshot.lighting().expect("lighting Function snapshot");
         let interval = profile.temperature_interval();
         let temperature = interval.and_then(|interval| {
-            lighting.temperature_kelvin.map(|value| {
-                mireds_from_kelvin(interval, value).expect("validated snapshot temperature")
-            })
+            lighting
+                .temperature_kelvin
+                .map(|value| mireds_from_kelvin(interval, value))
         });
         let (xy, hs) = if profile.has_rgb() {
             match lighting.mode {
@@ -152,9 +152,9 @@ impl Report {
             power: snapshot.power().and_then(crate::device::Power::value),
             // Observed zero is a known physical value; Matter's nonzero minimum
             // projects it to MinLevel without inferring the independent power state.
-            level: lighting.brightness_percent.map(|value| {
-                level_from_brightness(value.max(1.0)).expect("validated snapshot brightness")
-            }),
+            level: lighting
+                .brightness_percent
+                .map(|value| level_from_brightness(value.max(1.0))),
             xy,
             temperature,
             mode: lighting.mode,
