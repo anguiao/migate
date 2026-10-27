@@ -300,18 +300,7 @@ impl App {
         self.source.set_label(key, label);
         let mut derived = (*current.derived).clone();
         if let Some(served) = derived.served.get_mut(key) {
-            let battery = served.description.has_battery();
-            let description = crate::device::PhysicalDeviceDescription::new(
-                key.clone(),
-                label,
-                served.description.functions().to_vec(),
-            )
-            .expect("a served description keeps its functions");
-            served.description = if battery {
-                description.with_battery()
-            } else {
-                description
-            };
+            served.description.set_label(label);
         }
         *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
             configuration,

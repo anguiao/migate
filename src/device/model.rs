@@ -249,6 +249,14 @@ impl PhysicalDeviceDescription {
     pub fn functions(&self) -> &[FunctionDescription] {
         &self.functions
     }
+    pub(crate) fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
+    }
+    /// A native light group keeps its stable main function and identity.
+    pub(crate) fn with_main_light_profile(mut self, profile: LightProfile) -> Self {
+        self.functions[0].kind = FunctionKind::Light(profile);
+        self
+    }
     pub(crate) fn into_parts(self) -> (DeviceKey, String, Vec<FunctionDescription>, bool) {
         (self.key, self.label, self.functions, self.battery)
     }

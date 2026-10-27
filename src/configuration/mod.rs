@@ -6,7 +6,7 @@
 //! explicitly and never reads storage, the network, randomness or time.
 
 use crate::{
-    device::{DeviceKey, FunctionDescription, FunctionKind, PhysicalDeviceDescription},
+    device::{DeviceKey, FunctionDescription, PhysicalDeviceDescription},
     xiaomi::capability::{NativeDescription, RepairPlan},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -568,27 +568,9 @@ fn derive_served(
         ),
     };
     ServedDevice {
-        description: with_light_kind(description, crate::device::FunctionKind::Light(profile)),
+        description: description.with_main_light_profile(profile),
         repair,
         repair_reason,
-    }
-}
-
-fn with_light_kind(
-    description: PhysicalDeviceDescription,
-    kind: FunctionKind,
-) -> PhysicalDeviceDescription {
-    let (key, label, mut functions, battery) = description.into_parts();
-    functions
-        .first_mut()
-        .expect("a native group description has one main function")
-        .kind = kind;
-    let description = PhysicalDeviceDescription::new(key, label, functions)
-        .expect("a light replacement keeps the description valid");
-    if battery {
-        description.with_battery()
-    } else {
-        description
     }
 }
 
