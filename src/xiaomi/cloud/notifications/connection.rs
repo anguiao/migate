@@ -18,9 +18,9 @@ const PORT: u16 = 8883;
 pub async fn connect_notifications(
     credentials: &XiaomiRecord,
 ) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
-    validate_credentials(credentials)?;
+    let prepared = PreparedConnection::new(credentials, Timing::default())?;
     let stream = tls::connect(HOST, PORT).await?;
-    start(Box::new(stream), credentials, Timing::default()).await
+    prepared.start(Box::new(stream)).await
 }
 
 fn validate_credentials(credentials: &XiaomiRecord) -> Result<String, NotificationError> {
@@ -41,45 +41,68 @@ fn validate_credentials(credentials: &XiaomiRecord) -> Result<String, Notificati
     Ok(format!("ha.{}", uuid.simple()))
 }
 
-pub(super) async fn start(
-    mut stream: Box<dyn Transport>,
-    credentials: &XiaomiRecord,
-    mut timing: Timing,
-) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
-    let client_id = validate_credentials(credentials)?;
-    let mut connect = Connect::new(client_id);
-    connect.set_login(
-        CLIENT_ID.to_string(),
-        credentials.tokens.access_token.clone(),
-    );
-    connect.keep_alive = timing.keepalive.map_or(0, |duration| {
-        duration.as_secs().clamp(1, u64::from(u16::MAX)) as u16
-    });
-    connect.properties = Some(ConnectProperties {
-        session_expiry_interval: Some(0),
-        receive_maximum: Some(LIMIT as u16),
-        max_packet_size: Some(mqtt::MAX_FRAME_SIZE as u32),
-        topic_alias_max: Some(0),
-        request_response_info: None,
-        request_problem_info: Some(0),
-        user_properties: Vec::new(),
-        authentication_method: None,
-        authentication_data: None,
-    });
-    let mut frames = mqtt::Frames::default();
-    let handshake = mqtt::handshake(&mut stream, &mut frames, connect, timing.request)
-        .await
-        .map_err(handshake_error)?;
-    if let Some(seconds) = handshake.server_keep_alive {
-        timing.keepalive = (seconds > 0).then(|| Duration::from_secs(u64::from(seconds)));
+pub(super) struct PreparedConnection {
+    uid: String,
+    connect: Connect,
+    timing: Timing,
+}
+
+impl PreparedConnection {
+    pub(super) fn new(
+        credentials: &XiaomiRecord,
+        timing: Timing,
+    ) -> Result<Self, NotificationError> {
+        let client_id = validate_credentials(credentials)?;
+        let mut connect = Connect::new(client_id);
+        connect.set_login(
+            CLIENT_ID.to_string(),
+            credentials.tokens.access_token.clone(),
+        );
+        connect.keep_alive = timing.keepalive.map_or(0, |duration| {
+            duration.as_secs().clamp(1, u64::from(u16::MAX)) as u16
+        });
+        connect.properties = Some(ConnectProperties {
+            session_expiry_interval: Some(0),
+            receive_maximum: Some(LIMIT as u16),
+            max_packet_size: Some(mqtt::MAX_FRAME_SIZE as u32),
+            topic_alias_max: Some(0),
+            request_response_info: None,
+            request_problem_info: Some(0),
+            user_properties: Vec::new(),
+            authentication_method: None,
+            authentication_data: None,
+        });
+        Ok(Self {
+            uid: credentials.uid.clone(),
+            connect,
+            timing,
+        })
     }
-    Ok(NotificationDriver::new(
-        stream,
-        frames,
-        credentials.uid.clone(),
-        timing,
-        handshake.max_packet,
-    ))
+
+    pub(super) async fn start(
+        self,
+        mut stream: Box<dyn Transport>,
+    ) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
+        let Self {
+            uid,
+            connect,
+            mut timing,
+        } = self;
+        let mut frames = mqtt::Frames::default();
+        let handshake = mqtt::handshake(&mut stream, &mut frames, connect, timing.request)
+            .await
+            .map_err(handshake_error)?;
+        if let Some(seconds) = handshake.server_keep_alive {
+            timing.keepalive = (seconds > 0).then(|| Duration::from_secs(u64::from(seconds)));
+        }
+        Ok(NotificationDriver::new(
+            stream,
+            frames,
+            uid,
+            timing,
+            handshake.max_packet,
+        ))
+    }
 }
 
 fn handshake_error(error: mqtt::HandshakeError) -> NotificationError {

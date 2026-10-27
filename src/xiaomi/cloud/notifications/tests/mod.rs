@@ -1,6 +1,6 @@
 use super::{
     NotificationDriver, NotificationError, NotificationEvent, NotificationHandle, Timing,
-    connection::start,
+    connection::PreparedConnection,
 };
 use crate::{
     storage::{TokenSet, XiaomiRecord},

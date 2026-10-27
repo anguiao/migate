@@ -121,7 +121,9 @@ fn cloud_connect_authentication_rejections_are_sanitized() {
                 },
                 async {
                     let stream = Async::<TcpStream>::connect(address).await.unwrap();
-                    let error = start(Box::new(stream), &credentials(), timing())
+                    let error = PreparedConnection::new(&credentials(), timing())
+                        .unwrap()
+                        .start(Box::new(stream))
                         .await
                         .err()
                         .unwrap();
@@ -141,13 +143,7 @@ fn cloud_connect_authentication_rejections_are_sanitized() {
             "token" => record.tokens.access_token = "token\n".into(),
             _ => unreachable!(),
         }
-        let error = future::block_on(start(
-            Box::new(futures_lite::io::Cursor::new(Vec::new())),
-            &record,
-            timing(),
-        ))
-        .err()
-        .unwrap();
+        let error = PreparedConnection::new(&record, timing()).err().unwrap();
         assert_eq!(error, NotificationError::InvalidInput);
     }
 }

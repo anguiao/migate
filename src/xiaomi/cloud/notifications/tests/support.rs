@@ -151,8 +151,9 @@ pub(crate) async fn connect(
     request: Duration,
     keepalive: Option<Duration>,
 ) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
+    let prepared = PreparedConnection::new(credentials, Timing { request, keepalive })?;
     let stream = Async::<std::net::TcpStream>::connect(address)
         .await
         .map_err(|_| NotificationError::Io)?;
-    start(Box::new(stream), credentials, Timing { request, keepalive }).await
+    prepared.start(Box::new(stream)).await
 }
