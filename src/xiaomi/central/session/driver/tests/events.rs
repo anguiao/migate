@@ -102,7 +102,13 @@ async fn ready_event(handle: &SessionHandle, driver: &mut SessionDriver) {
         .iter()
         .find(|(_, subscription)| {
             subscription.request.is_some()
-                && matches!(subscription.kind, SubscriptionKind::Event { .. })
+                && matches!(
+                    subscription.kind,
+                    SubscriptionKind::Notification {
+                        binding: NotificationBinding::Event(_),
+                        ..
+                    }
+                )
         })
         .unwrap()
         .0;
@@ -186,8 +192,12 @@ fn local_event_generations_and_scoped_unsubscription_preserve_other_work() {
             .unwrap();
         let unsubscribe = handle.unsubscribe_events("target");
         driver.drain_cancellations();
-        assert!(driver.event_topics.is_empty());
-        assert_eq!(driver.property_topics.len(), 1);
+        assert_eq!(driver.notification_topics.len(), 1);
+        assert!(
+            driver
+                .notification_topics
+                .contains_key("client/appMsg/notify/iot/target/property/2.1")
+        );
         assert_eq!(driver.pending.len(), 1);
         driver.drain_requests().unwrap();
         acknowledge_unsubscribe(&mut driver);
@@ -206,8 +216,12 @@ fn local_event_generations_and_scoped_unsubscription_preserve_other_work() {
         );
         let unsubscribe = handle.unsubscribe_properties("target");
         driver.drain_cancellations();
-        assert!(driver.property_topics.is_empty());
-        assert_eq!(driver.event_topics.len(), 1);
+        assert_eq!(driver.notification_topics.len(), 1);
+        assert!(
+            driver
+                .notification_topics
+                .contains_key("client/appMsg/notify/iot/target/event/2.1")
+        );
         assert_eq!(driver.pending.len(), 1);
         driver.drain_requests().unwrap();
         acknowledge_unsubscribe(&mut driver);
@@ -221,7 +235,7 @@ fn local_event_generations_and_scoped_unsubscription_preserve_other_work() {
         assert_eq!(events.len(), 2);
         let unsubscribe = handle.unsubscribe_device("target");
         driver.drain_cancellations();
-        assert!(driver.event_topics.is_empty());
+        assert!(driver.notification_topics.is_empty());
         assert_eq!(read.await.result, Err(CentralError::Cancelled));
         driver.drain_requests().unwrap();
         acknowledge_unsubscribe(&mut driver);
@@ -253,7 +267,7 @@ fn local_late_event_subacks_and_failures_cannot_restore_retired_subscriptions() 
                 &mut |_| {},
             )
             .unwrap();
-        assert!(driver.event_topics.is_empty());
+        assert!(driver.notification_topics.is_empty());
         driver.drain_requests().unwrap();
         acknowledge_unsubscribe(&mut driver);
         unsubscribe.await.unwrap();
@@ -267,9 +281,9 @@ fn local_late_event_subacks_and_failures_cannot_restore_retired_subscriptions() 
             )
             .unwrap();
         assert_eq!(rejected.await, Err(CentralError::Rejected(135)));
-        assert!(driver.event_topics.is_empty());
+        assert!(driver.notification_topics.is_empty());
         ready_event(&handle, &mut driver).await;
-        assert_eq!(driver.event_topics.len(), 1);
+        assert_eq!(driver.notification_topics.len(), 1);
         assert_eq!(driver.shared.outstanding.get(), 0);
     });
 }
@@ -297,7 +311,7 @@ fn local_event_timeouts_do_not_accept_late_subacks_and_requests_are_bounded() {
                 &mut |_| {},
             )
             .unwrap();
-        assert!(driver.event_topics.is_empty());
+        assert!(driver.notification_topics.is_empty());
         let pending = (1..=LIMIT)
             .map(|eiid| {
                 handle.subscribe_event(

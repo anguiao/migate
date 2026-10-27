@@ -8,6 +8,7 @@ mod properties;
 mod support;
 
 use super::*;
+use crate::xiaomi::capability::PropertyBinding;
 use crate::xiaomi::central::session::request::RequestKind;
 use crate::xiaomi::central::{
     RequestOutcome, RequestStage, RequestTimeout, SendDecision, SendHooks, wire,

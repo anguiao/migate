@@ -53,7 +53,7 @@ fn cancelling_unsent_business_keeps_writes_and_subscriptions() {
             subscription.await.unwrap();
             assert_eq!(callbacks.get(), 4);
             assert_eq!(handle.shared.outstanding.get(), 0);
-            assert_eq!(driver.property_topics.len(), 1);
+            assert_eq!(driver.notification_topics.len(), 1);
         }
     });
 }

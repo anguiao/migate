@@ -2,12 +2,11 @@ use super::super::{CentralError, wire};
 use super::{
     CentralEvent,
     driver::{
-        EventSubscription, PropertySubscription, PublicationStage, SessionDriver, Subscription,
-        SubscriptionKind,
+        NotificationSubscription, PublicationStage, SessionDriver, Subscription, SubscriptionKind,
     },
     request::{
-        RequestKind, RequestStage, RequestTimeout, Response, event_topic, parse_response,
-        property_topic, valid_identifier, validate_identity,
+        NotificationBinding, RequestKind, RequestStage, RequestTimeout, Response, parse_response,
+        valid_identifier, validate_identity,
     },
 };
 use crate::xiaomi::mqtt;
@@ -69,21 +68,9 @@ impl SessionDriver {
                         if let RequestKind::Subscribe { did, binding } = &request.kind {
                             self.notification_generation =
                                 self.notification_generation.wrapping_add(1);
-                            self.property_topics.insert(
-                                property_topic(&self.client_id, did, *binding),
-                                PropertySubscription {
-                                    did: did.clone(),
-                                    binding: *binding,
-                                    generation: self.notification_generation,
-                                },
-                            );
-                        }
-                        if let RequestKind::SubscribeEvent { did, binding } = &request.kind {
-                            self.notification_generation =
-                                self.notification_generation.wrapping_add(1);
-                            self.event_topics.insert(
-                                event_topic(&self.client_id, did, *binding),
-                                EventSubscription {
+                            self.notification_topics.insert(
+                                binding.topic(&self.client_id, did),
+                                NotificationSubscription {
                                     did: did.clone(),
                                     binding: *binding,
                                     generation: self.notification_generation,
@@ -176,18 +163,12 @@ impl SessionDriver {
                         self.message(publish, on_event);
                     }
                     QoS::ExactlyOnce => {
-                        let property_topics = &self.property_topics;
-                        let event_topics = &self.event_topics;
+                        let notification_topics = &self.notification_topics;
                         self.incoming
                             .receive(&publish, || {
-                                property_topics
+                                notification_topics
                                     .get(&publish.topic)
-                                    .map(|property| property.generation)
-                                    .or_else(|| {
-                                        event_topics
-                                            .get(&publish.topic)
-                                            .map(|event| event.generation)
-                                    })
+                                    .map(|notification| notification.generation)
                             })
                             .map_err(|_| CentralError::Protocol)?;
                         self.enqueue(
@@ -209,13 +190,9 @@ impl SessionDriver {
                     let current = topic == &self.reply_topic
                         || topic == &self.list_topic
                         || received.context.is_some_and(|generation| {
-                            self.property_topics
+                            self.notification_topics
                                 .get(topic)
-                                .is_some_and(|property| property.generation == generation)
-                                || self
-                                    .event_topics
-                                    .get(topic)
-                                    .is_some_and(|event| event.generation == generation)
+                                .is_some_and(|notification| notification.generation == generation)
                         });
                     if current {
                         self.message(received.publish, on_event);
@@ -260,9 +237,8 @@ impl SessionDriver {
         let topic = publish.topic.as_str();
         let reply = topic == self.reply_topic;
         let list = topic == self.list_topic;
-        let property = self.property_topics.get(topic).cloned();
-        let event = self.event_topics.get(topic).cloned();
-        if !reply && !list && property.is_none() && event.is_none() {
+        let notification = self.notification_topics.get(topic).cloned();
+        if !reply && !list && notification.is_none() {
             return Ok(());
         }
         let message = wire::decode_mips(&publish.payload)?;
@@ -313,52 +289,61 @@ impl SessionDriver {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             on_event(CentralEvent::DeviceListChanged { dids });
-        } else if let Some(EventSubscription { did, binding, .. }) = event {
-            if publish.retain {
-                return Ok(());
-            }
-            let payload = &message.payload;
-            if payload.get("did").and_then(Value::as_str) != Some(&did)
-                || payload.get("siid").and_then(Value::as_u64) != Some(u64::from(binding.siid))
-                || payload.get("eiid").and_then(Value::as_u64) != Some(u64::from(binding.eiid))
-            {
-                return Err(CentralError::Protocol);
-            }
-            let arguments = match payload.get("arguments") {
-                Some(arguments) => arguments.as_array().ok_or(CentralError::Protocol)?.clone(),
-                // The local protocol also sends parameterless events without this field.
-                None => Vec::new(),
-            };
-            on_event(CentralEvent::EventOccurred {
-                did,
-                binding,
-                arguments,
-                source_time: payload.get("timestamp").and_then(Value::as_i64),
-            });
-        } else if let Some(PropertySubscription { did, binding, .. }) = property {
-            validate_identity(&message.payload, &did, binding, true)?;
-            let value = message
-                .payload
-                .get("value")
-                .filter(|value| crate::xiaomi::property::valid_value(value))
-                .ok_or(CentralError::Protocol)?;
-            let update_time = crate::xiaomi::property::update_time(&message.payload);
-            let event = if publish.retain {
-                CentralEvent::PropertySnapshot {
-                    did,
-                    binding,
-                    value: value.clone(),
-                    update_time,
+        } else if let Some(NotificationSubscription { did, binding, .. }) = notification {
+            match binding {
+                NotificationBinding::Event(binding) => {
+                    if publish.retain {
+                        return Ok(());
+                    }
+                    let payload = &message.payload;
+                    if payload.get("did").and_then(Value::as_str) != Some(&did)
+                        || payload.get("siid").and_then(Value::as_u64)
+                            != Some(u64::from(binding.siid))
+                        || payload.get("eiid").and_then(Value::as_u64)
+                            != Some(u64::from(binding.eiid))
+                    {
+                        return Err(CentralError::Protocol);
+                    }
+                    let arguments = match payload.get("arguments") {
+                        Some(arguments) => {
+                            arguments.as_array().ok_or(CentralError::Protocol)?.clone()
+                        }
+                        // The local protocol also sends parameterless events without this field.
+                        None => Vec::new(),
+                    };
+                    on_event(CentralEvent::EventOccurred {
+                        did,
+                        binding,
+                        arguments,
+                        source_time: payload.get("timestamp").and_then(Value::as_i64),
+                    });
                 }
-            } else {
-                CentralEvent::PropertyValue {
-                    did,
-                    binding,
-                    value: value.clone(),
-                    update_time,
+                NotificationBinding::Property(binding) => {
+                    validate_identity(&message.payload, &did, binding, true)?;
+                    let value = message
+                        .payload
+                        .get("value")
+                        .filter(|value| crate::xiaomi::property::valid_value(value))
+                        .ok_or(CentralError::Protocol)?;
+                    let update_time = crate::xiaomi::property::update_time(&message.payload);
+                    let event = if publish.retain {
+                        CentralEvent::PropertySnapshot {
+                            did,
+                            binding,
+                            value: value.clone(),
+                            update_time,
+                        }
+                    } else {
+                        CentralEvent::PropertyValue {
+                            did,
+                            binding,
+                            value: value.clone(),
+                            update_time,
+                        }
+                    };
+                    on_event(event);
                 }
-            };
-            on_event(event);
+            }
         }
         Ok(())
     }

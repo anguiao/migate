@@ -58,8 +58,9 @@ fn cancelled_and_expired_subscriptions_reserve_packet_ids_until_their_late_ack()
                 handle.cancel_device("target").unwrap();
                 driver.drain_cancellations();
                 assert!(
-                    driver.retired_topics["target"]
-                        .contains("master/appMsg/notify/iot/target/property/2.1")
+                    driver.retired_topics["target"].contains(&NotificationBinding::Property(
+                        PropertyBinding { siid: 2, piid: 1 }
+                    ))
                 );
             }
             if let Some(unsubscribe) = unsubscribe {
@@ -88,7 +89,7 @@ fn cancelled_and_expired_subscriptions_reserve_packet_ids_until_their_late_ack()
             };
             driver.packet(late, &mut |_| {}).unwrap();
             assert!(poll_once(rejoined.as_mut()).await.is_none());
-            assert!(driver.property_topics.is_empty());
+            assert!(driver.notification_topics.is_empty());
             driver
                 .packet(
                     Packet::SubAck(SubAck::new(new_id, vec![SubscribeReasonCode::QoS2])),
@@ -96,7 +97,7 @@ fn cancelled_and_expired_subscriptions_reserve_packet_ids_until_their_late_ack()
                 )
                 .unwrap();
             rejoined.await.unwrap();
-            assert_eq!(driver.property_topics.len(), 1);
+            assert_eq!(driver.notification_topics.len(), 1);
         }
     });
 }

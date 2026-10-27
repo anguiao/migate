@@ -1,9 +1,8 @@
 use super::super::CentralError;
 use super::{
     CentralEvent, LIMIT, SessionHandle, Timing, Transport,
-    request::{Request, RequestStage, RequestTimeout, Shared},
+    request::{NotificationBinding, Request, RequestStage, RequestTimeout, Shared},
 };
-use crate::xiaomi::capability::{EventBinding, PropertyBinding};
 use crate::xiaomi::mqtt;
 use event_listener::Event;
 use futures_lite::{future, io::AsyncRead};
@@ -41,29 +40,18 @@ pub(super) struct Subscription {
 }
 
 #[derive(Clone)]
-pub(super) struct PropertySubscription {
+pub(super) struct NotificationSubscription {
     pub(super) did: String,
-    pub(super) binding: PropertyBinding,
-    pub(super) generation: u64,
-}
-
-#[derive(Clone)]
-pub(super) struct EventSubscription {
-    pub(super) did: String,
-    pub(super) binding: EventBinding,
+    pub(super) binding: NotificationBinding,
     pub(super) generation: u64,
 }
 
 #[derive(Clone, Eq, PartialEq)]
 pub(super) enum SubscriptionKind {
     Baseline,
-    Property {
+    Notification {
         did: String,
-        binding: PropertyBinding,
-    },
-    Event {
-        did: String,
-        binding: EventBinding,
+        binding: NotificationBinding,
     },
     Unsubscribe,
 }
@@ -83,11 +71,9 @@ pub struct SessionDriver {
     pub(super) publications: HashMap<u16, Publication>,
     pub(super) subscriptions: HashMap<u16, Subscription>,
     pub(super) incoming: mqtt::QoS2<Option<u64>>,
-    pub(super) property_topics: HashMap<String, PropertySubscription>,
-    pub(super) event_topics: HashMap<String, EventSubscription>,
+    pub(super) notification_topics: HashMap<String, NotificationSubscription>,
     pub(super) notification_generation: u64,
-    pub(super) retired_topics: HashMap<String, BTreeSet<String>>,
-    pub(super) retired_event_topics: HashMap<String, BTreeSet<String>>,
+    pub(super) retired_topics: HashMap<String, BTreeSet<NotificationBinding>>,
     pub(super) ready: bool,
     pkid: u16,
     pub(super) keepalive: mqtt::Keepalive,
@@ -110,8 +96,7 @@ impl SessionDriver {
             closed: Default::default(),
             outstanding: Default::default(),
             cancellations: Default::default(),
-            property_invalidations: Default::default(),
-            event_invalidations: Default::default(),
+            notification_invalidations: Default::default(),
             cancel_unsent_business: Default::default(),
         });
         let now = Instant::now();
@@ -128,11 +113,9 @@ impl SessionDriver {
             publications: HashMap::new(),
             subscriptions: HashMap::new(),
             incoming: mqtt::QoS2::new(LIMIT),
-            property_topics: HashMap::new(),
-            event_topics: HashMap::new(),
+            notification_topics: HashMap::new(),
             notification_generation: 0,
             retired_topics: HashMap::new(),
-            retired_event_topics: HashMap::new(),
             ready: false,
             pkid: 0,
             keepalive: mqtt::Keepalive::new(now),
@@ -354,17 +337,11 @@ impl SessionDriver {
             .collect();
         for id in expired {
             let subscription = self.subscriptions.get_mut(&id).unwrap();
-            if let SubscriptionKind::Property { did, binding } = &subscription.kind {
+            if let SubscriptionKind::Notification { did, binding } = &subscription.kind {
                 self.retired_topics
                     .entry(did.clone())
                     .or_default()
-                    .insert(super::request::property_topic("master", did, *binding));
-            }
-            if let SubscriptionKind::Event { did, binding } = &subscription.kind {
-                self.retired_event_topics
-                    .entry(did.clone())
-                    .or_default()
-                    .insert(super::request::event_topic("master", did, *binding));
+                    .insert(*binding);
             }
             if let Some(request) = subscription.request.take() {
                 self.finish_timeout(request, RequestTimeout::Subscription);

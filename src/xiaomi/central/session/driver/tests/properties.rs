@@ -59,7 +59,7 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
             "a received property from the retired source was dispatched"
         );
         assert!(driver.ready);
-        assert_eq!(driver.property_topics.len(), 1);
+        assert_eq!(driver.notification_topics.len(), 1);
         assert_eq!(driver.subscriptions.len(), 1);
         assert!(driver.subscriptions[&subscription_id].request.is_some());
         assert_eq!(driver.pending.len(), 2);
@@ -140,7 +140,7 @@ fn received_property_invalidation_takes_effect_between_buffered_frames_in_one_po
             }]
         );
         assert!(driver.ready);
-        assert_eq!(driver.property_topics.len(), 2);
+        assert_eq!(driver.notification_topics.len(), 2);
     });
 }
 
@@ -170,7 +170,7 @@ fn property_unsubscription_keeps_business_writes_and_retires_late_subacks() {
         let read = handle.read_property_value("target", BINDING, |_| {});
         let unsubscribe = handle.unsubscribe_properties("target");
         driver.drain_cancellations();
-        assert!(driver.property_topics.is_empty());
+        assert!(driver.notification_topics.is_empty());
         assert!(driver.pending.contains_key(&mid));
         assert_eq!(pending.await, Err(CentralError::Cancelled));
         driver.drain_requests().unwrap();
@@ -190,7 +190,7 @@ fn property_unsubscription_keeps_business_writes_and_retires_late_subacks() {
                 &mut |_| {},
             )
             .unwrap();
-        assert!(driver.property_topics.is_empty());
+        assert!(driver.notification_topics.is_empty());
         reply(
             &mut driver,
             mid,
