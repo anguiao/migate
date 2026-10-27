@@ -124,21 +124,6 @@ pub(crate) fn planned_from(
             .collect(),
         relations: Vec::new(),
     };
-    let shapes = |derived: &configuration::DerivedConfiguration| {
-        derived
-            .served
-            .iter()
-            .map(|(key, served)| {
-                (
-                    key.clone(),
-                    matter::fixed_shape_with_battery(
-                        served.description.functions(),
-                        served.description.has_battery(),
-                    ),
-                )
-            })
-            .collect()
-    };
     let current_derived = current.derive();
     let new_identities = facts
         .devices
@@ -146,15 +131,16 @@ pub(crate) fn planned_from(
         .filter(|device| current.device(&device.key).is_none())
         .map(|device| (device.key.clone(), unique(&device.key.id)))
         .collect();
-    let plan = configuration::plan(PlanInput {
-        current: current.clone(),
-        current_shapes: shapes(&current_derived),
-        current_derived,
-        facts_shapes: shapes(&facts.derive()),
-        facts,
-        revocations: Vec::new(),
-        new_identities,
-    })
+    let plan = configuration::plan(
+        PlanInput {
+            current: &current,
+            current_derived: &current_derived,
+            facts,
+            revocations: Vec::new(),
+            new_identities,
+        },
+        |functions, battery| matter::fixed_shape_with_battery(functions.iter().copied(), battery),
+    )
     .unwrap();
     save(store, &plan.configuration);
     plan.configuration

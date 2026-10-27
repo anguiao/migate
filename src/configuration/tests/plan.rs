@@ -4,7 +4,7 @@
 use super::super::*;
 use crate::{
     device::{DeviceKey, NumericRange},
-    matter::{self, FixedShape},
+    matter,
     xiaomi::capability::{
         BrightnessBinding, LightBindings, NumericFormat, ParsedDevice, ParsedFunction,
         PropertyBinding, TemperatureBinding,
@@ -163,26 +163,6 @@ fn facts(scope: Scope, devices: Vec<SourceDevice>, relations: Vec<GroupRelation>
     }
 }
 
-fn shapes(derived: &DerivedConfiguration) -> BTreeMap<DeviceKey, FixedShape> {
-    derived
-        .served
-        .iter()
-        .map(|(key, served)| {
-            (
-                key.clone(),
-                matter::fixed_shape_with_battery(
-                    &derived
-                        .visible_functions(key)
-                        .into_iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    served.description.has_battery(),
-                ),
-            )
-        })
-        .collect()
-}
-
 #[test]
 fn grouping_a_mixed_light_hides_only_control_and_preserves_sensors_and_battery() {
     let light = ct_light_native("member", 2700, 6500);
@@ -212,16 +192,16 @@ fn grouping_a_mixed_light_hides_only_control_and_preserves_sensors_and_battery()
         source("member", mixed, None),
         source("group", ct_light_native("group", 2700, 6500), None),
     ];
-    let initial = plan(input(
+    let initial = plan(
         CommittedConfiguration::empty(),
         facts(scope(), source_devices.clone(), vec![]),
         BTreeMap::from([
             (key("member"), unique("member")),
             (key("group"), unique("group")),
         ]),
-    ))
+    )
     .unwrap();
-    let grouped = plan(input(
+    let grouped = plan(
         initial.configuration.clone(),
         facts(
             scope(),
@@ -238,7 +218,7 @@ fn grouping_a_mixed_light_hides_only_control_and_preserves_sensors_and_battery()
             }],
         ),
         BTreeMap::new(),
-    ))
+    )
     .unwrap();
     assert!(grouped.derived.published.contains(&key("member")));
     assert!(
@@ -273,30 +253,31 @@ fn grouping_a_mixed_light_hides_only_control_and_preserves_sensors_and_battery()
     grouped.configuration.validate().unwrap();
 }
 
-fn input(
+fn plan(
     current: CommittedConfiguration,
     facts: SourceFacts,
     new_identities: BTreeMap<DeviceKey, String>,
-) -> PlanInput {
-    input_with(current, facts, new_identities, Vec::new())
+) -> Result<Plan, PlanError> {
+    plan_with_revocations(current, facts, new_identities, Vec::new())
 }
 
-fn input_with(
+fn plan_with_revocations(
     current: CommittedConfiguration,
     facts: SourceFacts,
     new_identities: BTreeMap<DeviceKey, String>,
     revocations: Vec<Revocation>,
-) -> PlanInput {
+) -> Result<Plan, PlanError> {
     let current_derived = current.derive();
-    PlanInput {
-        current_shapes: shapes(&current_derived),
-        current,
-        current_derived,
-        facts_shapes: shapes(&facts.derive()),
-        facts,
-        revocations,
-        new_identities,
-    }
+    super::super::plan(
+        PlanInput {
+            current: &current,
+            current_derived: &current_derived,
+            facts,
+            revocations,
+            new_identities,
+        },
+        |functions, battery| matter::fixed_shape_with_battery(functions.iter().copied(), battery),
+    )
 }
 
 #[test]
@@ -309,7 +290,7 @@ fn new_identity_starts_at_version_one() {
     );
     let mut identities = BTreeMap::new();
     identities.insert(key("outlet"), unique("outlet"));
-    let plan = plan(input(CommittedConfiguration::empty(), facts, identities)).unwrap();
+    let plan = plan(CommittedConfiguration::empty(), facts, identities).unwrap();
     assert!(plan.changed);
     assert!(plan.rebuild);
     let device = plan.configuration.device(&key("outlet")).unwrap();
@@ -344,7 +325,7 @@ fn identical_facts_reuse_without_change() {
         groups: Vec::new(),
     };
     let facts = facts(scope(), vec![source("outlet", native, None)], Vec::new());
-    let plan = plan(input(current.clone(), facts, BTreeMap::new())).unwrap();
+    let plan = plan(current.clone(), facts, BTreeMap::new()).unwrap();
     assert!(!plan.changed);
     assert!(!plan.rebuild);
     assert_eq!(
@@ -384,7 +365,7 @@ fn hidden_member_republishes_with_a_version_bump() {
         vec![source("member", member_native, None)],
         Vec::new(),
     );
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(plan.rebuild);
     let member = plan.configuration.device(&key("member")).unwrap();
     assert_eq!(member.configuration_version, 2);
@@ -417,7 +398,7 @@ fn urn_only_change_is_reused_without_rebuild_or_a_version_bump() {
         vec![source("outlet", metadata_only, None)],
         Vec::new(),
     );
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(plan.changed);
     assert!(!plan.rebuild);
     assert_eq!(
@@ -447,7 +428,7 @@ fn native_control_change_replaces_and_rebuilds_without_a_version_bump() {
         groups: Vec::new(),
     };
     let facts = facts(scope(), vec![source("outlet", after, None)], Vec::new());
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(plan.rebuild);
     assert_eq!(
         plan.operations,
@@ -476,7 +457,7 @@ fn removed_device_unpublishes_and_bumps_its_version() {
         groups: Vec::new(),
     };
     let facts = facts(scope(), Vec::new(), Vec::new());
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(plan.rebuild);
     assert_eq!(
         plan.operations,
@@ -506,7 +487,7 @@ fn scope_change_alone_does_not_bump_root_or_device_versions() {
         vec![source("outlet", native, None)],
         Vec::new(),
     );
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(plan.rebuild);
     assert_eq!(
         plan.configuration
@@ -537,7 +518,7 @@ fn endpoint_exhaustion_is_explicit() {
     );
     let mut identities = BTreeMap::new();
     identities.insert(key("outlet"), unique("outlet"));
-    let error = plan(input(current, facts, identities)).unwrap_err();
+    let error = plan(current, facts, identities).unwrap_err();
     assert_eq!(error, PlanError::EndpointExhausted { key: key("outlet") });
 }
 
@@ -554,7 +535,7 @@ fn version_overflow_is_explicit() {
         groups: Vec::new(),
     };
     let facts = facts(scope(), vec![source("light", after, None)], Vec::new());
-    let error = plan(input(current, facts, BTreeMap::new())).unwrap_err();
+    let error = plan(current, facts, BTreeMap::new()).unwrap_err();
     assert_eq!(error, PlanError::VersionExhausted { key: key("light") });
 }
 
@@ -578,12 +559,13 @@ fn empty_saved_label_survives_plan_and_validation() {
         vec![source("outlet", native, Some("Renamed in Mi Home"))],
         Vec::new(),
     );
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(!plan.changed);
     assert_eq!(
         plan.configuration.device(&key("outlet")).unwrap().label,
         previous.label
     );
+    assert_eq!(plan.derived.served[&key("outlet")].description.label(), "");
     assert!(plan.configuration.validate().is_ok());
 }
 
@@ -598,7 +580,7 @@ fn revoked_startup_removal_bumps_versions_against_the_committed_graph() {
     };
     // Startup facts exclude the revoked device; the tombstone stays durable.
     let facts = facts(scope(), Vec::new(), Vec::new());
-    let plan = plan(input_with(
+    let plan = plan_with_revocations(
         current,
         facts,
         BTreeMap::new(),
@@ -606,7 +588,7 @@ fn revoked_startup_removal_bumps_versions_against_the_committed_graph() {
             key: key("outlet"),
             reason: "confirmed removal".into(),
         }],
-    ))
+    )
     .unwrap();
     assert!(plan.rebuild);
     assert!(plan.derived.published.is_empty());
@@ -628,6 +610,73 @@ fn revoked_startup_removal_bumps_versions_against_the_committed_graph() {
 }
 
 #[test]
+fn stale_revoked_member_cannot_affect_candidate_group_profile_or_shape() {
+    let group_native = ct_light_native("group", 2700, 6500);
+    let member_native = ct_light_native("member", 3000, 6000);
+    let relation = GroupRelation {
+        group_did: "group".into(),
+        record_did: "record-group".into(),
+        model: "vendor.group".into(),
+        instance_type: Some(LIGHT_TYPE.into()),
+        is_physical: true,
+        active: true,
+        error: None,
+        members: vec!["member".into()],
+    };
+    let current = CommittedConfiguration {
+        scope: Some(scope()),
+        root_version: 2,
+        devices: vec![
+            committed("group", group_native.clone(), "Saved group", 1),
+            committed_at("member", member_native.clone(), "Member", 1, 6),
+        ],
+        groups: vec![relation.clone()],
+    };
+    let mut stale = source("member", member_native, None);
+    stale.fresh = false;
+    let plan = plan_with_revocations(
+        current,
+        facts(
+            scope(),
+            vec![
+                source("group", group_native, Some("Directory group")),
+                stale,
+            ],
+            vec![relation],
+        ),
+        BTreeMap::new(),
+        vec![Revocation {
+            key: key("member"),
+            reason: "confirmed removal".into(),
+        }],
+    )
+    .unwrap();
+    let group = &plan.derived.served[&key("group")].description;
+    let interval = group.functions()[0].temperature_interval().unwrap();
+    assert_eq!((interval.min(), interval.max()), (2700, 6500));
+    assert_eq!(group.label(), "Saved group");
+    assert!(!plan.derived.served.contains_key(&key("member")));
+    assert!(
+        plan.configuration
+            .device(&key("member"))
+            .unwrap()
+            .native
+            .is_none()
+    );
+    assert!(plan.clear_revocations.is_empty());
+    assert_eq!(
+        plan.configuration
+            .device(&key("group"))
+            .unwrap()
+            .configuration_version,
+        2
+    );
+    assert_eq!(plan.configuration.root_version, 3);
+    assert!(plan.rebuild);
+    plan.configuration.validate().unwrap();
+}
+
+#[test]
 fn new_identity_imports_a_bounded_utf8_directory_name() {
     let name = "米家厨房吸顶灯超长名称需要按字节边界截断";
     let mut identities = BTreeMap::new();
@@ -637,7 +686,7 @@ fn new_identity_imports_a_bounded_utf8_directory_name() {
         vec![source("outlet", outlet_native("outlet", 2), Some(name))],
         Vec::new(),
     );
-    let plan = plan(input(CommittedConfiguration::empty(), facts, identities)).unwrap();
+    let plan = plan(CommittedConfiguration::empty(), facts, identities).unwrap();
     let label = &plan.configuration.device(&key("outlet")).unwrap().label;
     assert_eq!(label, "米家厨房吸顶灯超长名");
     assert!(label.len() <= 32);
@@ -678,7 +727,7 @@ fn member_reordering_is_canonical_and_does_not_rebuild() {
         ],
         vec![relation(&["member-b", "member-a"])],
     );
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(
         !plan.changed,
         "member order alone is not a configuration change"
@@ -700,7 +749,7 @@ fn fresh_revocation_clear_replaces_the_native_instance() {
         groups: Vec::new(),
     };
     let facts = facts(scope(), vec![source("outlet", native, None)], Vec::new());
-    let plan = plan(input_with(
+    let plan = plan_with_revocations(
         current,
         facts,
         BTreeMap::new(),
@@ -708,7 +757,7 @@ fn fresh_revocation_clear_replaces_the_native_instance() {
             key: key("outlet"),
             reason: "confirmed removal".into(),
         }],
-    ))
+    )
     .unwrap();
     assert_eq!(plan.clear_revocations, [key("outlet")]);
     assert!(plan.rebuild);
@@ -743,7 +792,7 @@ fn scope_change_replaces_the_native_instance_with_the_same_key() {
         vec![source("outlet", native, None)],
         Vec::new(),
     );
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(plan.rebuild);
     assert_eq!(
         plan.operations,
@@ -794,7 +843,7 @@ fn hidden_member_replacement_rebuilds_without_a_version_bump() {
         ],
         vec![relation],
     );
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(plan.rebuild);
     assert!(!plan.derived.published.contains(&key("member")));
     assert_eq!(
@@ -849,7 +898,7 @@ fn group_directory_metadata_change_does_not_rebuild() {
         ],
         vec![renamed.clone()],
     );
-    let plan = plan(input(current, facts, BTreeMap::new())).unwrap();
+    let plan = plan(current, facts, BTreeMap::new()).unwrap();
     assert!(plan.changed);
     assert!(!plan.rebuild);
     assert!(
@@ -871,7 +920,7 @@ fn state_native_from_instance(model: &str, instance: &serde_json::Value) -> Nati
 }
 
 fn assert_state_semantics_replaced(before: NativeDescription, after: NativeDescription) {
-    let initial = plan(input(
+    let initial = plan(
         CommittedConfiguration::empty(),
         facts(
             scope(),
@@ -879,10 +928,10 @@ fn assert_state_semantics_replaced(before: NativeDescription, after: NativeDescr
             Vec::new(),
         ),
         BTreeMap::from([(key("state"), unique("state"))]),
-    ))
+    )
     .unwrap()
     .configuration;
-    let updated = plan(input(
+    let updated = plan(
         initial.clone(),
         facts(
             scope(),
@@ -890,7 +939,7 @@ fn assert_state_semantics_replaced(before: NativeDescription, after: NativeDescr
             Vec::new(),
         ),
         BTreeMap::new(),
-    ))
+    )
     .unwrap();
     assert_eq!(
         updated.operations,

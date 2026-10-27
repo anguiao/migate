@@ -2,8 +2,8 @@
 //!
 //! Source facts use the Xiaomi native model directly; scope holds the current
 //! account and home while the group id is derived. Storage owns only the
-//! private codec and transaction. Planning receives the Matter canonical shape
-//! explicitly and never reads storage, the network, randomness or time.
+//! private codec and transaction. Planning receives a pure publication shape
+//! projection and never reads storage, the network, randomness or time.
 
 use crate::{
     device::{DeviceKey, FunctionDescription, PhysicalDeviceDescription},
@@ -186,14 +186,10 @@ pub(crate) struct Plan {
     pub changed: bool,
 }
 
-pub(crate) struct PlanInput {
-    pub current: CommittedConfiguration,
-    pub current_derived: DerivedConfiguration,
-    pub current_shapes: BTreeMap<DeviceKey, crate::matter::FixedShape>,
-    /// Effective source facts with non-fresh revocations already filtered out,
-    /// so every supplied Matter shape matches a planned candidate.
+pub(crate) struct PlanInput<'a> {
+    pub current: &'a CommittedConfiguration,
+    pub current_derived: &'a DerivedConfiguration,
     pub facts: SourceFacts,
-    pub facts_shapes: BTreeMap<DeviceKey, crate::matter::FixedShape>,
     pub revocations: Vec<Revocation>,
     pub new_identities: BTreeMap<DeviceKey, String>,
 }
@@ -345,25 +341,6 @@ impl CommittedConfiguration {
     }
 }
 
-impl SourceFacts {
-    /// Derive the candidate picture from the latest source facts.
-    pub(crate) fn derive(&self) -> DerivedConfiguration {
-        let groups = relations_by_did(&self.relations);
-        let labels = self.devices.iter().map(device_label).collect::<Vec<_>>();
-        derive_picture(
-            self.devices
-                .iter()
-                .zip(&labels)
-                .map(|(device, label)| DerivationDevice {
-                    key: &device.key,
-                    native: &device.native,
-                    label,
-                }),
-            &groups,
-        )
-    }
-}
-
 fn relations_by_did(relations: &[GroupRelation]) -> BTreeMap<String, GroupRelation> {
     relations
         .iter()
@@ -386,23 +363,14 @@ fn reserve_endpoint(
     }
 }
 
-pub(crate) fn device_label(device: &SourceDevice) -> String {
-    device
-        .name
-        .as_deref()
-        .map(import_label)
-        .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| default_device_label(device.native.model(), &device.key.id))
-}
-
 struct DerivationDevice<'a> {
     key: &'a DeviceKey,
     native: &'a NativeDescription,
     label: &'a str,
 }
 
-/// The one concrete derivation rule for a configuration picture. Committed
-/// configurations and source facts only project their own fields into it.
+/// Derive the served graph from one complete configuration, using its saved
+/// labels, native descriptions and canonical group relations together.
 fn derive_picture<'a>(
     devices: impl Iterator<Item = DerivationDevice<'a>>,
     groups: &BTreeMap<String, GroupRelation>,

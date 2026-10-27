@@ -50,17 +50,16 @@ enum FixedKind {
     },
 }
 
-/// Canonical shape of the functions as they will be published. The
-/// application collects this value once and hands it to planning.
-pub(crate) fn fixed_shape_with_battery(
-    functions: &[FunctionDescription],
+/// Project the actual visible functions into the canonical publication shape.
+/// Planning compares this value for the committed and final candidate graphs.
+pub(crate) fn fixed_shape_with_battery<'a>(
+    functions: impl ExactSizeIterator<Item = &'a FunctionDescription> + Clone,
     battery: bool,
 ) -> FixedShape {
-    let multiple = functions.len() > 1 || functions.iter().any(|function| function.is_read_only());
+    let multiple = functions.len() > 1 || functions.clone().any(|function| function.is_read_only());
     FixedShape {
         battery,
         functions: functions
-            .iter()
             .map(|function| FixedFunction {
                 id: function.id.clone(),
                 kind: match function.kind {

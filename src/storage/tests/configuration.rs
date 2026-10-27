@@ -58,25 +58,6 @@ pub(super) fn next(
             .collect(),
         relations: Vec::new(),
     };
-    let shapes = |derived: &configuration::DerivedConfiguration| {
-        derived
-            .served
-            .iter()
-            .map(|(key, served)| {
-                (
-                    key.clone(),
-                    matter::fixed_shape_with_battery(
-                        &derived
-                            .visible_functions(key)
-                            .into_iter()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        served.description.has_battery(),
-                    ),
-                )
-            })
-            .collect()
-    };
     let current_derived = current.derive();
     let new_identities = facts
         .devices
@@ -89,15 +70,16 @@ pub(super) fn next(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    configuration::plan(PlanInput {
-        current: current.clone(),
-        current_shapes: shapes(&current_derived),
-        current_derived,
-        facts_shapes: shapes(&facts.derive()),
-        facts,
-        revocations: Vec::new(),
-        new_identities,
-    })
+    configuration::plan(
+        PlanInput {
+            current,
+            current_derived: &current_derived,
+            facts,
+            revocations: Vec::new(),
+            new_identities,
+        },
+        |functions, battery| matter::fixed_shape_with_battery(functions.iter().copied(), battery),
+    )
     .unwrap()
 }
 

@@ -15,7 +15,7 @@ use crate::{
         self, CommittedConfiguration, DerivedConfiguration, Plan, PlanInput, validate_label,
     },
     device::{DeviceKey, DeviceRegistry, PhysicalDevice},
-    matter::{self, FixedShape, LabelWriter},
+    matter::{self, LabelWriter},
     storage::{Identity, StorageError, Store},
     terminal::AuthStatus,
     xiaomi::adapter::publication::{PreparedSources, SourceEntry, SourceHandle},
@@ -172,10 +172,6 @@ impl App {
 
     /// Collect the latest effective input and produce a pure candidate plan.
     /// No activation resource is created here.
-    ///
-    /// Source facts with an uncleared non-fresh revocation are removed before
-    /// Matter shapes are derived, so external shapes always match the planned
-    /// candidates.
     pub(crate) fn plan(&self) -> Result<Option<Plan>, StorageError> {
         let current = self.current();
         let snapshot = self.source.snapshot();
@@ -183,19 +179,8 @@ impl App {
             return Ok(None);
         }
         let revocations = self.store.devices().load_revocations()?;
-        let revoked = revocations
-            .iter()
-            .map(|revocation| revocation.key.clone())
-            .collect::<BTreeSet<_>>();
-        let mut facts = snapshot;
-        facts
-            .devices
-            .retain(|device| !revoked.contains(&device.key) || device.fresh);
-        let facts_derived = facts.derive();
-        let facts_shapes = shapes(&facts_derived);
-        let current_shapes = shapes(&current.derived);
         let mut new_identities = BTreeMap::new();
-        for device in &facts.devices {
+        for device in &snapshot.devices {
             if current.configuration.device(&device.key).is_none() {
                 new_identities.insert(
                     device.key.clone(),
@@ -203,15 +188,18 @@ impl App {
                 );
             }
         }
-        let plan = match configuration::plan(PlanInput {
-            current: current.configuration.clone(),
-            current_derived: (*current.derived).clone(),
-            current_shapes,
-            facts,
-            facts_shapes,
-            revocations,
-            new_identities,
-        }) {
+        let plan = match configuration::plan(
+            PlanInput {
+                current: &current.configuration,
+                current_derived: &current.derived,
+                facts: snapshot,
+                revocations,
+                new_identities,
+            },
+            |functions, battery| {
+                matter::fixed_shape_with_battery(functions.iter().copied(), battery)
+            },
+        ) {
             Ok(plan) => plan,
             Err(error) => {
                 if let configuration::PlanError::EndpointExhausted { key }
@@ -316,26 +304,6 @@ impl LabelWriter for App {
     fn write_label(&self, key: &DeviceKey, label: &str) -> Result<(), StorageError> {
         self.rename(key, label)
     }
-}
-
-fn shapes(derived: &DerivedConfiguration) -> BTreeMap<DeviceKey, FixedShape> {
-    derived
-        .served
-        .iter()
-        .map(|(key, served)| {
-            (
-                key.clone(),
-                matter::fixed_shape_with_battery(
-                    &derived
-                        .visible_functions(key)
-                        .into_iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    served.description.has_battery(),
-                ),
-            )
-        })
-        .collect()
 }
 
 /// The initial serving set only keeps devices with a restored reference.

@@ -3,33 +3,44 @@
 
 use super::{
     CommittedConfiguration, CommittedDevice, CommittedFunction, DerivedConfiguration,
-    OperationKind, Plan, PlanError, PlanInput, PlanOperation, device_label,
-    same_control_description,
+    OperationKind, Plan, PlanError, PlanInput, PlanOperation, SourceDevice, default_device_label,
+    import_label, same_control_description,
 };
-use crate::device::DeviceKey;
+use crate::device::{DeviceKey, FunctionDescription};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
+/// Derive the final candidate once, then compare its publication through the
+/// caller's pure projection of visible functions and shared battery capability.
+pub(crate) fn plan<Shape: PartialEq>(
+    input: PlanInput<'_>,
+    shape: impl Fn(&[&FunctionDescription], bool) -> Shape,
+) -> Result<Plan, PlanError> {
     let PlanInput {
         current,
         current_derived,
-        current_shapes,
         mut facts,
-        facts_shapes,
         revocations,
         mut new_identities,
     } = input;
-    let Some(scope) = facts.scope.clone() else {
+    let Some(scope) = facts.scope else {
         return Err(PlanError::InvalidInput("The current home scope is missing"));
     };
-    facts.devices.sort_by(|a, b| a.key.cmp(&b.key));
-    facts
-        .relations
-        .sort_by(|a, b| a.group_did.cmp(&b.group_did));
     let revoked = revocations
         .into_iter()
         .map(|revocation| revocation.key)
         .collect::<BTreeSet<_>>();
+    facts
+        .devices
+        .retain(|device| !revoked.contains(&device.key) || device.fresh);
+    // Equivalent directory reordering must not change the committed configuration.
+    facts.devices.sort_by(|a, b| a.key.cmp(&b.key));
+    facts
+        .relations
+        .sort_by(|a, b| a.group_did.cmp(&b.group_did));
+    for relation in &mut facts.relations {
+        relation.members.sort();
+        relation.members.dedup();
+    }
     let mut identities = current
         .devices
         .iter()
@@ -47,10 +58,10 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
     let mut clear_revocations = Vec::new();
     let mut next_devices = Vec::new();
 
-    for source in &facts.devices {
+    for source in facts.devices {
         let key = source.key.clone();
-        // The application filters non-fresh revoked facts before planning;
-        // any revoked fact here is a genuine fresh re-admission.
+        // Filtering precedes candidate construction, so any revoked fact here
+        // is a genuine fresh re-admission.
         if revoked.contains(&key) {
             clear_revocations.push(key.clone());
         }
@@ -84,7 +95,7 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
                         }
                     }
                 }
-                device.native = Some(source.native.clone());
+                device.native = Some(source.native);
                 device
             }
             None => {
@@ -110,10 +121,10 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
                     key: key.clone(),
                     unique_id,
                     endpoint,
-                    label: device_label(source),
+                    label: device_label(&source),
                     configuration_version: 1,
                     functions,
-                    native: Some(source.native.clone()),
+                    native: Some(source.native),
                 }
             }
         };
@@ -122,29 +133,17 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
 
     // Identities absent from the current filtered facts lose their current
     // native facts but keep their reservation, name and version.
-    for device in identities.values_mut() {
+    for mut device in identities.into_values() {
         device.native = None;
-        next_devices.push(device.clone());
+        next_devices.push(device);
     }
     next_devices.sort_by(|a, b| a.key.cmp(&b.key));
 
-    // Group facts use a canonical member order so an equivalent directory
-    // reordering never changes the committed configuration or rebuilds.
-    let groups = facts
-        .relations
-        .iter()
-        .map(|relation| {
-            let mut relation = relation.clone();
-            relation.members.sort();
-            relation.members.dedup();
-            relation
-        })
-        .collect::<Vec<_>>();
     let mut configuration = CommittedConfiguration {
         scope: Some(scope),
         root_version: current.root_version,
         devices: next_devices,
-        groups,
+        groups: facts.relations,
     };
     let derived = configuration.derive();
     let mut root_changed = current_derived.published != derived.published;
@@ -155,14 +154,16 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
         let old_pub = current_derived.published.contains(&device.key);
         let new_pub = derived.published.contains(&device.key);
         let shape_changed = if old_pub && new_pub {
-            let before = current_shapes
-                .get(&device.key)
-                .ok_or(PlanError::InvalidInput(
-                    "A committed Matter shape is missing",
-                ))?;
-            let after = facts_shapes
-                .get(&device.key)
-                .ok_or(PlanError::InvalidInput("A source Matter shape is missing"))?;
+            let before = shape(
+                &current_derived.visible_functions(&device.key),
+                current_derived.served[&device.key]
+                    .description
+                    .has_battery(),
+            );
+            let after = shape(
+                &derived.visible_functions(&device.key),
+                derived.served[&device.key].description.has_battery(),
+            );
             if before != after {
                 root_changed = true;
                 true
@@ -192,8 +193,8 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
     }
 
     let operations = operations(
-        &current,
-        &current_derived,
+        current,
+        current_derived,
         &derived,
         &configuration,
         &clear_revocations,
@@ -206,7 +207,7 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
         || current_derived.published != derived.published
         || current_derived.rules != derived.rules
         || instances_changed;
-    let changed = configuration != current || !clear_revocations.is_empty();
+    let changed = &configuration != current || !clear_revocations.is_empty();
     Ok(Plan {
         configuration,
         derived: std::rc::Rc::new(derived),
@@ -215,6 +216,15 @@ pub(crate) fn plan(input: PlanInput) -> Result<Plan, PlanError> {
         rebuild,
         changed,
     })
+}
+
+fn device_label(device: &SourceDevice) -> String {
+    device
+        .name
+        .as_deref()
+        .map(import_label)
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| default_device_label(device.native.model(), &device.key.id))
 }
 
 fn operations(

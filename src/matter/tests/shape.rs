@@ -2,7 +2,7 @@ use super::*;
 use crate::device::{LightProfile, TemperatureInterval};
 
 fn fixed_shape(functions: &[FunctionDescription]) -> FixedShape {
-    fixed_shape_with_battery(functions, false)
+    fixed_shape_with_battery(functions.iter(), false)
 }
 
 fn light(profile: LightProfile) -> FunctionDescription {
@@ -82,7 +82,7 @@ fn battery_capability_is_part_of_the_fixed_physical_shape() {
     let functions = [temperature, humidity];
     assert_ne!(
         fixed_shape(&functions),
-        fixed_shape_with_battery(&functions, true)
+        fixed_shape_with_battery(functions.iter(), true)
     );
 }
 

@@ -17,7 +17,7 @@ pub(crate) use storage::discard_subscriptions;
 
 pub(crate) use model::{FrozenEntry, PublishedFunction, PublishedIdentity};
 pub(crate) use sensors::measurement_mapping_issue;
-pub(crate) use shape::{FixedShape, fixed_shape_with_battery};
+pub(crate) use shape::fixed_shape_with_battery;
 
 #[cfg(test)]
 pub(crate) mod tests;

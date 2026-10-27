@@ -144,11 +144,20 @@ fn renaming_a_sensor_keeps_its_battery_capability() {
     );
     assert_eq!(
         crate::matter::fixed_shape_with_battery(
-            app.current().derived.served[&key].description.functions(),
+            app.current().derived.served[&key]
+                .description
+                .functions()
+                .iter(),
             true
         ),
         crate::matter::fixed_shape_with_battery(
-            source.physical.as_ref().unwrap().description().functions(),
+            source
+                .physical
+                .as_ref()
+                .unwrap()
+                .description()
+                .functions()
+                .iter(),
             true
         )
     );
