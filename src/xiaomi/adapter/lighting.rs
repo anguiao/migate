@@ -219,7 +219,7 @@ pub(super) fn observe(
         .iter()
         .find(|function| function.id() == id)
         .unwrap();
-    let mut patch = decode(description, binding, value)?;
+    let patch = decode(description, binding, value)?;
     let function = work.physical().function(id).unwrap();
     let before = function.snapshot();
     let state = before.lighting().unwrap();
@@ -241,15 +241,10 @@ pub(super) fn observe(
             .as_ref()
             .is_some_and(|gate| gate.is_feedback(binding, value));
     let external = takeover && matches!(origin, Origin::Notification) && changed && !feedback;
-    if let Some(value) = patch.temperature_kelvin
-        && function
-            .description()
-            .temperature_interval()
-            .is_none_or(|interval| !interval.contains(value))
-    {
-        function.clear_light_temperature();
-        patch.temperature_kelvin = None;
-    }
+    let observation = function
+        .project_light_observation(patch)
+        .expect("native report fits the logical light profile");
+    let patch = observation.patch();
     if external {
         if patch.power == Some(false) {
             function.take_over_light_all().expect("light");
@@ -269,9 +264,7 @@ pub(super) fn observe(
         }
     }
     work.observations.observed(work, id, binding, origin);
-    function
-        .observe_light(patch)
-        .expect("validated light report");
+    observation.apply();
     if patch.mode.is_some() {
         refresh_missing_active(work, id, state.mode);
     }

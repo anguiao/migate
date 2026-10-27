@@ -670,7 +670,8 @@ pub struct LightSnapshot {
     pub color: Option<Rgb>,
     pub mode: Option<LightMode>,
 }
-/// A single accepted report; omitted properties preserve existing observations.
+/// Source report values, admitted as a logical observation before application.
+/// Omitted properties preserve existing observations.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LightPatch {
     pub power: Option<bool>,

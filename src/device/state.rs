@@ -508,42 +508,12 @@ impl Function {
             self.0.changed.notify(usize::MAX);
         }
     }
-    /// Apply one validated function report and publish one shared revision.
-    pub fn observe_light(
+    /// Apply a complete logical observation without repeating its admission checks.
+    pub(super) fn apply_light_observation(
         &self,
-        patch: super::LightPatch,
-    ) -> Result<FunctionSnapshot, super::CommandError> {
-        use super::{CommandError, LightMode};
-        let description = self.description();
-        let Some(profile) = description.kind.light_profile() else {
-            return Err(CommandError::Unsupported);
-        };
-        if patch.brightness_percent.is_some() && !profile.has_brightness() {
-            return Err(CommandError::Unsupported);
-        }
-        if let Some(percent) = patch.brightness_percent
-            && (!percent.is_finite() || !(0.0..=100.0).contains(&percent))
-        {
-            return Err(CommandError::Rejected(
-                "brightness is outside 0..100 percent".into(),
-            ));
-        }
-        if let Some(value) = patch.temperature_kelvin {
-            let Some(interval) = profile.temperature_interval() else {
-                return Err(CommandError::Unsupported);
-            };
-            if !interval.contains(value) {
-                return Err(CommandError::Rejected(
-                    "color temperature is outside its physical range".into(),
-                ));
-            }
-        }
-        if patch.mode == Some(LightMode::Temperature) && profile.temperature_interval().is_none() {
-            return Err(CommandError::Unsupported);
-        }
-        if !profile.has_rgb() && (patch.color.is_some() || patch.mode == Some(LightMode::Rgb)) {
-            return Err(CommandError::Unsupported);
-        }
+        observation: super::light_observation::LightObservation<'_>,
+    ) -> FunctionSnapshot {
+        let (patch, clear_temperature) = observation.into_parts();
         let mut state = self.0.state.lock().unwrap();
         let (before_power, Some(before_lighting)) =
             state.control_parts().expect("light has control state")
@@ -555,6 +525,9 @@ impl Function {
             power = value.into();
         }
         let mut lighting = before_lighting;
+        if clear_temperature {
+            lighting.temperature_kelvin = None;
+        }
         if let Some(value) = patch.brightness_percent {
             lighting.brightness_percent = Some(value);
         }
@@ -572,7 +545,7 @@ impl Function {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
-        Ok(self.snapshot_locked(&state))
+        self.snapshot_locked(&state)
     }
     /// Replace the represented RGB and mode, including unknown fields.
     pub(crate) fn replace_light_color(
@@ -597,25 +570,6 @@ impl Function {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
-    }
-    /// Clear an out-of-publication color temperature to unknown.
-    pub(crate) fn clear_light_temperature(&self) -> FunctionSnapshot {
-        let changed = {
-            let mut state = self.0.state.lock().unwrap();
-            let before = state.control_parts();
-            if let Some(lighting) = state.lighting_mut() {
-                lighting.temperature_kelvin = None;
-            }
-            let changed = before != state.control_parts();
-            if changed {
-                state.revision = state.revision.wrapping_add(1);
-            }
-            changed
-        };
-        if changed {
-            self.0.changed.notify(usize::MAX);
-        }
-        self.snapshot()
     }
     pub(super) fn close(&self) {
         let mut state = self.0.state.lock().unwrap();

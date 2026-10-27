@@ -1,5 +1,6 @@
 mod command;
 mod light_command;
+mod light_observation;
 mod model;
 mod registry;
 mod state;
