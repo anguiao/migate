@@ -459,6 +459,16 @@ impl DeviceWorkTestExt for super::super::work::DeviceWork {
         stamp: &crate::xiaomi::adapter::observations::ReadStamp,
         value: &Value,
     ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
-        self.observe_read_at(id, binding, stamp, value, None, 0)
+        self.observe_read_at(
+            id,
+            binding,
+            stamp,
+            value,
+            Observation {
+                source: PathKind::Local,
+                source_time: None,
+                received_at: 0,
+            },
+        )
     }
 }

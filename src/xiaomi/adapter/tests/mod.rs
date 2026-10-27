@@ -28,7 +28,11 @@ mod source_runtime;
 mod subscriptions;
 mod support;
 
-use super::{bootstrap::Clock, *};
+use super::{
+    bootstrap::Clock,
+    observations::{Observation, Origin},
+    *,
+};
 use support::*;
 
 mod urn_updates;

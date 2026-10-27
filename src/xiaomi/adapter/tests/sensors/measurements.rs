@@ -192,8 +192,11 @@ fn an_earlier_read_cannot_overwrite_a_later_notification() {
                     TEMPERATURE,
                     &earlier,
                     &json!(20.0),
-                    Some(100),
-                    control.clock.unix_now(),
+                    Observation {
+                        source: PathKind::Local,
+                        source_time: Some(100),
+                        received_at: control.clock.unix_now(),
+                    },
                 )
                 .unwrap();
             let value = measurement(&control.context, "sensor", "temperature");

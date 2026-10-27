@@ -241,8 +241,11 @@ fn an_earlier_battery_read_cannot_overwrite_a_later_notification() {
                     BATTERY,
                     &earlier,
                     &json!(55),
-                    Some(100),
-                    control.clock.unix_now(),
+                    Observation {
+                        source: PathKind::Local,
+                        source_time: Some(100),
+                        received_at: control.clock.unix_now(),
+                    },
                 )
                 .unwrap();
             let value = battery(&control.context, "sensor").unwrap();

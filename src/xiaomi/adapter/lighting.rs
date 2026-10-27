@@ -1,5 +1,6 @@
 use super::{
     group_rules::{Member, aggregate},
+    observations::Origin,
     state::Context,
     work::DeviceWork,
 };
@@ -12,10 +13,6 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-pub(super) type PropertyKey = (String, u32, u32);
-pub(super) fn key(id: &str, binding: PropertyBinding) -> PropertyKey {
-    (id.into(), binding.siid, binding.piid)
-}
 pub(super) fn decode(
     function: &ParsedFunction,
     binding: PropertyBinding,
@@ -166,13 +163,6 @@ pub(super) fn encode(
     });
     Ok(values)
 }
-#[derive(Clone, Copy)]
-pub(super) enum Origin {
-    Read,
-    Notification,
-    Cache,
-}
-
 /// A mode change needs a fresh active value; repeated demand shares an existing read.
 pub(super) fn refresh_missing_active(
     work: &DeviceWork,

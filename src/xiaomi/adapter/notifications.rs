@@ -1,5 +1,6 @@
 use super::{
     model::{AdapterError, PathKind, SubscriptionBinding},
+    observations::{Observation, Origin},
     routing::PathPriority,
     state::{Backoff, Context, Lifetime},
     tasks::TaskSet,
@@ -265,19 +266,21 @@ impl Context {
             if let Ok(active) = function.state().unwrap().read_value(value)
                 && self.accept_state_notification(work, function.id(), source)
             {
-                work.observe_state_property(
+                work.observe_state(
                     function,
                     active,
-                    value,
-                    update_time,
-                    self.clock.unix_now(),
+                    crate::device::StateInput::Property(value.clone()),
+                    Observation {
+                        source: source.kind(),
+                        source_time: update_time,
+                        received_at: self.clock.unix_now(),
+                    },
                     if cached_report {
-                        super::lighting::Origin::Cache
+                        Origin::Cache
                     } else {
-                        super::lighting::Origin::Notification
+                        Origin::Notification
                     },
                 );
-                work.record_observation_source(function.id(), source.kind());
                 self.update_routing("state property observed");
                 self.status_changed.notify(usize::MAX);
             }
@@ -349,11 +352,23 @@ impl Context {
             .get(did)
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = work
-            && let Some(id) = work.event_channel(binding)
-            && self.accept_state_notification(&work, id, source)
+            && let Some(function) = work.event_function(binding)
+            && self.accept_state_notification(&work, function.id(), source)
         {
-            work.notify_event(binding, source_time, self.clock.unix_now());
-            work.record_observation_source(id, source.kind());
+            work.observe_state(
+                function,
+                Some(true),
+                crate::device::StateInput::Event {
+                    siid: binding.siid,
+                    eiid: binding.eiid,
+                },
+                Observation {
+                    source: source.kind(),
+                    source_time,
+                    received_at: self.clock.unix_now(),
+                },
+                Origin::Notification,
+            );
             self.update_routing("native motion event observed");
             self.status_changed.notify(usize::MAX);
         }

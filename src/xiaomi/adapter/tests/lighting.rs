@@ -643,8 +643,18 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
                 .unwrap();
             // Neither a read started before the receipt nor a cached report
             // proves that the displayed value still matches the device.
-            work.observe_read_at("main", BRIGHTNESS, &old_read, &json!(32768), None, 0)
-                .unwrap();
+            work.observe_read_at(
+                "main",
+                BRIGHTNESS,
+                &old_read,
+                &json!(32768),
+                Observation {
+                    source: PathKind::Local,
+                    source_time: None,
+                    received_at: 0,
+                },
+            )
+            .unwrap();
             work.notify_value_at(BRIGHTNESS, &json!(32768), None, true, false, 0);
             light
                 .begin_light_action(brightness(value), true)
@@ -1839,7 +1849,7 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                     .admitted
                     .clone()
                     .unwrap();
-                let key = super::super::lighting::key("main", active);
+                let key = super::super::observations::key("main", active);
                 until(|| work.refresh.borrow().snapshot().problems.contains_key(&key)).await;
                 peer.state.borrow_mut().hold_reads = true;
                 peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
@@ -1898,7 +1908,7 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
                 .admitted
                 .clone()
                 .unwrap();
-            let key = super::super::lighting::key("main", COLOR);
+            let key = super::super::observations::key("main", COLOR);
             until(|| work.refresh.borrow().snapshot().problems.contains_key(&key)).await;
             peer.state.borrow_mut().hold_reads = true;
             work.refresh_property("main", COLOR);
@@ -1936,7 +1946,7 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
                 .admitted
                 .clone()
                 .unwrap();
-            let key = super::super::lighting::key("main", COLOR);
+            let key = super::super::observations::key("main", COLOR);
             until(|| work.refresh.borrow().snapshot().problems.contains_key(&key)).await;
             peer.state.borrow_mut().hold_reads = true;
             work.refresh_property("main", COLOR);
@@ -2075,7 +2085,7 @@ fn unknown_mode_color_values_update_only_cache_until_the_mode_changes() {
                         .borrow()
                         .snapshot()
                         .problems
-                        .contains_key(&super::super::lighting::key("main", MODE))
+                        .contains_key(&super::super::observations::key("main", MODE))
                 })
                 .await;
                 assert_eq!(light.snapshot().lighting().unwrap().mode, None);

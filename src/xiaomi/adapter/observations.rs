@@ -1,10 +1,25 @@
-use super::{
-    lighting::{Origin, PropertyKey, key},
-    work::DeviceWork,
-};
+use super::{model::PathKind, work::DeviceWork};
 use crate::device::{CommandError, CommandRequest};
 use crate::xiaomi::capability::PropertyBinding;
 use std::{cell::RefCell, collections::BTreeMap};
+
+pub(super) type PropertyKey = (String, u32, u32);
+pub(super) fn key(id: &str, binding: PropertyBinding) -> PropertyKey {
+    (id.into(), binding.siid, binding.piid)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Origin {
+    Read,
+    Notification,
+    Cache,
+}
+
+pub(super) struct Observation {
+    pub(super) source: PathKind,
+    pub(super) source_time: Option<i64>,
+    pub(super) received_at: i64,
+}
 
 #[derive(Default)]
 struct Counts {

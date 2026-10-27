@@ -1,5 +1,6 @@
 use super::{
     model::AdapterError,
+    observations::{Observation, PropertyKey, key},
     routing::ControlPath,
     state::{Context, Lifetime},
     work::DeviceWork,
@@ -37,9 +38,9 @@ enum ReadResult {
 #[derive(Default)]
 pub(super) struct RefreshState {
     pending: VecDeque<Refresh>,
-    inflight: BTreeMap<super::lighting::PropertyKey, Rc<ReadFlight>>,
-    dirty_again: BTreeSet<super::lighting::PropertyKey>,
-    problems: BTreeMap<super::lighting::PropertyKey, String>,
+    inflight: BTreeMap<PropertyKey, Rc<ReadFlight>>,
+    dirty_again: BTreeSet<PropertyKey>,
+    problems: BTreeMap<PropertyKey, String>,
     baseline_generations: BTreeMap<String, u64>,
 }
 impl RefreshState {
@@ -80,15 +81,14 @@ impl RefreshState {
             .is_none_or(|generation| self.baseline_generations[&read.id] == generation)
     }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
-        self.inflight
-            .contains_key(&super::lighting::key(id, binding))
+        self.inflight.contains_key(&key(id, binding))
             || self
                 .pending
                 .iter()
                 .any(|read| read.id == id && read.binding == binding)
     }
     pub(super) fn request_dirty(&mut self, id: &str, binding: PropertyBinding) -> bool {
-        let key = super::lighting::key(id, binding);
+        let key = key(id, binding);
         if self.inflight.contains_key(&key) {
             self.dirty_again.insert(key);
             false
@@ -100,7 +100,7 @@ impl RefreshState {
         }
     }
     fn finish_dirty(&mut self, id: &str, binding: PropertyBinding) -> bool {
-        if self.dirty_again.remove(&super::lighting::key(id, binding)) {
+        if self.dirty_again.remove(&key(id, binding)) {
             self.request(id, binding);
             true
         } else {
@@ -225,8 +225,8 @@ impl RefreshState {
 #[cfg(test)]
 pub(super) struct RefreshSnapshot {
     pub(super) pending: Vec<Refresh>,
-    pub(super) inflight: BTreeSet<super::lighting::PropertyKey>,
-    pub(super) problems: BTreeMap<super::lighting::PropertyKey, String>,
+    pub(super) inflight: BTreeSet<PropertyKey>,
+    pub(super) problems: BTreeMap<PropertyKey, String>,
 }
 
 pub(super) struct ReadFlight {
@@ -234,19 +234,15 @@ pub(super) struct ReadFlight {
     path: ControlPath,
 }
 impl Refresh {
-    fn key(&self) -> super::lighting::PropertyKey {
-        super::lighting::key(&self.id, self.binding)
+    fn key(&self) -> PropertyKey {
+        key(&self.id, self.binding)
     }
 }
 impl ReadFlight {
     fn current(&self, context: &Context, did: &str, id: &str) -> bool {
-        match (&self.path, context.read_path_for(did, id)) {
-            (ControlPath::Local(old), Some(ControlPath::Local(new))) => old.same_connection(&new),
-            (ControlPath::Cloud(old), Some(ControlPath::Cloud(new))) => {
-                old.uid == new.uid && old.access_token == new.access_token
-            }
-            _ => false,
-        }
+        context
+            .read_path_for(did, id)
+            .is_some_and(|path| self.path.same(&path))
     }
 }
 fn works(context: &Context) -> Vec<Rc<DeviceWork>> {
@@ -282,7 +278,7 @@ pub(super) fn reconcile_state_read(
 ) {
     let current = {
         let refresh = work.refresh.borrow();
-        let flight = refresh.inflight.get(&super::lighting::key(id, binding));
+        let flight = refresh.inflight.get(&key(id, binding));
         if let Some(flight) = flight
             && !flight.current(context, &work.key.id, id)
         {
@@ -540,27 +536,18 @@ fn read_one(
                                     )
                                     && let Ok(value) = outcome.result
                                 {
-                                    let accepted = observing.observations.read_is_current(
-                                        &observing,
-                                        &observed_id,
-                                        read.binding,
-                                        &observed_stamp,
-                                    );
                                     *observed_validation.borrow_mut() = observing.observe_read_at(
                                         &observed_id,
                                         read.binding,
                                         &observed_stamp,
                                         &value.value,
-                                        value.update_time,
-                                        result_context.clock.unix_now(),
+                                        Observation {
+                                            source: super::model::PathKind::Local,
+                                            source_time: value.update_time,
+                                            received_at: result_context.clock.unix_now(),
+                                        },
                                     );
                                     if observed_validation.borrow().is_ok() {
-                                        if accepted && observing.state_function(&observed_id) {
-                                            observing.record_observation_source(
-                                                &observed_id,
-                                                super::model::PathKind::Local,
-                                            );
-                                        }
                                         result_context.refresh_group_states(&observing.key.id);
                                     }
                                 }
@@ -599,27 +586,18 @@ fn read_one(
                         Ok(reading) => {
                             let mut validation = Ok(());
                             if !work.life.is_closed() && flight.current(&context, &did, &read.id) {
-                                let accepted = work.observations.read_is_current(
-                                    &work,
-                                    &read.id,
-                                    read.binding,
-                                    &stamp,
-                                );
                                 validation = work.observe_read_at(
                                     &read.id,
                                     read.binding,
                                     &stamp,
                                     &reading.value,
-                                    reading.update_time,
-                                    context.clock.unix_now(),
+                                    Observation {
+                                        source: super::model::PathKind::Cloud,
+                                        source_time: reading.update_time,
+                                        received_at: context.clock.unix_now(),
+                                    },
                                 );
                                 if validation.is_ok() {
-                                    if accepted && work.state_function(&read.id) {
-                                        work.record_observation_source(
-                                            &read.id,
-                                            super::model::PathKind::Cloud,
-                                        );
-                                    }
                                     context.refresh_group_states(&did);
                                 }
                             }

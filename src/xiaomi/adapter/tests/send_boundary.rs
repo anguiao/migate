@@ -781,13 +781,23 @@ fn a_state_notification_satisfies_a_reserved_baseline_before_its_first_socket_by
                             .automatic
                             .store(false, std::sync::atomic::Ordering::Relaxed);
                         assert!(wire.written.borrow().is_empty());
-                        work.notify_event(
-                            EventBinding {
-                                siid: 2,
-                                eiid: 1008,
+                        let binding = EventBinding {
+                            siid: 2,
+                            eiid: 1008,
+                        };
+                        work.observe_state(
+                            work.event_function(binding).unwrap(),
+                            Some(true),
+                            crate::device::StateInput::Event {
+                                siid: binding.siid,
+                                eiid: binding.eiid,
                             },
-                            Some(1),
-                            2,
+                            Observation {
+                                source: PathKind::Local,
+                                source_time: Some(1),
+                                received_at: 2,
+                            },
+                            Origin::Notification,
                         );
                         wire.allow(usize::MAX);
                         until(|| work.refresh.borrow().snapshot().inflight.is_empty()).await;

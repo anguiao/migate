@@ -2,7 +2,7 @@ use super::{
     commands::LightWriteGate,
     model::{AdapterError, PathKind, SubscriptionBinding, SubscriptionStatus},
     notifications::NotificationSource,
-    observations::Observations,
+    observations::{Observation, Observations, Origin},
     refresh::RefreshState,
     state::{Context, Lifetime, LogicalSink},
 };
@@ -567,11 +567,6 @@ impl DeviceWork {
     pub(super) fn observation_source(&self, id: &str) -> Option<PathKind> {
         self.observation_sources.borrow().get(id).copied()
     }
-    pub(super) fn record_observation_source(&self, id: &str, source: PathKind) {
-        self.observation_sources
-            .borrow_mut()
-            .insert(id.into(), source);
-    }
     pub(super) fn subscription_status(&self, id: &str) -> Vec<SubscriptionStatus> {
         let bindings = self.channel_subscriptions(id);
         let local = self.local.borrow();
@@ -591,17 +586,12 @@ impl DeviceWork {
         })
         .collect()
     }
-    pub(super) fn event_channel(&self, binding: EventBinding) -> Option<&str> {
-        self.native
-            .device()
-            .functions()
-            .iter()
-            .find(|function| {
-                function
-                    .motion()
-                    .is_some_and(|motion| motion.event() == binding)
-            })
-            .map(ParsedFunction::id)
+    pub(super) fn event_function(&self, binding: EventBinding) -> Option<&ParsedFunction> {
+        self.native.device().functions().iter().find(|function| {
+            function
+                .motion()
+                .is_some_and(|motion| motion.event() == binding)
+        })
     }
     pub(super) fn state_function(&self, id: &str) -> bool {
         self.native
@@ -610,19 +600,18 @@ impl DeviceWork {
             .iter()
             .any(|function| function.id() == id && function.state().is_some())
     }
-    pub(super) fn observe_state_property(
+    pub(super) fn observe_state(
         &self,
         function: &ParsedFunction,
         active: Option<bool>,
-        value: &serde_json::Value,
-        source_time: Option<i64>,
-        received_at: i64,
-        origin: super::lighting::Origin,
+        input: crate::device::StateInput,
+        observation: Observation,
+        origin: Origin,
     ) {
         let state = function.state().unwrap();
         self.observations
             .observed(self, function.id(), state.property(), origin);
-        if !matches!(origin, super::lighting::Origin::Read) {
+        if !matches!(origin, Origin::Read) {
             self.refresh.borrow_mut().satisfy_baseline(function.id());
         }
         self.physical()
@@ -630,45 +619,14 @@ impl DeviceWork {
             .unwrap()
             .observe_state(
                 active,
-                crate::device::StateInput::Property(value.clone()),
-                source_time,
-                received_at,
+                input,
+                observation.source_time,
+                observation.received_at,
             )
             .expect("state function");
-    }
-    pub(super) fn notify_event(
-        &self,
-        binding: EventBinding,
-        source_time: Option<i64>,
-        received_at: i64,
-    ) {
-        let id = self.event_channel(binding).unwrap();
-        let property = self
-            .native
-            .device()
-            .functions()
-            .iter()
-            .find(|function| function.id() == id)
-            .unwrap()
-            .state()
-            .unwrap()
-            .property();
-        self.observations
-            .observed(self, id, property, super::lighting::Origin::Notification);
-        self.refresh.borrow_mut().satisfy_baseline(id);
-        self.physical()
-            .function(id)
-            .unwrap()
-            .observe_state(
-                Some(true),
-                crate::device::StateInput::Event {
-                    siid: binding.siid,
-                    eiid: binding.eiid,
-                },
-                source_time,
-                received_at,
-            )
-            .expect("motion function");
+        self.observation_sources
+            .borrow_mut()
+            .insert(function.id().into(), observation.source);
     }
     pub(super) fn observer(&self) -> Option<NotificationSource> {
         self.native
@@ -790,9 +748,9 @@ impl DeviceWork {
         }
         if self.battery_binding() == Some(binding) {
             let origin = if cached_report {
-                super::lighting::Origin::Cache
+                Origin::Cache
             } else {
-                super::lighting::Origin::Notification
+                Origin::Notification
             };
             return match observe_battery(self, binding, value, update_time, received_at, origin) {
                 Ok(()) => false,
@@ -818,9 +776,9 @@ impl DeviceWork {
         let light = function.lighting().is_some();
         if light {
             let origin = if cached_report {
-                super::lighting::Origin::Cache
+                Origin::Cache
             } else {
-                super::lighting::Origin::Notification
+                Origin::Notification
             };
             match super::lighting::observe(self, &id, binding, value, origin, takeover) {
                 Ok(()) => true,
@@ -831,9 +789,9 @@ impl DeviceWork {
             }
         } else if function.measurement().is_some() {
             let origin = if cached_report {
-                super::lighting::Origin::Cache
+                Origin::Cache
             } else {
-                super::lighting::Origin::Notification
+                Origin::Notification
             };
             match observe_measurement(
                 self,
@@ -847,28 +805,6 @@ impl DeviceWork {
                 Ok(()) => false,
                 Err(error) => {
                     log::warn!("Ignoring invalid measurement property: {error}");
-                    false
-                }
-            }
-        } else if let Some(state) = function.state() {
-            match state.read_value(value) {
-                Ok(active) => {
-                    self.observe_state_property(
-                        function,
-                        active,
-                        value,
-                        update_time,
-                        received_at,
-                        if cached_report {
-                            super::lighting::Origin::Cache
-                        } else {
-                            super::lighting::Origin::Notification
-                        },
-                    );
-                    false
-                }
-                Err(error) => {
-                    log::warn!("Ignoring invalid state property: {error}");
                     false
                 }
             }
@@ -1266,21 +1202,18 @@ impl DeviceWork {
         binding: PropertyBinding,
         stamp: &super::observations::ReadStamp,
         value: &serde_json::Value,
-        update_time: Option<i64>,
-        received_at: i64,
+        observation: Observation,
     ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
+        let Observation {
+            source_time: update_time,
+            received_at,
+            ..
+        } = observation;
         if !self.observations.read_is_current(self, id, binding, stamp) {
             return Ok(());
         }
         if id == BATTERY_CHANNEL && self.battery_binding() == Some(binding) {
-            return observe_battery(
-                self,
-                binding,
-                value,
-                update_time,
-                received_at,
-                super::lighting::Origin::Read,
-            );
+            return observe_battery(self, binding, value, update_time, received_at, Origin::Read);
         }
         let function = self
             .native
@@ -1290,14 +1223,7 @@ impl DeviceWork {
             .find(|function| function.id() == id)
             .unwrap();
         if function.lighting().is_some() {
-            super::lighting::observe(
-                self,
-                id,
-                binding,
-                value,
-                super::lighting::Origin::Read,
-                false,
-            )?;
+            super::lighting::observe(self, id, binding, value, Origin::Read, false)?;
         } else if function.measurement().is_some() {
             observe_measurement(
                 self,
@@ -1306,17 +1232,16 @@ impl DeviceWork {
                 value,
                 update_time,
                 received_at,
-                super::lighting::Origin::Read,
+                Origin::Read,
             )?;
         } else if let Some(state) = function.state() {
             let active = state.read_value(value)?;
-            self.observe_state_property(
+            self.observe_state(
                 function,
                 active,
-                value,
-                update_time,
-                received_at,
-                super::lighting::Origin::Read,
+                crate::device::StateInput::Property(value.clone()),
+                observation,
+                Origin::Read,
             );
         } else {
             let value =
@@ -1396,7 +1321,7 @@ fn observe_battery(
     value: &serde_json::Value,
     source_time: Option<i64>,
     received_at: i64,
-    origin: super::lighting::Origin,
+    origin: Origin,
 ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
     let battery = work
         .native
@@ -1423,7 +1348,7 @@ fn observe_measurement(
     value: &serde_json::Value,
     source_time: Option<i64>,
     received_at: i64,
-    origin: super::lighting::Origin,
+    origin: Origin,
 ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
     let measurement = function
         .measurement()
