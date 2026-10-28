@@ -223,6 +223,10 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id && function.curtain().is_some())
         {
+            self.physical()
+                .function(id)
+                .unwrap()
+                .curtain_source_changed();
             for binding in function.observation_bindings() {
                 self.refresh.borrow_mut().request_baseline(id, binding);
             }

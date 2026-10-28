@@ -576,6 +576,12 @@ impl Function {
             self.0.changed.notify(usize::MAX);
         }
     }
+    /// A replacement source may have missed movement after the previous target.
+    pub(crate) fn curtain_source_changed(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        let changed = state.update_curtain_projection(|p| p.clear_pending_target());
+        self.notify_curtain_projection(changed);
+    }
     /// Apply one validated curtain report without conflating the three inputs.
     pub(crate) fn observe_curtain(
         &self,

@@ -1,6 +1,74 @@
 use super::*;
 
 #[test]
+fn curtain_notification_recovery_settles_a_target_whose_movement_was_missed() {
+    use crate::device::CurtainCommand;
+    let (rig, listener, cloud) = cloud_rig();
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            settled(&c).await;
+            let function = function(&c.context.registry, "one", "main");
+            assert_eq!(function.matter_curtain().1, Some(25));
+            c.clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            cloud.send(Packet::Disconnect(Disconnect::new()));
+            until(|| {
+                c.context.notifications.borrow().is_none()
+                    && work(&c).function_observer("main").is_none()
+                    && [STATUS, CURRENT, TARGET]
+                        .iter()
+                        .all(|binding| !work(&c).refresh.borrow().contains("main", *binding))
+            })
+            .await;
+            assert_eq!(function.snapshot().availability, Availability::Available);
+            function
+                .begin_curtain(CurtainCommand::Target(90.0))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            assert_eq!(function.matter_curtain().1, Some(75));
+            {
+                let mut http = c.cloud.lock().unwrap();
+                http.raw_values.insert(("one".into(), 2, 3), json!(40));
+                http.raw_values.insert(("one".into(), 2, 4), json!(90));
+            }
+            let due = c.clock.now() + Duration::from_secs(10);
+            until(|| c.clock.deadlines.lock().unwrap().contains(&due)).await;
+            c.clock.advance(Duration::from_secs(10));
+            until(|| cloud.state.borrow().connects.len() == 2).await;
+            c.clock
+                .automatic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            settled(&c).await;
+            assert_eq!(function.snapshot().availability, Availability::Available);
+            assert_eq!(curtain(&c).current_position.value, Some(40));
+            assert_eq!(curtain(&c).target_position.value, Some(90));
+            assert_eq!(curtain(&c).status.value, Some(CurtainMotion::Stopped));
+            assert_eq!(function.matter_curtain().1, Some(40));
+            assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 1);
+
+            function
+                .begin_curtain(CurtainCommand::Target(60.0))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            let reads = c.cloud.lock().unwrap().property_reads.len();
+            work(&c).refresh_property("main", STATUS);
+            until(|| {
+                c.cloud.lock().unwrap().property_reads.len() > reads
+                    && !work(&c).refresh.borrow().contains("main", STATUS)
+            })
+            .await;
+            assert_eq!(function.matter_curtain().1, Some(90));
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn curtain_subscription_failure_recovers_without_losing_read_values() {
     block_on(rig().run(|c| async move {
         c.announce();
