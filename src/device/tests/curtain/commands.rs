@@ -1,118 +1,7 @@
-use crate::device::{
-    CurtainObservation, DeviceKey, FunctionDescription, FunctionKind, PhysicalDevice,
-    PhysicalDeviceDescription,
-};
-
-impl crate::device::FunctionSnapshot {
-    pub(crate) fn curtain(&self) -> Option<crate::device::CurtainSnapshot> {
-        match self.state {
-            crate::device::FunctionState::Curtain { curtain } => Some(curtain),
-            _ => None,
-        }
-    }
-}
-
-#[test]
-fn curtain_ignores_power_observations_without_publishing_a_change() {
-    let description = PhysicalDeviceDescription::new(
-        DeviceKey::new("xiaomi", "curtain"),
-        "Curtain",
-        vec![FunctionDescription {
-            id: "main".into(),
-            label: "Curtain".into(),
-            kind: FunctionKind::Curtain,
-        }],
-    )
-    .unwrap();
-    let (device, _) = PhysicalDevice::new(description);
-    let function = &device.functions()[0];
-    let original = function.snapshot();
-    let curtain = original.curtain().unwrap();
-    let unknown = CurtainObservation {
-        value: None,
-        source_time: None,
-        received_at: None,
-    };
-    assert_eq!(curtain.current_position, unknown);
-    assert_eq!(curtain.target_position, unknown);
-    assert_eq!(curtain.status.value, None);
-    assert_eq!(curtain.status.source_time, None);
-    assert_eq!(curtain.status.received_at, None);
-    function.observe(true);
-    assert_eq!(function.snapshot(), original);
-}
-
-#[test]
-fn curtain_observations_update_each_value_and_only_value_changes_advance_revision() {
-    use crate::device::{CurtainMotion, CurtainValue};
-
-    let description = PhysicalDeviceDescription::new(
-        DeviceKey::new("xiaomi", "curtain"),
-        "Curtain",
-        vec![FunctionDescription {
-            id: "main".into(),
-            label: "Curtain".into(),
-            kind: FunctionKind::Curtain,
-        }],
-    )
-    .unwrap();
-    let (device, _) = PhysicalDevice::new(description);
-    let function = &device.functions()[0];
-    let initial = function.snapshot();
-    function.observe_curtain(CurtainValue::CurrentPosition(37), Some(11), 12);
-    let current = function.snapshot();
-    assert_eq!(current.revision, initial.revision + 1);
-    assert_eq!(current.curtain().unwrap().current_position.value, Some(37));
-    assert_eq!(current.curtain().unwrap().target_position.value, None);
-    function.observe_curtain(CurtainValue::CurrentPosition(37), None, 13);
-    let repeated = function.snapshot();
-    assert_eq!(repeated.revision, current.revision);
-    assert_eq!(
-        repeated.curtain().unwrap().current_position.source_time,
-        None
-    );
-    assert_eq!(
-        repeated.curtain().unwrap().current_position.received_at,
-        Some(13)
-    );
-    function.observe_curtain(CurtainValue::TargetPosition(80), Some(14), 15);
-    function.observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(16), 17);
-    let values = function.snapshot().curtain().unwrap();
-    assert_eq!(values.current_position.value, Some(37));
-    assert_eq!(values.target_position.value, Some(80));
-    assert_eq!(values.status.value, Some(CurtainMotion::Opening));
-}
-
-fn ready_curtain(id: &str) -> (PhysicalDevice, crate::device::CommandReceiver) {
-    let description = PhysicalDeviceDescription::new(
-        DeviceKey::new("xiaomi", id),
-        "Curtain",
-        vec![FunctionDescription {
-            id: "main".into(),
-            label: "Curtain".into(),
-            kind: FunctionKind::Curtain,
-        }],
-    )
-    .unwrap();
-    let (device, mut receivers) = PhysicalDevice::new(description);
-    device.set_availability(crate::device::Availability::Available);
-    (device, receivers.remove(0))
-}
-
-async fn next_curtain(
-    receiver: &mut crate::device::CommandReceiver,
-) -> crate::device::CurtainRequest {
-    match receiver.next_operation().await.unwrap() {
-        crate::device::DeviceRequest::Curtain(request) => request,
-        _ => panic!("expected curtain request"),
-    }
-}
+use super::*;
 
 #[test]
 fn curtain_unsent_targets_are_replaced_and_stop_is_a_barrier() {
-    use crate::device::{CommandError, CurtainCommand};
-    use futures_lite::future::{block_on, poll_once};
-
     block_on(async {
         let (device, mut receiver) = ready_curtain("one");
         let function = &device.functions()[0];
@@ -153,9 +42,6 @@ fn curtain_unsent_targets_are_replaced_and_stop_is_a_barrier() {
 
 #[test]
 fn curtain_sent_receipt_keeps_gate_and_never_changes_observations() {
-    use crate::device::{CurtainCommand, CurtainMotion, CurtainValue};
-    use futures_lite::future::{block_on, poll_once};
-
     block_on(async {
         let (device, mut receiver) = ready_curtain("one");
         let function = &device.functions()[0];
@@ -201,9 +87,6 @@ fn curtain_sent_receipt_keeps_gate_and_never_changes_observations() {
 
 #[test]
 fn curtain_lifecycle_cancels_unsent_work_and_devices_are_independent() {
-    use crate::device::{Availability, CommandError, CurtainCommand};
-    use futures_lite::future::{block_on, poll_once};
-
     block_on(async {
         let (one, mut first_receiver) = ready_curtain("one");
         let (two, mut second_receiver) = ready_curtain("two");
@@ -253,9 +136,6 @@ fn curtain_lifecycle_cancels_unsent_work_and_devices_are_independent() {
 
 #[test]
 fn curtain_rejects_power_and_invalid_target_commands() {
-    use crate::device::{Command, CommandError, CurtainCommand};
-    use futures_lite::future::block_on;
-
     block_on(async {
         let (device, _receiver) = ready_curtain("one");
         let function = &device.functions()[0];
