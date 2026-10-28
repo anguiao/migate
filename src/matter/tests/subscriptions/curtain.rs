@@ -194,6 +194,54 @@ fn curtain_live_subscription_reports_only_changed_values() {
                         async { async_io::Timer::after(Duration::from_millis(200)).await },
                     )
                     .await;
+                    // A new movement followed by an external stop must publish
+                    // the same settled target without a local Stop request.
+                    wait_committed(&state).await;
+                    function.observe_curtain(CurtainValue::TargetPosition(91), Some(6), 6);
+                    function.observe_curtain(
+                        CurtainValue::Status(CurtainMotion::Opening),
+                        Some(6),
+                        6,
+                    );
+                    let resumed = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        resumed
+                            .curtain
+                            .iter()
+                            .map(|(id, (_, value))| (*id, *value))
+                            .collect::<Vec<_>>(),
+                        [(10, Some(5)), (11, Some(900))]
+                    );
+                    wait_committed(&state).await;
+                    function.observe_curtain(
+                        CurtainValue::Status(CurtainMotion::Stopped),
+                        Some(7),
+                        7,
+                    );
+                    let stopped = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        stopped
+                            .curtain
+                            .iter()
+                            .map(|(id, (_, value))| (*id, *value))
+                            .collect::<Vec<_>>(),
+                        [(10, Some(0)), (11, Some(7500))]
+                    );
+                    wait_committed(&state).await;
+                    function.observe_curtain(CurtainValue::CurrentPosition(57), Some(8), 8);
+                    let final_position = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        final_position
+                            .curtain
+                            .iter()
+                            .map(|(id, (_, value))| (*id, *value))
+                            .collect::<Vec<_>>(),
+                        [(8, Some(43)), (11, Some(4300)), (14, Some(4300))]
+                    );
+                    assert_eq!(
+                        function.snapshot().curtain().unwrap().target_position.value,
+                        Some(91)
+                    );
                 };
                 or(
                     services,

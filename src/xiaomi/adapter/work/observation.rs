@@ -274,11 +274,16 @@ impl DeviceWork {
         if !matches!(origin, Origin::Read) {
             self.refresh.borrow_mut().satisfy_baseline(id, binding);
         }
-        self.physical().function(id).unwrap().observe_curtain(
-            value,
-            observation.source_time,
-            observation.received_at,
-        );
+        let physical = self.physical();
+        let function = physical.function(id).unwrap();
+        match origin {
+            Origin::Notification => {
+                function.observe_curtain(value, observation.source_time, observation.received_at)
+            }
+            Origin::Read | Origin::Cache => {
+                function.read_curtain(value, observation.source_time, observation.received_at)
+            }
+        }
         self.property_sources.borrow_mut().insert(
             super::super::observations::key(id, binding),
             observation.source,

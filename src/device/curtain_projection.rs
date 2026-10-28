@@ -1,88 +1,51 @@
-use super::{CurtainMotion, CurtainSnapshot, CurtainValue, curtain_command::CurtainToken};
+use super::{CurtainMotion, CurtainSnapshot, CurtainValue};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    Waiting,
-    Stopped,
-}
-
-/// Tracks only explicit stop projections; native values stay intact.
+/// Settled targets follow physical feedback, independently of command receipts.
 #[derive(Default)]
-pub(super) struct CurtainProjection {
-    queued: Vec<CurtainToken>,
-    flight: Option<(CurtainToken, Phase)>,
-    accepted_waiting: bool,
-    accepted_stopped: bool,
+pub(super) enum CurtainProjection {
+    #[default]
+    Native,
+    PendingTarget,
+    Stopped,
 }
 impl CurtainProjection {
     pub(super) fn target(&self, snapshot: CurtainSnapshot) -> Option<u32> {
-        if self.accepted_stopped
-            || self
-                .flight
-                .is_some_and(|(_, phase)| phase == Phase::Stopped)
-        {
+        if matches!(self, Self::Stopped) {
             snapshot.current_position.value
         } else {
             snapshot.target_position.value
         }
     }
-    pub(super) fn queue_stop(&mut self, token: CurtainToken) {
-        self.queued.push(token);
-    }
     pub(super) fn target_command(&mut self) {
-        self.queued.clear();
-        self.flight = None;
-        self.accepted_waiting = false;
-        self.accepted_stopped = false;
+        *self = Self::PendingTarget;
     }
-    pub(super) fn sent(&mut self, token: CurtainToken) {
-        if let Some(index) = self.queued.iter().position(|queued| *queued == token) {
-            self.queued.remove(index);
-            self.flight = Some((token, Phase::Waiting));
+    pub(super) fn clear_pending_target(&mut self) {
+        if matches!(self, Self::PendingTarget) {
+            *self = Self::Native;
         }
     }
-    pub(super) fn accepted(&mut self, token: CurtainToken) {
-        if self.flight.is_some_and(|(current, _)| current == token) {
-            let (_, phase) = self.flight.take().unwrap();
-            match phase {
-                Phase::Waiting => self.accepted_waiting = true,
-                Phase::Stopped => self.accepted_stopped = true,
-            }
-        }
-    }
-    pub(super) fn failed(&mut self, token: CurtainToken) {
-        self.queued.retain(|queued| *queued != token);
-        if self.flight.is_some_and(|(current, _)| current == token) {
-            self.flight = None;
-        }
-    }
-    pub(super) fn cancel_unsent(&mut self) {
-        self.queued.clear();
-    }
-    pub(super) fn observe(&mut self, value: &CurtainValue) {
+    pub(super) fn observe(
+        &mut self,
+        value: &CurtainValue,
+        previous: CurtainSnapshot,
+        notification: bool,
+    ) {
         match value {
-            CurtainValue::TargetPosition(_) => self.target_command(),
+            // Baseline reads and cached targets do not announce a new movement.
+            CurtainValue::TargetPosition(_) if notification => self.target_command(),
             CurtainValue::Status(CurtainMotion::Stopped) => {
-                if self.accepted_waiting {
-                    self.accepted_waiting = false;
-                    self.accepted_stopped = true;
-                }
-                if let Some((token, Phase::Waiting)) = self.flight {
-                    self.flight = Some((token, Phase::Stopped));
+                // A repeated stopped status must not restore the previous stop
+                // after a new target. A moving-to-stopped transition is fresh.
+                if !matches!(self, Self::PendingTarget)
+                    || previous.status.value != Some(CurtainMotion::Stopped)
+                {
+                    *self = Self::Stopped;
                 }
             }
             CurtainValue::Status(CurtainMotion::Opening | CurtainMotion::Closing) => {
-                if self.accepted_stopped
-                    || self
-                        .flight
-                        .is_some_and(|(_, phase)| phase == Phase::Stopped)
-                {
-                    self.accepted_stopped = false;
-                    self.accepted_waiting = false;
-                    self.flight = None;
-                }
+                *self = Self::Native;
             }
-            CurtainValue::CurrentPosition(_) => {}
+            CurtainValue::CurrentPosition(_) | CurtainValue::TargetPosition(_) => {}
         }
     }
 }

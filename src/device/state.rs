@@ -362,7 +362,7 @@ impl PhysicalDevice {
                     }
                     if let Some(commands) = state.curtain_commands_mut() {
                         commands.unavailable(error.clone());
-                        let changed = state.update_curtain_projection(|p| p.cancel_unsent());
+                        let changed = state.update_curtain_projection(|p| p.clear_pending_target());
                         function.notify_curtain_projection(changed);
                     }
                     if light {
@@ -407,7 +407,7 @@ impl PhysicalDevice {
             }
             if let Some(commands) = state.curtain_commands_mut() {
                 commands.unavailable(super::CommandError::Cancelled);
-                let changed = state.update_curtain_projection(|p| p.cancel_unsent());
+                let changed = state.update_curtain_projection(|p| p.clear_pending_target());
                 function.notify_curtain_projection(changed);
             }
         }
@@ -583,6 +583,24 @@ impl Function {
         source_time: Option<i64>,
         received_at: i64,
     ) {
+        self.apply_curtain(value, source_time, received_at, true);
+    }
+    /// Restore native fields without treating a cached target as a new command.
+    pub(crate) fn read_curtain(
+        &self,
+        value: super::CurtainValue,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) {
+        self.apply_curtain(value, source_time, received_at, false);
+    }
+    fn apply_curtain(
+        &self,
+        value: super::CurtainValue,
+        source_time: Option<i64>,
+        received_at: i64,
+        notification: bool,
+    ) {
         fn update<T: Copy + PartialEq>(
             current: &mut super::CurtainObservation<T>,
             value: T,
@@ -602,7 +620,9 @@ impl Function {
             unreachable!("curtain function has curtain state")
         };
         let before_target = curtain.projection.target(curtain.snapshot);
-        curtain.projection.observe(&value);
+        curtain
+            .projection
+            .observe(&value, curtain.snapshot, notification);
         let changed = match value {
             super::CurtainValue::CurrentPosition(value) => update(
                 &mut curtain.snapshot.current_position,

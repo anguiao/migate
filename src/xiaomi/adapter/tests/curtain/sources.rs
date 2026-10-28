@@ -77,6 +77,12 @@ fn curtain_disconnect_and_retirement_keep_observations_and_recovery_reads_all_pr
             .await;
             settled(control).await;
             let observed = curtain(control);
+            assert_eq!(
+                function(&control.context.registry, "one", "main")
+                    .matter_curtain()
+                    .1,
+                Some(55)
+            );
             control.context.property_value_event(
                 old_source.borrow().as_ref().unwrap(),
                 "one",

@@ -104,6 +104,7 @@ fn curtain_cloud_commands_write_single_values_and_retain_the_request_in_diagnost
             settled(&c).await;
             let function = function(&c.context.registry, "one", "main");
             let before = function.snapshot();
+            assert_eq!(function.matter_curtain().1, Some(25));
             let reads = c.cloud.lock().unwrap().property_reads.len();
             function
                 .begin_curtain(CurtainCommand::Target(32.6))
@@ -120,7 +121,9 @@ fn curtain_cloud_commands_write_single_values_and_retain_the_request_in_diagnost
             assert_eq!(writes[0].0[0]["siid"], 2);
             assert_eq!(writes[0].0[0]["piid"], 4);
             assert_eq!(writes[0].0[0]["value"], 33);
-            assert_eq!(function.snapshot(), before);
+            assert_eq!(function.snapshot().curtain(), before.curtain());
+            assert_eq!(function.snapshot().availability, before.availability);
+            assert_eq!(function.matter_curtain().1, Some(75));
             assert_eq!(c.cloud.lock().unwrap().property_reads.len(), reads);
             let records = c
                 .context

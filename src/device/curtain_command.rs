@@ -18,12 +18,7 @@ pub enum CurtainCommand {
     Stop,
 }
 
-/// Requests retain their owning function; tokens distinguish its local stops.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CurtainToken(u64);
-
 struct Entry {
-    token: CurtainToken,
     command: CurtainCommand,
     completion: Completion,
     sent: AtomicBool,
@@ -40,7 +35,6 @@ impl CurtainAction {
 
 #[derive(Default)]
 pub(super) struct CurtainCoordinator {
-    serial: u64,
     pending: VecDeque<Arc<Entry>>,
     flight: Option<Arc<Entry>>,
     closed: bool,
@@ -71,9 +65,7 @@ impl CurtainCoordinator {
         {
             flight.completion.finish(Err(CommandError::Superseded));
         }
-        self.serial += 1;
         let entry = Arc::new(Entry {
-            token: CurtainToken(self.serial),
             command,
             completion: Completion::default(),
             sent: AtomicBool::new(false),
@@ -136,7 +128,7 @@ impl Function {
         self.snapshot_locked(&state).availability.command_result()?;
         let action = state.curtain_commands_mut().unwrap().submit(command);
         if matches!(command, CurtainCommand::Stop) {
-            let changed = state.update_curtain_projection(|p| p.queue_stop(action.0.token));
+            let changed = state.update_curtain_projection(|p| p.clear_pending_target());
             self.notify_curtain_projection(changed);
         }
         self.0.submitted.notify(usize::MAX);
@@ -211,46 +203,36 @@ impl CurtainRequest {
 
     /// Mark at the actual transport boundary, under the same lock as takeover.
     pub fn mark_sent(&self) -> Result<(), CommandError> {
-        let mut state = self.function.0.state.lock().unwrap();
+        let _state = self.function.0.state.lock().unwrap();
         self.current_result()?;
         self.entry.sent.store(true, Ordering::Relaxed);
-        let changed = state.update_curtain_projection(|p| p.sent(self.entry.token));
-        self.function.notify_curtain_projection(changed);
         Ok(())
     }
 
     pub fn accept(self) -> Result<FunctionSnapshot, CommandError> {
-        let mut state = self.function.0.state.lock().unwrap();
+        let state = self.function.0.state.lock().unwrap();
         if let Some(result) = self.entry.completion.result() {
             return result;
         }
         if !self.entry.sent.load(Ordering::Relaxed) {
             let error = CommandError::SendFailed("curtain request was not submitted".into());
-            let changed = state.update_curtain_projection(|p| p.failed(self.entry.token));
-            self.function.notify_curtain_projection(changed);
             self.entry.completion.finish(Err(error.clone()));
             return Err(error);
         }
-        let changed = state.update_curtain_projection(|p| p.accepted(self.entry.token));
-        self.function.notify_curtain_projection(changed);
         let result = Ok(self.function.snapshot_locked(&state));
         self.entry.completion.finish(result.clone());
         result
     }
 
     pub fn reject(self, error: CommandError) {
-        let mut state = self.function.0.state.lock().unwrap();
-        let changed = state.update_curtain_projection(|p| p.failed(self.entry.token));
-        self.function.notify_curtain_projection(changed);
+        let _state = self.function.0.state.lock().unwrap();
         self.entry.completion.finish(Err(error));
     }
 }
 impl Drop for CurtainRequest {
     fn drop(&mut self) {
         if !self.entry.completion.is_finished() {
-            let mut state = self.function.0.state.lock().unwrap();
-            let changed = state.update_curtain_projection(|p| p.failed(self.entry.token));
-            self.function.notify_curtain_projection(changed);
+            let _state = self.function.0.state.lock().unwrap();
             self.entry.completion.finish(Err(CommandError::Cancelled));
         }
     }

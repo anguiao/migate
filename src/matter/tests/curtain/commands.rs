@@ -85,13 +85,13 @@ fn stop_projection_follows_feedback_and_yields_to_new_commands_and_reports() {
         let read_target = async || read_u16(&handler, &ctx).await;
         assert_eq!(read_target().await, 2000);
 
-        // A stopped report before the request is sent cannot complete it.
+        // Physical stop feedback updates the target even before our Stop is sent.
         let first = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let request = next_curtain(&mut receiver).await;
         observe(CurtainValue::Status(CurtainMotion::Stopped));
-        assert_eq!(read_target().await, 2000);
+        assert_eq!(read_target().await, 8000);
         request.mark_sent().unwrap();
-        assert_eq!(read_target().await, 2000);
+        assert_eq!(read_target().await, 8000);
         // Same value and timestamps still constitute a new physical report.
         observe(CurtainValue::Status(CurtainMotion::Stopped));
         assert_eq!(read_target().await, 8000);
@@ -134,7 +134,7 @@ fn stop_projection_follows_feedback_and_yields_to_new_commands_and_reports() {
         observe(CurtainValue::Status(CurtainMotion::Stopped));
         assert_eq!(read_target().await, 2000);
 
-        // Stop and resume in one processing turn must not lose the resume.
+        // A new stopped transition after resuming has its own actual endpoint.
         let stop = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let request = next_curtain(&mut receiver).await;
         request.mark_sent().unwrap();
@@ -144,6 +144,6 @@ fn stop_projection_follows_feedback_and_yields_to_new_commands_and_reports() {
         observe(CurtainValue::Status(CurtainMotion::Closing));
         observe(CurtainValue::Status(CurtainMotion::Stopped));
         observe(CurtainValue::CurrentPosition(45));
-        assert_eq!(read_target().await, 2000);
+        assert_eq!(read_target().await, 5500);
     });
 }

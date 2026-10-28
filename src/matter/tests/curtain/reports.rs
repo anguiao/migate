@@ -129,13 +129,6 @@ fn queued_later_stops_do_not_mask_feedback_from_the_first_sent_stop() {
                 None
             };
             let first_request = next_curtain(&mut receiver).await;
-            if both_queued_before_send {
-                // An old cached stopped status cannot arm an unsent request.
-                function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), Some(1), 1);
-                assert!(poll_once(run.as_mut()).await.is_none());
-                assert_eq!(read_u16(&handler, &ctx).await, 2000);
-                ctx.changes.borrow_mut().clear();
-            }
             first_request.mark_sent().unwrap();
             let second = second_before
                 .unwrap_or_else(|| function.begin_curtain(CurtainCommand::Stop).unwrap());

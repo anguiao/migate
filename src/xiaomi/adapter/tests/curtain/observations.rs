@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn external_stop_converges_without_writes_and_cached_target_does_not_resume_it() {
+    block_on(rig().run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(peer(), |peer| async move {
+            settled(control).await;
+            let function = function(&control.context.registry, "one", "main");
+            peer.notify_value_at("one", STATUS, json!(2), Some(700), false);
+            until(|| curtain(control).status.source_time == Some(700)).await;
+            assert_eq!(function.matter_curtain().1, Some(37));
+            peer.notify_value_at("one", CURRENT, json!(57), Some(701), false);
+            until(|| curtain(control).current_position.source_time == Some(701)).await;
+            assert_eq!(function.matter_curtain().1, Some(57));
+            peer.notify_value_at("one", TARGET, json!(80), Some(702), true);
+            until(|| curtain(control).target_position.source_time == Some(702)).await;
+            assert_eq!(function.matter_curtain().1, Some(57));
+            peer.notify_value_at("one", TARGET, json!(80), Some(703), false);
+            until(|| curtain(control).target_position.source_time == Some(703)).await;
+            assert_eq!(function.matter_curtain().1, Some(80));
+            peer.notify_value_at("one", STATUS, json!(2), Some(704), false);
+            until(|| curtain(control).status.source_time == Some(704)).await;
+            assert_eq!(function.matter_curtain().1, Some(80));
+            assert_eq!(curtain(control).target_position.value, Some(80));
+            assert!(
+                !peer
+                    .state
+                    .borrow()
+                    .seen
+                    .iter()
+                    .any(|(op, _)| op == "rpcReq")
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn local_curtain_reads_and_subscribes_only_the_three_reported_properties() {
     block_on(rig().run(|c| async move {
         c.announce();
@@ -221,6 +258,12 @@ fn curtain_cloud_reads_and_reports_are_independent_and_old_http_read_cannot_over
             assert_eq!(initial.current_position.value, Some(25));
             assert_eq!(initial.target_position.value, Some(75));
             assert_eq!(initial.status.value, Some(CurtainMotion::Stopped));
+            assert_eq!(
+                function(&c.context.registry, "one", "main")
+                    .matter_curtain()
+                    .1,
+                Some(25)
+            );
             assert_eq!(
                 work(&c).property_source("main", CURRENT),
                 Some(PathKind::Cloud)
