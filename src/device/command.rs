@@ -411,5 +411,5 @@ impl CommandCoordinator {
 
 mod requests;
 
-use requests::Completion;
+pub(super) use requests::Completion;
 pub use requests::{CommandReceiver, CommandRequest, DeviceRequest, LightRequest};

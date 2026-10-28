@@ -150,7 +150,12 @@ fn unpublished_reason(relation: &GroupRelation) -> String {
     "waiting for a usable native description".into()
 }
 
-fn render(view: &View, did: Option<&str>, status: &AuthStatus) -> String {
+fn render(
+    view: &View,
+    did: Option<&str>,
+    status: &AuthStatus,
+    show_curtain_commands: bool,
+) -> String {
     let mut lines = Vec::new();
     for relation in view.current.derived.groups.values() {
         if did.is_some_and(|did| did != relation.group_did) {
@@ -243,6 +248,25 @@ fn render(view: &View, did: Option<&str>, status: &AuthStatus) -> String {
                             properties.iter().find(|property| property.name == name),
                         );
                         lines.push(format!("    {name}: {value}; upstream time {source_time}; received at {received_at}; {diagnostic}."));
+                    }
+                    if show_curtain_commands {
+                        lines.extend(
+                            status
+                                .curtain_commands(&key.id, id)
+                                .into_iter()
+                                .map(|command| format!("    {command}")),
+                        );
+                    }
+                    let pending = function.pending_curtain_commands();
+                    if !pending.is_empty() {
+                        let pending = pending
+                            .into_iter()
+                            .map(|command| {
+                                crate::xiaomi::adapter::CommandTarget::Curtain(command).to_string()
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        lines.push(format!("    queued curtain commands: {pending}."));
                     }
                 }
                 crate::device::FunctionState::Outlet { power } => {
@@ -410,7 +434,7 @@ impl View {
             [] => return Ok(None),
             ["help"] => format!("{COMMAND_HELP}\n{}", view.render_status(status, now)),
             ["list"] => {
-                let mut text = render(registry, None, status);
+                let mut text = render(registry, None, status, true);
                 for pending in status.pending() {
                     let key = DeviceKey::new("xiaomi", &pending.did);
                     let name = registry
@@ -426,7 +450,7 @@ impl View {
             }
             ["status"] => format!(
                 "{}\n{}",
-                render(registry, None, status),
+                render(registry, None, status, false),
                 view.render_devices(status, now, None)
             ),
             ["status", did] => {
@@ -444,7 +468,7 @@ impl View {
                 } else {
                     format!(
                         "{}\n{}",
-                        render(registry, Some(did), status),
+                        render(registry, Some(did), status, false),
                         view.render_devices(status, now, Some(did))
                     )
                 }

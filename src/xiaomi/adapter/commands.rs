@@ -22,6 +22,7 @@ use std::{
     time::Instant,
 };
 
+mod curtain;
 mod feedback;
 use feedback::LightFeedback;
 
@@ -497,6 +498,17 @@ pub(super) async fn consume(
                         continue;
                     }
                     crate::device::DeviceRequest::Power(request) => request,
+                    crate::device::DeviceRequest::Curtain(request) => {
+                        curtain::send_owned(
+                            request,
+                            context.clone(),
+                            work.clone(),
+                            sink.clone(),
+                            &function_id,
+                        )
+                        .await?;
+                        continue;
+                    }
                 };
                 // A sent outlet write is a raw transport receipt: keep it in an
                 // owned task so retiring the consumer/sink cannot drop it.

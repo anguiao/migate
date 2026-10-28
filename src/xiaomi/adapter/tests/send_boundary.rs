@@ -822,3 +822,97 @@ fn a_state_notification_satisfies_a_reserved_baseline_before_its_first_socket_by
         }),
     );
 }
+
+fn curtain_rig() -> Rig {
+    let description = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/xiaomi-acn010.json"
+    ))
+    .unwrap();
+    Rig::custom_lights(&[("one", "xiaomi.curtain.acn010", description)])
+}
+
+#[test]
+fn unsent_curtain_target_is_cancelled_by_stop_at_the_transport_boundary() {
+    use crate::device::{CommandError, CurtainCommand};
+    block_on(curtain_rig().run(|c| async move {
+        let wire = Rc::new(Wire::default());
+        let (_, driver) = local(&c, wire.clone());
+        let curtain = function(&c.context.registry, "one", "main");
+        future::or(
+            async {
+                driver.run(|_| {}).await.unwrap();
+                panic!("driver stopped")
+            },
+            async {
+                let old = curtain.begin_curtain(CurtainCommand::Target(20.0)).unwrap();
+                until(|| wire.polls.get() > 0).await;
+                let stop = curtain.begin_curtain(CurtainCommand::Stop).unwrap();
+                assert_eq!(old.accepted().await, Err(CommandError::Superseded));
+                wire.allow(usize::MAX);
+                until(|| !wire.written.borrow().is_empty()).await;
+                let mut frames = crate::xiaomi::mqtt::Frames::default();
+                frames.push(&wire.written.borrow()).unwrap();
+                let Packet::Publish(publish) = frames.next_packet().unwrap().unwrap() else {
+                    panic!()
+                };
+                assert!(frames.next_packet().unwrap().is_none());
+                let payload = decode_mips(&publish.payload).unwrap().payload;
+                assert_eq!(
+                    payload["rpc"]["params"],
+                    json!([{"did":"one","siid":2,"piid":1,"value":2}])
+                );
+                wire.reply(json!({"result":[{"did":"one","siid":2,"piid":1,"code":0}]}));
+                stop.accepted().await.unwrap();
+            },
+        )
+        .await;
+    }));
+}
+
+#[test]
+fn curtain_route_change_retries_only_a_request_with_no_local_bytes() {
+    use crate::device::CurtainCommand;
+    for sent in [false, true] {
+        let rig = curtain_rig();
+        rig.cloud.lock().unwrap().online.insert("one".into());
+        block_on(rig.run(|c| async move {
+            until(|| c.context.cloud_scope_valid.get()).await;
+            let wire = Rc::new(Wire::default());
+            if sent {
+                wire.allow(1);
+            }
+            let (handle, driver) = local(&c, wire.clone());
+            let curtain = function(&c.context.registry, "one", "main");
+            future::or(
+                async {
+                    driver.run(|_| {}).await.unwrap();
+                    panic!("driver stopped")
+                },
+                async {
+                    let action = curtain.begin_curtain(CurtainCommand::Target(52.4)).unwrap();
+                    if sent {
+                        until(|| wire.written.borrow().len() == 1).await;
+                    } else {
+                        until(|| wire.polls.get() > 0).await;
+                    }
+                    c.context.local_outcome(&handle, &response_timeout());
+                    wire.allow(usize::MAX);
+                    if sent {
+                        until(|| wire.written.borrow().len() > 1).await;
+                        wire.reply(json!({"result":[{"did":"one","siid":2,"piid":4,"code":0}]}));
+                    }
+                    action.accepted().await.unwrap();
+                    let cloud = c.cloud.lock().unwrap();
+                    if sent {
+                        assert!(cloud.numeric_writes.is_empty());
+                    } else {
+                        assert!(wire.written.borrow().is_empty());
+                        assert_eq!(cloud.numeric_writes.len(), 1);
+                        assert_eq!(cloud.numeric_writes[0].0[0]["value"], 52);
+                    }
+                },
+            )
+            .await;
+        }));
+    }
+}

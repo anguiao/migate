@@ -9,7 +9,7 @@ use event_listener::Event;
 use std::sync::{Arc, Mutex};
 enum RuntimeValue {
     Control(Box<ControlRuntime>),
-    Curtain(super::CurtainSnapshot),
+    Curtain(Box<CurtainRuntime>),
     Measurement(MeasurementSnapshot),
     StateSensor(super::StateSnapshot),
 }
@@ -18,6 +18,10 @@ struct ControlRuntime {
     lighting: Option<super::LightSnapshot>,
     commands: CommandCoordinator,
 }
+struct CurtainRuntime {
+    snapshot: super::CurtainSnapshot,
+    commands: super::curtain_command::CurtainCoordinator,
+}
 pub(super) struct RuntimeState {
     value: RuntimeValue,
     pub(super) revision: u64,
@@ -25,23 +29,26 @@ pub(super) struct RuntimeState {
 impl RuntimeState {
     fn curtain() -> Self {
         Self {
-            value: RuntimeValue::Curtain(super::CurtainSnapshot {
-                current_position: super::CurtainObservation {
-                    value: None,
-                    source_time: None,
-                    received_at: None,
+            value: RuntimeValue::Curtain(Box::new(CurtainRuntime {
+                snapshot: super::CurtainSnapshot {
+                    current_position: super::CurtainObservation {
+                        value: None,
+                        source_time: None,
+                        received_at: None,
+                    },
+                    target_position: super::CurtainObservation {
+                        value: None,
+                        source_time: None,
+                        received_at: None,
+                    },
+                    status: super::CurtainObservation {
+                        value: None,
+                        source_time: None,
+                        received_at: None,
+                    },
                 },
-                target_position: super::CurtainObservation {
-                    value: None,
-                    source_time: None,
-                    received_at: None,
-                },
-                status: super::CurtainObservation {
-                    value: None,
-                    source_time: None,
-                    received_at: None,
-                },
-            }),
+                commands: super::curtain_command::CurtainCoordinator::new(),
+            })),
             revision: 0,
         }
     }
@@ -77,7 +84,24 @@ impl RuntimeState {
         }
     }
     fn has_control_state(&self) -> bool {
-        matches!(self.value, RuntimeValue::Control(_))
+        matches!(
+            self.value,
+            RuntimeValue::Control(_) | RuntimeValue::Curtain(_)
+        )
+    }
+    pub(super) fn curtain_commands(&self) -> Option<&super::curtain_command::CurtainCoordinator> {
+        match &self.value {
+            RuntimeValue::Curtain(curtain) => Some(&curtain.commands),
+            _ => None,
+        }
+    }
+    pub(super) fn curtain_commands_mut(
+        &mut self,
+    ) -> Option<&mut super::curtain_command::CurtainCoordinator> {
+        match &mut self.value {
+            RuntimeValue::Curtain(curtain) => Some(&mut curtain.commands),
+            _ => None,
+        }
     }
     pub(super) fn commands(&self) -> Option<&CommandCoordinator> {
         match &self.value {
@@ -319,6 +343,9 @@ impl PhysicalDevice {
                     if let Some(commands) = state.commands_mut() {
                         commands.unavailable(light, error.clone());
                     }
+                    if let Some(commands) = state.curtain_commands_mut() {
+                        commands.unavailable(error.clone());
+                    }
                     if light {
                         function.notify_light_actions();
                     }
@@ -358,6 +385,9 @@ impl PhysicalDevice {
             {
                 commands.cancel_pending_light(super::CommandError::Cancelled);
                 function.notify_light_actions();
+            }
+            if let Some(commands) = state.curtain_commands_mut() {
+                commands.unavailable(super::CommandError::Cancelled);
             }
         }
     }
@@ -436,7 +466,9 @@ impl Function {
                 }
             }
             (super::FunctionKind::Curtain, RuntimeValue::Curtain(curtain)) => {
-                FunctionState::Curtain { curtain: *curtain }
+                FunctionState::Curtain {
+                    curtain: curtain.snapshot,
+                }
             }
             (super::FunctionKind::Temperature(_), RuntimeValue::Measurement(measurement)) => {
                 FunctionState::Temperature {
@@ -535,20 +567,23 @@ impl Function {
         };
         let changed = match value {
             super::CurtainValue::CurrentPosition(value) => update(
-                &mut curtain.current_position,
+                &mut curtain.snapshot.current_position,
                 value,
                 source_time,
                 received_at,
             ),
             super::CurtainValue::TargetPosition(value) => update(
-                &mut curtain.target_position,
+                &mut curtain.snapshot.target_position,
                 value,
                 source_time,
                 received_at,
             ),
-            super::CurtainValue::Status(value) => {
-                update(&mut curtain.status, value, source_time, received_at)
-            }
+            super::CurtainValue::Status(value) => update(
+                &mut curtain.snapshot.status,
+                value,
+                source_time,
+                received_at,
+            ),
         };
         if changed {
             state.revision = state.revision.wrapping_add(1);
@@ -667,6 +702,9 @@ impl Function {
         let light = self.description().kind.is_light();
         if let Some(commands) = state.commands_mut() {
             commands.close(light, super::CommandError::Cancelled);
+        }
+        if let Some(commands) = state.curtain_commands_mut() {
+            commands.close(super::CommandError::Cancelled);
         }
         if light {
             self.notify_light_actions();

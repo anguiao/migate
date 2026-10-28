@@ -49,7 +49,6 @@ impl CurtainPositionBinding {
         }
         Ok(raw)
     }
-    #[allow(dead_code)] // Used by the curtain adapter in the next slice.
     pub fn quantize(&self, percent: f64) -> u32 {
         self.range.quantize(percent)
     }

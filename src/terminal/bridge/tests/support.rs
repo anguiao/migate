@@ -22,7 +22,7 @@ use std::rc::Rc;
 pub(super) async fn next_power(receiver: &mut CommandReceiver) -> Option<CommandRequest> {
     match receiver.next_operation().await? {
         DeviceRequest::Power(request) => Some(request),
-        DeviceRequest::Light(_) => panic!("unexpected lighting request"),
+        _ => panic!("unexpected lighting request"),
     }
 }
 

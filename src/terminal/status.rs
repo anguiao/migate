@@ -102,6 +102,25 @@ impl AuthStatus {
             .unwrap_or_default()
     }
 
+    pub(super) fn curtain_commands(&self, did: &str, id: &str) -> Vec<String> {
+        self.adapter
+            .borrow()
+            .as_ref()
+            .and_then(|adapter| adapter.devices.iter().find(|device| device.did == did))
+            .and_then(|device| device.commands.iter().find(|channel| channel.channel == id))
+            .map(|channel| {
+                [("in-flight", &channel.inflight), ("last", &channel.last)]
+                    .into_iter()
+                    .filter_map(|(state, command)| {
+                        command
+                            .as_ref()
+                            .map(|command| format_command(id, state, command))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn update_adapter(&self, status: AdapterStatus) {
         if self.replace(status.authentication) {
             self.log(current_time());

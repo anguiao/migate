@@ -134,11 +134,14 @@ impl Default for RoutingStatus {
 pub enum CommandTarget {
     Power(bool),
     Light(crate::device::LightTarget),
+    Curtain(crate::device::CurtainCommand),
 }
 impl fmt::Display for CommandTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Power(value) => f.write_str(if *value { "on" } else { "off" }),
+            Self::Curtain(crate::device::CurtainCommand::Target(value)) => write!(f, "{value}%"),
+            Self::Curtain(crate::device::CurtainCommand::Stop) => f.write_str("stop"),
             Self::Light(target) => {
                 use crate::device::LightColorTarget;
                 let mut fields = Vec::new();

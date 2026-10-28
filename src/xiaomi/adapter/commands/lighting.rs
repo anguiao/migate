@@ -29,30 +29,35 @@ fn current_result(request: &DeviceRequest) -> Result<(), CommandError> {
     match request {
         DeviceRequest::Power(request) => request.current_result(),
         DeviceRequest::Light(request) => request.current_result(),
+        DeviceRequest::Curtain(_) => unreachable!("curtain requests use their own sender"),
     }
 }
 fn mark_sent(request: &DeviceRequest) -> Result<(), CommandError> {
     match request {
         DeviceRequest::Power(request) => request.mark_sent(),
         DeviceRequest::Light(request) => request.mark_sent(),
+        DeviceRequest::Curtain(_) => unreachable!("curtain requests use their own sender"),
     }
 }
 fn reject(request: DeviceRequest, error: CommandError) {
     match request {
         DeviceRequest::Power(request) => request.reject(error),
         DeviceRequest::Light(request) => request.reject(error),
+        DeviceRequest::Curtain(_) => unreachable!("curtain requests use their own sender"),
     }
 }
 fn accept(request: DeviceRequest) -> Result<(), CommandError> {
     match request {
         DeviceRequest::Power(request) => request.accept().map(|_| ()),
         DeviceRequest::Light(request) => request.accept().map(|_| ()),
+        DeviceRequest::Curtain(_) => unreachable!("curtain requests use their own sender"),
     }
 }
 fn skip(request: DeviceRequest) -> Result<(), CommandError> {
     match request {
         DeviceRequest::Power(request) => request.accept().map(|_| ()),
         DeviceRequest::Light(request) => request.accept_unchanged().map(|_| ()),
+        DeviceRequest::Curtain(_) => unreachable!("curtain requests use their own sender"),
     }
 }
 fn cloud_command_error(error: &CloudError) -> CommandError {
@@ -69,13 +74,13 @@ fn alive(work: &DeviceWork, sink: &LogicalSink) -> bool {
 }
 
 /// One settled property batch: logical result plus a fallible cloud report.
-struct BatchReceipt {
-    result: Result<(), CommandError>,
+pub(super) struct BatchReceipt {
+    pub(super) result: Result<(), CommandError>,
     /// A fallible cloud maintenance report after the receipt already settled.
-    maintenance: Option<AdapterError>,
+    pub(super) maintenance: Option<AdapterError>,
 }
 
-enum BatchAttempt {
+pub(super) enum BatchAttempt {
     /// No byte was written; the caller re-encodes and retries.
     Withdrawn,
     Settled(BatchReceipt),
@@ -89,17 +94,18 @@ fn settled(result: Result<(), CommandError>) -> BatchAttempt {
 }
 
 /// Concrete inputs for one attempt of one property batch.
-struct Batch<'a> {
-    function_id: &'a str,
-    properties: Vec<(PropertyBinding, Value)>,
-    retain_feedback: bool,
-    gate: &'a Rc<super::LightWriteGate>,
-    operation: &'a Rc<super::CommandOperation>,
-    mark: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
+pub(super) struct Batch<'a> {
+    pub(super) function_id: &'a str,
+    pub(super) properties: Vec<(PropertyBinding, Value)>,
+    pub(super) retain_feedback: bool,
+    pub(super) refresh_feedback: bool,
+    pub(super) gate: &'a Rc<super::LightWriteGate>,
+    pub(super) operation: &'a Rc<super::CommandOperation>,
+    pub(super) mark: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
     /// Ownership and the exact error once the request is superseded.
-    current: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
+    pub(super) current: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
     /// Single-light frames withdraw when their re-encode no longer matches.
-    frame_current: Option<&'a Rc<dyn Fn() -> bool>>,
+    pub(super) frame_current: Option<&'a Rc<dyn Fn() -> bool>>,
 }
 
 /// The DID gate still owns this receipt. Keep displayed feedback, but do not
@@ -232,7 +238,7 @@ fn refresh_after_write(
 /// owns route selection, the final transmission guard, send marking, feedback
 /// registration and receipt settlement.
 /// Callers own encoding, ownership closures and the logical request result.
-async fn submit_properties(
+pub(super) async fn submit_properties(
     context: &Rc<Context>,
     work: &Rc<DeviceWork>,
     sink: &Rc<LogicalSink>,
@@ -242,6 +248,7 @@ async fn submit_properties(
         function_id,
         properties,
         retain_feedback,
+        refresh_feedback,
         gate,
         operation,
         mark,
@@ -319,7 +326,7 @@ async fn submit_properties(
                     {
                         return;
                     }
-                    if outcome.stage != RequestStage::NotSent {
+                    if refresh_feedback && outcome.stage != RequestStage::NotSent {
                         refresh_after_write(
                             &result_context,
                             &result_work,
@@ -400,7 +407,9 @@ async fn submit_properties(
                 .cloud
                 .set_properties(&credentials.access_token, &did, &properties)
                 .await;
-            refresh_after_write(context, work, function_id, &properties, gate, authority);
+            if refresh_feedback {
+                refresh_after_write(context, work, function_id, &properties, gate, authority);
+            }
             let receipt = match &result {
                 Ok(results) => {
                     gate.finish_feedback_for(authority, &properties, results, retain_feedback);
@@ -495,10 +504,12 @@ pub(super) async fn send(
     let light_target = match &request {
         DeviceRequest::Power(_) => None,
         DeviceRequest::Light(request) => Some(request.target),
+        DeviceRequest::Curtain(_) => unreachable!("curtain requests use their own sender"),
     };
     let power = match &request {
         DeviceRequest::Power(request) => Some(request.target),
         DeviceRequest::Light(request) => request.target.power(),
+        DeviceRequest::Curtain(_) => unreachable!("curtain requests use their own sender"),
     };
     if current(&request) {
         context.take_over_related_targets(&did, power, light_target.map(LightTarget::dimension));
@@ -525,6 +536,7 @@ pub(super) async fn send(
         DeviceRequest::Light(_) => {
             CommandTarget::Light(light_target.expect("light requests carry a target"))
         }
+        DeviceRequest::Curtain(_) => unreachable!("curtain requests use their own sender"),
     };
     let operation = context.commands.begin_operation(
         &did,
@@ -593,6 +605,7 @@ pub(super) async fn send(
                 function_id: id,
                 properties,
                 retain_feedback,
+                refresh_feedback: true,
                 gate: &gate,
                 operation: &operation.0,
                 mark: &mark,

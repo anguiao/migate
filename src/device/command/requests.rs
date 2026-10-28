@@ -51,13 +51,13 @@ impl Function {
 }
 
 #[derive(Default)]
-pub(super) struct Completion {
+pub(in crate::device) struct Completion {
     result: Mutex<Option<Result<FunctionSnapshot, CommandError>>>,
     changed: Event,
 }
 
 impl Completion {
-    pub(super) fn finish(&self, result: Result<FunctionSnapshot, CommandError>) {
+    pub(in crate::device) fn finish(&self, result: Result<FunctionSnapshot, CommandError>) {
         let mut current = self.result.lock().unwrap();
         if current.is_none() {
             *current = Some(result);
@@ -65,13 +65,13 @@ impl Completion {
         }
     }
 
-    pub(super) fn result(&self) -> Option<Result<FunctionSnapshot, CommandError>> {
+    pub(in crate::device) fn result(&self) -> Option<Result<FunctionSnapshot, CommandError>> {
         self.result.lock().unwrap().clone()
     }
-    pub(super) fn is_finished(&self) -> bool {
+    pub(in crate::device) fn is_finished(&self) -> bool {
         self.result.lock().unwrap().is_some()
     }
-    pub(super) async fn wait(&self) -> Result<FunctionSnapshot, CommandError> {
+    pub(in crate::device) async fn wait(&self) -> Result<FunctionSnapshot, CommandError> {
         loop {
             let listener = self.changed.listen();
             if let Some(result) = self.result.lock().unwrap().clone() {
@@ -256,18 +256,23 @@ impl Drop for CommandRequest {
 pub enum DeviceRequest {
     Power(CommandRequest),
     Light(LightRequest),
+    Curtain(super::super::CurtainRequest),
 }
 impl DeviceRequest {
     pub(crate) fn queued_at(&self) -> Instant {
         match self {
             Self::Power(request) => request.queued_at(),
             Self::Light(request) => request.queued_at,
+            Self::Curtain(request) => request.queued_at(),
         }
     }
 }
 impl CommandReceiver {
     /// One gate serializes power and both lighting dimensions for this function.
     pub async fn next_operation(&mut self) -> Option<DeviceRequest> {
+        if self.function.description().kind == super::super::FunctionKind::Curtain {
+            return self.next_curtain_operation().await;
+        }
         self.wait_active().await;
         loop {
             let listener = self.function.0.submitted.listen();

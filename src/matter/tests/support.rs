@@ -17,7 +17,7 @@ pub(super) async fn next_power(
 ) -> Option<crate::device::CommandRequest> {
     match receiver.next_operation().await? {
         crate::device::DeviceRequest::Power(request) => Some(request),
-        crate::device::DeviceRequest::Light(_) => panic!("unexpected lighting request"),
+        _ => panic!("unexpected lighting request"),
     }
 }
 

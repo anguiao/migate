@@ -194,6 +194,7 @@ async fn member_task(
             &member.work,
             &member.sink,
             Batch {
+                refresh_feedback: true,
                 function_id: "main",
                 properties: properties.clone(),
                 retain_feedback: false,

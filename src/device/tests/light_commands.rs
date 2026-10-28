@@ -54,7 +54,7 @@ fn temperature(value: f64) -> LightTarget {
 async fn frame(receiver: &mut CommandReceiver) -> LightRequest {
     match receiver.next_operation().await.unwrap() {
         DeviceRequest::Light(request) => request,
-        DeviceRequest::Power(_) => panic!("expected a lighting frame"),
+        _ => panic!("expected a lighting frame"),
     }
 }
 fn begin(function: &Function, value: f64, final_frame: bool) -> LightAction {
@@ -301,7 +301,7 @@ fn lamp_power_and_lighting_share_one_gate_and_valid_off_cancels_both_dimensions(
         sent.accept().unwrap();
         let power = match receiver.next_operation().await.unwrap() {
             DeviceRequest::Power(request) => request,
-            DeviceRequest::Light(_) => panic!("expected off"),
+            _ => panic!("expected off"),
         };
         assert!(!power.target);
         let newer = begin(function, 50.0, true);
@@ -597,7 +597,7 @@ fn external_off_withdraws_dequeued_unsent_power_but_owns_sent_power_receipt() {
         assert!(poll_once(on.as_mut()).await.is_none());
         let request = match receiver.next_operation().await.unwrap() {
             DeviceRequest::Power(request) => request,
-            DeviceRequest::Light(_) => panic!("expected power"),
+            _ => panic!("expected power"),
         };
         function.take_over_light_all().unwrap();
         assert!(request.current_result().is_err());
@@ -609,7 +609,7 @@ fn external_off_withdraws_dequeued_unsent_power_but_owns_sent_power_receipt() {
         assert!(poll_once(on.as_mut()).await.is_none());
         let request = match receiver.next_operation().await.unwrap() {
             DeviceRequest::Power(request) => request,
-            DeviceRequest::Light(_) => panic!("expected power"),
+            _ => panic!("expected power"),
         };
         request.mark_sent().unwrap();
         function.take_over_light_all().unwrap();
@@ -654,7 +654,7 @@ fn a_new_valid_off_withdraws_older_pending_and_dequeued_unsent_light_power_on() 
         );
         let request = match receiver.next_operation().await.unwrap() {
             DeviceRequest::Power(request) => request,
-            DeviceRequest::Light(_) => panic!("expected power"),
+            _ => panic!("expected power"),
         };
         assert!(!request.target);
         request.accept().unwrap();
@@ -664,7 +664,7 @@ fn a_new_valid_off_withdraws_older_pending_and_dequeued_unsent_light_power_on() 
         assert!(poll_once(on.as_mut()).await.is_none());
         let request = match receiver.next_operation().await.unwrap() {
             DeviceRequest::Power(request) => request,
-            DeviceRequest::Light(_) => panic!("expected power"),
+            _ => panic!("expected power"),
         };
         let mut off = Box::pin(function.execute(Command::Off));
         assert!(poll_once(off.as_mut()).await.is_none());
@@ -674,7 +674,7 @@ fn a_new_valid_off_withdraws_older_pending_and_dequeued_unsent_light_power_on() 
         request.reject(CommandError::Cancelled);
         let request = match receiver.next_operation().await.unwrap() {
             DeviceRequest::Power(request) => request,
-            DeviceRequest::Light(_) => panic!("expected power"),
+            _ => panic!("expected power"),
         };
         assert!(!request.target);
         request.accept().unwrap();

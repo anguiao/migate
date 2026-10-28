@@ -69,7 +69,7 @@ fn light_device() -> (Function, CommandReceiver) {
 async fn next_light(receiver: &mut CommandReceiver) -> crate::device::LightRequest {
     match receiver.next_operation().await.unwrap() {
         DeviceRequest::Light(request) => request,
-        DeviceRequest::Power(_) => panic!("expected lighting frame"),
+        _ => panic!("expected lighting frame"),
     }
 }
 

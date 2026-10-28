@@ -306,7 +306,8 @@ impl Rig {
                 let light = native_group
                     || records.iter().any(|record| {
                         record.device().key().id == did
-                            && record.device().functions()[0].lighting().is_some()
+                            && (record.device().functions()[0].lighting().is_some()
+                                || record.device().functions()[0].curtain().is_some())
                     });
                 if light {
                     state

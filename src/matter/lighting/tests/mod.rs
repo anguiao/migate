@@ -158,7 +158,7 @@ macro_rules! setup {
 async fn frame(receiver: &mut crate::device::CommandReceiver) -> LightRequest {
     match receiver.next_operation().await.unwrap() {
         DeviceRequest::Light(frame) => frame,
-        DeviceRequest::Power(_) => panic!("expected lighting frame"),
+        _ => panic!("expected lighting frame"),
     }
 }
 fn accept(function: &Function, request: LightRequest) {

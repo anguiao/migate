@@ -277,7 +277,14 @@ impl DeviceWork {
         self.current_sink().close();
         let local = self.local.borrow_mut().connection.take();
         if let Some(local) = local {
-            if self.is_light() {
+            if self.is_light()
+                || self
+                    .native
+                    .device()
+                    .functions()
+                    .iter()
+                    .any(|function| function.curtain().is_some())
+            {
                 drop(local.unsubscribe_properties(&self.key.id));
                 drop(local.unsubscribe_events(&self.key.id));
             } else {
