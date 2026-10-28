@@ -150,8 +150,14 @@ impl Function {
         if commands.closed {
             return Err(CommandError::Cancelled);
         }
+        if matches!(command, CurtainCommand::Target(_)) {
+            let changed = state.update_curtain_projection(|p| p.target_command());
+            self.notify_curtain_projection(changed);
+        }
         self.snapshot_locked(&state).availability.command_result()?;
         let action = state.curtain_commands_mut().unwrap().submit(command);
+        let changed = state.update_curtain_projection(|p| p.begin(command, action.token()));
+        self.notify_curtain_projection(changed);
         self.0.submitted.notify(usize::MAX);
         Ok(action)
     }
@@ -224,33 +230,47 @@ impl CurtainRequest {
 
     /// Mark at the actual transport boundary, under the same lock as takeover.
     pub fn mark_sent(&self) -> Result<(), CommandError> {
-        let _state = self.function.0.state.lock().unwrap();
+        let mut state = self.function.0.state.lock().unwrap();
         self.current_result()?;
         self.entry.sent.store(true, Ordering::Relaxed);
+        let changed = state.update_curtain_projection(|p| p.sent(self.entry.token));
+        self.function.notify_curtain_projection(changed);
         Ok(())
     }
 
     pub fn accept(self) -> Result<FunctionSnapshot, CommandError> {
-        let state = self.function.0.state.lock().unwrap();
+        let mut state = self.function.0.state.lock().unwrap();
         if let Some(result) = self.entry.completion.result() {
             return result;
         }
         if !self.entry.sent.load(Ordering::Relaxed) {
             let error = CommandError::SendFailed("curtain request was not submitted".into());
+            let changed = state.update_curtain_projection(|p| p.failed(self.entry.token));
+            self.function.notify_curtain_projection(changed);
             self.entry.completion.finish(Err(error.clone()));
             return Err(error);
         }
+        let changed = state.update_curtain_projection(|p| p.accepted(self.entry.token));
+        self.function.notify_curtain_projection(changed);
         let result = Ok(self.function.snapshot_locked(&state));
         self.entry.completion.finish(result.clone());
         result
     }
 
     pub fn reject(self, error: CommandError) {
+        let mut state = self.function.0.state.lock().unwrap();
+        let changed = state.update_curtain_projection(|p| p.failed(self.entry.token));
+        self.function.notify_curtain_projection(changed);
         self.entry.completion.finish(Err(error));
     }
 }
 impl Drop for CurtainRequest {
     fn drop(&mut self) {
-        self.entry.completion.finish(Err(CommandError::Cancelled));
+        if !self.entry.completion.is_finished() {
+            let mut state = self.function.0.state.lock().unwrap();
+            let changed = state.update_curtain_projection(|p| p.failed(self.entry.token));
+            self.function.notify_curtain_projection(changed);
+            self.entry.completion.finish(Err(CommandError::Cancelled));
+        }
     }
 }

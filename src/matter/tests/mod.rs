@@ -450,3 +450,5 @@ fn load_basic_info(
         .unwrap()
 }
 mod sensors;
+
+mod curtain;

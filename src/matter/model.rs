@@ -1,4 +1,6 @@
-use super::{bridged_info::BridgedHandler, lighting, on_off::OnOffHandler, sensors, states};
+use super::{
+    bridged_info::BridgedHandler, curtain, lighting, on_off::OnOffHandler, sensors, states,
+};
 use crate::device::{Function, FunctionKind, LightProfileKind, PhysicalDevice};
 use crate::storage::Identity;
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -17,7 +19,7 @@ use rs_matter::{
                 bridged_device_basic_information::{self as bridged, ClusterHandler as _},
                 carbon_dioxide_concentration_measurement, color_control, illuminance_measurement,
                 level_control, occupancy_sensing, power_source, relative_humidity_measurement,
-                temperature_measurement,
+                temperature_measurement, window_covering,
             },
             desc::{self, ClusterHandler as _},
             groups::{self, ClusterHandler as _},
@@ -73,6 +75,7 @@ struct Versions {
     air_quality: u32,
     power_source: u32,
     state: u32,
+    curtain: u32,
 }
 impl Versions {
     /// Each new instance seeds independent random per-cluster DataVersions so
@@ -94,6 +97,7 @@ impl Versions {
             air_quality: random.random(),
             power_source: random.random(),
             state: random.random(),
+            curtain: random.random(),
         }
     }
 }

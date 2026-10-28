@@ -13,17 +13,22 @@ const SINGLE_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     BridgedHandler::CLUSTER,
     OnOffHandler::CLUSTER
 );
-// The dedicated Window Covering handler is installed in the subsequent slice.
-const CURTAIN_PENDING_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+const WINDOW_COVERING: DeviceType = DeviceType {
+    dtype: 0x0202,
+    drev: 6,
+};
+const CURTAIN_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::DescHandler::CLUSTER,
     groups::GroupsHandler::CLUSTER,
     identify::IdentifyHandler::<()>::CLUSTER,
-    BridgedHandler::CLUSTER
+    BridgedHandler::CLUSTER,
+    <curtain::CurtainHandler as window_covering::ClusterAsyncHandler>::CLUSTER
 );
-const CURTAIN_CHILD_PENDING_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+const CURTAIN_CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
-    identify::IdentifyHandler::<()>::CLUSTER
+    identify::IdentifyHandler::<()>::CLUSTER,
+    <curtain::CurtainHandler as window_covering::ClusterAsyncHandler>::CLUSTER
 );
 const CT_LIGHT: DeviceType = DeviceType {
     dtype: 0x010c,
@@ -268,11 +273,11 @@ impl Entry {
                             O_CLUSTERS,
                         ),
                     }
-                } else if matches!(function.kind, FunctionHandlerKind::Curtain) {
+                } else if matches!(function.kind, FunctionHandlerKind::Curtain(_)) {
                     Endpoint::new(
                         self.endpoint,
-                        devices!(DEV_TYPE_BRIDGED_NODE),
-                        CURTAIN_PENDING_CLUSTERS,
+                        devices!(WINDOW_COVERING, DEV_TYPE_BRIDGED_NODE),
+                        CURTAIN_CLUSTERS,
                     )
                 } else {
                     Endpoint::new(self.endpoint, SINGLE_TYPES, SINGLE_CLUSTERS)
@@ -294,10 +299,10 @@ impl Entry {
                 }
             }
             Role::Child { function, .. } => match &function.kind {
-                FunctionHandlerKind::Curtain => Endpoint::new(
+                FunctionHandlerKind::Curtain(_) => Endpoint::new(
                     self.endpoint,
-                    devices!(DEV_TYPE_BRIDGED_NODE),
-                    CURTAIN_CHILD_PENDING_CLUSTERS,
+                    devices!(WINDOW_COVERING),
+                    CURTAIN_CHILD_CLUSTERS,
                 )
                 .with_tags(tags),
                 FunctionHandlerKind::Contact(_) => {

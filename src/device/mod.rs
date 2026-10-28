@@ -1,6 +1,6 @@
 mod command;
-#[allow(dead_code)] // The next slice connects the protocol command handlers.
 mod curtain_command;
+mod curtain_projection;
 mod light_command;
 mod light_observation;
 mod model;
@@ -11,7 +11,6 @@ pub use command::{
     ActionToken, CommandReceiver, CommandRequest, DeviceRequest, LightAction,
     LightActionDiagnostics, LightDimension, LightRequest,
 };
-#[allow(unused_imports)] // The next slice names these protocol-facing types.
 pub use curtain_command::{CurtainAction, CurtainCommand, CurtainRequest, CurtainToken};
 pub use light_command::{LightColorTarget, LightTarget};
 pub(crate) use model::CurtainValue;

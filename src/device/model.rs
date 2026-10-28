@@ -447,7 +447,6 @@ pub enum FunctionState {
     },
 }
 impl FunctionSnapshot {
-    #[allow(dead_code)] // Used by the curtain handler in the next slice.
     pub fn curtain(&self) -> Option<CurtainSnapshot> {
         match &self.state {
             FunctionState::Curtain { curtain } => Some(*curtain),

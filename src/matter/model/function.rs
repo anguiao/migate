@@ -7,7 +7,7 @@ pub(super) struct FunctionHandler {
 }
 pub(super) enum FunctionHandlerKind {
     Outlet(OnOffHandler),
-    Curtain,
+    Curtain(curtain::CurtainHandler),
     Light(Box<lighting::Lighting>),
     Temperature(sensors::TemperatureHandler),
     Humidity(sensors::HumidityHandler),
@@ -75,7 +75,11 @@ impl FunctionHandler {
                 endpoint,
                 Dataver::new(versions.on_off),
             )),
-            FunctionKind::Curtain => FunctionHandlerKind::Curtain,
+            FunctionKind::Curtain => FunctionHandlerKind::Curtain(curtain::CurtainHandler::new(
+                function,
+                endpoint,
+                Dataver::new(versions.curtain),
+            )),
         };
         Self {
             groups: Dataver::new(versions.groups),
@@ -87,7 +91,7 @@ impl FunctionHandler {
         match &self.kind {
             FunctionHandlerKind::Light(light) => Some(light),
             FunctionHandlerKind::Outlet(_)
-            | FunctionHandlerKind::Curtain
+            | FunctionHandlerKind::Curtain(_)
             | FunctionHandlerKind::Temperature(_)
             | FunctionHandlerKind::Humidity(_)
             | FunctionHandlerKind::Co2(_)
@@ -120,6 +124,8 @@ impl FunctionHandler {
             {
                 handler.dataver_changed()
             }
+            FunctionHandlerKind::Curtain(handler) if cluster.is_none_or(|id| id == 0x102) =>
+                <curtain::CurtainHandler as window_covering::ClusterAsyncHandler>::dataver_changed(handler),
             FunctionHandlerKind::Temperature(handler)
                 if cluster.is_none_or(|id| id == 0x402) =>
             {
@@ -149,7 +155,7 @@ impl FunctionHandler {
             FunctionHandlerKind::Contact(_) => |_, cluster| cluster == 0x45,
             FunctionHandlerKind::Occupancy(_) => |_, cluster| cluster == 0x406,
             FunctionHandlerKind::Outlet(_) => |_, cluster| cluster == 6,
-            FunctionHandlerKind::Curtain => |_, _| false,
+            FunctionHandlerKind::Curtain(_) => |_, cluster| cluster == 0x102,
             FunctionHandlerKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
             FunctionHandlerKind::Temperature(_) => |_, cluster| cluster == 0x402,
             FunctionHandlerKind::Humidity(_) => |_, cluster| cluster == 0x405,
@@ -195,6 +201,14 @@ impl AsyncHandler for FunctionHandler {
         {
             return Err(ErrorCode::CommandNotFound.into());
         }
+        if matches!(self.kind, FunctionHandlerKind::Curtain(_))
+            && ctx.cmd().cluster_id == 0x102
+            && <curtain::CurtainHandler as window_covering::ClusterAsyncHandler>::CLUSTER
+                .command(ctx.cmd().cmd_id)
+                .is_none()
+        {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
         self.handler().invoke(ctx, reply).await
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
@@ -209,7 +223,7 @@ macro_rules! dispatch_function {
             FunctionHandlerKind::Outlet(handler) => AsyncHandler::$method(
                 &on_off::HandlerAsyncAdaptor(handler), $($arg),*
             ).await,
-            FunctionHandlerKind::Curtain => AsyncHandler::$method(&EmptyHandler, $($arg),*).await,
+            FunctionHandlerKind::Curtain(handler) => AsyncHandler::$method(&window_covering::HandlerAsyncAdaptor(handler), $($arg),*).await,
             FunctionHandlerKind::Light(light) => AsyncHandler::$method(
                 &lighting::Dispatch(light), $($arg),*
             ).await,

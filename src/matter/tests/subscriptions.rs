@@ -464,6 +464,7 @@ struct Observed {
     roots: std::collections::BTreeMap<u16, (u32, u32)>,
     unsupported: Vec<u16>,
     lighting: std::collections::BTreeMap<(u16, u32, u32), (u32, u16)>,
+    curtain: std::collections::BTreeMap<u32, (u32, Option<u16>)>,
 }
 impl Observed {
     fn add(&mut self, report: &ReportDataResp<'_>) {
@@ -502,6 +503,15 @@ impl Observed {
                                     endpoint,
                                     (data.data_ver.unwrap(), data.data.u32().unwrap()),
                                 );
+                            }
+                            (Some(0x102), Some(attribute)) => {
+                                let value = if data.data.null().is_ok() {
+                                    None
+                                } else {
+                                    Some(data.data.u16().unwrap())
+                                };
+                                self.curtain
+                                    .insert(attribute, (data.data_ver.unwrap(), value));
                             }
                             (Some(cluster @ (8 | 0x300)), Some(attribute)) => {
                                 self.lighting.insert(
@@ -617,6 +627,7 @@ async fn receive_observed(client: &Matter<'_>, id: u32) -> Result<Observed, Erro
     Ok(observed)
 }
 
+mod curtain;
 mod lighting;
 mod persistence;
 mod recovery;

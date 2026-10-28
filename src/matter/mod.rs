@@ -1,5 +1,6 @@
 mod bridge;
 mod bridged_info;
+mod curtain;
 mod lighting;
 mod model;
 mod on_off;

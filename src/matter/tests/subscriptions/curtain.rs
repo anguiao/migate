@@ -1,0 +1,220 @@
+use super::*;
+use crate::device::{
+    CurtainCommand, CurtainMotion, CurtainValue, DeviceKey, DeviceRequest, FunctionDescription,
+    FunctionKind, PhysicalDevice, PhysicalDeviceDescription,
+};
+
+#[test]
+fn curtain_live_subscription_reports_only_changed_values() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path()).unwrap();
+            let identity = store.load_identity().unwrap();
+            let info = basic_info(&identity);
+            let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            let protocol = StoreAdapter::new(store.matter());
+            let kv = matter.kv(protocol.clone());
+            matter.startup(&kv).unwrap();
+            let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            connect(&matter, SERVER_ID, CLIENT_ID, 81);
+            connect(&client, CLIENT_ID, SERVER_ID, 81);
+            let crypto = test_only_crypto();
+            let buffers: MatterBuffers = MatterBuffers::new();
+            let state: InteractionModelState = InteractionModelState::new();
+            let (device, mut receivers) = PhysicalDevice::new(
+                PhysicalDeviceDescription::new(
+                    DeviceKey::new("xiaomi", "subscription-curtain"),
+                    "Curtain",
+                    vec![FunctionDescription {
+                        id: "main".into(),
+                        label: "Curtain".into(),
+                        kind: FunctionKind::Curtain,
+                    }],
+                )
+                .unwrap(),
+            );
+            device.set_availability(Availability::Available);
+            let function = &device.functions()[0];
+            function
+                .observe_curtain(CurtainValue::CurrentPosition(20), Some(1), 1)
+                .unwrap();
+            function
+                .observe_curtain(CurtainValue::TargetPosition(80), Some(1), 1)
+                .unwrap();
+            function
+                .observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 1)
+                .unwrap();
+            let handler = model_handler(vec![single_entry(&device)]);
+            let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+            let incoming = Pipe::default();
+            let outgoing = Pipe::default();
+            let responder = DefaultResponder::new(&im);
+            block_on(async {
+                im.startup().await.unwrap();
+                let services = async {
+                    or(
+                        matter.run(
+                            &crypto,
+                            SendPipe(&outgoing),
+                            ReceivePipe(&incoming),
+                            NoNetwork,
+                        ),
+                        or(
+                            client.run(
+                                &crypto,
+                                SendPipe(&incoming),
+                                ReceivePipe(&outgoing),
+                                NoNetwork,
+                            ),
+                            or(responder.run::<4, 4>(), im.run()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    panic!("curtain services exited");
+                };
+                let controller = async {
+                    let paths = [8, 10, 11, 14].map(|a| {
+                        AttrPath::from_gp(&GenericPath::new(Some(2), Some(0x102), Some(a)))
+                    });
+                    let (id, initial) = subscribe_paths(&client, &paths).await.unwrap();
+                    wait_committed(&state).await;
+                    assert_eq!(
+                        initial
+                            .curtain
+                            .iter()
+                            .map(|(id, (_, value))| (*id, *value))
+                            .collect::<Vec<_>>(),
+                        [
+                            (8, Some(80)),
+                            (10, Some(5)),
+                            (11, Some(2000)),
+                            (14, Some(8000))
+                        ]
+                    );
+                    function
+                        .observe_curtain(CurtainValue::CurrentPosition(25), Some(2), 2)
+                        .unwrap();
+                    let current = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        current
+                            .curtain
+                            .iter()
+                            .map(|(id, (_, value))| (*id, *value))
+                            .collect::<Vec<_>>(),
+                        [(8, Some(75)), (14, Some(7500))]
+                    );
+                    assert_ne!(current.curtain[&8].0, initial.curtain[&8].0);
+                    wait_committed(&state).await;
+                    function
+                        .observe_curtain(CurtainValue::TargetPosition(60), Some(3), 3)
+                        .unwrap();
+                    let target = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        target
+                            .curtain
+                            .iter()
+                            .map(|(id, (_, value))| (*id, *value))
+                            .collect::<Vec<_>>(),
+                        [(11, Some(4000))]
+                    );
+                    wait_committed(&state).await;
+                    function
+                        .observe_curtain(CurtainValue::Status(CurtainMotion::Closing), Some(4), 4)
+                        .unwrap();
+                    let status = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        status
+                            .curtain
+                            .iter()
+                            .map(|(id, (_, value))| (*id, *value))
+                            .collect::<Vec<_>>(),
+                        [(10, Some(10))]
+                    );
+                    wait_committed(&state).await;
+                    function
+                        .observe_curtain(CurtainValue::CurrentPosition(25), Some(5), 5)
+                        .unwrap();
+                    function
+                        .observe_curtain(CurtainValue::TargetPosition(60), Some(5), 5)
+                        .unwrap();
+                    function
+                        .observe_curtain(CurtainValue::Status(CurtainMotion::Closing), Some(5), 5)
+                        .unwrap();
+                    or(
+                        async {
+                            let report = receive_observed(&client, id).await.unwrap();
+                            panic!("unexpected duplicate report: {report:?}");
+                        },
+                        async { async_io::Timer::after(Duration::from_millis(200)).await },
+                    )
+                    .await;
+
+                    // Both Stops are queued before the first is sent. Its real
+                    // feedback still publishes the converged target immediately.
+                    let first = function.begin_curtain(CurtainCommand::Stop).unwrap();
+                    let second = function.begin_curtain(CurtainCommand::Stop).unwrap();
+                    let DeviceRequest::Curtain(request) =
+                        receivers[0].next_operation().await.unwrap()
+                    else {
+                        panic!("expected Stop")
+                    };
+                    assert_eq!(request.command, CurtainCommand::Stop);
+                    request.mark_sent().unwrap();
+                    function
+                        .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), Some(5), 5)
+                        .unwrap();
+                    let stopped = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(
+                        stopped
+                            .curtain
+                            .iter()
+                            .map(|(id, (_, value))| (*id, *value))
+                            .collect::<Vec<_>>(),
+                        [(10, Some(0)), (11, Some(7500))]
+                    );
+                    assert_ne!(stopped.curtain[&11].0, target.curtain[&11].0);
+                    request.accept().unwrap();
+                    first.accepted().await.unwrap();
+                    let DeviceRequest::Curtain(request) =
+                        receivers[0].next_operation().await.unwrap()
+                    else {
+                        panic!("expected second Stop")
+                    };
+                    assert_eq!(request.command, CurtainCommand::Stop);
+                    request.mark_sent().unwrap();
+                    request.accept().unwrap();
+                    second.accepted().await.unwrap();
+                    wait_committed(&state).await;
+                    function
+                        .observe_curtain(CurtainValue::CurrentPosition(25), Some(5), 5)
+                        .unwrap();
+                    function
+                        .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), Some(5), 5)
+                        .unwrap();
+                    or(
+                        async {
+                            let report = receive_observed(&client, id).await.unwrap();
+                            panic!("unexpected duplicate stop report: {report:?}");
+                        },
+                        async { async_io::Timer::after(Duration::from_millis(200)).await },
+                    )
+                    .await;
+                };
+                or(
+                    services,
+                    or(controller, async {
+                        async_io::Timer::after(Duration::from_secs(8)).await;
+                        panic!("curtain subscription timed out");
+                    }),
+                )
+                .await;
+            });
+            protocol.check_failure().unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

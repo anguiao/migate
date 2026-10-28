@@ -21,6 +21,7 @@ struct ControlRuntime {
 struct CurtainRuntime {
     snapshot: super::CurtainSnapshot,
     commands: super::curtain_command::CurtainCoordinator,
+    projection: super::curtain_projection::CurtainProjection,
 }
 pub(super) struct RuntimeState {
     value: RuntimeValue,
@@ -48,6 +49,7 @@ impl RuntimeState {
                     },
                 },
                 commands: super::curtain_command::CurtainCoordinator::new(),
+                projection: super::curtain_projection::CurtainProjection::default(),
             })),
             revision: 0,
         }
@@ -102,6 +104,21 @@ impl RuntimeState {
             RuntimeValue::Curtain(curtain) => Some(&mut curtain.commands),
             _ => None,
         }
+    }
+    pub(super) fn update_curtain_projection(
+        &mut self,
+        update: impl FnOnce(&mut super::curtain_projection::CurtainProjection),
+    ) -> bool {
+        let RuntimeValue::Curtain(curtain) = &mut self.value else {
+            unreachable!("curtain function has curtain state")
+        };
+        let before = curtain.projection.target(curtain.snapshot);
+        update(&mut curtain.projection);
+        let changed = before != curtain.projection.target(curtain.snapshot);
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        changed
     }
     pub(super) fn commands(&self) -> Option<&CommandCoordinator> {
         match &self.value {
@@ -345,6 +362,8 @@ impl PhysicalDevice {
                     }
                     if let Some(commands) = state.curtain_commands_mut() {
                         commands.unavailable(error.clone());
+                        let changed = state.update_curtain_projection(|p| p.cancel_unsent());
+                        function.notify_curtain_projection(changed);
                     }
                     if light {
                         function.notify_light_actions();
@@ -388,6 +407,8 @@ impl PhysicalDevice {
             }
             if let Some(commands) = state.curtain_commands_mut() {
                 commands.unavailable(super::CommandError::Cancelled);
+                let changed = state.update_curtain_projection(|p| p.cancel_unsent());
+                function.notify_curtain_projection(changed);
             }
         }
     }
@@ -540,6 +561,21 @@ impl Function {
         }
         Ok(self.snapshot_locked(&state))
     }
+    pub(crate) fn matter_curtain(&self) -> (super::CurtainSnapshot, Option<u32>) {
+        let state = self.0.state.lock().unwrap();
+        let RuntimeValue::Curtain(curtain) = &state.value else {
+            unreachable!("curtain function has curtain state")
+        };
+        (
+            self.snapshot_locked(&state).curtain().unwrap(),
+            curtain.projection.target(curtain.snapshot),
+        )
+    }
+    pub(super) fn notify_curtain_projection(&self, changed: bool) {
+        if changed {
+            self.0.changed.notify(usize::MAX);
+        }
+    }
     /// Apply one validated curtain report without conflating the three inputs.
     pub(crate) fn observe_curtain(
         &self,
@@ -565,6 +601,8 @@ impl Function {
         let RuntimeValue::Curtain(curtain) = &mut state.value else {
             return Err(super::CommandError::Unsupported);
         };
+        let before_target = curtain.projection.target(curtain.snapshot);
+        curtain.projection.observe(&value);
         let changed = match value {
             super::CurtainValue::CurrentPosition(value) => update(
                 &mut curtain.snapshot.current_position,
@@ -585,7 +623,8 @@ impl Function {
                 received_at,
             ),
         };
-        if changed {
+        let projection_changed = before_target != curtain.projection.target(curtain.snapshot);
+        if changed || projection_changed {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
