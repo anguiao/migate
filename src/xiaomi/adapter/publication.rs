@@ -200,11 +200,7 @@ impl SourceHandle {
                         .functions()
                         .iter()
                         .any(|function| function.lighting().is_some())
-                        .then(|| {
-                            self.0
-                                .light_writes
-                                .for_device(&key.id, self.0.clock.clone())
-                        });
+                        .then(|| self.0.write_gates.for_device(&key.id, self.0.clock.clone()));
                     let work = Rc::new(DeviceWork::new(
                         native.clone(),
                         sink.clone(),
@@ -258,7 +254,7 @@ impl SourceHandle {
                     // control bindings changed; authority and logical
                     // replacements keep the same DID's raw receipts.
                     if matches!(source.kind, OperationKind::ReplacedNative) {
-                        self.0.light_writes.clear_authority(&did);
+                        self.0.write_gates.clear_authority(&did);
                     }
                 }
                 OperationKind::Removed | OperationKind::Reused => {

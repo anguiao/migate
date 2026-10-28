@@ -114,7 +114,7 @@ impl XiaomiAdapter {
         let report = auth.local_status()?;
         let context = Rc::new(Context {
             commands: Rc::new(super::commands::Commands::default()),
-            light_writes: super::commands::LightWriteGates::default(),
+            write_gates: super::commands::DeviceWriteGates::default(),
             relations: RefCell::new(relations),
             notifications: RefCell::new(None),
             credentials_changed: Event::new(),
@@ -169,7 +169,7 @@ impl XiaomiAdapter {
                 .functions()
                 .iter()
                 .any(|function| function.lighting().is_some())
-                .then(|| context.light_writes.for_device(&did, context.clock.clone()));
+                .then(|| context.write_gates.for_device(&did, context.clock.clone()));
             let work = Rc::new(DeviceWork::new(
                 native,
                 sink.clone(),

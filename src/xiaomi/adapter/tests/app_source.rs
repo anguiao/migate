@@ -80,7 +80,7 @@ impl AppSource {
                     .then(|| {
                         adapter
                             .context
-                            .light_writes
+                            .write_gates
                             .for_device(&device.key.id, adapter.context.clock.clone())
                     });
                 let work = Rc::new(DeviceWork::new(

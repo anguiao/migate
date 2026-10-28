@@ -1,14 +1,10 @@
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
-use event_listener::Event;
 use serde_json::json;
 
 use super::{
-    LightWriteGate,
-    lighting::{Batch, BatchAttempt, submit_properties},
+    DeviceWriteGate,
+    properties::{Batch, BatchAttempt, submit_properties},
 };
 use crate::{
     device::{CommandError, CurtainCommand, CurtainRequest},
@@ -19,44 +15,13 @@ use crate::{
     },
 };
 
-/// The receipt task and DID gate survive retirement of the consumer.
-pub(super) async fn send_owned(
+pub(super) async fn send(
     request: CurtainRequest,
     context: Rc<Context>,
     work: Rc<DeviceWork>,
     sink: Rc<LogicalSink>,
     id: &str,
-) -> Result<(), AdapterError> {
-    let completion = Rc::new((Cell::new(false), Event::new()));
-    let complete = completion.clone();
-    let owner = context.clone();
-    let id = id.to_owned();
-    let gate = context
-        .light_writes
-        .for_device(&work.key.id, context.clock.clone());
-    context.tasks.spawn(async move {
-        let _permit = gate.acquire().await;
-        let result = send(request, owner, work, sink, &id, gate).await;
-        complete.0.set(true);
-        complete.1.notify(usize::MAX);
-        result
-    });
-    loop {
-        let changed = completion.1.listen();
-        if completion.0.get() {
-            return Ok(());
-        }
-        changed.await;
-    }
-}
-
-async fn send(
-    request: CurtainRequest,
-    context: Rc<Context>,
-    work: Rc<DeviceWork>,
-    sink: Rc<LogicalSink>,
-    id: &str,
-    gate: Rc<LightWriteGate>,
+    gate: Rc<DeviceWriteGate>,
 ) -> Result<(), AdapterError> {
     let did = work.key.id.clone();
     let bindings = work
@@ -101,7 +66,7 @@ async fn send(
                 function_id: id,
                 properties: vec![property.clone()],
                 retain_feedback: false,
-                refresh_feedback: false,
+                after_write: None,
                 gate: &gate,
                 operation: &operation.0,
                 mark: &mark,

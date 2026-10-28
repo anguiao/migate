@@ -6,7 +6,7 @@ use super::{
     work::DeviceWork,
 };
 use crate::{
-    device::{CommandError, CommandReceiver, CommandRequest},
+    device::{CommandError, CommandReceiver, CommandRequest, DeviceRequest},
     xiaomi::{
         capability::PropertyBinding,
         central::{CentralError, RequestStage, SendDecision, SendHooks, SessionHandle},
@@ -24,22 +24,23 @@ use std::{
 
 mod curtain;
 mod feedback;
+mod properties;
 use feedback::LightFeedback;
 
 /// Receipts and recent numeric feedback retain their gate across device replacements.
 #[derive(Default)]
-pub(super) struct LightWriteGates {
-    gates: RefCell<BTreeMap<String, Rc<LightWriteGate>>>,
+pub(super) struct DeviceWriteGates {
+    gates: RefCell<BTreeMap<String, Rc<DeviceWriteGate>>>,
 }
-impl LightWriteGates {
-    pub(super) fn for_device(&self, did: &str, clock: Arc<dyn Clock>) -> Rc<LightWriteGate> {
+impl DeviceWriteGates {
+    pub(super) fn for_device(&self, did: &str, clock: Arc<dyn Clock>) -> Rc<DeviceWriteGate> {
         let mut gates = self.gates.borrow_mut();
         gates.retain(|_, gate| {
             Rc::strong_count(gate) > 1 || !gate.feedback.borrow_mut().is_empty(clock.now())
         });
         gates
             .entry(did.into())
-            .or_insert_with(|| Rc::new(LightWriteGate::new(clock)))
+            .or_insert_with(|| Rc::new(DeviceWriteGate::new(clock)))
             .clone()
     }
     /// A binding-authority replacement retires every sent/history
@@ -50,7 +51,7 @@ impl LightWriteGates {
         }
     }
 }
-pub(super) struct LightWriteGate {
+pub(super) struct DeviceWriteGate {
     busy: Cell<bool>,
     changed: Event,
     clock: Arc<dyn Clock>,
@@ -58,7 +59,7 @@ pub(super) struct LightWriteGate {
     /// Binding-authority epoch; a replacement retires all old feedback.
     authority: Cell<u64>,
 }
-impl LightWriteGate {
+impl DeviceWriteGate {
     fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
             busy: Cell::new(false),
@@ -68,11 +69,11 @@ impl LightWriteGate {
             authority: Cell::new(0),
         }
     }
-    async fn acquire(self: &Rc<Self>) -> LightWritePermit {
+    async fn acquire(self: &Rc<Self>) -> DeviceWritePermit {
         loop {
             let changed = self.changed.listen();
             if !self.busy.replace(true) {
-                return LightWritePermit(self.clone());
+                return DeviceWritePermit(self.clone());
             }
             changed.await;
         }
@@ -125,8 +126,8 @@ impl LightWriteGate {
             .matches(binding, value, self.clock.now())
     }
 }
-struct LightWritePermit(Rc<LightWriteGate>);
-impl Drop for LightWritePermit {
+struct DeviceWritePermit(Rc<DeviceWriteGate>);
+impl Drop for DeviceWritePermit {
     fn drop(&mut self) {
         self.0.cancel_feedback();
         self.0.busy.set(false);
@@ -464,79 +465,73 @@ pub(super) async fn consume(
         },
         async {
             while let Some(request) = receiver.next_operation().await {
-                let request = match request {
-                    crate::device::DeviceRequest::Light(request) => {
-                        lighting::send_owned(
-                            crate::device::DeviceRequest::Light(request),
-                            context.clone(),
-                            work.clone(),
-                            sink.clone(),
-                            &function_id,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    crate::device::DeviceRequest::Power(request)
-                        if work
-                            .native
-                            .device()
-                            .functions()
-                            .iter()
-                            .find(|function| function.id() == function_id)
-                            .unwrap()
-                            .lighting()
-                            .is_some() =>
-                    {
-                        lighting::send_owned(
-                            crate::device::DeviceRequest::Power(request),
-                            context.clone(),
-                            work.clone(),
-                            sink.clone(),
-                            &function_id,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    crate::device::DeviceRequest::Power(request) => request,
-                    crate::device::DeviceRequest::Curtain(request) => {
-                        curtain::send_owned(
-                            request,
-                            context.clone(),
-                            work.clone(),
-                            sink.clone(),
-                            &function_id,
-                        )
-                        .await?;
-                        continue;
-                    }
-                };
-                // A sent outlet write is a raw transport receipt: keep it in an
-                // owned task so retiring the consumer/sink cannot drop it.
-                let completion = Rc::new((Cell::new(false), Event::new()));
-                let done = completion.clone();
-                let send_context = context.clone();
-                let send_work = work.clone();
-                let send_sink = sink.clone();
-                let send_id = function_id.clone();
-                context.tasks.spawn(async move {
-                    let result =
-                        send_power(request, send_context, send_work, send_sink, &send_id).await;
-                    done.0.set(true);
-                    done.1.notify(usize::MAX);
-                    result
-                });
-                loop {
-                    let changed = completion.1.listen();
-                    if completion.0.get() {
-                        break;
-                    }
-                    changed.await;
-                }
+                send_owned(
+                    request,
+                    context.clone(),
+                    work.clone(),
+                    sink.clone(),
+                    &function_id,
+                )
+                .await;
             }
             Ok(())
         },
     )
     .await
+}
+
+/// Keep every original receipt alive when its consumer or device is retired.
+async fn send_owned(
+    request: DeviceRequest,
+    context: Rc<Context>,
+    work: Rc<DeviceWork>,
+    sink: Rc<LogicalSink>,
+    id: &str,
+) {
+    let light = work
+        .native
+        .device()
+        .functions()
+        .iter()
+        .find(|function| function.id() == id)
+        .unwrap()
+        .lighting()
+        .is_some();
+    let gate = (light || matches!(&request, DeviceRequest::Curtain(_))).then(|| {
+        context
+            .write_gates
+            .for_device(&work.key.id, context.clock.clone())
+    });
+    let completion = Rc::new((Cell::new(false), Event::new()));
+    let done = completion.clone();
+    let owner = context.clone();
+    let id = id.to_owned();
+    context.tasks.spawn(async move {
+        let result = if let Some(gate) = gate {
+            let _permit = gate.acquire().await;
+            match request {
+                DeviceRequest::Curtain(request) => {
+                    curtain::send(request, owner, work, sink, &id, gate).await
+                }
+                request => lighting::send(request, owner, work, sink, &id, gate).await,
+            }
+        } else {
+            let DeviceRequest::Power(request) = request else {
+                unreachable!("only outlet commands have no device write gate")
+            };
+            send_power(request, owner, work, sink, &id).await
+        };
+        done.0.set(true);
+        done.1.notify(usize::MAX);
+        result
+    });
+    loop {
+        let changed = completion.1.listen();
+        if completion.0.get() {
+            return;
+        }
+        changed.await;
+    }
 }
 
 async fn send_power(

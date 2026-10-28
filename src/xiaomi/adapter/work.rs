@@ -1,5 +1,5 @@
 use super::{
-    commands::LightWriteGate,
+    commands::DeviceWriteGate,
     model::{AdapterError, PathKind, SubscriptionBinding, SubscriptionStatus},
     notifications::NotificationSource,
     observations::{Observation, Observations, Origin},
@@ -59,7 +59,7 @@ pub(super) struct DeviceWork {
     /// Native authority; retiring or replacing it ends this runtime.
     pub(super) life: Lifetime,
     pub(super) observations: Observations,
-    pub(super) light_write: Option<Rc<LightWriteGate>>,
+    pub(super) light_write: Option<Rc<DeviceWriteGate>>,
     /// Current logical delivery target; logical-only replacement swaps it.
     sink: RefCell<Rc<LogicalSink>>,
     local: RefCell<LocalAttachment>,
@@ -82,7 +82,7 @@ impl DeviceWork {
         native: NativeDescription,
         sink: Rc<LogicalSink>,
         refresh_changed: Rc<Event>,
-        light_write: Option<Rc<LightWriteGate>>,
+        light_write: Option<Rc<DeviceWriteGate>>,
     ) -> Self {
         let key = native.device().key().clone();
         Self {

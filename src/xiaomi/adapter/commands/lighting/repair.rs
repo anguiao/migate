@@ -114,7 +114,7 @@ async fn member_task(
     pending: Rc<RefCell<Option<LightRequest>>>,
 ) -> (Result<(), CommandError>, Option<AdapterError>) {
     let gate = context
-        .light_writes
+        .write_gates
         .for_device(&member.work.key.id, context.clock.clone());
     let _permit = gate.acquire().await;
     let current: Rc<dyn Fn() -> Result<(), CommandError>> = {
@@ -194,7 +194,7 @@ async fn member_task(
             &member.work,
             &member.sink,
             Batch {
-                refresh_feedback: true,
+                after_write: Some(super::refresh_after_write),
                 function_id: "main",
                 properties: properties.clone(),
                 retain_feedback: false,
