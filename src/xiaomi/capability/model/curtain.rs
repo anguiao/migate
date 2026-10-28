@@ -42,7 +42,6 @@ impl CurtainPositionBinding {
         self.range
     }
     /// Observations retain their reported precision; the step governs writes.
-    #[allow(dead_code)] // Used by the curtain adapter in the next slice.
     pub fn read_raw(&self, value: &Value) -> Result<u32, CapabilityError> {
         let raw = raw_integer(value)?;
         if raw > 100 {
@@ -145,7 +144,6 @@ impl CurtainStatusBinding {
     pub fn stopped(&self) -> u32 {
         self.stopped
     }
-    #[allow(dead_code)] // Used by the curtain adapter in the next slice.
     pub fn read_value(&self, value: &Value) -> Result<CurtainMotion, CapabilityError> {
         let raw = raw_integer(value)?;
         if raw == self.opening {

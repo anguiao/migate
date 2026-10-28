@@ -362,11 +362,17 @@ pub struct MeasurementSnapshot {
 impl Eq for MeasurementSnapshot {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Used by the curtain adapter in the next slice.
 pub enum CurtainMotion {
     Opening,
     Closing,
     Stopped,
+}
+
+/// One validated native curtain report.
+pub(crate) enum CurtainValue {
+    CurrentPosition(u32),
+    TargetPosition(u32),
+    Status(CurtainMotion),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

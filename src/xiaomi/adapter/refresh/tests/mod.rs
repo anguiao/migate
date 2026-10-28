@@ -13,6 +13,28 @@ fn dirty_again_produces_exactly_one_follow_up_read() {
     assert_eq!(state.pending.len(), 1);
 }
 
+#[test]
+fn satisfying_one_property_baseline_preserves_the_others() {
+    let mut state = RefreshState::default();
+    let bindings = [
+        PropertyBinding { siid: 2, piid: 2 },
+        PropertyBinding { siid: 2, piid: 3 },
+        PropertyBinding { siid: 2, piid: 4 },
+    ];
+    for binding in bindings {
+        state.request_baseline("main", binding);
+    }
+    let (reserved, _) = state
+        .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
+        .unwrap();
+    state.satisfy_baseline("main", bindings[0]);
+    state.complete(reserved, ReadResult::Retired, Duration::ZERO, false);
+    state.inflight.clear();
+    assert!(!state.contains("main", bindings[0]));
+    assert!(state.contains("main", bindings[1]));
+    assert!(state.contains("main", bindings[2]));
+}
+
 fn cloud_path() -> ControlPath {
     ControlPath::Cloud(super::super::routing::CloudPath {
         uid: "account".into(),
@@ -32,7 +54,7 @@ fn a_satisfied_reserved_baseline_is_not_requeued_when_withdrawn() {
         .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
         .unwrap();
 
-    state.satisfy_baseline("motion");
+    state.satisfy_baseline("motion", binding);
     state.complete(read, ReadResult::Retired, Duration::ZERO, false);
 
     assert!(state.pending.is_empty());
@@ -88,7 +110,9 @@ fn an_unpolled_baseline_lease_is_not_returned_after_notification() {
         read,
         retry: true,
     };
-    work.refresh.borrow_mut().satisfy_baseline("motion");
+    work.refresh
+        .borrow_mut()
+        .satisfy_baseline("motion", binding);
     drop(cleanup);
 
     let state = work.refresh.borrow();
@@ -113,7 +137,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
             .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
             .unwrap();
         if ordinary {
-            state.satisfy_baseline("motion");
+            state.satisfy_baseline("motion", binding);
         }
         state.complete(read, ReadResult::Retired, Duration::ZERO, false);
         assert_eq!(state.pending.len(), 1);
@@ -124,7 +148,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
     let (old, _) = state
         .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
         .unwrap();
-    state.satisfy_baseline("motion");
+    state.satisfy_baseline("motion", binding);
     state.request_baseline("motion", binding);
     state.complete(old, ReadResult::Retired, Duration::ZERO, false);
     assert_eq!(state.pending.len(), 1);
@@ -136,7 +160,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
     assert_eq!(state.pending.len(), 1);
 
     state.request("motion", binding);
-    state.satisfy_baseline("motion");
+    state.satisfy_baseline("motion", binding);
     assert_eq!(state.pending.len(), 1);
 }
 
@@ -171,7 +195,7 @@ fn returned_ordinary_demand_survives_a_pending_baseline(drop_lease: bool) {
     drop(cleanup);
 
     let mut state = work.refresh.borrow_mut();
-    state.satisfy_baseline("motion");
+    state.satisfy_baseline("motion", binding);
     assert!(
         state
             .reserve(Duration::ZERO, |_| Some(cloud_path()), false)

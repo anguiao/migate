@@ -1,7 +1,7 @@
 use super::{
     model::{
-        AdapterStatus, DeviceStatus, FunctionStatus, GatewayStatus, PathKind, PendingDevice,
-        RecoveryStatus, RoutingStatus,
+        AdapterStatus, DeviceStatus, FunctionStatus, GatewayStatus, ObservedPropertyStatus,
+        PathKind, PendingDevice, RecoveryStatus, RoutingStatus, SubscriptionBinding,
     },
     routing::ControlPath,
     state::Context,
@@ -168,6 +168,32 @@ impl Context {
                         } else {
                             Vec::new()
                         },
+                        properties: function.curtain().map_or_else(Vec::new, |curtain| {
+                            let subscriptions = work.subscription_status(function.id());
+                            [
+                                ("Current position", curtain.current().property()),
+                                ("Target position", curtain.target().property()),
+                                ("Status", curtain.status().property()),
+                            ]
+                            .into_iter()
+                            .map(|(name, binding)| ObservedPropertyStatus {
+                                name,
+                                binding,
+                                observation_source: work.property_source(function.id(), binding),
+                                read_problem: work
+                                    .refresh
+                                    .borrow()
+                                    .property_problem(function.id(), binding),
+                                subscriptions: subscriptions
+                                    .iter()
+                                    .filter(|item| {
+                                        item.binding == SubscriptionBinding::Property(binding)
+                                    })
+                                    .cloned()
+                                    .collect(),
+                            })
+                            .collect()
+                        }),
                     }
                 })
                 .collect();

@@ -7,7 +7,7 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
-            .filter(|function| function.state().is_some())
+            .filter(|function| function.state().is_some() || function.curtain().is_some())
         {
             let id = function.id();
             let path = context.read_path_for(&self.key.id, id);
@@ -25,18 +25,30 @@ impl DeviceWork {
                 changed
             };
             if changed {
-                super::super::refresh::reconcile_state_read(
-                    self,
-                    context,
-                    id,
-                    function.state().unwrap().property(),
-                    path.is_some(),
-                );
+                for binding in function.observation_bindings() {
+                    super::super::refresh::reconcile_state_read(
+                        self,
+                        context,
+                        id,
+                        binding,
+                        path.is_some(),
+                    );
+                }
             }
         }
     }
     pub(in crate::xiaomi::adapter) fn observation_source(&self, id: &str) -> Option<PathKind> {
         self.observation_sources.borrow().get(id).copied()
+    }
+    pub(in crate::xiaomi::adapter) fn property_source(
+        &self,
+        id: &str,
+        binding: PropertyBinding,
+    ) -> Option<PathKind> {
+        self.property_sources
+            .borrow()
+            .get(&super::super::observations::key(id, binding))
+            .copied()
     }
     pub(in crate::xiaomi::adapter) fn event_function(
         &self,
@@ -67,7 +79,9 @@ impl DeviceWork {
         self.observations
             .observed(self, function.id(), state.property(), origin);
         if !matches!(origin, Origin::Read) {
-            self.refresh.borrow_mut().satisfy_baseline(function.id());
+            self.refresh
+                .borrow_mut()
+                .satisfy_baseline(function.id(), state.property());
         }
         self.physical()
             .function(function.id())
@@ -95,7 +109,7 @@ impl DeviceWork {
             .functions()
             .iter()
             .find(|function| {
-                function.bindings().contains(&binding)
+                function.observation_bindings().contains(&binding)
                     || function.kind().is_control()
                         && self.native.device().refresh_trigger() == Some(binding)
             })
@@ -134,19 +148,12 @@ impl DeviceWork {
                 }
             };
         }
-        let Some(function) = self
-            .native
-            .device()
-            .functions()
-            .iter()
-            .find(|function| function.bindings().contains(&binding))
-        else {
+        let Some(function) = self.native.device().functions().iter().find(|function| {
+            function.curtain().is_none() && function.observation_bindings().contains(&binding)
+        }) else {
             return false;
         };
         let id = function.id().to_owned();
-        if function.curtain().is_some() {
-            return false;
-        }
         let light = function.lighting().is_some();
         if light {
             let origin = if cached_report {
@@ -215,7 +222,10 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
-        if function.lighting().is_some() {
+        if function.curtain().is_some() {
+            let decoded = Self::decode_curtain(function, binding, value)?;
+            self.observe_curtain(function, binding, decoded, observation, Origin::Read);
+        } else if function.lighting().is_some() {
             super::super::lighting::observe(self, id, binding, value, Origin::Read, false)?;
         } else if function.measurement().is_some() {
             observe_measurement(
@@ -246,6 +256,53 @@ impl DeviceWork {
             self.observations.observe_read(self, id, stamp, value);
         }
         Ok(())
+    }
+
+    pub(in crate::xiaomi::adapter) fn observe_curtain(
+        &self,
+        function: &ParsedFunction,
+        binding: PropertyBinding,
+        value: crate::device::CurtainValue,
+        observation: Observation,
+        origin: Origin,
+    ) {
+        if self.life.is_closed() {
+            return;
+        }
+        let id = function.id();
+        self.observations.observed(self, id, binding, origin);
+        if !matches!(origin, Origin::Read) {
+            self.refresh.borrow_mut().satisfy_baseline(id, binding);
+        }
+        self.physical()
+            .function(id)
+            .unwrap()
+            .observe_curtain(value, observation.source_time, observation.received_at)
+            .expect("curtain function");
+        self.property_sources.borrow_mut().insert(
+            super::super::observations::key(id, binding),
+            observation.source,
+        );
+    }
+    pub(in crate::xiaomi::adapter) fn decode_curtain(
+        function: &ParsedFunction,
+        binding: PropertyBinding,
+        value: &serde_json::Value,
+    ) -> Result<crate::device::CurtainValue, crate::xiaomi::capability::CapabilityError> {
+        use crate::device::CurtainValue;
+        let curtain = function.curtain().expect("curtain function");
+        if binding == curtain.current().property() {
+            Ok(CurtainValue::CurrentPosition(
+                curtain.current().read_raw(value)?,
+            ))
+        } else if binding == curtain.target().property() {
+            Ok(CurtainValue::TargetPosition(
+                curtain.target().read_raw(value)?,
+            ))
+        } else {
+            debug_assert_eq!(binding, curtain.status().property());
+            Ok(CurtainValue::Status(curtain.status().read_value(value)?))
+        }
     }
 }
 

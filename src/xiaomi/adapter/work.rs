@@ -66,6 +66,7 @@ pub(super) struct DeviceWork {
     cloud: RefCell<CloudAttachment>,
     active: RefCell<BTreeMap<String, NotificationSource>>,
     observation_sources: RefCell<BTreeMap<String, PathKind>>,
+    property_sources: RefCell<BTreeMap<super::observations::PropertyKey, PathKind>>,
     state_read_paths: RefCell<BTreeMap<String, Option<super::routing::ControlPath>>>,
     condition_generation: Cell<u64>,
     pub(super) refresh: RefCell<RefreshState>,
@@ -95,6 +96,7 @@ impl DeviceWork {
             cloud: RefCell::new(CloudAttachment::default()),
             active: RefCell::new(BTreeMap::new()),
             observation_sources: RefCell::new(BTreeMap::new()),
+            property_sources: RefCell::new(BTreeMap::new()),
             state_read_paths: RefCell::new(BTreeMap::new()),
             condition_generation: Cell::new(0),
             refresh: RefCell::new(RefreshState::default()),
@@ -143,8 +145,7 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
-            .filter(|function| function.curtain().is_none())
-            .flat_map(ParsedFunction::bindings)
+            .flat_map(ParsedFunction::observation_bindings)
             .collect::<Vec<_>>();
         if let Some(trigger) = self.native.device().refresh_trigger() {
             values.push(trigger);
@@ -164,7 +165,6 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
-            .filter(|function| function.curtain().is_none())
             .map(|function| function.id().to_owned())
             .chain(self.battery_binding().map(|_| BATTERY_CHANNEL.to_owned()))
             .collect()
@@ -216,6 +216,19 @@ impl DeviceWork {
     }
     fn function_source_changed(&self, id: &str) {
         self.observations.function_source_changed(id);
+        if let Some(function) = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == id && function.curtain().is_some())
+        {
+            for binding in function.observation_bindings() {
+                self.refresh.borrow_mut().request_baseline(id, binding);
+            }
+            self.refresh_changed.notify(usize::MAX);
+            return;
+        }
         if self.state_function(id) {
             let binding = self
                 .native
@@ -290,15 +303,10 @@ impl DeviceWork {
         self.refresh_functions(false);
     }
     fn refresh_functions(&self, include_states: bool) {
-        for function in self
-            .native
-            .device()
-            .functions()
-            .iter()
-            .filter(|function| function.curtain().is_none())
-            .filter(|function| include_states || function.state().is_none())
-        {
-            for binding in function.bindings() {
+        for function in self.native.device().functions().iter().filter(|function| {
+            include_states || function.state().is_none() && function.curtain().is_none()
+        }) {
+            for binding in function.observation_bindings() {
                 self.refresh_property(function.id(), binding);
             }
         }
@@ -327,11 +335,9 @@ impl DeviceWork {
         if id == BATTERY_CHANNEL {
             return self.battery_binding() == Some(binding);
         }
-        self.native
-            .device()
-            .functions()
-            .iter()
-            .any(|function| function.id() == id && function.bindings().contains(&binding))
+        self.native.device().functions().iter().any(|function| {
+            function.id() == id && function.observation_bindings().contains(&binding)
+        })
     }
 }
 pub(super) async fn run(

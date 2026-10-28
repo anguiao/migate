@@ -41,7 +41,7 @@ pub(super) struct RefreshState {
     inflight: BTreeMap<PropertyKey, Rc<ReadFlight>>,
     dirty_again: BTreeSet<PropertyKey>,
     problems: BTreeMap<PropertyKey, String>,
-    baseline_generations: BTreeMap<String, u64>,
+    baseline_generations: BTreeMap<PropertyKey, u64>,
 }
 impl RefreshState {
     pub(super) fn request(&mut self, id: &str, binding: PropertyBinding) {
@@ -51,7 +51,12 @@ impl RefreshState {
         self.queue(id, binding, true);
     }
     fn queue(&mut self, id: &str, binding: PropertyBinding, baseline: bool) {
-        let baseline = baseline.then(|| *self.baseline_generations.entry(id.into()).or_default());
+        let baseline = baseline.then(|| {
+            *self
+                .baseline_generations
+                .entry(key(id, binding))
+                .or_default()
+        });
         if let Some(pending) = self
             .pending
             .iter_mut()
@@ -70,15 +75,18 @@ impl RefreshState {
             });
         }
     }
-    pub(super) fn satisfy_baseline(&mut self, id: &str) {
-        let generation = self.baseline_generations.entry(id.into()).or_default();
+    pub(super) fn satisfy_baseline(&mut self, id: &str, binding: PropertyBinding) {
+        let generation = self
+            .baseline_generations
+            .entry(key(id, binding))
+            .or_default();
         *generation = generation.wrapping_add(1);
         self.pending
-            .retain(|read| read.id != id || read.baseline.is_none());
+            .retain(|read| read.key() != key(id, binding) || read.baseline.is_none());
     }
     fn required(&self, read: &Refresh) -> bool {
         read.baseline
-            .is_none_or(|generation| self.baseline_generations[&read.id] == generation)
+            .is_none_or(|generation| self.baseline_generations[&read.key()] == generation)
     }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
         self.inflight.contains_key(&key(id, binding))
@@ -197,6 +205,9 @@ impl RefreshState {
             .map(|(_, problem)| problem.clone())
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
+    }
+    pub(super) fn property_problem(&self, id: &str, binding: PropertyBinding) -> Option<String> {
+        self.problems.get(&key(id, binding)).cloned()
     }
     pub(super) fn problems_except(&self, id: &str) -> Vec<String> {
         self.problems
@@ -462,7 +473,9 @@ fn read_one(
             .is_some_and(|battery| read.id == "battery" && read.binding == battery.property())
             || work.native.device().functions().iter().any(|function| {
                 function.id() == read.id
-                    && (function.lighting().is_some() || function.kind().is_read_only())
+                    && (function.lighting().is_some()
+                        || function.kind().is_read_only()
+                        || function.curtain().is_some())
             });
         let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
         let reading = async {

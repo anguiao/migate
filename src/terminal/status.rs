@@ -1,7 +1,8 @@
 use crate::xiaomi::{
     adapter::{
-        AdapterStatus, ChannelCommands, CommandStatus, DeviceStatus, GatewayStatus, PathKind,
-        PathPriority, PendingDevice, RecoveryStatus, RoutingStatus,
+        AdapterStatus, ChannelCommands, CommandStatus, DeviceStatus, GatewayStatus,
+        ObservedPropertyStatus, PathKind, PathPriority, PendingDevice, RecoveryStatus,
+        RoutingStatus,
     },
     auth::{AuthReport, AuthenticationState, CertificateUpdate},
     certificate::{CertificateStatus, CertificateValidity},
@@ -84,6 +85,21 @@ impl AuthStatus {
                 let _ = write!(report, "\n{}", format_device(device));
             }
         }
+    }
+
+    pub(super) fn curtain_properties(&self, did: &str, id: &str) -> Vec<ObservedPropertyStatus> {
+        self.adapter
+            .borrow()
+            .as_ref()
+            .and_then(|adapter| adapter.devices.iter().find(|device| device.did == did))
+            .and_then(|device| {
+                device
+                    .functions
+                    .iter()
+                    .find(|function| function.function == id)
+            })
+            .map(|function| function.properties.clone())
+            .unwrap_or_default()
     }
 
     pub fn update_adapter(&self, status: AdapterStatus) {
@@ -324,6 +340,14 @@ fn format_device(status: &DeviceStatus) -> String {
         if let Some(reason) = &function.read_problem {
             let _ = write!(report, "\n    Read: {reason}.");
         }
+        for property in &function.properties {
+            let _ = write!(
+                report,
+                "\n    {}: {}.",
+                property.name,
+                property_diagnostics(Some(property))
+            );
+        }
     }
     for ChannelCommands {
         channel,
@@ -347,6 +371,42 @@ fn format_device(status: &DeviceStatus) -> String {
         }
     }
     report
+}
+
+pub(super) fn property_diagnostics(property: Option<&ObservedPropertyStatus>) -> String {
+    let Some(property) = property else {
+        return "observation source unknown; read unknown; subscription unknown".into();
+    };
+    let mut fields = vec![
+        format!(
+            "property {}.{}",
+            property.binding.siid, property.binding.piid
+        ),
+        format!(
+            "observation source {}",
+            property.observation_source.map(path).unwrap_or("unknown")
+        ),
+        property.read_problem.as_ref().map_or_else(
+            || "read: no reported problem".into(),
+            |problem| format!("read: {problem}"),
+        ),
+    ];
+    fields.extend(property.subscriptions.iter().map(|subscription| {
+        let mut text = format!(
+            "{} subscription {}",
+            path(subscription.source),
+            if subscription.ready {
+                "ready"
+            } else {
+                "not ready"
+            }
+        );
+        if let Some(problem) = &subscription.problem {
+            let _ = write!(text, " ({problem})");
+        }
+        text
+    }));
+    fields.join("; ")
 }
 
 fn format_command(channel: &str, state: &str, command: &CommandStatus) -> String {

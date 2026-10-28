@@ -150,7 +150,7 @@ fn unpublished_reason(relation: &GroupRelation) -> String {
     "waiting for a usable native description".into()
 }
 
-fn render(view: &View, did: Option<&str>) -> String {
+fn render(view: &View, did: Option<&str>, status: &AuthStatus) -> String {
     let mut lines = Vec::new();
     for relation in view.current.derived.groups.values() {
         if did.is_some_and(|did| did != relation.group_did) {
@@ -201,12 +201,49 @@ fn render(view: &View, did: Option<&str>) -> String {
             let snapshot = function.snapshot();
             match snapshot.state {
                 crate::device::FunctionState::Curtain { curtain } => {
-                    lines.push(format!(
-                        "  {id} ({label}): current={:?}; target={:?}; status={:?}",
-                        curtain.current_position.value,
-                        curtain.target_position.value,
-                        curtain.status.value
-                    ));
+                    lines.push(format!("  {id} ({label}):"));
+                    let properties = status.curtain_properties(&key.id, id);
+                    let entries = [
+                        (
+                            "Current position",
+                            curtain
+                                .current_position
+                                .value
+                                .map_or_else(|| "unknown".into(), |value| format!("{value}%")),
+                            curtain.current_position.source_time,
+                            curtain.current_position.received_at,
+                        ),
+                        (
+                            "Target position",
+                            curtain
+                                .target_position
+                                .value
+                                .map_or_else(|| "unknown".into(), |value| format!("{value}%")),
+                            curtain.target_position.source_time,
+                            curtain.target_position.received_at,
+                        ),
+                        (
+                            "Status",
+                            match curtain.status.value {
+                                None => "unknown",
+                                Some(crate::device::CurtainMotion::Opening) => "opening",
+                                Some(crate::device::CurtainMotion::Closing) => "closing",
+                                Some(crate::device::CurtainMotion::Stopped) => "stopped",
+                            }
+                            .into(),
+                            curtain.status.source_time,
+                            curtain.status.received_at,
+                        ),
+                    ];
+                    for (name, value, source_time, received_at) in entries {
+                        let source_time =
+                            source_time.map_or_else(|| "unknown".into(), |time| time.to_string());
+                        let received_at = received_at.map_or_else(|| "unknown".into(), timestamp);
+                        let diagnostic = super::status::property_diagnostics(
+                            properties.iter().find(|property| property.name == name),
+                        );
+                        lines.push(format!("    {name}: {value}; upstream time {source_time}; received at {received_at}; {diagnostic}."));
+                    }
                 }
                 crate::device::FunctionState::Outlet { power } => {
                     lines.push(format!("  {id} ({label}): {}", power_text(power)));
@@ -373,7 +410,7 @@ impl View {
             [] => return Ok(None),
             ["help"] => format!("{COMMAND_HELP}\n{}", view.render_status(status, now)),
             ["list"] => {
-                let mut text = render(registry, None);
+                let mut text = render(registry, None, status);
                 for pending in status.pending() {
                     let key = DeviceKey::new("xiaomi", &pending.did);
                     let name = registry
@@ -389,7 +426,7 @@ impl View {
             }
             ["status"] => format!(
                 "{}\n{}",
-                render(registry, None),
+                render(registry, None, status),
                 view.render_devices(status, now, None)
             ),
             ["status", did] => {
@@ -407,7 +444,7 @@ impl View {
                 } else {
                     format!(
                         "{}\n{}",
-                        render(registry, Some(did)),
+                        render(registry, Some(did), status),
                         view.render_devices(status, now, Some(did))
                     )
                 }

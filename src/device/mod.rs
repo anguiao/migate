@@ -10,6 +10,7 @@ pub use command::{
     LightActionDiagnostics, LightDimension, LightRequest,
 };
 pub use light_command::{LightColorTarget, LightTarget};
+pub(crate) use model::CurtainValue;
 pub(crate) use model::mired_span;
 pub use model::{
     Availability, BatterySnapshot, Capability, Command, CommandError, CurtainMotion,

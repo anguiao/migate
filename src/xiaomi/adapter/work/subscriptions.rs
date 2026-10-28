@@ -13,8 +13,8 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
-        if function.kind().is_read_only() {
-            return function.bindings();
+        if function.kind().is_read_only() || function.curtain().is_some() {
+            return function.observation_bindings();
         }
         let mut bindings = self
             .native

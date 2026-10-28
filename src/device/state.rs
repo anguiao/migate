@@ -508,6 +508,54 @@ impl Function {
         }
         Ok(self.snapshot_locked(&state))
     }
+    /// Apply one validated curtain report without conflating the three inputs.
+    pub(crate) fn observe_curtain(
+        &self,
+        value: super::CurtainValue,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) -> Result<FunctionSnapshot, super::CommandError> {
+        fn update<T: Copy + PartialEq>(
+            current: &mut super::CurtainObservation<T>,
+            value: T,
+            source_time: Option<i64>,
+            received_at: i64,
+        ) -> bool {
+            let changed = current.value != Some(value);
+            *current = super::CurtainObservation {
+                value: Some(value),
+                source_time,
+                received_at: Some(received_at),
+            };
+            changed
+        }
+        let mut state = self.0.state.lock().unwrap();
+        let RuntimeValue::Curtain(curtain) = &mut state.value else {
+            return Err(super::CommandError::Unsupported);
+        };
+        let changed = match value {
+            super::CurtainValue::CurrentPosition(value) => update(
+                &mut curtain.current_position,
+                value,
+                source_time,
+                received_at,
+            ),
+            super::CurtainValue::TargetPosition(value) => update(
+                &mut curtain.target_position,
+                value,
+                source_time,
+                received_at,
+            ),
+            super::CurtainValue::Status(value) => {
+                update(&mut curtain.status, value, source_time, received_at)
+            }
+        };
+        if changed {
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+        Ok(self.snapshot_locked(&state))
+    }
     /// Apply one state observation already interpreted at the source boundary.
     pub fn observe_state(
         &self,

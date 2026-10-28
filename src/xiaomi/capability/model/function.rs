@@ -271,4 +271,16 @@ impl ParsedFunction {
         }
         bindings
     }
+
+    pub(crate) fn observation_bindings(&self) -> Vec<PropertyBinding> {
+        if let Some(curtain) = self.curtain() {
+            vec![
+                curtain.status().property(),
+                curtain.current().property(),
+                curtain.target().property(),
+            ]
+        } else {
+            self.bindings()
+        }
+    }
 }

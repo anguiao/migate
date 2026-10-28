@@ -39,4 +39,5 @@ mod urn_updates;
 
 mod sensors;
 
+mod curtain;
 mod states;

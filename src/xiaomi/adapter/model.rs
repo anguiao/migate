@@ -232,6 +232,14 @@ pub struct SubscriptionStatus {
     pub problem: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct ObservedPropertyStatus {
+    pub name: &'static str,
+    pub binding: PropertyBinding,
+    pub observation_source: Option<PathKind>,
+    pub read_problem: Option<String>,
+    pub subscriptions: Vec<SubscriptionStatus>,
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct FunctionStatus {
     pub function: String,
     pub selected_read: Option<PathKind>,
@@ -240,6 +248,7 @@ pub struct FunctionStatus {
     pub read_problem: Option<String>,
     pub observation_source: Option<PathKind>,
     pub subscriptions: Vec<SubscriptionStatus>,
+    pub properties: Vec<ObservedPropertyStatus>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceStatus {

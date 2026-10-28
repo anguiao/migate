@@ -18,6 +18,34 @@ impl Context {
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = &work
             && let Some(function) = work.native.device().functions().iter().find(|function| {
+                function.curtain().is_some() && function.observation_bindings().contains(&binding)
+            })
+        {
+            if let Ok(value) = DeviceWork::decode_curtain(function, binding, value)
+                && self.accept_state_notification(work, function.id(), source)
+            {
+                work.observe_curtain(
+                    function,
+                    binding,
+                    value,
+                    Observation {
+                        source: source.kind(),
+                        source_time: update_time,
+                        received_at: self.clock.unix_now(),
+                    },
+                    if cached_report {
+                        Origin::Cache
+                    } else {
+                        Origin::Notification
+                    },
+                );
+                self.update_routing("curtain property observed");
+                self.status_changed.notify(usize::MAX);
+            }
+            return;
+        }
+        if let Some(work) = &work
+            && let Some(function) = work.native.device().functions().iter().find(|function| {
                 function
                     .state()
                     .is_some_and(|state| state.property() == binding)
@@ -91,7 +119,17 @@ impl Context {
             .is_some_and(|desired| desired.same(source))
             && work.source_ready(id, source)
         {
-            work.install_state_observer(id, source.clone());
+            if work
+                .native
+                .device()
+                .functions()
+                .iter()
+                .any(|function| function.id() == id && function.curtain().is_some())
+            {
+                work.install_observer(id, source.clone());
+            } else {
+                work.install_state_observer(id, source.clone());
+            }
             self.update_device_availability(did);
             self.note_notification_switch(did, "state notification established source baseline");
             return true;
