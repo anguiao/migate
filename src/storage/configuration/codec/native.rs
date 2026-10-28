@@ -4,10 +4,11 @@ use crate::xiaomi::capability::NativeDescription;
 use crate::{
     device::{DeviceKey, MeasurementRange, NumericRange},
     xiaomi::capability::{
-        BatteryBinding, BrightnessBinding, ColorBinding, EventArgument, EventBinding,
-        LightBindings, MeasurementBinding, MeasurementUnit, ModeBinding, MotionBinding,
-        NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, StateBinding, StateMapping,
-        StateValue, TemperatureBinding,
+        BatteryBinding, BrightnessBinding, ColorBinding, CurtainBindings, CurtainMotorBinding,
+        CurtainPositionBinding, CurtainStatusBinding, EventArgument, EventBinding, LightBindings,
+        MeasurementBinding, MeasurementUnit, ModeBinding, MotionBinding, NumericFormat,
+        ParsedDevice, ParsedFunction, PropertyBinding, StateBinding, StateMapping, StateValue,
+        TemperatureBinding,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,14 @@ enum WireFunction {
         label: String,
         power: WireBinding,
         lighting: WireLighting,
+    },
+    Curtain {
+        id: String,
+        label: String,
+        motor: WireCurtainMotor,
+        status: WireCurtainStatus,
+        current: WireNumeric,
+        target: WireNumeric,
     },
     Temperature {
         id: String,
@@ -77,6 +86,23 @@ enum WireFunction {
         label: String,
         state: WireState,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireCurtainMotor {
+    property: WireBinding,
+    format: NumericFormat,
+    pause: u32,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireCurtainStatus {
+    property: WireBinding,
+    format: NumericFormat,
+    opening: u32,
+    closing: u32,
+    stopped: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -291,6 +317,28 @@ impl WireNative {
 
 impl WireFunction {
     fn from_parsed(function: &ParsedFunction) -> Self {
+        if let Some(curtain) = function.curtain() {
+            let motor = curtain.motor();
+            let status = curtain.status();
+            return Self::Curtain {
+                id: function.id().to_owned(),
+                label: function.label().to_owned(),
+                motor: WireCurtainMotor {
+                    property: motor.property().into(),
+                    format: motor.format(),
+                    pause: motor.pause(),
+                },
+                status: WireCurtainStatus {
+                    property: status.property().into(),
+                    format: status.format(),
+                    opening: status.opening(),
+                    closing: status.closing(),
+                    stopped: status.stopped(),
+                },
+                current: WireNumeric::from_curtain_position(curtain.current()),
+                target: WireNumeric::from_curtain_position(curtain.target()),
+            };
+        }
         if let Some(state) = function.state() {
             let id = function.id().to_owned();
             let label = function.label().to_owned();
@@ -401,6 +449,36 @@ impl WireFunction {
 
     fn into_parsed(self) -> Result<ParsedFunction, &'static str> {
         match self {
+            Self::Curtain {
+                id,
+                label,
+                motor,
+                status,
+                current,
+                target,
+            } => {
+                let motor =
+                    CurtainMotorBinding::new(motor.property.into(), motor.format, motor.pause)
+                        .map_err(|_| "Stored curtain binding is invalid")?;
+                let status = CurtainStatusBinding::new(
+                    status.property.into(),
+                    status.format,
+                    status.opening,
+                    status.closing,
+                    status.stopped,
+                )
+                .map_err(|_| "Stored curtain binding is invalid")?;
+                Ok(ParsedFunction::curtain_control(
+                    id,
+                    label,
+                    CurtainBindings::new(
+                        motor,
+                        status,
+                        current.into_curtain_position()?,
+                        target.into_curtain_position()?,
+                    ),
+                ))
+            }
             Self::Contact { id, label, state } => {
                 Ok(ParsedFunction::contact(id, label, state.into_binding()?))
             }
@@ -554,6 +632,22 @@ impl WireMeasurement {
 }
 
 impl WireNumeric {
+    fn from_curtain_position(binding: &CurtainPositionBinding) -> Self {
+        Self {
+            property: binding.property().into(),
+            format: binding.format(),
+            min: binding.range().min(),
+            max: binding.range().max(),
+            step: binding.range().step(),
+        }
+    }
+
+    fn into_curtain_position(self) -> Result<CurtainPositionBinding, &'static str> {
+        let range = NumericRange::new(self.min, self.max, self.step)
+            .map_err(|_| "Stored curtain binding is invalid")?;
+        CurtainPositionBinding::new(self.property.into(), self.format, range)
+            .map_err(|_| "Stored curtain binding is invalid")
+    }
     fn from_brightness(binding: &BrightnessBinding) -> Self {
         Self {
             property: binding.property().into(),

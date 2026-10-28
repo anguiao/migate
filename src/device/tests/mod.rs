@@ -413,4 +413,5 @@ mod multi_device;
 
 mod sensors;
 
+mod curtain;
 mod states;

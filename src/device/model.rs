@@ -26,6 +26,7 @@ impl DeviceKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Capability {
     OnOff,
+    Curtain,
     Brightness,
     ColorTemperature(TemperatureInterval),
     ColorRgb,
@@ -92,6 +93,7 @@ impl LightProfile {
 pub enum FunctionKind {
     Outlet,
     Light(LightProfile),
+    Curtain,
     Temperature(MeasurementRange),
     Humidity(MeasurementRange),
     CarbonDioxide(MeasurementRange),
@@ -102,7 +104,7 @@ pub enum FunctionKind {
 }
 impl FunctionKind {
     pub fn is_control(self) -> bool {
-        matches!(self, Self::Outlet | Self::Light(_))
+        matches!(self, Self::Outlet | Self::Light(_) | Self::Curtain)
     }
     pub fn is_state_sensor(self) -> bool {
         matches!(self, Self::Contact | Self::Motion | Self::Occupancy)
@@ -117,6 +119,7 @@ impl FunctionKind {
         match self {
             Self::Light(profile) => Some(profile),
             Self::Outlet
+            | Self::Curtain
             | Self::Temperature(_)
             | Self::Humidity(_)
             | Self::CarbonDioxide(_)
@@ -146,6 +149,7 @@ impl FunctionKind {
             Self::Motion => vec![Capability::Motion],
             Self::Occupancy => vec![Capability::Occupancy],
             Self::Outlet => vec![Capability::OnOff],
+            Self::Curtain => vec![Capability::Curtain],
             Self::Light(profile) => {
                 let mut capabilities = vec![Capability::OnOff];
                 if profile.has_brightness() {
@@ -357,6 +361,28 @@ pub struct MeasurementSnapshot {
 }
 impl Eq for MeasurementSnapshot {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)] // Used by the curtain adapter in the next slice.
+pub enum CurtainMotion {
+    Opening,
+    Closing,
+    Stopped,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CurtainObservation<T> {
+    pub value: Option<T>,
+    pub source_time: Option<i64>,
+    pub received_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CurtainSnapshot {
+    pub current_position: CurtainObservation<u32>,
+    pub target_position: CurtainObservation<u32>,
+    pub status: CurtainObservation<CurtainMotion>,
+}
+
 /// The native input participating in the latest binary-state observation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StateInput {
@@ -389,6 +415,9 @@ pub enum FunctionState {
         power: Power,
         lighting: LightSnapshot,
     },
+    Curtain {
+        curtain: CurtainSnapshot,
+    },
     Temperature {
         measurement: MeasurementSnapshot,
     },
@@ -412,6 +441,13 @@ pub enum FunctionState {
     },
 }
 impl FunctionSnapshot {
+    #[allow(dead_code)] // Used by the curtain handler in the next slice.
+    pub fn curtain(&self) -> Option<CurtainSnapshot> {
+        match &self.state {
+            FunctionState::Curtain { curtain } => Some(*curtain),
+            _ => None,
+        }
+    }
     pub fn state_sensor(&self) -> Option<StateSnapshot> {
         match &self.state {
             FunctionState::Contact { state }
@@ -424,6 +460,7 @@ impl FunctionSnapshot {
         match &self.state {
             FunctionState::Outlet { power } | FunctionState::Light { power, .. } => Some(*power),
             FunctionState::Temperature { .. }
+            | FunctionState::Curtain { .. }
             | FunctionState::Humidity { .. }
             | FunctionState::CarbonDioxide { .. }
             | FunctionState::Illuminance { .. }
@@ -436,6 +473,7 @@ impl FunctionSnapshot {
         match &self.state {
             FunctionState::Light { lighting, .. } => Some(*lighting),
             FunctionState::Outlet { .. }
+            | FunctionState::Curtain { .. }
             | FunctionState::Temperature { .. }
             | FunctionState::Humidity { .. }
             | FunctionState::CarbonDioxide { .. }
@@ -453,6 +491,7 @@ impl FunctionSnapshot {
             | FunctionState::Illuminance { measurement } => Some(*measurement),
             FunctionState::Outlet { .. }
             | FunctionState::Light { .. }
+            | FunctionState::Curtain { .. }
             | FunctionState::Contact { .. }
             | FunctionState::Motion { .. }
             | FunctionState::Occupancy { .. } => None,

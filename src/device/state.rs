@@ -9,6 +9,7 @@ use event_listener::Event;
 use std::sync::{Arc, Mutex};
 enum RuntimeValue {
     Control(Box<ControlRuntime>),
+    Curtain(super::CurtainSnapshot),
     Measurement(MeasurementSnapshot),
     StateSensor(super::StateSnapshot),
 }
@@ -22,6 +23,28 @@ pub(super) struct RuntimeState {
     pub(super) revision: u64,
 }
 impl RuntimeState {
+    fn curtain() -> Self {
+        Self {
+            value: RuntimeValue::Curtain(super::CurtainSnapshot {
+                current_position: super::CurtainObservation {
+                    value: None,
+                    source_time: None,
+                    received_at: None,
+                },
+                target_position: super::CurtainObservation {
+                    value: None,
+                    source_time: None,
+                    received_at: None,
+                },
+                status: super::CurtainObservation {
+                    value: None,
+                    source_time: None,
+                    received_at: None,
+                },
+            }),
+            revision: 0,
+        }
+    }
     fn control(lighting: Option<super::LightSnapshot>) -> Self {
         Self {
             value: RuntimeValue::Control(Box::new(ControlRuntime {
@@ -59,19 +82,25 @@ impl RuntimeState {
     pub(super) fn commands(&self) -> Option<&CommandCoordinator> {
         match &self.value {
             RuntimeValue::Control(control) => Some(&control.commands),
-            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
+            RuntimeValue::Curtain(_)
+            | RuntimeValue::Measurement(_)
+            | RuntimeValue::StateSensor(_) => None,
         }
     }
     pub(super) fn commands_mut(&mut self) -> Option<&mut CommandCoordinator> {
         match &mut self.value {
             RuntimeValue::Control(control) => Some(&mut control.commands),
-            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
+            RuntimeValue::Curtain(_)
+            | RuntimeValue::Measurement(_)
+            | RuntimeValue::StateSensor(_) => None,
         }
     }
     pub(super) fn power(&self) -> Option<Power> {
         match &self.value {
             RuntimeValue::Control(control) => Some(control.power),
-            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
+            RuntimeValue::Curtain(_)
+            | RuntimeValue::Measurement(_)
+            | RuntimeValue::StateSensor(_) => None,
         }
     }
     fn set_power(&mut self, new: Power) {
@@ -82,7 +111,9 @@ impl RuntimeState {
     fn control_parts(&self) -> Option<(Power, Option<super::LightSnapshot>)> {
         match &self.value {
             RuntimeValue::Control(control) => Some((control.power, control.lighting)),
-            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
+            RuntimeValue::Curtain(_)
+            | RuntimeValue::Measurement(_)
+            | RuntimeValue::StateSensor(_) => None,
         }
     }
     fn set_control_parts(&mut self, power: Power, lighting: Option<super::LightSnapshot>) {
@@ -94,13 +125,17 @@ impl RuntimeState {
     fn lighting_mut(&mut self) -> Option<&mut super::LightSnapshot> {
         match &mut self.value {
             RuntimeValue::Control(control) => control.lighting.as_mut(),
-            RuntimeValue::Measurement(_) | RuntimeValue::StateSensor(_) => None,
+            RuntimeValue::Curtain(_)
+            | RuntimeValue::Measurement(_)
+            | RuntimeValue::StateSensor(_) => None,
         }
     }
     fn measurement_mut(&mut self) -> Option<&mut MeasurementSnapshot> {
         match &mut self.value {
             RuntimeValue::Measurement(measurement) => Some(measurement),
-            RuntimeValue::Control(_) | RuntimeValue::StateSensor(_) => None,
+            RuntimeValue::Control(_) | RuntimeValue::Curtain(_) | RuntimeValue::StateSensor(_) => {
+                None
+            }
         }
     }
 }
@@ -346,7 +381,9 @@ impl Function {
             color: None,
             mode: description.inferred_color_mode(),
         });
-        let state = if description.kind.is_measurement() {
+        let state = if description.kind == super::FunctionKind::Curtain {
+            RuntimeState::curtain()
+        } else if description.kind.is_measurement() {
             RuntimeState::measurement_state()
         } else if description.kind.is_state_sensor() {
             RuntimeState::state_sensor()
@@ -397,6 +434,9 @@ impl Function {
                     power: control.power,
                     lighting: control.lighting.expect("light has lighting state"),
                 }
+            }
+            (super::FunctionKind::Curtain, RuntimeValue::Curtain(curtain)) => {
+                FunctionState::Curtain { curtain: *curtain }
             }
             (super::FunctionKind::Temperature(_), RuntimeValue::Measurement(measurement)) => {
                 FunctionState::Temperature {
@@ -494,7 +534,10 @@ impl Function {
         Ok(self.snapshot_locked(&state))
     }
     pub fn observe(&self, power: bool) {
-        if self.description().is_read_only() {
+        if !matches!(
+            self.description().kind,
+            super::FunctionKind::Outlet | super::FunctionKind::Light(_)
+        ) {
             return;
         }
         let mut state = self.0.state.lock().unwrap();

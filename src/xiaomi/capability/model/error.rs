@@ -47,7 +47,7 @@ impl fmt::Display for CapabilityError {
             }
             Self::InvalidLight(field) => write!(formatter, "invalid light capability: {field}"),
             Self::InvalidGroup(field) => write!(formatter, "invalid native light group: {field}"),
-            Self::InvalidValue(field) => write!(formatter, "invalid light property value: {field}"),
+            Self::InvalidValue(field) => write!(formatter, "invalid property value: {field}"),
             Self::IncompatibleModel(model) => {
                 write!(formatter, "unsupported MIoT description for {model}")
             }

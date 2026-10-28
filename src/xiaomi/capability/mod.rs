@@ -1,3 +1,4 @@
+mod curtain;
 mod description;
 mod group;
 mod light;
@@ -8,11 +9,13 @@ mod outlet;
 mod repair;
 mod sensor;
 mod state_sensor;
+pub(crate) use curtain::is_curtain_type;
 pub(crate) use group::parse_group;
 pub(crate) use light::is_light_type;
 pub(crate) use ls2307::is_type as is_ls2307_type;
 pub use model::{
-    BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding, LightBindings,
+    BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding, CurtainBindings,
+    CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding, LightBindings,
     MeasurementBinding, MeasurementUnit, ModeBinding, NumericFormat, ParsedDevice, ParsedFunction,
     PropertyBinding, TemperatureBinding,
 };
@@ -41,6 +44,8 @@ pub fn parse_device_for_model(
         Err(CapabilityError::IncompatibleModel(ls2307::MODEL))
     } else if description.urn.standard("device", "light", 0x0000a001) {
         light::parse_light(key.clone(), model, &description)
+    } else if description.urn.standard("device", "curtain", 0x0000a00c) {
+        curtain::parse_curtain(key.clone(), &description)
     } else {
         outlet::parse_outlet(key.clone(), &description)
     };

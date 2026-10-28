@@ -5,6 +5,26 @@ fn fixed_shape(functions: &[FunctionDescription]) -> FixedShape {
     fixed_shape_with_battery(functions.iter(), false)
 }
 
+#[test]
+fn curtain_has_a_distinct_stable_single_control_shape() {
+    let curtain = FunctionDescription {
+        id: "main".into(),
+        label: "窗帘".into(),
+        kind: FunctionKind::Curtain,
+    };
+    let mut renamed = curtain.clone();
+    renamed.label = "Bedroom".into();
+    let outlet = FunctionDescription {
+        kind: FunctionKind::Outlet,
+        ..curtain.clone()
+    };
+    assert_eq!(
+        fixed_shape(std::slice::from_ref(&curtain)),
+        fixed_shape(&[renamed])
+    );
+    assert_ne!(fixed_shape(&[curtain]), fixed_shape(&[outlet]));
+}
+
 fn light(profile: LightProfile) -> FunctionDescription {
     FunctionDescription {
         id: "main".into(),

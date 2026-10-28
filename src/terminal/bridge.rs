@@ -119,6 +119,7 @@ fn capabilities(description: &crate::device::FunctionDescription) -> String {
         .iter()
         .map(|capability| match capability {
             Capability::OnOff => "on/off".into(),
+            Capability::Curtain => "curtain".into(),
             Capability::Brightness => "brightness".into(),
             Capability::ColorTemperature(interval) => {
                 format!("temperature {}–{} K", interval.min(), interval.max())
@@ -199,6 +200,14 @@ fn render(view: &View, did: Option<&str>) -> String {
             let label = &function.description().label;
             let snapshot = function.snapshot();
             match snapshot.state {
+                crate::device::FunctionState::Curtain { curtain } => {
+                    lines.push(format!(
+                        "  {id} ({label}): current={:?}; target={:?}; status={:?}",
+                        curtain.current_position.value,
+                        curtain.target_position.value,
+                        curtain.status.value
+                    ));
+                }
                 crate::device::FunctionState::Outlet { power } => {
                     lines.push(format!("  {id} ({label}): {}", power_text(power)));
                 }

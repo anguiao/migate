@@ -145,6 +145,23 @@ pub(crate) fn native_for(
                     };
                     ParsedFunction::outlet(id, label, PropertyBinding { siid, piid: 1 })
                 }
+                FunctionKind::Curtain => {
+                    let instance = serde_json::from_str(include_str!(
+                        "../../../../tests/fixtures/miot/xiaomi-acn010.json"
+                    ))
+                    .unwrap();
+                    let parsed = crate::xiaomi::capability::parse_device_for_model(
+                        description.key().clone(),
+                        "xiaomi.curtain.acn010",
+                        &instance,
+                    )
+                    .unwrap();
+                    ParsedFunction::curtain_control(
+                        id,
+                        label,
+                        parsed.functions()[0].curtain().unwrap().clone(),
+                    )
+                }
                 FunctionKind::Light(profile) => {
                     let power = PropertyBinding { siid: 2, piid: 1 };
                     let lighting = match profile {
@@ -201,6 +218,12 @@ pub(crate) fn native_for(
             if description
                 .functions()
                 .iter()
+                .any(|function| function.kind == FunctionKind::Curtain)
+            {
+                "urn:miot-spec-v2:device:curtain:0000A00C:xiaomi-acn010:1:0000D031"
+            } else if description
+                .functions()
+                .iter()
                 .any(|function| function.kind.is_light())
             {
                 "urn:miot-spec-v2:device:light:0000A001:test-v1:1"
@@ -226,14 +249,22 @@ pub(crate) fn native_for(
         .functions()
         .iter()
         .any(|function| function.kind.is_light());
+    let is_curtain = description
+        .functions()
+        .iter()
+        .any(|function| function.kind == FunctionKind::Curtain);
     NativeDescription::new(
-        if is_light {
+        if is_curtain {
+            "xiaomi.curtain.acn010"
+        } else if is_light {
             "test.light"
         } else {
             "test.outlet"
         }
         .into(),
-        if is_light {
+        if is_curtain {
+            "urn:miot-spec-v2:device:curtain:0000A00C:xiaomi-acn010:1:0000D031"
+        } else if is_light {
             "urn:miot-spec-v2:device:light:0000A001:test-v1:1"
         } else {
             "urn:miot-spec-v2:device:outlet:0000A002:test-v1:1"

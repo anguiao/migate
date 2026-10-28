@@ -29,6 +29,7 @@ struct FixedFunction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FixedKind {
     Outlet,
+    Curtain,
     Contact,
     Motion,
     Occupancy,
@@ -64,6 +65,7 @@ pub(crate) fn fixed_shape_with_battery<'a>(
                 id: function.id.clone(),
                 kind: match function.kind {
                     FunctionKind::Outlet => FixedKind::Outlet,
+                    FunctionKind::Curtain => FixedKind::Curtain,
                     FunctionKind::Contact => FixedKind::Contact,
                     FunctionKind::Motion => FixedKind::Motion,
                     FunctionKind::Occupancy => FixedKind::Occupancy,

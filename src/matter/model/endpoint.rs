@@ -13,6 +13,18 @@ const SINGLE_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     BridgedHandler::CLUSTER,
     OnOffHandler::CLUSTER
 );
+// The dedicated Window Covering handler is installed in the subsequent slice.
+const CURTAIN_PENDING_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::DescHandler::CLUSTER,
+    groups::GroupsHandler::CLUSTER,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    BridgedHandler::CLUSTER
+);
+const CURTAIN_CHILD_PENDING_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    identify::IdentifyHandler::<()>::CLUSTER
+);
 const CT_LIGHT: DeviceType = DeviceType {
     dtype: 0x010c,
     drev: 4,
@@ -256,6 +268,12 @@ impl Entry {
                             O_CLUSTERS,
                         ),
                     }
+                } else if matches!(function.kind, FunctionHandlerKind::Curtain) {
+                    Endpoint::new(
+                        self.endpoint,
+                        devices!(DEV_TYPE_BRIDGED_NODE),
+                        CURTAIN_PENDING_CLUSTERS,
+                    )
                 } else {
                     Endpoint::new(self.endpoint, SINGLE_TYPES, SINGLE_CLUSTERS)
                 }
@@ -276,6 +294,12 @@ impl Entry {
                 }
             }
             Role::Child { function, .. } => match &function.kind {
+                FunctionHandlerKind::Curtain => Endpoint::new(
+                    self.endpoint,
+                    devices!(DEV_TYPE_BRIDGED_NODE),
+                    CURTAIN_CHILD_PENDING_CLUSTERS,
+                )
+                .with_tags(tags),
                 FunctionHandlerKind::Contact(_) => {
                     Endpoint::new(self.endpoint, devices!(CONTACT_SENSOR), CONTACT_CLUSTERS)
                         .with_tags(tags)

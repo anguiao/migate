@@ -7,6 +7,7 @@ pub(super) struct FunctionHandler {
 }
 pub(super) enum FunctionHandlerKind {
     Outlet(OnOffHandler),
+    Curtain,
     Light(Box<lighting::Lighting>),
     Temperature(sensors::TemperatureHandler),
     Humidity(sensors::HumidityHandler),
@@ -74,6 +75,7 @@ impl FunctionHandler {
                 endpoint,
                 Dataver::new(versions.on_off),
             )),
+            FunctionKind::Curtain => FunctionHandlerKind::Curtain,
         };
         Self {
             groups: Dataver::new(versions.groups),
@@ -85,6 +87,7 @@ impl FunctionHandler {
         match &self.kind {
             FunctionHandlerKind::Light(light) => Some(light),
             FunctionHandlerKind::Outlet(_)
+            | FunctionHandlerKind::Curtain
             | FunctionHandlerKind::Temperature(_)
             | FunctionHandlerKind::Humidity(_)
             | FunctionHandlerKind::Co2(_)
@@ -146,6 +149,7 @@ impl FunctionHandler {
             FunctionHandlerKind::Contact(_) => |_, cluster| cluster == 0x45,
             FunctionHandlerKind::Occupancy(_) => |_, cluster| cluster == 0x406,
             FunctionHandlerKind::Outlet(_) => |_, cluster| cluster == 6,
+            FunctionHandlerKind::Curtain => |_, _| false,
             FunctionHandlerKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
             FunctionHandlerKind::Temperature(_) => |_, cluster| cluster == 0x402,
             FunctionHandlerKind::Humidity(_) => |_, cluster| cluster == 0x405,
@@ -205,6 +209,7 @@ macro_rules! dispatch_function {
             FunctionHandlerKind::Outlet(handler) => AsyncHandler::$method(
                 &on_off::HandlerAsyncAdaptor(handler), $($arg),*
             ).await,
+            FunctionHandlerKind::Curtain => AsyncHandler::$method(&EmptyHandler, $($arg),*).await,
             FunctionHandlerKind::Light(light) => AsyncHandler::$method(
                 &lighting::Dispatch(light), $($arg),*
             ).await,

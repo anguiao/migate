@@ -1,3 +1,4 @@
+mod curtain;
 mod labels;
 pub(crate) mod model_fixture;
 

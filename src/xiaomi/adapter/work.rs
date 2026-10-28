@@ -143,6 +143,7 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
+            .filter(|function| function.curtain().is_none())
             .flat_map(ParsedFunction::bindings)
             .collect::<Vec<_>>();
         if let Some(trigger) = self.native.device().refresh_trigger() {
@@ -163,6 +164,7 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
+            .filter(|function| function.curtain().is_none())
             .map(|function| function.id().to_owned())
             .chain(self.battery_binding().map(|_| BATTERY_CHANNEL.to_owned()))
             .collect()
@@ -293,6 +295,7 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
+            .filter(|function| function.curtain().is_none())
             .filter(|function| include_states || function.state().is_none())
         {
             for binding in function.bindings() {

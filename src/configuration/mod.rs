@@ -557,6 +557,7 @@ pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescript
                 left.id() == right.id()
                     && left.power() == right.power()
                     && left.lighting() == right.lighting()
+                    && left.curtain() == right.curtain()
                     && left.measurement() == right.measurement()
                     && left.state() == right.state()
                     && left.motion() == right.motion()

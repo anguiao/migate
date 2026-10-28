@@ -144,6 +144,9 @@ impl DeviceWork {
             return false;
         };
         let id = function.id().to_owned();
+        if function.curtain().is_some() {
+            return false;
+        }
         let light = function.lighting().is_some();
         if light {
             let origin = if cached_report {
