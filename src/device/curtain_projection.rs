@@ -1,4 +1,4 @@
-use super::{CurtainCommand, CurtainMotion, CurtainSnapshot, CurtainToken, CurtainValue};
+use super::{CurtainMotion, CurtainSnapshot, CurtainValue, curtain_command::CurtainToken};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -26,11 +26,8 @@ impl CurtainProjection {
             snapshot.target_position.value
         }
     }
-    pub(super) fn begin(&mut self, command: CurtainCommand, token: CurtainToken) {
-        match command {
-            CurtainCommand::Target(_) => self.target_command(),
-            CurtainCommand::Stop => self.queued.push(token),
-        }
+    pub(super) fn queue_stop(&mut self, token: CurtainToken) {
+        self.queued.push(token);
     }
     pub(super) fn target_command(&mut self) {
         self.queued.clear();

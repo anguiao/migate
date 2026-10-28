@@ -447,12 +447,6 @@ pub enum FunctionState {
     },
 }
 impl FunctionSnapshot {
-    pub fn curtain(&self) -> Option<CurtainSnapshot> {
-        match &self.state {
-            FunctionState::Curtain { curtain } => Some(*curtain),
-            _ => None,
-        }
-    }
     pub fn state_sensor(&self) -> Option<StateSnapshot> {
         match &self.state {
             FunctionState::Contact { state }

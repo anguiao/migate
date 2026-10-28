@@ -11,7 +11,7 @@ pub use command::{
     ActionToken, CommandReceiver, CommandRequest, DeviceRequest, LightAction,
     LightActionDiagnostics, LightDimension, LightRequest,
 };
-pub use curtain_command::{CurtainAction, CurtainCommand, CurtainRequest, CurtainToken};
+pub use curtain_command::{CurtainAction, CurtainCommand, CurtainRequest};
 pub use light_command::{LightColorTarget, LightTarget};
 pub(crate) use model::CurtainValue;
 pub(crate) use model::mired_span;

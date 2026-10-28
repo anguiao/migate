@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Instant,
 };
@@ -18,52 +18,34 @@ pub enum CurtainCommand {
     Stop,
 }
 
-/// Tokens distinguish requests even when a device identity is reused.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CurtainToken {
-    owner: u64,
-    serial: u64,
-}
+/// Requests retain their owning function; tokens distinguish its local stops.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CurtainToken(u64);
 
 struct Entry {
     token: CurtainToken,
     command: CurtainCommand,
-    completion: Arc<Completion>,
+    completion: Completion,
     sent: AtomicBool,
     queued_at: Instant,
 }
 
 pub struct CurtainAction(Arc<Entry>);
 impl CurtainAction {
-    pub fn token(&self) -> CurtainToken {
-        self.0.token
-    }
-
     /// Acceptance is a transport receipt, not a physical observation.
     pub async fn accepted(&self) -> Result<FunctionSnapshot, CommandError> {
         self.0.completion.wait().await
     }
 }
 
+#[derive(Default)]
 pub(super) struct CurtainCoordinator {
-    owner: u64,
     serial: u64,
     pending: VecDeque<Arc<Entry>>,
     flight: Option<Arc<Entry>>,
     closed: bool,
 }
 impl CurtainCoordinator {
-    pub(super) fn new() -> Self {
-        static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
-        Self {
-            owner: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
-            serial: 0,
-            pending: VecDeque::new(),
-            flight: None,
-            closed: false,
-        }
-    }
-
     fn submit(&mut self, command: CurtainCommand) -> CurtainAction {
         // A Stop removes all earlier unsent targets; a target replaces only
         // the adjacent target, never crossing an intervening Stop.
@@ -91,12 +73,9 @@ impl CurtainCoordinator {
         }
         self.serial += 1;
         let entry = Arc::new(Entry {
-            token: CurtainToken {
-                owner: self.owner,
-                serial: self.serial,
-            },
+            token: CurtainToken(self.serial),
             command,
-            completion: Arc::new(Completion::default()),
+            completion: Completion::default(),
             sent: AtomicBool::new(false),
             queued_at: Instant::now(),
         });
@@ -156,8 +135,10 @@ impl Function {
         }
         self.snapshot_locked(&state).availability.command_result()?;
         let action = state.curtain_commands_mut().unwrap().submit(command);
-        let changed = state.update_curtain_projection(|p| p.begin(command, action.token()));
-        self.notify_curtain_projection(changed);
+        if matches!(command, CurtainCommand::Stop) {
+            let changed = state.update_curtain_projection(|p| p.queue_stop(action.0.token));
+            self.notify_curtain_projection(changed);
+        }
         self.0.submitted.notify(usize::MAX);
         Ok(action)
     }

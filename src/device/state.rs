@@ -48,7 +48,7 @@ impl RuntimeState {
                         received_at: None,
                     },
                 },
-                commands: super::curtain_command::CurtainCoordinator::new(),
+                commands: super::curtain_command::CurtainCoordinator::default(),
                 projection: super::curtain_projection::CurtainProjection::default(),
             })),
             revision: 0,
@@ -567,7 +567,7 @@ impl Function {
             unreachable!("curtain function has curtain state")
         };
         (
-            self.snapshot_locked(&state).curtain().unwrap(),
+            curtain.snapshot,
             curtain.projection.target(curtain.snapshot),
         )
     }
@@ -582,7 +582,7 @@ impl Function {
         value: super::CurtainValue,
         source_time: Option<i64>,
         received_at: i64,
-    ) -> Result<FunctionSnapshot, super::CommandError> {
+    ) {
         fn update<T: Copy + PartialEq>(
             current: &mut super::CurtainObservation<T>,
             value: T,
@@ -599,7 +599,7 @@ impl Function {
         }
         let mut state = self.0.state.lock().unwrap();
         let RuntimeValue::Curtain(curtain) = &mut state.value else {
-            return Err(super::CommandError::Unsupported);
+            unreachable!("curtain function has curtain state")
         };
         let before_target = curtain.projection.target(curtain.snapshot);
         curtain.projection.observe(&value);
@@ -628,7 +628,6 @@ impl Function {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
-        Ok(self.snapshot_locked(&state))
     }
     /// Apply one state observation already interpreted at the source boundary.
     pub fn observe_state(

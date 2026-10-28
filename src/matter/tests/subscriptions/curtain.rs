@@ -37,15 +37,9 @@ fn curtain_live_subscription_reports_only_changed_values() {
             );
             device.set_availability(Availability::Available);
             let function = &device.functions()[0];
-            function
-                .observe_curtain(CurtainValue::CurrentPosition(20), Some(1), 1)
-                .unwrap();
-            function
-                .observe_curtain(CurtainValue::TargetPosition(80), Some(1), 1)
-                .unwrap();
-            function
-                .observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 1)
-                .unwrap();
+            function.observe_curtain(CurtainValue::CurrentPosition(20), Some(1), 1);
+            function.observe_curtain(CurtainValue::TargetPosition(80), Some(1), 1);
+            function.observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 1);
             let handler = model_handler(vec![single_entry(&device)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
@@ -94,9 +88,7 @@ fn curtain_live_subscription_reports_only_changed_values() {
                             (14, Some(8000))
                         ]
                     );
-                    function
-                        .observe_curtain(CurtainValue::CurrentPosition(25), Some(2), 2)
-                        .unwrap();
+                    function.observe_curtain(CurtainValue::CurrentPosition(25), Some(2), 2);
                     let current = receive_observed(&client, id).await.unwrap();
                     assert_eq!(
                         current
@@ -108,9 +100,7 @@ fn curtain_live_subscription_reports_only_changed_values() {
                     );
                     assert_ne!(current.curtain[&8].0, initial.curtain[&8].0);
                     wait_committed(&state).await;
-                    function
-                        .observe_curtain(CurtainValue::TargetPosition(60), Some(3), 3)
-                        .unwrap();
+                    function.observe_curtain(CurtainValue::TargetPosition(60), Some(3), 3);
                     let target = receive_observed(&client, id).await.unwrap();
                     assert_eq!(
                         target
@@ -121,9 +111,11 @@ fn curtain_live_subscription_reports_only_changed_values() {
                         [(11, Some(4000))]
                     );
                     wait_committed(&state).await;
-                    function
-                        .observe_curtain(CurtainValue::Status(CurtainMotion::Closing), Some(4), 4)
-                        .unwrap();
+                    function.observe_curtain(
+                        CurtainValue::Status(CurtainMotion::Closing),
+                        Some(4),
+                        4,
+                    );
                     let status = receive_observed(&client, id).await.unwrap();
                     assert_eq!(
                         status
@@ -134,15 +126,13 @@ fn curtain_live_subscription_reports_only_changed_values() {
                         [(10, Some(10))]
                     );
                     wait_committed(&state).await;
-                    function
-                        .observe_curtain(CurtainValue::CurrentPosition(25), Some(5), 5)
-                        .unwrap();
-                    function
-                        .observe_curtain(CurtainValue::TargetPosition(60), Some(5), 5)
-                        .unwrap();
-                    function
-                        .observe_curtain(CurtainValue::Status(CurtainMotion::Closing), Some(5), 5)
-                        .unwrap();
+                    function.observe_curtain(CurtainValue::CurrentPosition(25), Some(5), 5);
+                    function.observe_curtain(CurtainValue::TargetPosition(60), Some(5), 5);
+                    function.observe_curtain(
+                        CurtainValue::Status(CurtainMotion::Closing),
+                        Some(5),
+                        5,
+                    );
                     or(
                         async {
                             let report = receive_observed(&client, id).await.unwrap();
@@ -163,9 +153,11 @@ fn curtain_live_subscription_reports_only_changed_values() {
                     };
                     assert_eq!(request.command, CurtainCommand::Stop);
                     request.mark_sent().unwrap();
-                    function
-                        .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), Some(5), 5)
-                        .unwrap();
+                    function.observe_curtain(
+                        CurtainValue::Status(CurtainMotion::Stopped),
+                        Some(5),
+                        5,
+                    );
                     let stopped = receive_observed(&client, id).await.unwrap();
                     assert_eq!(
                         stopped
@@ -188,12 +180,12 @@ fn curtain_live_subscription_reports_only_changed_values() {
                     request.accept().unwrap();
                     second.accepted().await.unwrap();
                     wait_committed(&state).await;
-                    function
-                        .observe_curtain(CurtainValue::CurrentPosition(25), Some(5), 5)
-                        .unwrap();
-                    function
-                        .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), Some(5), 5)
-                        .unwrap();
+                    function.observe_curtain(CurtainValue::CurrentPosition(25), Some(5), 5);
+                    function.observe_curtain(
+                        CurtainValue::Status(CurtainMotion::Stopped),
+                        Some(5),
+                        5,
+                    );
                     or(
                         async {
                             let report = receive_observed(&client, id).await.unwrap();

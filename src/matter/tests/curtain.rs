@@ -127,12 +127,8 @@ fn curtain_reads_native_values_and_validates_mode() {
             );
         }
         let function = &device.functions()[0];
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(37), Some(1), 2)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::TargetPosition(80), Some(1), 2)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(37), Some(1), 2);
+        function.observe_curtain(CurtainValue::TargetPosition(80), Some(1), 2);
         for (id, expected) in [(8, 63), (11, 2000), (14, 6300)] {
             ctx.attribute = attr(0x102, id);
             assert_eq!(
@@ -147,9 +143,7 @@ fn curtain_reads_native_values_and_validates_mode() {
             (CurtainMotion::Closing, 10),
             (CurtainMotion::Stopped, 0),
         ] {
-            function
-                .observe_curtain(CurtainValue::Status(motion), Some(1), 2)
-                .unwrap();
+            function.observe_curtain(CurtainValue::Status(motion), Some(1), 2);
             ctx.attribute = attr(0x102, 10);
             assert_eq!(
                 report_value(&read_bytes(&handler, &ctx).await.unwrap())
@@ -254,7 +248,7 @@ fn stop_projection_follows_feedback_and_yields_to_new_commands_and_reports() {
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
     block_on(async {
-        let observe = |value| function.observe_curtain(value, Some(7), 7).unwrap();
+        let observe = |value| function.observe_curtain(value, Some(7), 7);
         observe(CurtainValue::CurrentPosition(20));
         observe(CurtainValue::TargetPosition(80));
         observe(CurtainValue::Status(CurtainMotion::Opening));
@@ -343,7 +337,7 @@ fn stop_failure_and_unsent_barriers_do_not_overwrite_later_target() {
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
     block_on(async {
-        let observe = |value| function.observe_curtain(value, None, 1).unwrap();
+        let observe = |value| function.observe_curtain(value, None, 1);
         observe(CurtainValue::CurrentPosition(30));
         observe(CurtainValue::TargetPosition(80));
         observe(CurtainValue::Status(CurtainMotion::Opening));
@@ -410,43 +404,29 @@ fn curtain_reports_only_changed_projection_and_preserves_values_on_disconnect() 
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
     block_on(async {
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(20), Some(1), 1)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::TargetPosition(80), Some(1), 1)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(20), Some(1), 1);
+        function.observe_curtain(CurtainValue::TargetPosition(80), Some(1), 1);
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 1);
         ctx.attribute = attr(0x102, 11);
         let mut run = pin!(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         ctx.changes.borrow_mut().clear();
         let version = super::support::report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(21), Some(2), 2)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(21), Some(2), 2);
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(&*ctx.changes.borrow(), &[(2, 0x102, 8), (2, 0x102, 14)]);
         let next = super::support::report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
         assert_ne!(next, version);
         ctx.changes.borrow_mut().clear();
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(21), Some(3), 3)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(21), Some(3), 3);
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(ctx.changes.borrow().is_empty());
         assert_eq!(
             super::support::report_dataver(&read_bytes(&handler, &ctx).await.unwrap()),
             next
         );
-        function
-            .observe_curtain(CurtainValue::TargetPosition(70), Some(4), 4)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Closing), Some(4), 4)
-            .unwrap();
+        function.observe_curtain(CurtainValue::TargetPosition(70), Some(4), 4);
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Closing), Some(4), 4);
         assert!(poll_once(run.as_mut()).await.is_none());
         assert_eq!(&*ctx.changes.borrow(), &[(2, 0x102, 11), (2, 0x102, 10)]);
         ctx.changes.borrow_mut().clear();
@@ -473,12 +453,8 @@ fn later_rejected_target_still_retires_previous_stop_projection() {
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
     block_on(async {
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(25), None, 1)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::TargetPosition(80), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(25), None, 1);
+        function.observe_curtain(CurtainValue::TargetPosition(80), None, 1);
         let stop = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let DeviceRequest::Curtain(request) = receiver.next_operation().await.unwrap() else {
             panic!()
@@ -486,9 +462,7 @@ fn later_rejected_target_still_retires_previous_stop_projection() {
         request.mark_sent().unwrap();
         request.accept().unwrap();
         stop.accepted().await.unwrap();
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1);
         ctx.attribute = attr(0x102, 11);
         assert_eq!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
@@ -508,9 +482,7 @@ fn later_rejected_target_still_retires_previous_stop_projection() {
                 .unwrap(),
             2000
         );
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1);
         assert_eq!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
                 .u16()
@@ -526,9 +498,7 @@ fn stop_feedback_accepts_either_report_order_and_unknown_current() {
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
     block_on(async {
-        function
-            .observe_curtain(CurtainValue::TargetPosition(80), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::TargetPosition(80), None, 1);
         ctx.attribute = attr(0x102, 11);
         let stop = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let DeviceRequest::Curtain(request) = receiver.next_operation().await.unwrap() else {
@@ -544,17 +514,13 @@ fn stop_feedback_accepts_either_report_order_and_unknown_current() {
                 .unwrap(),
             2000
         );
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1);
         assert!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
                 .null()
                 .is_ok()
         );
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(44), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(44), None, 1);
         assert_eq!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
                 .u16()
@@ -562,9 +528,7 @@ fn stop_feedback_accepts_either_report_order_and_unknown_current() {
             5600
         );
 
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Opening), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Opening), None, 1);
         let stop = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let DeviceRequest::Curtain(request) = receiver.next_operation().await.unwrap() else {
             panic!()
@@ -572,18 +536,14 @@ fn stop_feedback_accepts_either_report_order_and_unknown_current() {
         request.mark_sent().unwrap();
         request.accept().unwrap();
         stop.accepted().await.unwrap();
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(50), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(50), None, 1);
         assert_eq!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
                 .u16()
                 .unwrap(),
             2000
         );
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1);
         assert_eq!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
                 .u16()
@@ -655,20 +615,14 @@ fn repeating_stop_keeps_confirmed_position_until_a_new_target_or_motion() {
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
     block_on(async {
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(25), None, 1)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::TargetPosition(80), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(25), None, 1);
+        function.observe_curtain(CurtainValue::TargetPosition(80), None, 1);
         let first = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let DeviceRequest::Curtain(request) = receiver.next_operation().await.unwrap() else {
             panic!()
         };
         request.mark_sent().unwrap();
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1);
         ctx.attribute = attr(0x102, 11);
         let read_target = async || {
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
@@ -687,9 +641,7 @@ fn repeating_stop_keeps_confirmed_position_until_a_new_target_or_motion() {
         request.reject(CommandError::Timeout);
         assert_eq!(second.accepted().await.unwrap_err(), CommandError::Timeout);
         assert_eq!(read_target().await, 7500);
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Opening), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Opening), None, 1);
         assert_eq!(read_target().await, 2000);
     });
 }
@@ -701,15 +653,9 @@ fn queued_later_stops_do_not_mask_feedback_from_the_first_sent_stop() {
         device.set_availability(Availability::Available);
         let function = &device.functions()[0];
         block_on(async {
-            function
-                .observe_curtain(CurtainValue::CurrentPosition(25), Some(1), 1)
-                .unwrap();
-            function
-                .observe_curtain(CurtainValue::TargetPosition(80), Some(1), 1)
-                .unwrap();
-            function
-                .observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 1)
-                .unwrap();
+            function.observe_curtain(CurtainValue::CurrentPosition(25), Some(1), 1);
+            function.observe_curtain(CurtainValue::TargetPosition(80), Some(1), 1);
+            function.observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 1);
             ctx.attribute = attr(0x102, 11);
             let mut run = pin!(handler.run(&ctx));
             assert!(poll_once(run.as_mut()).await.is_none());
@@ -726,9 +672,7 @@ fn queued_later_stops_do_not_mask_feedback_from_the_first_sent_stop() {
             };
             if both_queued_before_send {
                 // An old cached stopped status cannot arm an unsent request.
-                function
-                    .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), Some(1), 1)
-                    .unwrap();
+                function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), Some(1), 1);
                 assert!(poll_once(run.as_mut()).await.is_none());
                 assert_eq!(
                     report_value(&read_bytes(&handler, &ctx).await.unwrap())
@@ -744,9 +688,7 @@ fn queued_later_stops_do_not_mask_feedback_from_the_first_sent_stop() {
             let version =
                 super::support::report_dataver(&read_bytes(&handler, &ctx).await.unwrap());
             // This report belongs to the sent Stop, even with another Stop queued.
-            function
-                .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), Some(1), 1)
-                .unwrap();
+            function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), Some(1), 1);
             assert!(poll_once(run.as_mut()).await.is_none());
             let bytes = read_bytes(&handler, &ctx).await.unwrap();
             assert_eq!(report_value(&bytes).u16().unwrap(), 7500);
@@ -778,21 +720,15 @@ fn rejecting_first_stop_preserves_the_later_queued_stop() {
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
     block_on(async {
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(25), None, 1)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::TargetPosition(80), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(25), None, 1);
+        function.observe_curtain(CurtainValue::TargetPosition(80), None, 1);
         let first = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let second = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let DeviceRequest::Curtain(request) = receiver.next_operation().await.unwrap() else {
             panic!()
         };
         request.mark_sent().unwrap();
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1);
         ctx.attribute = attr(0x102, 11);
         let read_target = async || {
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
@@ -808,9 +744,7 @@ fn rejecting_first_stop_preserves_the_later_queued_stop() {
         };
         assert_eq!(request.command, CurtainCommand::Stop);
         request.mark_sent().unwrap();
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1);
         assert_eq!(read_target().await, 7500);
         request.accept().unwrap();
         second.accepted().await.unwrap();
@@ -823,7 +757,7 @@ fn later_native_target_and_resumed_motion_retire_older_stop_work() {
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
     block_on(async {
-        let observe = |value| function.observe_curtain(value, Some(1), 1).unwrap();
+        let observe = |value| function.observe_curtain(value, Some(1), 1);
         observe(CurtainValue::CurrentPosition(25));
         observe(CurtainValue::TargetPosition(80));
         observe(CurtainValue::Status(CurtainMotion::Opening));
@@ -877,12 +811,8 @@ fn unsent_stop_failure_leaves_the_next_stop_usable() {
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
     block_on(async {
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(25), None, 1)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::TargetPosition(80), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(25), None, 1);
+        function.observe_curtain(CurtainValue::TargetPosition(80), None, 1);
         let first = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let second = function.begin_curtain(CurtainCommand::Stop).unwrap();
         let DeviceRequest::Curtain(request) = receiver.next_operation().await.unwrap() else {
@@ -894,9 +824,7 @@ fn unsent_stop_failure_leaves_the_next_stop_usable() {
             Err(CommandError::SendFailed(_))
         ));
         ctx.attribute = attr(0x102, 11);
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1);
         assert_eq!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
                 .u16()
@@ -907,9 +835,7 @@ fn unsent_stop_failure_leaves_the_next_stop_usable() {
             panic!()
         };
         request.mark_sent().unwrap();
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1)
-            .unwrap();
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Stopped), None, 1);
         assert_eq!(
             report_value(&read_bytes(&handler, &ctx).await.unwrap())
                 .u16()

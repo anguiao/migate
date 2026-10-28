@@ -3,6 +3,15 @@ use crate::device::{
     PhysicalDeviceDescription,
 };
 
+impl crate::device::FunctionSnapshot {
+    pub(crate) fn curtain(&self) -> Option<crate::device::CurtainSnapshot> {
+        match self.state {
+            crate::device::FunctionState::Curtain { curtain } => Some(curtain),
+            _ => None,
+        }
+    }
+}
+
 #[test]
 fn curtain_ignores_power_observations_without_publishing_a_change() {
     let description = PhysicalDeviceDescription::new(
@@ -50,16 +59,12 @@ fn curtain_observations_update_each_value_and_only_value_changes_advance_revisio
     let (device, _) = PhysicalDevice::new(description);
     let function = &device.functions()[0];
     let initial = function.snapshot();
-    function
-        .observe_curtain(CurtainValue::CurrentPosition(37), Some(11), 12)
-        .unwrap();
+    function.observe_curtain(CurtainValue::CurrentPosition(37), Some(11), 12);
     let current = function.snapshot();
     assert_eq!(current.revision, initial.revision + 1);
     assert_eq!(current.curtain().unwrap().current_position.value, Some(37));
     assert_eq!(current.curtain().unwrap().target_position.value, None);
-    function
-        .observe_curtain(CurtainValue::CurrentPosition(37), None, 13)
-        .unwrap();
+    function.observe_curtain(CurtainValue::CurrentPosition(37), None, 13);
     let repeated = function.snapshot();
     assert_eq!(repeated.revision, current.revision);
     assert_eq!(
@@ -70,12 +75,8 @@ fn curtain_observations_update_each_value_and_only_value_changes_advance_revisio
         repeated.curtain().unwrap().current_position.received_at,
         Some(13)
     );
-    function
-        .observe_curtain(CurtainValue::TargetPosition(80), Some(14), 15)
-        .unwrap();
-    function
-        .observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(16), 17)
-        .unwrap();
+    function.observe_curtain(CurtainValue::TargetPosition(80), Some(14), 15);
+    function.observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(16), 17);
     let values = function.snapshot().curtain().unwrap();
     assert_eq!(values.current_position.value, Some(37));
     assert_eq!(values.target_position.value, Some(80));
@@ -144,7 +145,6 @@ fn curtain_unsent_targets_are_replaced_and_stop_is_a_barrier() {
         stop.accepted().await.unwrap();
         let request = next_curtain(&mut receiver).await;
         assert_eq!(request.command, CurtainCommand::Target(40.0));
-        assert_ne!(stop.token(), after.token());
         request.mark_sent().unwrap();
         request.accept().unwrap();
         after.accepted().await.unwrap();
@@ -159,15 +159,9 @@ fn curtain_sent_receipt_keeps_gate_and_never_changes_observations() {
     block_on(async {
         let (device, mut receiver) = ready_curtain("one");
         let function = &device.functions()[0];
-        function
-            .observe_curtain(CurtainValue::CurrentPosition(20), Some(1), 2)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::TargetPosition(80), Some(1), 2)
-            .unwrap();
-        function
-            .observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 2)
-            .unwrap();
+        function.observe_curtain(CurtainValue::CurrentPosition(20), Some(1), 2);
+        function.observe_curtain(CurtainValue::TargetPosition(80), Some(1), 2);
+        function.observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 2);
         let before = function.snapshot();
         let first = function
             .begin_curtain(CurtainCommand::Target(60.0))
