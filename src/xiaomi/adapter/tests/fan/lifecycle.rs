@@ -46,7 +46,10 @@ fn retired_instance_cannot_resume_a_sent_speed_or_affect_its_replacement() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .latest = Some(native);
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(native);
             control.context.reconcile("one").unwrap();
             until(|| {
                 control

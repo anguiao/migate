@@ -66,18 +66,11 @@ fn retired_curtain_cancels_queued_work_and_old_receipt_cannot_overtake_replaceme
             let stale = old.begin_curtain(CurtainCommand::Stop).unwrap();
             let mut changed: Value = instance();
             changed["services"][1]["properties"][3]["value-range"] = json!([0, 100, 5]);
-            let parsed = crate::xiaomi::capability::parse_device_for_model(
-                DeviceKey::new("xiaomi", "one"),
+            let candidate = crate::xiaomi::capability::tests::source::SourceFixture::new(
+                "one",
                 "xiaomi.curtain.acn010",
-                &changed,
-            )
-            .unwrap();
-            let native = crate::xiaomi::capability::NativeDescription::new(
-                "xiaomi.curtain.acn010".into(),
-                changed["type"].as_str().unwrap().into(),
-                parsed,
-            )
-            .unwrap();
+                changed,
+            );
             control
                 .context
                 .live
@@ -85,7 +78,7 @@ fn retired_curtain_cancels_queued_work_and_old_receipt_cannot_overtake_replaceme
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .latest = Some(native);
+                .candidate = Some(candidate.into());
             control.context.reconcile("one").unwrap();
             let replacement = loop {
                 let current = control

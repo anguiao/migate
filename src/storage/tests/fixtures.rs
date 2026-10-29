@@ -93,19 +93,11 @@ pub(crate) fn planned_from(
 ) -> CommittedConfiguration {
     let facts = SourceFacts {
         scope: Some(scope()),
-        descriptions: natives
-            .iter()
-            .map(|native| crate::configuration::SourceRaw {
-                description: native.raw.clone(),
-                fresh: true,
-            })
-            .collect(),
         devices: natives
             .into_iter()
             .map(|native| SourceDevice {
-                key: native.device().key().clone(),
                 name: Some(native.model().to_owned()),
-                native: native.native,
+                description: native.into(),
                 fresh: true,
             })
             .collect(),
@@ -115,8 +107,13 @@ pub(crate) fn planned_from(
     let new_identities = facts
         .devices
         .iter()
-        .filter(|device| current.device(&device.key).is_none())
-        .map(|device| (device.key.clone(), unique(&device.key.id)))
+        .filter(|device| current.device(&device.description.raw.key).is_none())
+        .map(|device| {
+            (
+                device.description.raw.key.clone(),
+                unique(&device.description.raw.key.id),
+            )
+        })
         .collect();
     let plan = configuration::plan(
         PlanInput {

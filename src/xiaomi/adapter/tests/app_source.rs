@@ -102,13 +102,21 @@ impl AppSource {
                     adapter.context.refresh_changed.clone(),
                     light_write,
                 ));
-                let mut slot = DeviceSlot::restored(work);
-                slot.raw = configuration
-                    .descriptions
-                    .iter()
-                    .find(|raw| raw.key == device.key)
-                    .cloned();
-                slot.committed_raw = slot.raw.clone();
+                let candidate = crate::xiaomi::capability::SourceDescription {
+                    raw: configuration
+                        .descriptions
+                        .iter()
+                        .find(|raw| raw.key == device.key)
+                        .unwrap()
+                        .clone(),
+                    native: Some(work.native.clone()),
+                };
+                let slot = DeviceSlot {
+                    admitted: Some(work),
+                    committed: Some(candidate.clone()),
+                    candidate: Some(candidate),
+                    ..Default::default()
+                };
                 live.devices.insert(device.key.id, slot);
                 physical = Some(instance);
             }
@@ -129,8 +137,7 @@ impl AppSource {
             .entry(description.key().id.clone())
             .or_default();
         let native = native_for(&description);
-        slot.raw = Some(native.raw.clone());
-        slot.latest = Some(native.native);
+        slot.candidate = Some(native.into());
         slot.latest_name = Some(description.label().to_owned());
         slot.confirmed = true;
     }
@@ -139,7 +146,7 @@ impl AppSource {
         let mut live = self.handle.0.live.borrow_mut();
         let slot = live.devices.get_mut(&key.id).unwrap();
         let native = slot.admitted.as_ref().unwrap().native.clone();
-        slot.latest = Some(native);
+        slot.candidate.as_mut().unwrap().native = Some(native);
         slot.latest_name = Some(name.to_owned());
     }
 }

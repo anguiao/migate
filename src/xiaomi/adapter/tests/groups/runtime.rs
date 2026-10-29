@@ -147,11 +147,8 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                         injected.set(true);
                         let mut live = context.live.borrow_mut();
                         if let Some(slot) = live.devices.get_mut("group-1") {
-                            let mut cached = slot
-                                .latest
-                                .clone()
-                                .or_else(|| slot.admitted.as_ref().map(|work| work.native.clone()))
-                                .unwrap();
+                            let mut cached =
+                                slot.candidate.as_ref().unwrap().native.clone().unwrap();
                             let grid = crate::device::NumericRange::new(2700, 6500, 1).unwrap();
                             cached = crate::xiaomi::capability::NativeDescription::new(
                                 cached.model().into(),
@@ -162,7 +159,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                                 ),
                             )
                             .unwrap();
-                            slot.latest = Some(cached);
+                            slot.candidate.as_mut().unwrap().native = Some(cached);
                             slot.confirmed = true;
                         }
                     }
@@ -442,10 +439,11 @@ fn failed_source_wins_before_configured_startup_commits() {
         until(|| {
             let live = c.context.live.borrow();
             live.scope.is_some()
-                && live
-                    .devices
-                    .get("one")
-                    .is_some_and(|slot| slot.latest.is_some())
+                && live.devices.get("one").is_some_and(|slot| {
+                    slot.candidate
+                        .as_ref()
+                        .is_some_and(|source| source.native.is_some())
+                })
         })
         .await;
         let port = free_udp_port();

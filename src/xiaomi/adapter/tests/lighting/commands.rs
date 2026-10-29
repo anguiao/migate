@@ -481,7 +481,10 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
             .devices
             .get_mut("one")
             .unwrap()
-            .latest = Some(changed);
+            .candidate
+            .as_mut()
+            .unwrap()
+            .native = Some(changed);
         c.context.reconcile("one").unwrap();
         until(|| {
             c.context

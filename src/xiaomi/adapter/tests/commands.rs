@@ -153,7 +153,10 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .latest = Some(changed);
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(changed);
             control.context.reconcile("one").unwrap();
             let current_physical = loop {
                 let current = control
@@ -256,7 +259,10 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .latest = Some(stable.clone());
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(stable.clone());
             control.context.reconcile("multi").unwrap();
             let current = control.context.registry.get(&key).unwrap();
             assert!(

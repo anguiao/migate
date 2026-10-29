@@ -159,7 +159,10 @@ fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .latest = Some(changed);
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(changed);
             control.context.reconcile("one").unwrap();
             until(|| {
                 control
@@ -207,7 +210,10 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .latest = Some(duplicate);
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(duplicate);
             control.context.reconcile("multi").unwrap();
             assert!(Rc::ptr_eq(&work, &device_work(control, "multi")));
             release_operation(&peer, "rpcReq", "multi", 3, accepted("multi", 3, 0)).await;
@@ -320,7 +326,10 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                     .devices
                     .get_mut("one")
                     .unwrap()
-                    .latest = Some(narrowed);
+                    .candidate
+                    .as_mut()
+                    .unwrap()
+                    .native = Some(narrowed);
                 control.context.reconcile("one").unwrap();
                 until(|| {
                     let current = device_work(control, "one");
@@ -338,7 +347,10 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                     .devices
                     .get_mut("one")
                     .unwrap()
-                    .latest = Some(original);
+                    .candidate
+                    .as_mut()
+                    .unwrap()
+                    .native = Some(original);
                 control.context.reconcile("one").unwrap();
                 until(|| {
                     let current = device_work(control, "one");

@@ -7,7 +7,7 @@
 
 use crate::{
     device::{DeviceKey, FunctionDescription, FunctionKey, PhysicalDeviceDescription},
-    xiaomi::capability::{NativeDescription, RawDescription, RepairPlan},
+    xiaomi::capability::{NativeDescription, RawDescription, RepairPlan, SourceDescription},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -111,8 +111,7 @@ pub(crate) struct DerivedConfiguration {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceDevice {
-    pub key: DeviceKey,
-    pub native: NativeDescription,
+    pub description: SourceDescription,
     pub name: Option<String>,
     pub fresh: bool,
 }
@@ -121,14 +120,7 @@ pub(crate) struct SourceDevice {
 pub(crate) struct SourceFacts {
     pub scope: Option<Scope>,
     pub devices: Vec<SourceDevice>,
-    pub descriptions: Vec<SourceRaw>,
     pub relations: Vec<GroupRelation>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SourceRaw {
-    pub description: RawDescription,
-    pub fresh: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,6 +212,16 @@ impl DerivedConfiguration {
 }
 
 impl CommittedConfiguration {
+    /// Join the validated stored input with its effective model once per source.
+    pub(crate) fn source_descriptions(&self) -> impl Iterator<Item = SourceDescription> + '_ {
+        self.descriptions.iter().map(|raw| SourceDescription {
+            raw: raw.clone(),
+            native: self
+                .device(&raw.key)
+                .and_then(|device| device.native.clone()),
+        })
+    }
+
     pub(crate) fn empty() -> Self {
         Self {
             scope: None,

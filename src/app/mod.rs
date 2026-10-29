@@ -191,9 +191,12 @@ impl App {
         let committed_derived = current.configuration.derive();
         let mut new_identities = BTreeMap::new();
         for device in &snapshot.devices {
-            if current.configuration.device(&device.key).is_none() {
+            let description = &device.description;
+            if description.native.is_some()
+                && current.configuration.device(&description.raw.key).is_none()
+            {
                 new_identities.insert(
-                    device.key.clone(),
+                    description.raw.key.clone(),
                     uuid::Uuid::new_v4().simple().to_string(),
                 );
             }

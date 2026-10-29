@@ -145,7 +145,7 @@ pub(super) async fn run(
             live.devices
                 .iter()
                 .filter(|(did, slot)| {
-                    home.dids.contains(did) && (slot.admitted.is_some() || slot.raw.is_some())
+                    home.dids.contains(did) && (slot.admitted.is_some() || slot.candidate.is_some())
                 })
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
@@ -335,14 +335,13 @@ pub(super) async fn run(
                     slot.finish_loading(&life);
                 }
                 match result {
-                    Ok((raw, native, name)) => {
+                    Ok((description, name)) => {
                         let matches_target = target.as_ref().is_none_or(|(model, urn)| {
-                            *model == raw.model && *urn == raw.instance_type
+                            *model == description.raw.model && *urn == description.raw.instance_type
                         });
                         if matches_target {
                             if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
-                                slot.latest = native;
-                                slot.raw = Some(raw);
+                                slot.candidate = Some(description);
                                 slot.latest_name = name;
                                 slot.blocked = None;
                                 slot.recompute_failed = false;

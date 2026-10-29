@@ -532,7 +532,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
             {
                 let mut live = c.context.live.borrow_mut();
                 let slot = live.devices.get_mut("one").unwrap();
-                slot.latest = Some(changed);
+                slot.candidate.as_mut().unwrap().native = Some(changed);
             }
             {
                 let mut cloud = c.cloud.lock().unwrap();

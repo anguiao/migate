@@ -133,18 +133,10 @@ fn source(id: &str, fixture: SourceFixture, name: Option<&str>) -> TestSource {
 fn facts(scope: Scope, devices: Vec<TestSource>, relations: Vec<GroupRelation>) -> SourceFacts {
     SourceFacts {
         scope: Some(scope),
-        descriptions: devices
-            .iter()
-            .map(|source| SourceRaw {
-                description: source.fixture.raw.clone(),
-                fresh: source.fresh,
-            })
-            .collect(),
         devices: devices
             .into_iter()
             .map(|source| SourceDevice {
-                key: source.fixture.raw.key.clone(),
-                native: source.fixture.native,
+                description: source.fixture.into(),
                 name: source.name,
                 fresh: source.fresh,
             })

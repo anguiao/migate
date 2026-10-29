@@ -3,7 +3,7 @@ use super::*;
 use crate::configuration::{
     self, CommittedConfiguration, Plan, PlanInput, Scope, SourceDevice, SourceFacts,
 };
-use crate::xiaomi::capability::{NativeDescription, parse_device_for_model};
+use crate::xiaomi::capability::tests::source::SourceFixture;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -31,32 +31,15 @@ fn instance(composite: bool) -> Value {
 
 fn plan(current: &CommittedConfiguration, value: Value) -> Plan {
     let key = DeviceKey::new("xiaomi", "composite");
-    let native = NativeDescription::new(
-        "example.composite".into(),
-        value["type"].as_str().unwrap().into(),
-        parse_device_for_model(key.clone(), "example.composite", &value).unwrap(),
-    )
-    .unwrap();
+    let description = SourceFixture::new("composite", "example.composite", value).into();
     let derived = current.derive();
     let facts = SourceFacts {
-        descriptions: vec![crate::configuration::SourceRaw {
-            description: crate::xiaomi::capability::RawDescription::new(
-                key.clone(),
-                "example.composite".into(),
-                value["type"].as_str().unwrap().into(),
-                value.clone(),
-                None,
-            )
-            .unwrap(),
-            fresh: true,
-        }],
         scope: Some(Scope {
             uid: "account".into(),
             home_id: "home".into(),
         }),
         devices: vec![SourceDevice {
-            key: key.clone(),
-            native,
+            description,
             name: Some("Composite".into()),
             fresh: true,
         }],

@@ -101,19 +101,11 @@ pub(super) fn next(
 ) -> Plan {
     let facts = SourceFacts {
         scope: Some(scope),
-        descriptions: natives
-            .iter()
-            .map(|native| crate::configuration::SourceRaw {
-                description: native.raw.clone(),
-                fresh: true,
-            })
-            .collect(),
         devices: natives
             .into_iter()
             .map(|native| SourceDevice {
-                key: native.device().key().clone(),
                 name: Some(native.model().to_owned()),
-                native: native.native,
+                description: native.into(),
                 fresh: true,
             })
             .collect(),
@@ -123,10 +115,10 @@ pub(super) fn next(
     let new_identities = facts
         .devices
         .iter()
-        .filter(|device| current.device(&device.key).is_none())
+        .filter(|device| current.device(&device.description.raw.key).is_none())
         .map(|device| {
             (
-                device.key.clone(),
+                device.description.raw.key.clone(),
                 uuid::Uuid::new_v4().simple().to_string(),
             )
         })

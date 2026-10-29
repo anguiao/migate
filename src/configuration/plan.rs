@@ -31,15 +31,11 @@ pub(crate) fn plan<Shape: PartialEq>(
         .collect::<BTreeSet<_>>();
     facts
         .devices
-        .retain(|device| !revoked.contains(&device.key) || device.fresh);
-    facts
-        .descriptions
-        .retain(|source| !revoked.contains(&source.description.key) || source.fresh);
+        .retain(|device| !revoked.contains(&device.description.raw.key) || device.fresh);
     // Equivalent directory reordering must not change the committed configuration.
-    facts.devices.sort_by(|a, b| a.key.cmp(&b.key));
     facts
-        .descriptions
-        .sort_by(|a, b| a.description.key.cmp(&b.description.key));
+        .devices
+        .sort_by(|a, b| a.description.raw.key.cmp(&b.description.raw.key));
     facts
         .relations
         .sort_by(|a, b| a.group_did.cmp(&b.group_did));
@@ -62,19 +58,25 @@ pub(crate) fn plan<Shape: PartialEq>(
     }
     let mut allocator = Allocator::new(reserved);
     let clear_revocations = facts
-        .descriptions
+        .devices
         .iter()
-        .filter(|source| revoked.contains(&source.description.key) && source.fresh)
-        .map(|source| source.description.key.clone())
+        .filter(|source| revoked.contains(&source.description.raw.key) && source.fresh)
+        .map(|source| source.description.raw.key.clone())
         .collect::<Vec<_>>();
     let mut next_devices = Vec::new();
 
+    let mut descriptions = Vec::new();
     for source in facts.devices {
-        let key = source.key.clone();
+        let label = device_label(&source);
+        let key = source.description.raw.key.clone();
+        descriptions.push(source.description.raw);
+        let Some(native) = source.description.native else {
+            continue;
+        };
         let device = match identities.remove(&key) {
             Some(previous) => {
                 let mut device = previous;
-                for function in source.native.device().functions() {
+                for function in native.device().functions() {
                     if !device
                         .functions
                         .iter()
@@ -87,7 +89,7 @@ pub(crate) fn plan<Shape: PartialEq>(
                         });
                     }
                 }
-                device.native = Some(source.native);
+                device.native = Some(native);
                 device
             }
             None => {
@@ -96,7 +98,7 @@ pub(crate) fn plan<Shape: PartialEq>(
                     .ok_or_else(|| PlanError::MissingIdentity { key: key.clone() })?;
                 let endpoint = allocator.allocate(&key)?;
                 let mut functions = Vec::new();
-                for function in source.native.device().functions() {
+                for function in native.device().functions() {
                     let endpoint = allocator.allocate(&key)?;
                     functions.push(CommittedFunction {
                         id: function.id().to_owned(),
@@ -107,10 +109,10 @@ pub(crate) fn plan<Shape: PartialEq>(
                     key: key.clone(),
                     unique_id,
                     endpoint,
-                    label: device_label(&source),
+                    label,
                     configuration_version: 1,
                     functions,
-                    native: Some(source.native),
+                    native: Some(native),
                 }
             }
         };
@@ -129,11 +131,7 @@ pub(crate) fn plan<Shape: PartialEq>(
         scope: Some(scope),
         root_version: current.root_version,
         devices: next_devices,
-        descriptions: facts
-            .descriptions
-            .into_iter()
-            .map(|source| source.description)
-            .collect(),
+        descriptions,
         groups: facts.relations,
     };
     let derived = configuration.derive();
@@ -215,7 +213,12 @@ fn device_label(device: &SourceDevice) -> String {
         .as_deref()
         .map(import_label)
         .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| default_device_label(device.native.model(), &device.key.id))
+        .unwrap_or_else(|| {
+            default_device_label(
+                &device.description.raw.model,
+                &device.description.raw.key.id,
+            )
+        })
 }
 
 fn operations(

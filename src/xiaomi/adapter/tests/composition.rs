@@ -320,27 +320,13 @@ fn core_metadata_can_change_without_rebuilding_source_or_matter() {
                     .count();
                 let mut updated = input;
                 updated["type"] = json!("urn:miot-spec-v2:device:light:0000A001:example:1");
-                let parsed = crate::xiaomi::capability::parse_device_for_model(
-                    key.clone(),
-                    "example.composite",
-                    &updated,
-                )
-                .unwrap();
-                let native = crate::xiaomi::capability::NativeDescription::new(
-                    "example.composite".into(),
-                    updated["type"].as_str().unwrap().into(),
-                    parsed,
-                )
-                .unwrap();
-                control
-                    .context
-                    .live
-                    .borrow_mut()
-                    .devices
-                    .get_mut("one")
-                    .unwrap()
-                    .latest = Some(native);
-                control.context.reconcile("one").unwrap();
+                {
+                    let mut cloud = control.cloud.lock().unwrap();
+                    let urn = updated["type"].as_str().unwrap().to_owned();
+                    cloud.instance_types.insert("one".into(), urn.clone());
+                    cloud.catalog_instances.insert(urn, updated);
+                }
+                control.context.request_sync();
                 until(|| {
                     control
                         .publication

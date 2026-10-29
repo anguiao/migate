@@ -30,8 +30,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
         {
             let mut live = c.context.live.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
-            slot.raw = Some(confirmed.raw);
-            slot.latest = Some(confirmed.native);
+            slot.candidate = Some(confirmed.into());
         }
         c.context.reconcile("member-a").unwrap();
         until(|| {
@@ -143,8 +142,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             {
                 let mut live = control.context.live.borrow_mut();
                 let slot = live.devices.get_mut("member-a").unwrap();
-                slot.raw = Some(confirmed.raw);
-                slot.latest = Some(confirmed.native);
+                slot.candidate = Some(confirmed.into());
             }
             control.context.reconcile("member-a").unwrap();
             until(|| {
@@ -233,7 +231,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
         {
             let mut live = c.context.live.borrow_mut();
             let slot = live.devices.get_mut("one").unwrap();
-            slot.latest = Some(native);
+            slot.candidate.as_mut().unwrap().native = Some(native);
             slot.confirmed = true;
             slot.access = access;
             slot.cloud_access = cloud_access;

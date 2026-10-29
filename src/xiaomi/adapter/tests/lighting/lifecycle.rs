@@ -79,7 +79,10 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .latest = Some(narrower);
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(narrower);
             control.context.reconcile("one").unwrap();
 
             // Wait for the actual instance replacement, not the still-serving
@@ -157,7 +160,10 @@ fn binding_change_retires_old_feedback_authority() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .latest = Some(changed);
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(changed);
             control.context.reconcile("one").unwrap();
             let new = ready_replacement_light(control).await;
             assert_eq!(
@@ -244,7 +250,10 @@ fn retired_work_replacement_retires_old_feedback_authority() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .latest = Some(changed);
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(changed);
             control.context.reconcile("one").unwrap();
             let new = ready_replacement_light(control).await;
             assert_eq!(

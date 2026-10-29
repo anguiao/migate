@@ -1,4 +1,4 @@
-//! The unchanged source instance and its most recently committed recognition result.
+//! Validated source input and its paired recognition result.
 
 use super::{CapabilityError, NativeDescription, description::Description, parse_device_for_model};
 use crate::device::DeviceKey;
@@ -11,6 +11,14 @@ pub(crate) struct RawDescription {
     pub(crate) instance_type: String,
     pub(crate) instance: Value,
     pub(crate) diagnostic: Option<String>,
+}
+
+/// The source document and the effective model produced from that document.
+/// Unsupported input still retains its raw description and diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SourceDescription {
+    pub(crate) raw: RawDescription,
+    pub(crate) native: Option<NativeDescription>,
 }
 
 impl RawDescription {
@@ -57,31 +65,32 @@ impl RawDescription {
     }
 
     /// Re-run the current parser without changing the original source document.
-    pub(crate) fn recognize(
-        &self,
-        group: bool,
-    ) -> Result<(Self, Option<NativeDescription>), CapabilityError> {
+    pub(crate) fn recognize(&self, group: bool) -> Result<SourceDescription, CapabilityError> {
         let parsed = if group {
             super::parse_group(self.key.clone(), &self.model, &self.instance)
         } else {
             parse_device_for_model(self.key.clone(), &self.model, &self.instance)
         };
         let mut source = self.clone();
-        match parsed {
+        let native = match parsed {
             Ok(device) => {
                 source.diagnostic = None;
                 let native =
                     NativeDescription::new(self.model.clone(), self.instance_type.clone(), device)?;
-                Ok((source, Some(native)))
+                Some(native)
             }
             Err(
                 error @ (CapabilityError::UnsupportedDevice | CapabilityError::NoCapabilities(_)),
             )
             | Err(error @ CapabilityError::InvalidGroup("group light is missing or ambiguous")) => {
                 source.diagnostic = Some(error.to_string());
-                Ok((source, None))
+                None
             }
-            Err(error) => Err(error),
-        }
+            Err(error) => return Err(error),
+        };
+        Ok(SourceDescription {
+            raw: source,
+            native,
+        })
     }
 }

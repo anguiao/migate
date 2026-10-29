@@ -16,7 +16,6 @@ use crate::xiaomi::capability::NativeDescription;
 use crate::{
     configuration::{
         CommittedConfiguration, GroupRelation, OperationKind, Plan, SourceDevice, SourceFacts,
-        SourceRaw,
     },
     device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
 };
@@ -70,7 +69,7 @@ impl SourceHandle {
         let live = self.0.live.borrow();
         live.devices
             .values()
-            .filter_map(|slot| slot.committed_raw.as_ref().map(|raw| raw.key.clone()))
+            .filter_map(|slot| slot.committed.as_ref().map(|source| source.raw.key.clone()))
             .collect()
     }
 
@@ -86,11 +85,13 @@ impl SourceHandle {
                 .iter()
                 .filter(|(_, slot)| slot.recompute_failed)
                 .map(|(did, slot)| {
-                    let raw = slot
-                        .raw
+                    let source = slot
+                        .candidate
                         .as_ref()
                         .expect("a failed recomputation retains its source");
-                    raw.recognize(slot.group)
+                    source
+                        .raw
+                        .recognize(slot.group)
                         .map(|result| (did.clone(), result))
                         .map_err(|error| format!("{did}: {error}"))
                 })
@@ -98,13 +99,12 @@ impl SourceHandle {
         };
         {
             let mut live = self.0.live.borrow_mut();
-            for (did, (raw, native)) in &recovered {
+            for (did, description) in &recovered {
                 let slot = live
                     .devices
                     .get_mut(did)
                     .expect("recomputed source retains its slot");
-                slot.raw = Some(raw.clone());
-                slot.latest = native.clone();
+                slot.candidate = Some(description.clone());
                 slot.blocked = None;
                 slot.recompute_failed = false;
             }
@@ -128,44 +128,30 @@ impl SourceHandle {
         // cannot be combined with other new facts. Keep the committed graph
         // until the complete input is available, while still honoring removed slots.
         let waiting = live.devices.values().any(|slot| {
-            slot.committed_raw.is_some()
+            slot.committed.is_some()
                 && (slot.description_target_missing
                     || slot.cloud_access.as_ref().is_some_and(|access| {
-                        slot.raw.as_ref().is_none_or(|raw| {
-                            access.model != raw.model || access.instance_type != raw.instance_type
+                        slot.candidate.as_ref().is_none_or(|source| {
+                            access.model != source.raw.model
+                                || access.instance_type != source.raw.instance_type
                         })
                     }))
         });
         let mut devices = Vec::new();
-        let mut descriptions = Vec::new();
         for slot in live.devices.values() {
-            let raw = if waiting {
-                slot.committed_raw.as_ref()
+            let description = if waiting {
+                &slot.committed
             } else {
-                slot.raw.as_ref()
+                &slot.candidate
             };
-            if let Some(raw) = raw {
-                descriptions.push(SourceRaw {
-                    description: raw.clone(),
+            if let Some(description) = description {
+                devices.push(SourceDevice {
+                    description: description.clone(),
+                    name: slot.latest_name.clone(),
                     fresh: slot.confirmed,
                 });
             }
-            let native = if waiting {
-                slot.committed_native.clone()
-            } else {
-                slot.latest.clone()
-            };
-            let Some(native) = native else {
-                continue;
-            };
-            devices.push(SourceDevice {
-                key: native.device().key().clone(),
-                native,
-                name: slot.latest_name.clone(),
-                fresh: slot.confirmed,
-            });
         }
-        devices.sort_by(|a, b| a.key.cmp(&b.key));
         let problems = live
             .devices
             .iter()
@@ -214,7 +200,6 @@ impl SourceHandle {
         SourceFacts {
             scope,
             devices,
-            descriptions,
             relations,
         }
     }
@@ -324,9 +309,6 @@ impl SourceHandle {
             || self.0.graph.borrow().rules != plan.derived.rules;
         for key in &prepared.removed {
             self.0.retire_work(&key.id);
-            if let Some(slot) = self.0.live.borrow_mut().devices.get_mut(&key.id) {
-                slot.committed_native = None;
-            }
         }
         let mut started = Vec::new();
         for source in prepared.installed {
@@ -383,18 +365,26 @@ impl SourceHandle {
                     .as_ref()
                     .and_then(|native| native.device().battery_issue()),
             );
-            slot.committed_native = device.native.clone();
             slot.group = plan.derived.groups.contains_key(&operation.key.id);
         }
-        for raw in &plan.configuration.descriptions {
+        {
             let mut live = self.0.live.borrow_mut();
-            let slot = live
-                .devices
-                .get_mut(&raw.key.id)
-                .expect("committed source retains its slot");
-            slot.committed_raw = Some(raw.clone());
-            if slot.raw.as_ref() == Some(raw) {
-                slot.latest_name = None;
+            for slot in live.devices.values_mut() {
+                slot.committed = None;
+            }
+            for description in plan.configuration.source_descriptions() {
+                let slot = live
+                    .devices
+                    .get_mut(&description.raw.key.id)
+                    .expect("committed source retains its slot");
+                if slot
+                    .candidate
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.raw == description.raw)
+                {
+                    slot.latest_name = None;
+                }
+                slot.committed = Some(description);
             }
         }
         // Install every instance and the graph before starting consumers or
@@ -466,7 +456,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .map(|slot| (slot.admitted.clone(), slot.raw.is_some()))
+            .map(|slot| (slot.admitted.clone(), slot.candidate.is_some()))
             .unwrap_or_default();
         if let Some(work) = &admitted {
             let sink = work.current_sink();

@@ -214,14 +214,13 @@ impl Context {
                         )
                         .and_then(|raw| raw.recognize(true))
                         {
-                            Ok((raw, native)) => {
+                            Ok(description) => {
                                 if let Some(slot) =
                                     context.live.borrow_mut().devices.get_mut(&group_did)
                                 {
                                     slot.blocked = None;
                                     slot.recompute_failed = false;
-                                    slot.latest = native;
-                                    slot.raw = Some(raw);
+                                    slot.candidate = Some(description);
                                     slot.latest_name = name;
                                 }
                                 context.clear_description_problem(&group_did);

@@ -57,21 +57,16 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             peer.state.borrow_mut().hold_writes = true;
             let first = old.begin_light_action(brightness(60.0), false).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
-            let cached = control.context.live.borrow().devices["one"]
-                .admitted
-                .as_ref()
-                .unwrap()
-                .native
+            let candidate = control.context.live.borrow().devices["one"]
+                .candidate
                 .clone();
             let access = control.context.live.borrow().devices["one"].access.clone();
             let cloud_access = control.context.live.borrow().devices["one"]
                 .cloud_access
                 .clone();
-            let raw = control.context.live.borrow().devices["one"].raw.clone();
             control.context.remove("one").unwrap();
             let slot = super::super::super::state::DeviceSlot {
-                latest: Some(cached),
-                raw,
+                candidate,
                 latest_name: None,
                 access,
                 cloud_access,

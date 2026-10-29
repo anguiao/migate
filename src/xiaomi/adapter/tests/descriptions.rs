@@ -96,9 +96,10 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         .unwrap();
         assert!(
             restored.context.live.borrow().devices["one"]
-                .raw
+                .candidate
                 .as_ref()
                 .unwrap()
+                .raw
                 .diagnostic
                 .is_some()
         );
@@ -180,7 +181,10 @@ fn a_native_replacement_clears_its_previous_subscription_failure() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .latest = Some(replacement);
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(replacement);
             control.context.reconcile("one").unwrap();
             until(|| {
                 let current = device_work(control, "one");
@@ -259,7 +263,10 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .latest = Some(changed);
+                .candidate
+                .as_mut()
+                .unwrap()
+                .native = Some(changed);
             control.context.reconcile("one").unwrap();
             until(|| {
                 control

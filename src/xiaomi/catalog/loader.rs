@@ -1,4 +1,4 @@
-use crate::xiaomi::capability::{NativeDescription, RawDescription};
+use crate::xiaomi::capability::{RawDescription, SourceDescription};
 use std::{error::Error, fmt};
 
 use crate::{
@@ -84,7 +84,7 @@ pub(crate) async fn load_device(
     credentials: &XiaomiRecord,
     home: &OwnedHome,
     did: &str,
-) -> Result<(RawDescription, Option<NativeDescription>, Option<String>), CatalogError> {
+) -> Result<(SourceDescription, Option<String>), CatalogError> {
     if home.uid != credentials.uid {
         return Err(CatalogError::InvalidScope);
     }
@@ -108,6 +108,6 @@ pub(crate) async fn load_device(
         None,
     )
     .map_err(CatalogError::Capability)?;
-    let (raw, native) = raw.recognize(false).map_err(CatalogError::Capability)?;
-    Ok((raw, native, details.name))
+    let description = raw.recognize(false).map_err(CatalogError::Capability)?;
+    Ok((description, details.name))
 }

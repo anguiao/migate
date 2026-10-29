@@ -3,7 +3,7 @@
 use crate::{
     configuration::CommittedConfiguration,
     device::DeviceKey,
-    xiaomi::capability::{NativeDescription, RawDescription},
+    xiaomi::capability::{NativeDescription, RawDescription, SourceDescription},
 };
 use serde_json::Value;
 
@@ -23,10 +23,10 @@ impl SourceFixture {
             None,
         )
         .unwrap();
-        let (raw, native) = raw.recognize(false).unwrap();
+        let description = raw.recognize(false).unwrap();
         Self {
-            raw,
-            native: native.unwrap(),
+            raw: description.raw,
+            native: description.native.unwrap(),
         }
     }
 
@@ -49,5 +49,14 @@ impl std::ops::Deref for SourceFixture {
 
     fn deref(&self) -> &Self::Target {
         &self.native
+    }
+}
+
+impl From<SourceFixture> for SourceDescription {
+    fn from(fixture: SourceFixture) -> Self {
+        Self {
+            raw: fixture.raw,
+            native: Some(fixture.native),
+        }
     }
 }

@@ -22,7 +22,7 @@ pub use model::{
 };
 pub(crate) use native::NativeDescription;
 pub(crate) use repair::{RepairPlan, compose_group_light};
-pub(crate) use source::RawDescription;
+pub(crate) use source::{RawDescription, SourceDescription};
 pub use state_sensor::{
     EventArgument, EventBinding, MotionBinding, StateBinding, StateMapping, StateValue,
 };

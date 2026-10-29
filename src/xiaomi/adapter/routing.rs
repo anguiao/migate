@@ -298,7 +298,11 @@ impl Context {
         slot.admitted
             .as_ref()
             .map(|work| &work.native)
-            .or(slot.latest.as_ref())
+            .or_else(|| {
+                slot.candidate
+                    .as_ref()
+                    .and_then(|source| source.native.as_ref())
+            })
             .is_some_and(|native| native.device().is_read_only())
     }
     pub(super) fn cloud_candidate(&self, did: &str, http: bool) -> Result<(), String> {
