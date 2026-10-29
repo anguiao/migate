@@ -341,6 +341,21 @@ fn corrupted_ls2307_binding_or_mode_conversion_cannot_be_restored() {
 }
 
 #[test]
+fn generic_light_cannot_restore_an_unrelated_service_as_brightness() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    seed(
+        &store,
+        vec![fixture("light", "xiaomi.light.ceil04", CEILING)],
+    );
+    let mut encoded: Value = serde_json::from_str(&raw(&store)).unwrap();
+    encoded["devices"][0]["native"]["functions"][0]["lighting"]["brightness"]["property"]["siid"] =
+        json!(40);
+    corrupt(&store, &encoded);
+    assert!(store.devices().load_configuration().is_err());
+}
+
+#[test]
 fn new_description_and_version_keep_identity_names_and_endpoints() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -387,15 +402,27 @@ fn new_description_and_version_keep_identity_names_and_endpoints() {
 }
 
 #[test]
-fn ls2307_cannot_publish_an_outlet_description() {
+fn ls2307_identity_does_not_discard_an_independent_outlet() {
     let instance: Value = serde_json::from_str(OUTLET).unwrap();
+    let parsed = parse_device_for_model(
+        DeviceKey::new("xiaomi", "wrong"),
+        "devcea.light.ls2307",
+        &instance,
+    )
+    .unwrap();
     assert!(
-        parse_device_for_model(
-            DeviceKey::new("xiaomi", "wrong"),
-            "devcea.light.ls2307",
-            &instance
-        )
-        .is_err()
+        parsed
+            .functions()
+            .iter()
+            .any(|function| function.id() == "outlet:2")
+    );
+    assert!(
+        parsed
+            .recognition()
+            .unwrap()
+            .diagnostics()
+            .iter()
+            .any(|issue| issue.reason().contains("devcea.ls2307.rgb"))
     );
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -403,7 +430,7 @@ fn ls2307_cannot_publish_an_outlet_description() {
     let mut encoded: Value = serde_json::from_str(&raw(&store)).unwrap();
     encoded["devices"][0]["native"]["model"] = json!("devcea.light.ls2307");
     corrupt(&store, &encoded);
-    assert!(store.devices().load_configuration().is_err());
+    assert!(store.devices().load_configuration().is_ok());
 }
 
 #[test]
@@ -429,14 +456,20 @@ fn unrepresentable_mired_ranges_are_rejected_at_construction_and_cache_restore()
             })
             .unwrap();
         temperature["value-range"] = json!(range);
+        let parsed = parse_device_for_model(
+            DeviceKey::new("xiaomi", "bad-range"),
+            "xiaomi.light.ceil04",
+            &instance,
+        )
+        .unwrap();
         assert!(
-            parse_device_for_model(
-                DeviceKey::new("xiaomi", "bad-range"),
-                "xiaomi.light.ceil04",
-                &instance
-            )
-            .is_err()
+            parsed.functions()[0]
+                .lighting()
+                .unwrap()
+                .temperature()
+                .is_none()
         );
+        assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
         let mut encoded = valid.clone();
         let temperature =
             &mut encoded["devices"][0]["native"]["functions"][0]["lighting"]["temperature"];

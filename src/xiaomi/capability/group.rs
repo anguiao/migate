@@ -5,7 +5,7 @@
 //! instance so only real, controllable native bindings become capabilities;
 //! member capabilities and RGB repair stay outside this boundary.
 
-use super::{CapabilityError, ParsedDevice, description::Description, light::parse_light};
+use super::{CapabilityError, ParsedDevice, description::Description, parse_device_for_model};
 use crate::device::DeviceKey;
 
 /// Parse a native group's own MIoT instance into a standard light profile.
@@ -22,5 +22,11 @@ pub(crate) fn parse_group(
             "group instance is not a standard light device",
         ));
     }
-    parse_light(key, model, &description)
+    let device = parse_device_for_model(key, model, instance)?;
+    if device.unique_light().is_none() {
+        return Err(CapabilityError::InvalidGroup(
+            "group light is missing or ambiguous",
+        ));
+    }
+    Ok(device)
 }

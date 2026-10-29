@@ -122,7 +122,16 @@ fn parser_and_cached_bindings_reject_unrepresentable_mired_ranges() {
     for (min, max) in [(4500, 4501), (1, 6500), (10, 6500)] {
         let mut instance = original.clone();
         instance["services"][1]["properties"][2]["value-range"] = json!([min, max, 1]);
-        assert!(parse_device(key(), &instance).is_err(), "{min}..{max}");
+        let parsed = parse_device(key(), &instance).unwrap();
+        assert!(
+            parsed.functions()[0]
+                .lighting()
+                .unwrap()
+                .temperature()
+                .is_none(),
+            "{min}..{max}"
+        );
+        assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
         assert!(
             TemperatureBinding::new(
                 temperature.property(),
@@ -178,11 +187,52 @@ fn ls2307_combines_exact_rgb_and_mode_binding_without_scene_inference() {
             }
             _ => unreachable!(),
         }
+        let parsed = parse_device_for_model(key(), "devcea.light.ls2307", &invalid).unwrap();
+        assert_eq!(
+            parsed.functions()[0]
+                .lighting()
+                .unwrap()
+                .temperature()
+                .is_some(),
+            mutation == "wrong-vendor",
+            "{mutation}"
+        );
         assert!(
-            parse_device_for_model(key(), "devcea.light.ls2307", &invalid).is_err(),
+            parsed.functions()[0].lighting().unwrap().color().is_none(),
+            "{mutation}"
+        );
+        assert!(
+            parsed
+                .recognition()
+                .unwrap()
+                .diagnostics()
+                .iter()
+                .any(|issue| issue.reason().contains("devcea.ls2307.rgb")),
             "{mutation}"
         );
     }
+}
+
+#[test]
+fn ls2307_without_mode_feedback_keeps_dimming_but_does_not_infer_white_mode() {
+    let mut instance = description("devcea.light.ls2307");
+    instance["services"][2]["properties"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|property| property["iid"] != 2);
+    let parsed = parse_device_for_model(key(), "devcea.light.ls2307", &instance).unwrap();
+    assert_eq!(
+        parsed.functions()[0].kind(),
+        FunctionKind::Light(LightProfile::Dimmable)
+    );
+    assert!(
+        parsed
+            .recognition()
+            .unwrap()
+            .diagnostics()
+            .iter()
+            .any(|issue| issue.target() == "light:2" && issue.reason().contains("mode"))
+    );
 }
 
 #[test]
@@ -219,7 +269,13 @@ fn incomplete_invalid_or_ambiguous_light_descriptions_are_rejected() {
     ] {
         let mut invalid = original.clone();
         invalid["services"][1]["properties"][1][field] = value;
-        assert!(parse_device(key(), &invalid).is_err(), "{field}");
+        let parsed = parse_device(key(), &invalid).unwrap();
+        assert_eq!(
+            parsed.functions()[0].kind(),
+            FunctionKind::Light(LightProfile::OnOff),
+            "{field}"
+        );
+        assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
     }
     let mut optional = original.clone();
     optional["services"][1]["properties"]
@@ -255,7 +311,15 @@ fn incomplete_invalid_or_ambiguous_light_descriptions_are_rejected() {
         .as_array_mut()
         .unwrap()
         .push(duplicate);
-    assert!(parse_device(key(), &ambiguous).is_err());
+    assert_eq!(
+        parse_device(key(), &ambiguous)
+            .unwrap()
+            .functions()
+            .iter()
+            .map(|f| f.id())
+            .collect::<Vec<_>>(),
+        ["light:2", "light:8"]
+    );
 }
 
 fn profile_description(on: bool, brightness: bool, ct: bool, rgb: bool) -> Value {
@@ -367,12 +431,21 @@ fn unsupported_light_profiles_are_rejected_with_a_clear_reason() {
             "unsupported light capability combination",
         ),
     ] {
-        let error = parse_device(key(), &profile_description(on, brightness, ct, rgb)).unwrap_err();
-        let text = error.to_string();
-        assert!(
-            text.contains(reason),
-            "on={on} brightness={brightness} ct={ct} rgb={rgb}: {text}"
-        );
+        let result = parse_device(key(), &profile_description(on, brightness, ct, rgb));
+        if !on {
+            assert!(result.unwrap_err().to_string().contains(reason));
+        } else {
+            let parsed = result.unwrap();
+            assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
+            assert_eq!(
+                parsed.functions()[0].kind(),
+                FunctionKind::Light(if brightness {
+                    LightProfile::Dimmable
+                } else {
+                    LightProfile::OnOff
+                })
+            );
+        }
     }
 }
 
@@ -395,7 +468,17 @@ fn present_invalid_optional_properties_are_rejected_and_scene_modes_are_ignored(
             })
             .unwrap();
         property[field] = value;
-        assert!(parse_device(key(), &invalid).is_err(), "{kind} {field}");
+        let parsed = parse_device(key(), &invalid).unwrap();
+        assert!(
+            parsed.functions()[0]
+                .lighting()
+                .unwrap()
+                .temperature()
+                .is_some(),
+            "{kind} {field}"
+        );
+        assert!(parsed.functions()[0].lighting().unwrap().color().is_none());
+        assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
     }
     let mut mode_only = profile_description(true, true, true, false);
     mode_only["services"][1]["properties"]

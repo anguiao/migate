@@ -26,6 +26,50 @@ fn sensor(id: &str) -> crate::xiaomi::capability::NativeDescription {
 }
 
 #[test]
+fn recognition_metadata_survives_storage_and_metadata_only_changes_reuse_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(dir.path()).unwrap();
+    let original = sensor("sensor");
+    let planned = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![original.clone()],
+    )
+    .configuration;
+    save(&store, &planned);
+    let loaded = load(&store);
+    assert_eq!(
+        loaded.devices[0]
+            .native
+            .as_ref()
+            .unwrap()
+            .device()
+            .recognition(),
+        original.device().recognition()
+    );
+    let mut instance: Value = serde_json::from_str(SENSOR).unwrap();
+    instance["type"] = json!("urn:miot-spec-v2:device:air-conditioner:0000A004:example:1");
+    let changed = crate::xiaomi::capability::NativeDescription::new(
+        original.model().into(),
+        instance["type"].as_str().unwrap().into(),
+        parse_device_for_model(original.device().key().clone(), original.model(), &instance)
+            .unwrap(),
+    )
+    .unwrap();
+    let plan = next(&loaded, scope("account", "home"), vec![changed]);
+    assert!(plan.changed);
+    assert!(!plan.rebuild);
+    assert_eq!(
+        plan.operations[0].kind,
+        crate::configuration::OperationKind::Reused
+    );
+    assert_eq!(
+        plan.configuration.devices[0].functions,
+        loaded.devices[0].functions
+    );
+}
+
+#[test]
 fn single_measurements_and_mixed_controls_round_trip_with_current_parent_layout() {
     for wanted in ["temperature:3:1001", "humidity:3:1008", "mixed"] {
         let directory = tempfile::tempdir().unwrap();
@@ -611,7 +655,7 @@ fn specific_battery_parse_diagnostics_survive_save_and_load() {
     assert!(device.battery().is_none());
     assert_eq!(device.battery_issue(), Some(expected.as_str()));
     let plan = next(&loaded, scope("account", "home"), vec![diagnostic_only]);
-    assert!(!plan.changed);
+    assert!(plan.changed);
     assert!(!plan.rebuild);
     assert_eq!(
         plan.operations[0].kind,

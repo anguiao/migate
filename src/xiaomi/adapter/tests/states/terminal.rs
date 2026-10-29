@@ -31,6 +31,7 @@ fn native_state_terminal_distinguishes_event_subscriptions_and_observation_metad
                 "Observation source: local",
                 "property 2.1024",
                 "event 2.1008",
+                "bindings property 2.1024, event 2.1008",
             ] {
                 assert!(text.contains(expected), "missing {expected}: {text}");
             }

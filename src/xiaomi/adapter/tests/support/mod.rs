@@ -121,15 +121,20 @@ pub(super) fn cached(_uid: &str, did: &str, multi: bool) -> NativeDescription {
         include_str!("../../../../../tests/fixtures/miot/outlet.json")
     })
     .unwrap();
+    let model = if multi {
+        "cuco.plug.cp7pd"
+    } else {
+        "cuco.plug.v3"
+    };
     NativeDescription::new(
-        if multi {
-            "cuco.plug.cp7pd"
-        } else {
-            "cuco.plug.v3"
-        }
-        .into(),
+        model.into(),
         instance["type"].as_str().unwrap().into(),
-        parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap(),
+        crate::xiaomi::capability::parse_device_for_model(
+            DeviceKey::new("xiaomi", did),
+            model,
+            &instance,
+        )
+        .unwrap(),
     )
     .unwrap()
 }

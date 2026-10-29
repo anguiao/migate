@@ -2,6 +2,65 @@ use super::super::StateMapping;
 use super::{BatteryBinding, CapabilityError, MeasurementUnit, ParsedFunction, PropertyBinding};
 use crate::device::{DeviceKey, FunctionKind, PhysicalDeviceDescription};
 
+/// Source recognition facts are persisted for explanation, but never decide routing.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecognitionMetadata {
+    pub(crate) category: String,
+    pub(crate) core: Vec<String>,
+    pub(crate) patches: Vec<AppliedPatch>,
+    pub(crate) diagnostics: Vec<RecognitionDiagnostic>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedPatch {
+    pub(crate) id: String,
+    pub(crate) target: String,
+    pub(crate) stage: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecognitionDiagnostic {
+    pub(crate) target: String,
+    pub(crate) reason: String,
+}
+
+impl RecognitionMetadata {
+    pub fn category(&self) -> &str {
+        &self.category
+    }
+    pub fn core(&self) -> &[String] {
+        &self.core
+    }
+    pub fn patches(&self) -> &[AppliedPatch] {
+        &self.patches
+    }
+    pub fn diagnostics(&self) -> &[RecognitionDiagnostic] {
+        &self.diagnostics
+    }
+}
+impl AppliedPatch {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+    pub fn stage(&self) -> &str {
+        &self.stage
+    }
+}
+impl RecognitionDiagnostic {
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
 /// A parsed device description with non-empty, uniquely keyed functions and
 /// uniquely owned real bindings and source-anchored identities.
 #[derive(Clone, Debug)]
@@ -11,6 +70,7 @@ pub struct ParsedDevice {
     refresh_trigger: Option<PropertyBinding>,
     battery: Option<BatteryBinding>,
     battery_issue: Option<String>,
+    recognition: Option<RecognitionMetadata>,
 }
 impl PartialEq for ParsedDevice {
     fn eq(&self, other: &Self) -> bool {
@@ -18,10 +78,13 @@ impl PartialEq for ParsedDevice {
             && self.functions == other.functions
             && self.refresh_trigger == other.refresh_trigger
             && self.battery == other.battery
+            && self.battery_issue == other.battery_issue
+            && self.recognition == other.recognition
     }
 }
 impl Eq for ParsedDevice {}
 impl ParsedDevice {
+    #[cfg(test)]
     pub(crate) fn new(
         key: DeviceKey,
         functions: Vec<ParsedFunction>,
@@ -29,6 +92,7 @@ impl ParsedDevice {
     ) -> Result<Self, CapabilityError> {
         Self::new_with_battery(key, functions, refresh_trigger, None)
     }
+    #[cfg(test)]
     pub(crate) fn new_with_battery(
         key: DeviceKey,
         functions: Vec<ParsedFunction>,
@@ -53,6 +117,7 @@ impl ParsedDevice {
         battery: Option<BatteryBinding>,
         battery_issue: Option<String>,
     ) -> Result<Self, CapabilityError> {
+        super::super::validate_source_identity(&key)?;
         if functions.is_empty() {
             return Err(CapabilityError::InvalidDescription("functions"));
         }
@@ -86,6 +151,47 @@ impl ParsedDevice {
                     "function source identity",
                 ));
             }
+            if let Some(lighting) = function.lighting() {
+                let service = function.power().unwrap().siid;
+                if lighting
+                    .brightness()
+                    .is_some_and(|binding| binding.property().siid != service)
+                    || lighting
+                        .temperature()
+                        .is_some_and(|binding| binding.property().siid != service)
+                    || lighting.mode().is_none()
+                        && lighting
+                            .color()
+                            .is_some_and(|binding| binding.property().siid != service)
+                {
+                    return Err(CapabilityError::InvalidDescription(
+                        "light binding ownership",
+                    ));
+                }
+            }
+            if let Some(curtain) = function.curtain() {
+                let service = curtain.motor().property().siid;
+                if curtain
+                    .bindings()
+                    .iter()
+                    .any(|binding| binding.siid != service)
+                {
+                    return Err(CapabilityError::InvalidDescription(
+                        "curtain binding ownership",
+                    ));
+                }
+            }
+            if let Some(fan) = function.fan() {
+                let service = fan.power().siid;
+                if fan.swing().is_some_and(|binding| binding.siid != service)
+                    || fan
+                        .mode()
+                        .is_some_and(|binding| binding.property().siid != service)
+                    || fan.mode().is_none() && fan.speed().property().siid != service
+                {
+                    return Err(CapabilityError::InvalidDescription("fan binding ownership"));
+                }
+            }
             if let Some(measurement) = function.measurement()
                 && !matches!(
                     (function.kind(), measurement.unit()),
@@ -116,7 +222,36 @@ impl ParsedDevice {
             refresh_trigger,
             battery,
             battery_issue,
+            recognition: None,
         })
+    }
+    pub(crate) fn with_recognition(
+        mut self,
+        metadata: RecognitionMetadata,
+    ) -> Result<Self, CapabilityError> {
+        let valid = |value: &str| !value.is_empty() && !value.chars().any(char::is_control);
+        if !valid(&metadata.category)
+            || metadata
+                .core
+                .iter()
+                .any(|id| !self.functions.iter().any(|f| f.id() == id))
+            || metadata.patches.iter().any(|patch| {
+                !valid(&patch.id)
+                    || !valid(&patch.stage)
+                    || !self.functions.iter().any(|f| f.id() == patch.target)
+            })
+            || metadata
+                .diagnostics
+                .iter()
+                .any(|issue| !valid(&issue.target) || !valid(&issue.reason))
+        {
+            return Err(CapabilityError::InvalidDescription("recognition metadata"));
+        }
+        self.recognition = Some(metadata);
+        Ok(self)
+    }
+    pub fn recognition(&self) -> Option<&RecognitionMetadata> {
+        self.recognition.as_ref()
     }
     pub fn key(&self) -> &DeviceKey {
         &self.key

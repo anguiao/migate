@@ -1,50 +1,15 @@
 use super::{
     CapabilityError, FanBindings, FanModeBinding, FanSpeedBinding, FanSpeedEncoding, NumericFormat,
-    ParsedDevice, ParsedFunction, PropertyBinding,
-    description::{Description, Property, Service, Urn, array, string},
+    PropertyBinding,
+    description::{Description, Property, Service, array, string},
 };
-use crate::device::DeviceKey;
-
-pub(crate) fn is_fan_type(value: &str) -> bool {
-    Urn::parse(value).is_ok_and(|urn| urn.standard("device", "fan", 0x0000a005))
-}
-
-pub(crate) fn is_dmaker_fan_type(value: &str) -> bool {
-    Urn::parse(value).is_ok_and(|urn| {
-        urn.standard("device", "fan", 0x0000a005) && urn.vendor.starts_with("dmaker-")
-    })
-}
-
-pub(super) fn parse_fan(
-    key: DeviceKey,
-    model: &str,
-    instance: &Description<'_>,
-) -> Result<ParsedDevice, CapabilityError> {
-    let services = instance
-        .services
-        .iter()
-        .filter(|s| s.urn.standard("service", "fan", 0x7808))
-        .collect::<Vec<_>>();
-    let [service] = services.as_slice() else {
-        return Err(CapabilityError::MissingFunction("fan"));
-    };
-    let fan = parse_fan_service(model, instance, service)?;
-    ParsedDevice::new(
-        key,
-        vec![ParsedFunction::fan_control(
-            format!("fan:{}", service.iid),
-            "风扇",
-            fan,
-        )],
-        None,
-    )
-}
 
 /// Parse one standard fan service; the caller determines the function identity.
 pub(super) fn parse_fan_service(
     model: &str,
     instance: &Description<'_>,
     service: &Service<'_>,
+    diagnostics: &mut Vec<super::RecognitionDiagnostic>,
 ) -> Result<FanBindings, CapabilityError> {
     let is_dmaker = model.starts_with("dmaker.");
     let is_dmaker_instance = instance.urn.vendor.starts_with("dmaker-");
@@ -56,11 +21,48 @@ pub(super) fn parse_fan_service(
         .filter(|p| p.urn.standard("property", "horizontal-swing", 0x17))
         .collect::<Vec<_>>();
     let swing = match swings.as_slice() {
-        [swing] if boolean(swing).is_ok() => Some(binding(service, swing)),
-        _ => None,
+        [] => None,
+        [swing] => match boolean(swing) {
+            Ok(()) => Some(binding(service, swing)),
+            Err(error) => {
+                diagnostics.push(super::RecognitionDiagnostic {
+                    target: format!("fan:{}", service.iid),
+                    reason: format!("horizontal swing: {error}"),
+                });
+                None
+            }
+        },
+        _ => {
+            diagnostics.push(super::RecognitionDiagnostic {
+                target: format!("fan:{}", service.iid),
+                reason: "horizontal swing property is ambiguous".into(),
+            });
+            None
+        }
     };
-    // A known wind mode requires the dmaker strategy; an unrelated mode does not.
-    let dmaker_semantics = service
+    let dmaker_semantics = dmaker_semantics(instance, service);
+    if is_dmaker_instance && !is_dmaker && dmaker_semantics {
+        return Err(CapabilityError::InvalidDescription(
+            "fan mode semantics are unconfirmed",
+        ));
+    }
+    let (mode, speed) = if is_dmaker && is_dmaker_instance && dmaker_semantics {
+        let (mode, speed) = dmaker_bindings(instance, service)?;
+        (Some(mode), speed)
+    } else {
+        (None, generic_speed(service, diagnostics)?)
+    };
+    Ok(FanBindings::new(
+        binding(service, power),
+        mode,
+        speed,
+        swing,
+    ))
+}
+
+/// Match only the confirmed wind-mode semantics, not the vendor name alone.
+pub(super) fn dmaker_semantics(instance: &Description<'_>, service: &Service<'_>) -> bool {
+    service
         .properties
         .iter()
         .filter(|p| p.urn.standard("property", "mode", 8))
@@ -90,24 +92,7 @@ pub(super) fn parse_fan_service(
                         && s.urn.vendor == instance.urn.vendor
                 }),
             }
-        });
-    if is_dmaker_instance && !is_dmaker && dmaker_semantics {
-        return Err(CapabilityError::InvalidDescription(
-            "fan mode semantics are unconfirmed",
-        ));
-    }
-    let (mode, speed) = if is_dmaker && is_dmaker_instance && dmaker_semantics {
-        let (mode, speed) = dmaker_bindings(instance, service)?;
-        (Some(mode), speed)
-    } else {
-        (None, generic_speed(service)?)
-    };
-    Ok(FanBindings::new(
-        binding(service, power),
-        mode,
-        speed,
-        swing,
-    ))
+        })
 }
 
 fn dmaker_bindings(
@@ -181,7 +166,10 @@ fn dmaker_bindings(
     Ok((mode, speed))
 }
 
-fn generic_speed(service: &Service<'_>) -> Result<FanSpeedBinding, CapabilityError> {
+fn generic_speed(
+    service: &Service<'_>,
+    diagnostics: &mut Vec<super::RecognitionDiagnostic>,
+) -> Result<FanSpeedBinding, CapabilityError> {
     let candidates = service
         .properties
         .iter()
@@ -193,6 +181,13 @@ fn generic_speed(service: &Service<'_>) -> Result<FanSpeedBinding, CapabilityErr
         let candidate = match parse_speed(service, property) {
             Ok(candidate) => candidate,
             Err(candidate_error) => {
+                diagnostics.push(super::RecognitionDiagnostic {
+                    target: format!("fan:{}", service.iid),
+                    reason: format!(
+                        "fan-level {}.{}: {candidate_error}",
+                        service.iid, property.iid
+                    ),
+                });
                 error = candidate_error;
                 continue;
             }

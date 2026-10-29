@@ -1,35 +1,88 @@
 use super::{
-    CapabilityError, ParsedDevice, ParsedFunction, PropertyBinding,
+    CapabilityError, ParsedFunction, PropertyBinding,
     description::{Description, Property, Urn, array, string},
 };
-use crate::device::DeviceKey;
 
-/// Parse stable outlet functions without treating vendor extensions as standard switches.
-pub(super) fn parse_outlet(
-    key: DeviceKey,
+pub(super) fn candidates(
+    model: &str,
     instance: &Description<'_>,
-) -> Result<ParsedDevice, CapabilityError> {
-    if !instance.urn.standard("device", "outlet", 0x0000A002) {
-        return Err(CapabilityError::UnsupportedDevice);
-    }
-    if instance.urn.vendor == "cuco-cp7pd" {
-        parse_cp7pd(key, instance)
+    diagnostics: &mut Vec<super::RecognitionDiagnostic>,
+    patches: &mut Vec<super::AppliedPatch>,
+) -> (Vec<ParsedFunction>, Option<PropertyBinding>) {
+    let (mentioned, matched) = super::patch::cp7pd_identity(model, &instance.urn);
+    let mut functions = Vec::new();
+    let trigger = if mentioned && !matched {
+        diagnostics.push(
+            super::patch::CP7PD_CHANNELS
+                .failed("cp7pd", "model and instance identity do not match"),
+        );
+        None
+    } else if matched {
+        let trigger = match cp7pd_binding(instance, "master", 2, "miot-spec-v2", 0x780c) {
+            Ok(binding) => Some(binding),
+            Err(error) => {
+                diagnostics.push(super::patch::CP7PD_REFRESH.failed("cp7pd master", &error));
+                None
+            }
+        };
+        for (id, label, siid, namespace, type_id) in [
+            ("outlet_1", "开关 1", 3, "cuco-spec", 0x7801),
+            ("outlet_2", "开关 2", 4, "cuco-spec", 0x7802),
+            ("usb", "USB", 9, "miot-spec-v2", 0x780c),
+        ] {
+            let target = format!("outlet:{siid}");
+            match cp7pd_binding(instance, id, siid, namespace, type_id) {
+                Ok(binding) => {
+                    functions.push(ParsedFunction::outlet(target.clone(), label, binding));
+                    patches.push(super::patch::CP7PD_CHANNELS.applied(target.clone()));
+                    if trigger.is_some() {
+                        patches.push(super::patch::CP7PD_REFRESH.applied(target));
+                    }
+                }
+                Err(error) => {
+                    diagnostics.push(super::patch::CP7PD_CHANNELS.failed(target, &error));
+                }
+            }
+        }
+        trigger
     } else {
-        let power = standard_main_power(instance)?;
-        ParsedDevice::new(
-            key,
-            vec![ParsedFunction::outlet(
-                format!("outlet:{}", power.siid),
-                "主电源",
-                power,
-            )],
-            None,
-        )
+        None
+    };
+    if !instance.urn.standard("device", "outlet", 0x0000a002) {
+        return (functions, trigger);
     }
-}
-
-pub(crate) fn is_outlet_type(value: &str) -> bool {
-    Urn::parse(value).is_ok_and(|urn| urn.standard("device", "outlet", 0x0000A002))
+    for service in instance.services.iter().filter(|s| {
+        s.urn.standard("service", "switch", 0x780c)
+            && (!mentioned || ![2, 3, 4, 9].contains(&s.iid))
+    }) {
+        let target = format!("outlet:{}", service.iid);
+        let properties = service
+            .properties
+            .iter()
+            .filter(|p| p.urn.standard("property", "on", 6))
+            .collect::<Vec<_>>();
+        let result = match properties.as_slice() {
+            [property] => power_binding(service.iid, property),
+            [] => Err(CapabilityError::MissingMainPower),
+            _ => Err(CapabilityError::AmbiguousMainPower),
+        };
+        match result {
+            Ok(power) => functions.push(ParsedFunction::outlet(target, "主电源", power)),
+            Err(error) => {
+                diagnostics.push(super::RecognitionDiagnostic {
+                    target,
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+    if functions.is_empty() && diagnostics.is_empty() {
+        diagnostics.push(super::RecognitionDiagnostic {
+            target: "outlet".into(),
+            reason: CapabilityError::MissingMainPower.to_string(),
+        });
+    }
+    (functions, trigger)
 }
 
 pub(crate) const CP7PD_MODEL: &str = "cuco.plug.cp7pd";
@@ -37,54 +90,6 @@ pub(crate) const CP7PD_MODEL: &str = "cuco.plug.cp7pd";
 pub(crate) fn is_cp7pd_type(value: &str) -> bool {
     Urn::parse(value)
         .is_ok_and(|urn| urn.standard("device", "outlet", 0x0000A002) && urn.vendor == "cuco-cp7pd")
-}
-
-/// The exact cp7pd channel bindings and master trigger in their fixed layout.
-pub(crate) fn is_cp7pd_topology(device: &ParsedDevice) -> bool {
-    const CHANNELS: [(&str, PropertyBinding); 3] = [
-        ("outlet:3", PropertyBinding { siid: 3, piid: 1 }),
-        ("outlet:4", PropertyBinding { siid: 4, piid: 1 }),
-        ("outlet:9", PropertyBinding { siid: 9, piid: 1 }),
-    ];
-    if device.refresh_trigger() != Some(PropertyBinding { siid: 2, piid: 1 })
-        || device
-            .functions()
-            .iter()
-            .filter(|function| function.kind().is_control())
-            .count()
-            != CHANNELS.len()
-    {
-        return false;
-    }
-    device
-        .functions()
-        .iter()
-        .filter(|function| function.kind().is_control())
-        .zip(CHANNELS)
-        .all(|(function, (id, power))| {
-            function.lighting().is_none() && function.id() == id && function.power() == Some(power)
-        })
-}
-
-fn standard_main_power(instance: &Description<'_>) -> Result<PropertyBinding, CapabilityError> {
-    let candidates = instance
-        .services
-        .iter()
-        .filter(|service| service.urn.standard("service", "switch", 0x0000780C))
-        .flat_map(|service| {
-            service
-                .properties
-                .iter()
-                .filter(|property| property.urn.standard("property", "on", 0x00000006))
-                .map(|property| (service.iid, property))
-        })
-        .collect::<Vec<_>>();
-    let (siid, property) = match candidates.as_slice() {
-        [] => return Err(CapabilityError::MissingMainPower),
-        [candidate] => *candidate,
-        _ => return Err(CapabilityError::AmbiguousMainPower),
-    };
-    power_binding(siid, property)
 }
 
 pub(super) fn power_binding(
@@ -111,26 +116,6 @@ pub(super) fn power_binding(
         siid,
         piid: property.iid,
     })
-}
-
-fn parse_cp7pd(
-    key: DeviceKey,
-    instance: &Description<'_>,
-) -> Result<ParsedDevice, CapabilityError> {
-    let refresh_trigger = cp7pd_binding(instance, "master", 2, "miot-spec-v2", 0x0000780C)?;
-    let mut functions = Vec::new();
-    for (id, label, siid, namespace, type_id) in [
-        ("outlet_1", "开关 1", 3, "cuco-spec", 0x00007801),
-        ("outlet_2", "开关 2", 4, "cuco-spec", 0x00007802),
-        ("usb", "USB", 9, "miot-spec-v2", 0x0000780C),
-    ] {
-        functions.push(ParsedFunction::outlet(
-            format!("outlet:{siid}"),
-            label,
-            cp7pd_binding(instance, id, siid, namespace, type_id)?,
-        ));
-    }
-    ParsedDevice::new(key, functions, Some(refresh_trigger))
 }
 
 fn cp7pd_binding(

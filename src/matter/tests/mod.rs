@@ -1,3 +1,4 @@
+mod composition;
 mod handlers;
 mod lighting_handlers;
 mod subscriptions;

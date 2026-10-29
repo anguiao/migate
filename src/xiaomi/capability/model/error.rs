@@ -4,6 +4,7 @@ use std::{error::Error, fmt};
 pub enum CapabilityError {
     InvalidDescription(&'static str),
     UnsupportedDevice,
+    NoCapabilities(Vec<String>),
     UnsupportedLightGroup,
     MissingMainPower,
     InvalidMainPowerType,
@@ -25,6 +26,11 @@ impl fmt::Display for CapabilityError {
                 write!(formatter, "invalid MIoT description: {field}")
             }
             Self::UnsupportedDevice => formatter.write_str("unsupported MIoT device type"),
+            Self::NoCapabilities(issues) => write!(
+                formatter,
+                "no supported MIoT functions: {}",
+                issues.join("; ")
+            ),
             Self::UnsupportedLightGroup => {
                 formatter.write_str("Xiaomi light groups are not supported")
             }

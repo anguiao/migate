@@ -3,6 +3,81 @@
 use super::*;
 
 #[test]
+fn changed_battery_diagnostic_reuses_runtime_and_is_visible_immediately() {
+    block_on(Rig::sensor_without_battery("sensor").run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(sensor_peer(21.0, 45.0), |peer| async move {
+            until(|| control.context.active_notification("sensor") == Some(PathKind::Local)).await;
+            until(|| peer.count("subscribe", "sensor", TEMPERATURE.siid) == 2).await;
+            let before = work(&control.context, "sensor");
+            let physical = before.physical();
+            let subscriptions = peer.count("subscribe", "sensor", TEMPERATURE.siid);
+            let old_diagnostic = control.context.diagnostics().devices[0]
+                .battery_problem
+                .clone();
+            let old = before.native.clone();
+            let changed = crate::xiaomi::capability::ParsedDevice::new_with_battery_diagnostic(
+                old.device().key().clone(),
+                old.device().functions().to_vec(),
+                old.device().refresh_trigger(),
+                old.device().battery().cloned(),
+                Some("updated battery diagnostic".into()),
+            )
+            .unwrap();
+            let native = crate::xiaomi::capability::NativeDescription::new(
+                old.model().into(),
+                old.instance_type().into(),
+                changed,
+            )
+            .unwrap();
+            control
+                .context
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut("sensor")
+                .unwrap()
+                .latest = Some(native);
+            assert_eq!(
+                control.context.diagnostics().devices[0].battery_problem,
+                old_diagnostic,
+                "uncommitted metadata must not leak into the serving diagnostics"
+            );
+            control.context.reconcile("sensor").unwrap();
+            until(|| {
+                control
+                    .publication
+                    .current()
+                    .configuration
+                    .device(&DeviceKey::new("xiaomi", "sensor"))
+                    .unwrap()
+                    .native
+                    .as_ref()
+                    .unwrap()
+                    .device()
+                    .battery_issue()
+                    == Some("updated battery diagnostic")
+            })
+            .await;
+            assert!(physical.same_instance(&work(&control.context, "sensor").physical()));
+            assert!(Rc::ptr_eq(&before, &work(&control.context, "sensor")));
+            assert_eq!(
+                peer.count("subscribe", "sensor", TEMPERATURE.siid),
+                subscriptions
+            );
+            assert!(
+                control.context.diagnostics().devices[0]
+                    .battery_problem
+                    .as_deref()
+                    .is_some_and(|issue| issue.contains("updated battery diagnostic"))
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn battery_reads_and_notifications_keep_independent_source_and_reception_times() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();

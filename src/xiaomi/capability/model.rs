@@ -10,7 +10,7 @@ mod numeric;
 pub use curtain::{
     CurtainBindings, CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding,
 };
-pub use device::ParsedDevice;
+pub use device::{AppliedPatch, ParsedDevice, RecognitionDiagnostic, RecognitionMetadata};
 pub use error::CapabilityError;
 pub(crate) use fan::FanSpeedEncoding;
 pub use fan::{FanBindings, FanModeBinding, FanSpeedBinding};

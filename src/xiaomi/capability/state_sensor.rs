@@ -166,14 +166,20 @@ fn integer_format(value: &Value) -> Result<NumericFormat, CapabilityError> {
         _ => Err(CapabilityError::InvalidDescription("state format")),
     }
 }
-fn readable_notification(property: &Property<'_>) -> bool {
-    property.value["access"].as_array().is_some_and(|access| {
-        ["read", "notify"].iter().all(|permission| {
-            access
-                .iter()
-                .any(|value| value.as_str() == Some(permission))
-        })
-    })
+fn readable_notification(property: &Property<'_>) -> Result<(), CapabilityError> {
+    let access = array(property.value, "access")?;
+    if access.iter().any(|value| value.as_str().is_none()) {
+        return Err(CapabilityError::InvalidDescription("access"));
+    }
+    for permission in ["read", "notify"] {
+        if !access
+            .iter()
+            .any(|value| value.as_str() == Some(permission))
+        {
+            return Err(CapabilityError::MissingAccess(permission));
+        }
+    }
+    Ok(())
 }
 fn enumeration(
     property: &Property<'_>,
@@ -207,17 +213,24 @@ fn enumeration(
         values,
     })
 }
-fn contact(service: &Service<'_>) -> Option<StateBinding> {
+fn contact(service: &Service<'_>) -> Result<StateBinding, CapabilityError> {
+    let mut failure = CapabilityError::MissingFunction("contact state");
     for (name, type_id) in [("contact-state", 0x7C), ("status", 0x7)] {
-        for property in service.properties.iter().filter(|property| {
-            property.urn.standard("property", name, type_id) && readable_notification(property)
-        }) {
-            let mapping = if name == "contact-state" {
-                (property.value["format"] == "bool").then_some(StateMapping::ContactBoolean)
-            } else {
-                enumeration(property, &["Open"], &["Closed"], false).ok()
-            };
-            if let Some(binding) = mapping.and_then(|mapping| {
+        for property in service
+            .properties
+            .iter()
+            .filter(|property| property.urn.standard("property", name, type_id))
+        {
+            let candidate = (|| {
+                readable_notification(property)?;
+                let mapping = if name == "contact-state" {
+                    if property.value["format"] != "bool" {
+                        return Err(CapabilityError::InvalidDescription("contact format"));
+                    }
+                    StateMapping::ContactBoolean
+                } else {
+                    enumeration(property, &["Open"], &["Closed"], false)?
+                };
                 StateBinding::new(
                     PropertyBinding {
                         siid: service.iid,
@@ -225,27 +238,33 @@ fn contact(service: &Service<'_>) -> Option<StateBinding> {
                     },
                     mapping,
                 )
-                .ok()
-            }) {
-                return Some(binding);
+            })();
+            match candidate {
+                Ok(binding) => return Ok(binding),
+                Err(error) => failure = error,
             }
         }
     }
-    None
+    Err(failure)
 }
-fn motion(service: &Service<'_>) -> Option<MotionBinding> {
+fn motion(service: &Service<'_>) -> Result<MotionBinding, CapabilityError> {
     let event = service
         .events
         .iter()
-        .find(|event| event.urn.standard("event", "motion-detected", 0x5001))?;
-    let property = service.properties.iter().find(|property| {
-        property
-            .urn
-            .standard("property", "no-motion-duration", 0xCB)
-            && readable_notification(property)
-    })?;
+        .find(|event| event.urn.standard("event", "motion-detected", 0x5001))
+        .ok_or(CapabilityError::MissingFunction("motion event"))?;
+    let property = service
+        .properties
+        .iter()
+        .find(|property| {
+            property
+                .urn
+                .standard("property", "no-motion-duration", 0xCB)
+        })
+        .ok_or(CapabilityError::MissingFunction("no-motion-duration"))?;
+    readable_notification(property)?;
     if property.value["unit"] != "seconds" {
-        return None;
+        return Err(CapabilityError::InvalidDescription("motion duration unit"));
     }
     let state = StateBinding::new(
         PropertyBinding {
@@ -253,10 +272,9 @@ fn motion(service: &Service<'_>) -> Option<MotionBinding> {
             piid: property.iid,
         },
         StateMapping::NoMotionDuration {
-            format: integer_format(property.value).ok()?,
+            format: integer_format(property.value)?,
         },
-    )
-    .ok()?;
+    )?;
     let arguments = event
         .arguments
         .iter()
@@ -275,8 +293,7 @@ fn motion(service: &Service<'_>) -> Option<MotionBinding> {
                 unit: property.value["unit"].as_str().map(str::to_owned),
             })
         })
-        .collect::<Result<_, CapabilityError>>()
-        .ok()?;
+        .collect::<Result<_, CapabilityError>>()?;
     MotionBinding::new(
         state,
         EventBinding {
@@ -285,16 +302,27 @@ fn motion(service: &Service<'_>) -> Option<MotionBinding> {
         },
         arguments,
     )
-    .ok()
 }
-pub(super) fn functions(description: &Description<'_>) -> Vec<ParsedFunction> {
+pub(super) fn functions(
+    description: &Description<'_>,
+    diagnostics: &mut Vec<super::RecognitionDiagnostic>,
+) -> Vec<ParsedFunction> {
     let mut result = Vec::new();
-    if let Some(binding) = description
+    for service in description
         .services
         .iter()
         .filter(|service| service.urn.standard("service", "magnet-sensor", 0x7827))
-        .find_map(contact)
     {
+        let binding = match contact(service) {
+            Ok(binding) => binding,
+            Err(error) => {
+                diagnostics.push(super::RecognitionDiagnostic {
+                    target: format!("contact:{}", service.iid),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
         let property = binding.property();
         result.push(ParsedFunction::contact(
             format!("contact:{}:{}", property.siid, property.piid),
@@ -302,12 +330,21 @@ pub(super) fn functions(description: &Description<'_>) -> Vec<ParsedFunction> {
             binding,
         ));
     }
-    if let Some(binding) = description
+    for service in description
         .services
         .iter()
         .filter(|service| service.urn.standard("service", "motion-sensor", 0x7825))
-        .find_map(motion)
     {
+        let binding = match motion(service) {
+            Ok(binding) => binding,
+            Err(error) => {
+                diagnostics.push(super::RecognitionDiagnostic {
+                    target: format!("motion:{}", service.iid),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
         let property = binding.state().property();
         result.push(ParsedFunction::motion_sensor(
             format!("motion:{}:{}", property.siid, property.piid),
@@ -319,32 +356,37 @@ pub(super) fn functions(description: &Description<'_>) -> Vec<ParsedFunction> {
         .services
         .iter()
         .find(|service| service.urn.standard("service", "occupancy-sensor", 0x78C0))
-        && let Some(binding) = service
-            .properties
-            .iter()
-            .find(|property| {
-                property.urn.standard("property", "occupancy-status", 0x166)
-                    && readable_notification(property)
-            })
-            .and_then(|property| {
-                let mapping =
-                    enumeration(property, &["Has One", "Has Someone"], &["No One"], true).ok()?;
-                StateBinding::new(
-                    PropertyBinding {
-                        siid: service.iid,
-                        piid: property.iid,
-                    },
-                    mapping,
-                )
-                .ok()
-            })
     {
-        let property = binding.property();
-        result.push(ParsedFunction::occupancy(
-            format!("occupancy:{}:{}", property.siid, property.piid),
-            "Occupancy",
-            binding,
-        ));
+        let candidate = (|| {
+            let property = service
+                .properties
+                .iter()
+                .find(|property| property.urn.standard("property", "occupancy-status", 0x166))
+                .ok_or(CapabilityError::MissingFunction("occupancy status"))?;
+            readable_notification(property)?;
+            let mapping = enumeration(property, &["Has One", "Has Someone"], &["No One"], true)?;
+            StateBinding::new(
+                PropertyBinding {
+                    siid: service.iid,
+                    piid: property.iid,
+                },
+                mapping,
+            )
+        })();
+        match candidate {
+            Ok(binding) => {
+                let property = binding.property();
+                result.push(ParsedFunction::occupancy(
+                    format!("occupancy:{}:{}", property.siid, property.piid),
+                    "Occupancy",
+                    binding,
+                ));
+            }
+            Err(error) => diagnostics.push(super::RecognitionDiagnostic {
+                target: format!("occupancy:{}", service.iid),
+                reason: error.to_string(),
+            }),
+        }
     }
     result
 }

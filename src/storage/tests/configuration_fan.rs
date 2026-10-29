@@ -130,6 +130,14 @@ fn fan_stored_bindings_are_validated() {
             "/devices/0/native/functions/0/speed/property/piid",
             serde_json::json!(0),
         ),
+        (
+            "/devices/0/native/functions/0/speed/encoding/max",
+            serde_json::json!(50),
+        ),
+        (
+            "/devices/0/native/functions/0/mode/property/siid",
+            serde_json::json!(40),
+        ),
         ("/devices/0/native/model", serde_json::json!("cuco.plug.v3")),
         (
             "/devices/0/native/instance_type",

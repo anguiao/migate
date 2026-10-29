@@ -1,26 +1,13 @@
 use super::{
     CapabilityError, CurtainBindings, CurtainMotorBinding, CurtainPositionBinding,
-    CurtainStatusBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
-    description::{Description, Property, Service, Urn, array, string},
+    CurtainStatusBinding, NumericFormat, ParsedFunction, PropertyBinding,
+    description::{Property, Service, array, string},
 };
-use crate::device::{DeviceKey, NumericRange};
+use crate::device::NumericRange;
 
-pub(crate) fn is_curtain_type(value: &str) -> bool {
-    Urn::parse(value).is_ok_and(|urn| urn.standard("device", "curtain", 0x0000a00c))
-}
-
-pub(super) fn parse_curtain(
-    key: DeviceKey,
-    instance: &Description<'_>,
-) -> Result<ParsedDevice, CapabilityError> {
-    let services = instance
-        .services
-        .iter()
-        .filter(|service| service.urn.standard("service", "curtain", 0x7816))
-        .collect::<Vec<_>>();
-    let [service] = services.as_slice() else {
-        return Err(CapabilityError::InvalidDescription("curtain service"));
-    };
+pub(super) fn parse_curtain_service(
+    service: &Service<'_>,
+) -> Result<ParsedFunction, CapabilityError> {
     let motor = property(service, "motor-control", 0x38)?;
     let status = property(service, "status", 0x07)?;
     let current = property(service, "current-position", 0x39)?;
@@ -45,15 +32,11 @@ pub(super) fn parse_curtain(
         position(binding(current), current)?,
         position(binding(target), target)?,
     );
-    ParsedDevice::new(
-        key,
-        vec![ParsedFunction::curtain_control(
-            format!("curtain:{}", service.iid),
-            "窗帘",
-            curtain,
-        )],
-        None,
-    )
+    Ok(ParsedFunction::curtain_control(
+        format!("curtain:{}", service.iid),
+        "窗帘",
+        curtain,
+    ))
 }
 
 fn property<'a>(

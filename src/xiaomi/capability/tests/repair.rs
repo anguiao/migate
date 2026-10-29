@@ -93,15 +93,14 @@ fn repair_requires_every_member_to_be_the_concrete_ls2307_adapter() {
     );
     let obct = parse_model("member-b", "yeelink.light.light3", &light3());
     assert!(plan_rgb_repair(&group, [&ls, &obct]).is_err());
-    let other_model = NativeDescription::new(
-        "not.light.ls2307".into(),
-        ls.instance_type().into(),
-        ls.device().clone(),
-    )
-    .unwrap();
     assert!(
-        plan_rgb_repair(&group, [&other_model]).is_err(),
-        "a non-ls2307 model must not be planned"
+        NativeDescription::new(
+            "not.light.ls2307".into(),
+            ls.instance_type().into(),
+            ls.device().clone(),
+        )
+        .is_err(),
+        "an ls2307 control strategy requires the matching model"
     );
     assert!(
         NativeDescription::new(

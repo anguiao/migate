@@ -90,12 +90,8 @@ fn corrupted_curtain_bindings_cannot_be_restored() {
             serde_json::json!(4),
         ),
         (
-            "/devices/0/native/model",
-            serde_json::json!("devcea.light.ls2307"),
-        ),
-        (
-            "/devices/0/native/model",
-            serde_json::json!("cuco.plug.cp7pd"),
+            "/devices/0/native/functions/0/status/property/siid",
+            serde_json::json!(40),
         ),
     ] {
         let mut invalid = valid.clone();

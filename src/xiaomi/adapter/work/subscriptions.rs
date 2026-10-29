@@ -385,8 +385,8 @@ impl DeviceWork {
     }
     pub(in crate::xiaomi::adapter) fn battery_problem(&self) -> Option<String> {
         let mut values = Vec::new();
-        if let Some(issue) = self.native.device().battery_issue() {
-            values.push(issue.to_owned());
+        if let Some(issue) = self.committed_battery_issue.borrow().as_ref() {
+            values.push(issue.clone());
         }
         if let Some(problem) = self.battery_subscription_problem.borrow().clone() {
             values.push(problem);
@@ -395,6 +395,9 @@ impl DeviceWork {
             values.push(problem);
         }
         (!values.is_empty()).then(|| values.join("; "))
+    }
+    pub(in crate::xiaomi::adapter) fn set_committed_battery_issue(&self, issue: Option<&str>) {
+        *self.committed_battery_issue.borrow_mut() = issue.map(str::to_owned);
     }
     pub(in crate::xiaomi::adapter) fn set_battery_subscription_problem(
         &self,

@@ -11,7 +11,10 @@ const SENSOR_SERVICE: u32 = 0x0000_7814;
 const BATTERY_SERVICE: u32 = 0x0000_7805;
 const BATTERY_LEVEL: u32 = 0x0000_0014;
 
-pub(super) fn measurements(instance: &Description<'_>) -> Vec<ParsedFunction> {
+pub(super) fn measurements(
+    instance: &Description<'_>,
+    diagnostics: &mut Vec<super::RecognitionDiagnostic>,
+) -> Vec<ParsedFunction> {
     let mut functions = Vec::new();
     for (name, property_name, type_id, unit) in [
         (
@@ -34,7 +37,7 @@ pub(super) fn measurements(instance: &Description<'_>) -> Vec<ParsedFunction> {
             MeasurementUnit::Lux,
         ),
     ] {
-        let candidate = instance
+        let candidates = instance
             .services
             .iter()
             .filter(|service| {
@@ -46,16 +49,24 @@ pub(super) fn measurements(instance: &Description<'_>) -> Vec<ParsedFunction> {
                     )
                     || service.urn.standard("service", "environment", 0x0000_780A)
             })
-            .find_map(|service| {
+            .flat_map(|service| {
                 service
                     .properties
                     .iter()
                     .filter(|property| property.urn.standard("property", property_name, type_id))
-                    .find_map(|property| {
-                        measurement_binding(service.iid, property.iid, property.value, unit).ok()
-                    })
+                    .map(move |property| (service.iid, property))
             });
-        if let Some(binding) = candidate {
+        for (siid, property) in candidates {
+            let binding = match measurement_binding(siid, property.iid, property.value, unit) {
+                Ok(binding) => binding,
+                Err(error) => {
+                    diagnostics.push(super::RecognitionDiagnostic {
+                        target: format!("{name}:{siid}:{}", property.iid),
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
             let property = binding.property();
             let id = format!("{name}:{}:{}", property.siid, property.piid);
             functions.push(match name {

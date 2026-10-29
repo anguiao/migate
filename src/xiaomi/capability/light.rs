@@ -1,34 +1,19 @@
 use super::ls2307;
 use super::{
     BrightnessBinding, CapabilityError, ColorBinding, LightBindings, ModeBinding, NumericFormat,
-    ParsedDevice, ParsedFunction, PropertyBinding, TemperatureBinding,
-    description::{Description, Property, Service, Urn, array, string},
+    ParsedFunction, PropertyBinding, TemperatureBinding,
+    description::{Description, Property, Service, array, string},
     outlet::power_binding,
 };
-use crate::device::{DeviceKey, NumericRange};
+use crate::device::NumericRange;
 
-pub(crate) fn is_light_type(value: &str) -> bool {
-    Urn::parse(value).is_ok_and(|urn| urn.standard("device", "light", 0x0000a001))
-}
-pub(super) fn parse_light(
-    key: DeviceKey,
+pub(super) fn parse_light_service(
     model: &str,
     instance: &Description<'_>,
-) -> Result<ParsedDevice, CapabilityError> {
-    let services = instance
-        .services
-        .iter()
-        .filter(|service| service.urn.standard("service", "light", 0x00007802))
-        .collect::<Vec<_>>();
-    let service = match services.as_slice() {
-        [] => return Err(CapabilityError::UnsupportedDevice),
-        [service] => *service,
-        _ => {
-            return Err(CapabilityError::InvalidLight(
-                "one standard light service is required",
-            ));
-        }
-    };
+    service: &Service<'_>,
+    diagnostics: &mut Vec<super::RecognitionDiagnostic>,
+    patches: &mut Vec<super::AppliedPatch>,
+) -> Result<ParsedFunction, CapabilityError> {
     let power = match optional_standard_property(service, "on", 6)? {
         Some(property) => power_binding(service.iid, property)?,
         None => {
@@ -37,34 +22,98 @@ pub(super) fn parse_light(
             ));
         }
     };
-    let brightness = optional_standard_property(service, "brightness", 0x0d)?
-        .map(|property| brightness_binding(service.iid, property))
-        .transpose()?;
-    let temperature = optional_standard_property(service, "color-temperature", 0x0f)?
-        .map(|property| temperature_binding(service.iid, property))
-        .transpose()?;
-    let color = optional_standard_property(service, "color", 0x0e)?
-        .map(|property| color_binding(service.iid, property))
-        .transpose()?;
-    let (color, mode) = if model == ls2307::MODEL {
-        let (Some(brightness), Some(temperature)) = (brightness, temperature) else {
-            return Err(CapabilityError::IncompatibleModel(ls2307::MODEL));
+    let target = format!("light:{}", service.iid);
+    let brightness = optional(
+        diagnostics,
+        &target,
+        "brightness",
+        optional_standard_property(service, "brightness", 0x0d)
+            .and_then(|p| p.map(|p| brightness_binding(service.iid, p)).transpose()),
+    );
+    let mut temperature = optional(
+        diagnostics,
+        &target,
+        "color temperature",
+        optional_standard_property(service, "color-temperature", 0x0f)
+            .and_then(|p| p.map(|p| temperature_binding(service.iid, p)).transpose()),
+    );
+    let mut color = optional(
+        diagnostics,
+        &target,
+        "RGB",
+        optional_standard_property(service, "color", 0x0e)
+            .and_then(|p| p.map(|p| color_binding(service.iid, p)).transpose()),
+    );
+    if brightness.is_none() && temperature.take().is_some() {
+        diagnostics.push(super::RecognitionDiagnostic {
+            target: target.clone(),
+            reason: "color temperature requires brightness".into(),
+        });
+    }
+    if (brightness.is_none() || temperature.is_none()) && color.take().is_some() {
+        diagnostics.push(super::RecognitionDiagnostic {
+            target: target.clone(),
+            reason: "RGB requires brightness and color temperature".into(),
+        });
+    }
+    let mut mode = None;
+    if super::patch::ls2307_target(model, service.iid) {
+        let patched = match (brightness, temperature) {
+            (Some(brightness), Some(temperature)) => {
+                parse_ls2307(instance, service, power, brightness, temperature)
+            }
+            _ => Err(CapabilityError::IncompatibleModel(ls2307::MODEL)),
         };
-        parse_ls2307(instance, service, power, brightness, temperature)?
-    } else {
-        (color, None)
-    };
+        match patched {
+            Ok((patched_color, patched_mode)) => {
+                color = patched_color;
+                mode = patched_mode;
+                patches.push(super::patch::LS2307_RGB.applied(target.clone()));
+            }
+            Err(error) => {
+                diagnostics.push(super::patch::LS2307_RGB.failed(target.clone(), error));
+                // On this confirmed model, the native temperature can be a
+                // remembered value while the lamp is in RGB mode. A plain
+                // temperature profile would incorrectly infer white mode.
+                if instance.urn.standard("device", "light", 0xa001)
+                    && ls2307::matches_vendor(&instance.urn)
+                {
+                    if temperature.take().is_some() {
+                        diagnostics.push(super::RecognitionDiagnostic {
+                            target: target.clone(),
+                            reason: "color temperature feedback requires confirmed color mode"
+                                .into(),
+                        });
+                    }
+                    color = None;
+                }
+            }
+        }
+    }
     let lighting = LightBindings::new(brightness, temperature, color, mode)?;
-    ParsedDevice::new(
-        key,
-        vec![ParsedFunction::light(
-            format!("light:{}", service.iid),
-            "Light",
-            power,
-            lighting,
-        )],
-        None,
-    )
+    Ok(ParsedFunction::light(
+        format!("light:{}", service.iid),
+        "Light",
+        power,
+        lighting,
+    ))
+}
+fn optional<T>(
+    diagnostics: &mut Vec<super::RecognitionDiagnostic>,
+    target: &str,
+    name: &str,
+    result: Result<Option<T>, CapabilityError>,
+) -> Option<T> {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            diagnostics.push(super::RecognitionDiagnostic {
+                target: target.into(),
+                reason: format!("{name}: {error}"),
+            });
+            None
+        }
+    }
 }
 fn optional_standard_property<'a>(
     service: &'a Service<'a>,
@@ -202,7 +251,8 @@ fn parse_ls2307(
 ) -> Result<(Option<ColorBinding>, Option<ModeBinding>), CapabilityError> {
     let incompatible = || CapabilityError::IncompatibleModel(ls2307::MODEL);
     let matches_vendor = ls2307::matches_vendor;
-    if !matches_vendor(&instance.urn)
+    if !instance.urn.standard("device", "light", 0x0000a001)
+        || !matches_vendor(&instance.urn)
         || main.iid != ls2307::POWER.siid
         || !matches_vendor(&main.urn)
         || !ls2307::main_bindings(power, &brightness, &temperature)

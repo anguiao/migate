@@ -515,7 +515,7 @@ fn a_control_can_share_a_physical_battery_binding() {
 }
 
 #[test]
-fn battery_diagnostics_do_not_change_native_capability_equality() {
+fn battery_diagnostics_are_part_of_committed_metadata() {
     let mut missing = sensor_description();
     missing["services"]
         .as_array_mut()
@@ -532,7 +532,7 @@ fn battery_diagnostics_do_not_change_native_capability_equality() {
         diagnosed.refresh_trigger(),
     )
     .unwrap();
-    assert_eq!(diagnosed, stored);
+    assert_ne!(diagnosed, stored);
     assert!(diagnosed.battery_issue().is_some());
     assert!(stored.battery_issue().is_none());
 }

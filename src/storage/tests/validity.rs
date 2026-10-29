@@ -153,6 +153,97 @@ fn stored_cp7pd_needs_its_exact_type_trigger_and_channel_bindings() {
 }
 
 #[test]
+fn cp7pd_channel_validity_does_not_depend_on_diagnostic_text() {
+    use crate::xiaomi::capability::{AppliedPatch, NativeDescription, RecognitionDiagnostic};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut instance: Value = serde_json::from_str(MULTI).unwrap();
+    let master = instance["services"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|service| service["iid"] == 2)
+        .unwrap();
+    master["properties"][0]["access"] = json!(["read"]);
+    let original = native("multi", "cuco.plug.cp7pd", instance);
+    assert!(original.device().refresh_trigger().is_none());
+    planned(&store, vec![original.clone()]);
+    let saved = stored(&store);
+
+    for diagnostics in [
+        vec![],
+        vec![RecognitionDiagnostic {
+            target: "different".into(),
+            reason: "changed explanation".into(),
+        }],
+    ] {
+        let mut metadata = original.device().recognition().unwrap().clone();
+        metadata.diagnostics = diagnostics.clone();
+        let mut encoded = saved.clone();
+        encoded["devices"][0]["native"]["recognition"]["diagnostics"] =
+            serde_json::to_value(&diagnostics).unwrap();
+        overwrite(&store, &encoded);
+        let loaded = store
+            .devices()
+            .load_configuration()
+            .expect("diagnostics do not control stored admission");
+        assert_eq!(
+            loaded.devices[0]
+                .native
+                .as_ref()
+                .unwrap()
+                .device()
+                .functions(),
+            original.device().functions()
+        );
+        let device = original
+            .device()
+            .clone()
+            .with_recognition(metadata)
+            .unwrap();
+        assert!(
+            NativeDescription::new(
+                original.model().into(),
+                original.instance_type().into(),
+                device
+            )
+            .is_ok()
+        );
+    }
+
+    let mut metadata = original.device().recognition().unwrap().clone();
+    metadata.diagnostics.clear();
+    metadata.patches.push(AppliedPatch {
+        id: "cuco.cp7pd.refresh".into(),
+        target: "outlet:3".into(),
+        stage: "feedback".into(),
+    });
+    let device = original
+        .device()
+        .clone()
+        .with_recognition(metadata)
+        .unwrap();
+    assert!(
+        NativeDescription::new(
+            original.model().into(),
+            original.instance_type().into(),
+            device
+        )
+        .is_err(),
+        "an applied refresh patch requires its real trigger"
+    );
+    let mut encoded = saved;
+    encoded["devices"][0]["native"]["recognition"]["diagnostics"] = json!([]);
+    encoded["devices"][0]["native"]["recognition"]["patches"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"cuco.cp7pd.refresh", "target":"outlet:3", "stage":"feedback"}));
+    overwrite(&store, &encoded);
+    assert!(store.devices().load_configuration().is_err());
+}
+
+#[test]
 fn missing_required_fields_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();

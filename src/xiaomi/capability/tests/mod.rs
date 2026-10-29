@@ -1,3 +1,4 @@
+mod composition;
 mod curtain;
 mod fan;
 mod labels;
@@ -37,13 +38,14 @@ fn four_single_outlet_models_accept_their_public_instance_urns() {
         "zimi.plug.zncz01",
         "qmi.plug.psv3",
     ] {
-        let outlet = parse_device(key(), &model_description(model))
+        let outlet = super::parse_device_for_model(key(), model, &model_description(model))
             .unwrap_or_else(|error| panic!("{model}: {error}"));
         assert_eq!(
             outlet.functions()[0].power().unwrap(),
             PropertyBinding { siid: 2, piid: 1 }
         );
-        let device = parse_device(key(), &model_description(model)).unwrap();
+        let device =
+            super::parse_device_for_model(key(), model, &model_description(model)).unwrap();
         assert_eq!(device.functions().len(), 1);
         assert_eq!(device.functions()[0].id(), "outlet:2");
         assert_eq!(device.functions()[0].power(), outlet.functions()[0].power());
@@ -54,7 +56,7 @@ fn four_single_outlet_models_accept_their_public_instance_urns() {
 #[test]
 fn cp7pd_exposes_three_independent_channels_and_observes_total_control_internally() {
     let description = model_description("cuco.plug.cp7pd");
-    let device = parse_device(key(), &description).unwrap();
+    let device = parse_cp7pd(&description).unwrap();
     assert_eq!(*device.key(), key());
     assert_eq!(device.functions()[0].kind(), FunctionKind::Outlet);
     assert_eq!(
@@ -93,10 +95,7 @@ fn cp7pd_mapping_is_independent_of_description_text() {
             }
         }
     }
-    assert_eq!(
-        parse_device(key(), &original),
-        parse_device(key(), &renamed)
-    );
+    assert_eq!(parse_cp7pd(&original), parse_cp7pd(&renamed));
 }
 
 fn cp7pd_service_mut(description: &mut Value, siid: u32) -> &mut Value {
@@ -108,29 +107,53 @@ fn cp7pd_service_mut(description: &mut Value, siid: u32) -> &mut Value {
         .unwrap()
 }
 
+fn parse_cp7pd(instance: &Value) -> Result<super::ParsedDevice, CapabilityError> {
+    super::parse_device_for_model(key(), "cuco.plug.cp7pd", instance)
+}
+
 #[test]
-fn cp7pd_requires_all_channels_and_the_internal_total_control_binding() {
+fn cp7pd_reports_missing_channels_or_master_without_losing_other_channels() {
     for (siid, id) in [(2, "master"), (3, "outlet_1"), (4, "outlet_2"), (9, "usb")] {
         let mut description = model_description("cuco.plug.cp7pd");
         description["services"]
             .as_array_mut()
             .unwrap()
             .retain(|service| service["iid"] != siid);
-        assert_eq!(
-            parse_device(key(), &description),
-            Err(CapabilityError::MissingFunction(id))
-        );
+        assert_cp7pd_partial(&description, siid, id);
 
         let mut description = model_description("cuco.plug.cp7pd");
         cp7pd_service_mut(&mut description, siid)["properties"]
             .as_array_mut()
             .unwrap()
             .retain(|property| property["iid"] != 1);
-        assert_eq!(
-            parse_device(key(), &description),
-            Err(CapabilityError::MissingFunction(id))
-        );
+        assert_cp7pd_partial(&description, siid, id);
     }
+}
+
+fn assert_cp7pd_partial(description: &Value, failed_siid: u32, reason: &str) {
+    let parsed = parse_cp7pd(description).unwrap();
+    let expected = [3, 4, 9]
+        .into_iter()
+        .filter(|siid| *siid != failed_siid)
+        .map(|siid| format!("outlet:{siid}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parsed
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(parsed.refresh_trigger().is_some(), failed_siid != 2);
+    assert!(
+        parsed
+            .recognition()
+            .unwrap()
+            .diagnostics()
+            .iter()
+            .any(|issue| issue.reason().contains(reason))
+    );
 }
 
 #[test]
@@ -138,10 +161,7 @@ fn cp7pd_checks_boolean_type_and_every_permission_for_each_binding() {
     for siid in [2, 3, 4, 9] {
         let mut description = model_description("cuco.plug.cp7pd");
         cp7pd_service_mut(&mut description, siid)["properties"][0]["format"] = json!("uint8");
-        assert_eq!(
-            parse_device(key(), &description),
-            Err(CapabilityError::InvalidMainPowerType)
-        );
+        assert_cp7pd_partial(&description, siid, "boolean");
         for permission in ["read", "write", "notify"] {
             let mut description = model_description("cuco.plug.cp7pd");
             cp7pd_service_mut(&mut description, siid)["properties"][0]["access"] = json!(
@@ -150,10 +170,7 @@ fn cp7pd_checks_boolean_type_and_every_permission_for_each_binding() {
                     .filter(|value| *value != permission)
                     .collect::<Vec<_>>()
             );
-            assert_eq!(
-                parse_device(key(), &description),
-                Err(CapabilityError::MissingAccess(permission))
-            );
+            assert_cp7pd_partial(&description, siid, permission);
         }
     }
 }
@@ -209,20 +226,11 @@ fn cp7pd_rejects_wrong_vendor_namespace_and_semantics() {
         } else {
             service["properties"][0]["type"] = json!(urn);
         }
-        assert!(
-            matches!(
-                parse_device(key(), &description),
-                Err(CapabilityError::IncompatibleModel(_))
-            ),
-            "{urn}"
-        );
+        assert_cp7pd_partial(&description, siid, "cuco.plug.cp7pd");
     }
     let mut description = model_description("cuco.plug.cp7pd");
     description["type"] = json!("urn:miot-spec-v2:device:outlet:0000A002:other-cp7pd:1");
-    assert_eq!(
-        parse_device(key(), &description),
-        Err(CapabilityError::AmbiguousMainPower)
-    );
+    assert!(super::parse_device_for_model(key(), "cuco.plug.cp7pd", &description).is_err());
 }
 
 #[test]
@@ -389,9 +397,11 @@ fn indicator_light_without_a_functional_switch_is_unsupported() {
     let mut description = minimal_description();
     description["services"][0]["type"] =
         json!("urn:miot-spec-v2:service:indicator-light:00007803:other-vendor:1");
-    assert_eq!(
-        parse_device(key(), &description),
-        Err(CapabilityError::MissingMainPower)
+    assert!(
+        parse_device(key(), &description)
+            .unwrap_err()
+            .to_string()
+            .contains("outlet")
     );
 }
 
@@ -399,9 +409,11 @@ fn indicator_light_without_a_functional_switch_is_unsupported() {
 fn non_boolean_main_power_and_each_missing_permission_are_rejected() {
     let mut description = minimal_description();
     description["services"][0]["properties"][0]["format"] = json!("uint8");
-    assert_eq!(
-        parse_device(key(), &description),
-        Err(CapabilityError::InvalidMainPowerType)
+    assert!(
+        parse_device(key(), &description)
+            .unwrap_err()
+            .to_string()
+            .contains("boolean")
     );
     for permission in ["read", "write", "notify"] {
         let mut description = minimal_description();
@@ -411,9 +423,11 @@ fn non_boolean_main_power_and_each_missing_permission_are_rejected() {
                 .filter(|value| *value != permission)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            parse_device(key(), &description),
-            Err(CapabilityError::MissingAccess(permission))
+        assert!(
+            parse_device(key(), &description)
+                .unwrap_err()
+                .to_string()
+                .contains(permission)
         );
     }
 }
@@ -427,9 +441,11 @@ fn multiple_functional_power_properties_are_ambiguous() {
         .as_array_mut()
         .unwrap()
         .push(second);
-    assert_eq!(
-        parse_device(key(), &description),
-        Err(CapabilityError::AmbiguousMainPower)
+    assert!(
+        parse_device(key(), &description)
+            .unwrap_err()
+            .to_string()
+            .contains("multiple standard outlet")
     );
 
     let mut description = minimal_description();
@@ -437,8 +453,13 @@ fn multiple_functional_power_properties_are_ambiguous() {
     second["iid"] = json!(43);
     description["services"].as_array_mut().unwrap().push(second);
     assert_eq!(
-        parse_device(key(), &description),
-        Err(CapabilityError::AmbiguousMainPower)
+        parse_device(key(), &description)
+            .unwrap()
+            .functions()
+            .iter()
+            .map(|f| f.id())
+            .collect::<Vec<_>>(),
+        ["outlet:42", "outlet:43"]
     );
 }
 
@@ -451,9 +472,11 @@ fn private_or_inconsistent_urns_cannot_masquerade_as_standard_power() {
     ] {
         let mut description = minimal_description();
         description["services"][0]["properties"][0]["type"] = json!(urn);
-        assert_eq!(
-            parse_device(key(), &description),
-            Err(CapabilityError::MissingMainPower)
+        assert!(
+            parse_device(key(), &description)
+                .unwrap_err()
+                .to_string()
+                .contains("outlet")
         );
     }
     let mut description = minimal_description();
@@ -491,10 +514,12 @@ fn unsupported_devices_and_malformed_protocol_fields_fail_at_the_boundary() {
     }
     let mut description = minimal_description();
     description["services"][0]["properties"][0]["access"] = json!(["read", 1, "write", "notify"]);
-    assert!(matches!(
-        parse_device(key(), &description),
-        Err(CapabilityError::InvalidDescription(_))
-    ));
+    assert!(
+        parse_device(key(), &description)
+            .unwrap_err()
+            .to_string()
+            .contains("access")
+    );
 }
 
 mod group;
@@ -507,7 +532,7 @@ pub(crate) fn parse_device(
     key: crate::device::DeviceKey,
     instance: &serde_json::Value,
 ) -> Result<super::ParsedDevice, CapabilityError> {
-    super::parse_device_for_model(key, "", instance)
+    super::parse_device_for_model(key, "test.generic", instance)
 }
 
 mod sensors;

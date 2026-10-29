@@ -333,6 +333,9 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
                 "Speed: unknown",
                 "Horizontal swing: unknown",
                 "8.1",
+                "Category: fan",
+                "fan:2: core",
+                "dmaker.fan.straight-wind",
             ] {
                 assert!(result.contains(expected), "missing {expected}: {result}");
             }

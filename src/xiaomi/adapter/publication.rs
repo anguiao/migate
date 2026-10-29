@@ -279,11 +279,14 @@ impl SourceHandle {
             let device = plan.configuration.device(&operation.key).unwrap();
             let mut live = self.0.live.borrow_mut();
             let slot = live.devices.get_mut(&operation.key.id).unwrap();
-            slot.admitted
-                .as_ref()
-                .unwrap()
-                .physical()
-                .set_label(device.label.clone());
+            let work = slot.admitted.as_ref().unwrap();
+            work.physical().set_label(device.label.clone());
+            work.set_committed_battery_issue(
+                device
+                    .native
+                    .as_ref()
+                    .and_then(|native| native.device().battery_issue()),
+            );
             slot.latest = device.native.clone();
             slot.latest_name = None;
             slot.group = plan.derived.groups.contains_key(&operation.key.id);

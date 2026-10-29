@@ -46,6 +46,9 @@ fn parses_real_group3_native_light_profile() {
         "a group mode value cannot create a color capability"
     );
     assert!(parsed.refresh_trigger().is_none());
+    let recognition = parsed.recognition().expect("group recognition metadata");
+    assert_eq!(recognition.category(), "light");
+    assert_eq!(recognition.core(), ["light:2"]);
 }
 
 #[test]

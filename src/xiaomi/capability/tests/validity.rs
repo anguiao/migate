@@ -329,8 +329,8 @@ fn native_description_rejects_cp7pd_recovery_mismatches() {
             cp7pd_type.into(),
             wrong_channel.clone()
         )
-        .is_err(),
-        "cp7pd channels own exact bindings"
+        .is_ok(),
+        "an independent outlet cannot be rejected by an unrelated model topology"
     );
 }
 

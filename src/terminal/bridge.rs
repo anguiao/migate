@@ -31,6 +31,80 @@ fn configuration_lines(view: &View, did: &str) -> Vec<String> {
             record.endpoint,
             record.configuration_version
         ));
+        if let Some(native) = &record.native {
+            let device = native.device();
+            let recognition = device.recognition();
+            let category = recognition
+                .map(|metadata| metadata.category())
+                .unwrap_or_else(|| {
+                    native
+                        .instance_type()
+                        .split(':')
+                        .nth(3)
+                        .expect("a native instance has a validated URN")
+                });
+            lines.push(format!("  Category: {category}."));
+            for function in device.functions() {
+                let role = if recognition
+                    .is_some_and(|metadata| metadata.core().iter().any(|id| id == function.id()))
+                {
+                    "core"
+                } else {
+                    "additional"
+                };
+                let mut bindings = function
+                    .bindings()
+                    .iter()
+                    .map(|binding| format!("property {}.{}", binding.siid, binding.piid))
+                    .collect::<Vec<_>>();
+                if let Some(motion) = function.motion() {
+                    let event = motion.event();
+                    bindings.push(format!("event {}.{}", event.siid, event.eiid));
+                    bindings.extend(motion.arguments().iter().map(|argument| {
+                        format!(
+                            "event argument {}.{}",
+                            argument.property.siid, argument.property.piid
+                        )
+                    }));
+                }
+                let bindings = bindings.join(", ");
+                lines.push(format!(
+                    "  {}: {role}; capabilities {}; bindings {bindings}.",
+                    function.id(),
+                    capabilities(&function.description())
+                ));
+            }
+            if let Some(battery) = device.battery() {
+                let binding = battery.property();
+                lines.push(format!(
+                    "  Shared battery binding: property {}.{}.",
+                    binding.siid, binding.piid
+                ));
+            }
+            if let Some(binding) = device.refresh_trigger() {
+                lines.push(format!(
+                    "  Refresh trigger: property {}.{}.",
+                    binding.siid, binding.piid
+                ));
+            }
+            if let Some(metadata) = recognition {
+                for patch in metadata.patches() {
+                    lines.push(format!(
+                        "  Patch {}: {} ({}).",
+                        patch.id(),
+                        patch.target(),
+                        patch.stage()
+                    ));
+                }
+                for issue in metadata.diagnostics() {
+                    lines.push(format!(
+                        "  Recognition issue {}: {}.",
+                        issue.target(),
+                        issue.reason()
+                    ));
+                }
+            }
+        }
     }
     // The terminal lists every confirmed membership from the effective
     // relations, including groups that are currently unpublished.
@@ -70,9 +144,11 @@ fn configuration_lines(view: &View, did: &str) -> Vec<String> {
             .entries
             .iter()
             .find(|entry| entry.physical.key() == &key)
+            && let Some(native_function) = entry.native.device().unique_light()
+            && let Some(logical_function) = entry.physical.function(native_function.id())
         {
-            let native = entry.native.device().functions()[0].description();
-            let logical = entry.physical.functions()[0].description();
+            let native = native_function.description();
+            let logical = logical_function.description();
             let repaired = logical.supports_rgb() && !native.supports_rgb();
             lines.push(format!(
                 "  Native capabilities: {}. Repaired: {}. State source: {}.",

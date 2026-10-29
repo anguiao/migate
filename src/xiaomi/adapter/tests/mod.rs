@@ -2,6 +2,7 @@ pub(crate) mod app_source;
 mod bootstrap;
 mod cloud_refresh;
 mod commands;
+mod composition;
 mod credentials;
 mod descriptions;
 mod diagnostics;

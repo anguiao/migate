@@ -75,6 +75,7 @@ pub(super) struct DeviceWork {
     pub(super) refresh: RefCell<RefreshState>,
     pub(super) refresh_changed: Rc<Event>,
     pub(super) light_frames: RefCell<LightFrames>,
+    committed_battery_issue: RefCell<Option<String>>,
     battery_subscription_problem: RefCell<Option<String>>,
     battery_read_problem: RefCell<Option<String>>,
     retry_requested: Cell<bool>,
@@ -88,6 +89,7 @@ impl DeviceWork {
         light_write: Option<Rc<DeviceWriteGate>>,
     ) -> Self {
         let key = native.device().key().clone();
+        let battery_issue = native.device().battery_issue().map(str::to_owned);
         Self {
             key,
             native,
@@ -106,6 +108,7 @@ impl DeviceWork {
             refresh: RefCell::new(RefreshState::default()),
             refresh_changed,
             light_frames: RefCell::new(LightFrames::default()),
+            committed_battery_issue: RefCell::new(battery_issue),
             battery_subscription_problem: RefCell::new(None),
             battery_read_problem: RefCell::new(None),
             retry_requested: Cell::new(false),
