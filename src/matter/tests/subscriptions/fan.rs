@@ -1,9 +1,8 @@
-use super::super::support::{Context, read_bytes, report_dataver, report_value};
-use super::*;
-use crate::device::{
-    DeviceKey, DeviceRequest, FanCommand, FanStep, FanValue, FunctionDescription, FunctionKind,
-    PhysicalDevice, PhysicalDeviceDescription,
+use super::super::support::{
+    Context, fan_device, observe_fan_state, read_bytes, report_dataver, report_value,
 };
+use super::*;
+use crate::device::{DeviceRequest, FanCommand, FanStep, FanValue};
 async fn no_report(client: &Matter<'_>, id: u32) {
     or(
         async {
@@ -42,26 +41,10 @@ fn fan_live_subscription_reports_only_changed_projections() {
             let crypto = test_only_crypto();
             let buffers: MatterBuffers = MatterBuffers::new();
             let state: InteractionModelState = InteractionModelState::new();
-            let (device, mut receivers) = PhysicalDevice::new(
-                PhysicalDeviceDescription::new(
-                    DeviceKey::new("xiaomi", "subscription-fan"),
-                    "Fan",
-                    vec![FunctionDescription {
-                        id: "main".into(),
-                        label: "Fan".into(),
-                        kind: FunctionKind::Fan {
-                            horizontal_swing: true,
-                        },
-                    }],
-                )
-                .unwrap(),
-            );
+            let (device, mut receiver) = fan_device("subscription-fan", true);
             device.set_availability(Availability::Available);
             let function = &device.functions()[0];
-            function.observe_fan(FanValue::Power(true), Some(1), 1);
-            function.observe_fan(FanValue::Speed(40), Some(1), 1);
-            function.observe_fan(FanValue::Mode(0), Some(1), 1);
-            function.observe_fan(FanValue::Swing(false), Some(1), 1);
+            observe_fan_state(function, true, 40, 0, false);
             let handler = model_handler(vec![single_entry(&device)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
@@ -110,7 +93,7 @@ fn fan_live_subscription_reports_only_changed_projections() {
                         [(0, 2), (2, 40), (3, 40), (5, 40), (6, 40), (8, 0)]
                     );
                     assert!(
-                        futures_lite::future::poll_once(receivers[0].next_operation())
+                        futures_lite::future::poll_once(receiver.next_operation())
                             .await
                             .is_none()
                     );
@@ -138,13 +121,13 @@ fn fan_live_subscription_reports_only_changed_projections() {
                             expected
                         );
                         assert!(
-                            futures_lite::future::poll_once(receivers[0].next_operation())
+                            futures_lite::future::poll_once(receiver.next_operation())
                                 .await
                                 .is_none()
                         );
                     }
                     let action = function.begin_fan(FanCommand::Swing(true)).unwrap();
-                    let DeviceRequest::Fan(request) = receivers[0].next_operation().await.unwrap()
+                    let DeviceRequest::Fan(request) = receiver.next_operation().await.unwrap()
                     else {
                         panic!("expected fan request")
                     };
@@ -222,26 +205,10 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
             let crypto = test_only_crypto();
             let buffers: MatterBuffers = MatterBuffers::new();
             let state: InteractionModelState = InteractionModelState::new();
-            let (device, mut receivers) = PhysicalDevice::new(
-                PhysicalDeviceDescription::new(
-                    DeviceKey::new("xiaomi", "fan-write-report"),
-                    "Fan",
-                    vec![FunctionDescription {
-                        id: "main".into(),
-                        label: "Fan".into(),
-                        kind: FunctionKind::Fan {
-                            horizontal_swing: true,
-                        },
-                    }],
-                )
-                .unwrap(),
-            );
+            let (device, mut receiver) = fan_device("fan-write-report", true);
             device.set_availability(Availability::Available);
             let function = &device.functions()[0];
-            function.observe_fan(FanValue::Power(true), Some(1), 1);
-            function.observe_fan(FanValue::Speed(40), Some(1), 1);
-            function.observe_fan(FanValue::Mode(1), Some(1), 1);
-            function.observe_fan(FanValue::Swing(false), Some(1), 1);
+            observe_fan_state(function, true, 40, 1, false);
             let handler = model_handler(vec![single_entry(&device)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
@@ -280,8 +247,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                     assert_eq!(values(&initial), [(2, 40), (8, 0)]);
                     let observed = function.snapshot().fan().unwrap();
                     let accept = async {
-                        let DeviceRequest::Fan(request) =
-                            receivers[0].next_operation().await.unwrap()
+                        let DeviceRequest::Fan(request) = receiver.next_operation().await.unwrap()
                         else {
                             panic!("expected fan request")
                         };
@@ -298,7 +264,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                     assert_eq!(status, IMStatusCode::Success);
                     assert_eq!(function.snapshot().fan().unwrap(), observed);
                     assert!(
-                        futures_lite::future::poll_once(receivers[0].next_operation())
+                        futures_lite::future::poll_once(receiver.next_operation())
                             .await
                             .is_none()
                     );
@@ -309,7 +275,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                     assert_eq!(retained.fan[&8].1, 0);
                     assert_eq!(function.snapshot().fan().unwrap(), observed);
                     assert!(
-                        futures_lite::future::poll_once(receivers[0].next_operation())
+                        futures_lite::future::poll_once(receiver.next_operation())
                             .await
                             .is_none()
                     );
@@ -318,7 +284,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                     loop {
                         let report = receive_observed(&client, id).await.unwrap();
                         assert!(
-                            futures_lite::future::poll_once(receivers[0].next_operation())
+                            futures_lite::future::poll_once(receiver.next_operation())
                                 .await
                                 .is_none()
                         );
@@ -339,7 +305,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                     assert_eq!(actual_observed.mode, observed.mode);
                     assert_eq!(actual_observed.speed, observed.speed);
                     assert!(
-                        futures_lite::future::poll_once(receivers[0].next_operation())
+                        futures_lite::future::poll_once(receiver.next_operation())
                             .await
                             .is_none()
                     );
@@ -347,8 +313,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
 
                     let observed = function.snapshot().fan().unwrap();
                     let accept = async {
-                        let DeviceRequest::Fan(request) =
-                            receivers[0].next_operation().await.unwrap()
+                        let DeviceRequest::Fan(request) = receiver.next_operation().await.unwrap()
                         else {
                             panic!("expected fan request")
                         };
@@ -368,7 +333,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                     assert_eq!(status, IMStatusCode::Success);
                     assert_eq!(function.snapshot().fan().unwrap(), observed);
                     assert!(
-                        futures_lite::future::poll_once(receivers[0].next_operation())
+                        futures_lite::future::poll_once(receiver.next_operation())
                             .await
                             .is_none()
                     );
@@ -382,7 +347,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                     loop {
                         let report = receive_observed(&client, id).await.unwrap();
                         assert!(
-                            futures_lite::future::poll_once(receivers[0].next_operation())
+                            futures_lite::future::poll_once(receiver.next_operation())
                                 .await
                                 .is_none()
                         );
@@ -445,30 +410,16 @@ fn persistent_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
     let crypto = test_only_crypto();
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: InteractionModelState = InteractionModelState::new();
-    let (device, mut receivers) = PhysicalDevice::new(
-        PhysicalDeviceDescription::new(
-            DeviceKey::new("xiaomi", "persistent-fan"),
-            "Fan",
-            vec![FunctionDescription {
-                id: "main".into(),
-                label: "Fan".into(),
-                kind: FunctionKind::Fan {
-                    horizontal_swing: true,
-                },
-            }],
-        )
-        .unwrap(),
-    );
+    let (device, mut receiver) = fan_device("persistent-fan", true);
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
-    function.observe_fan(FanValue::Power(previous.is_none()), Some(1), 1);
-    function.observe_fan(
-        FanValue::Speed(if previous.is_some() { 77 } else { 40 }),
-        Some(1),
+    observe_fan_state(
+        function,
+        previous.is_none(),
+        if previous.is_some() { 77 } else { 40 },
         1,
+        previous.is_some(),
     );
-    function.observe_fan(FanValue::Mode(1), Some(1), 1);
-    function.observe_fan(FanValue::Swing(previous.is_some()), Some(1), 1);
     let handler = model_handler(vec![single_entry(&device)]);
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
@@ -507,7 +458,7 @@ fn persistent_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
         };
         let controller = async {
             assert!(
-                futures_lite::future::poll_once(receivers[0].next_operation())
+                futures_lite::future::poll_once(receiver.next_operation())
                     .await
                     .is_none()
             );
@@ -519,7 +470,7 @@ fn persistent_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                     [(0, 0), (2, 0), (3, 0), (5, 0), (6, 0), (8, 1)]
                 );
                 assert!(
-                    futures_lite::future::poll_once(receivers[0].next_operation())
+                    futures_lite::future::poll_once(receiver.next_operation())
                         .await
                         .is_none()
                 );
@@ -532,7 +483,7 @@ fn persistent_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                     [(0, 3), (2, 77), (3, 77), (5, 77), (6, 77)]
                 );
                 assert!(
-                    futures_lite::future::poll_once(receivers[0].next_operation())
+                    futures_lite::future::poll_once(receiver.next_operation())
                         .await
                         .is_none()
                 );
@@ -553,8 +504,7 @@ fn persistent_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                 );
                 wait_committed(&state).await;
                 let action = function.begin_fan(FanCommand::Speed(40)).unwrap();
-                let DeviceRequest::Fan(request) = receivers[0].next_operation().await.unwrap()
-                else {
+                let DeviceRequest::Fan(request) = receiver.next_operation().await.unwrap() else {
                     panic!("expected fan request")
                 };
                 request.mark_sent(FanStep::Mode).unwrap();

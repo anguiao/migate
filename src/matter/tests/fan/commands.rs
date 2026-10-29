@@ -4,38 +4,6 @@ use crate::device::{
 };
 use rs_matter::{dm::InvokeReplyInstance, tlv::TLVElement, utils::storage::WriteBuf};
 
-macro_rules! setup {
-    ($swing:expr, $device:ident, $receiver:ident, $handler:ident, $im:ident) => {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let identity = store.load_identity().unwrap();
-        let ($device, mut receivers) = PhysicalDevice::new(
-            PhysicalDeviceDescription::new(
-                DeviceKey::new("xiaomi", "fan-command"),
-                "Fan",
-                vec![FunctionDescription {
-                    id: "main".into(),
-                    label: "Fan".into(),
-                    kind: FunctionKind::Fan {
-                        horizontal_swing: $swing,
-                    },
-                }],
-            )
-            .unwrap(),
-        );
-        let mut $receiver = receivers.remove(0);
-        $device.set_availability(Availability::Available);
-        let $handler = model_handler(vec![single_entry(&$device)]);
-        let info = basic_info(&identity);
-        let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-        let buffers: MatterBuffers = MatterBuffers::new();
-        let state: InteractionModelState = InteractionModelState::new();
-        let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let kv = matter.kv(StoreAdapter::new(store.matter()));
-        let $im = InteractionModel::new(&matter, &crypto, &buffers, &$handler, &kv, &state);
-    };
-}
-
 async fn next_fan(receiver: &mut CommandReceiver) -> FanRequest {
     let DeviceRequest::Fan(request) = receiver.next_operation().await.unwrap() else {
         panic!("expected fan request")
@@ -45,12 +13,11 @@ async fn next_fan(receiver: &mut CommandReceiver) -> FanRequest {
 
 #[test]
 fn writes_dispatch_fan_commands_and_wait_for_all_receipts() {
-    setup!(true, device, receiver, handler, im);
+    let (device, mut receiver) = fan_device("fan-command", true);
+    device.set_availability(Availability::Available);
+    fan_model!(&device, handler, im);
     let function = &device.functions()[0];
-    function.observe_fan(FanValue::Power(true), Some(1), 1);
-    function.observe_fan(FanValue::Speed(40), Some(1), 1);
-    function.observe_fan(FanValue::Mode(1), Some(1), 1);
-    function.observe_fan(FanValue::Swing(false), Some(1), 1);
+    observe_fan_state(function, true, 40, 1, false);
     block_on(async {
         for (attribute, raw, command) in [
             (2, 1, FanCommand::Speed(1)),
@@ -117,12 +84,11 @@ fn writes_dispatch_fan_commands_and_wait_for_all_receipts() {
 
 #[test]
 fn invalid_writes_are_rejected_without_queueing_or_changing_observations() {
-    setup!(true, device, receiver, handler, im);
+    let (device, mut receiver) = fan_device("fan-command", true);
+    device.set_availability(Availability::Available);
+    fan_model!(&device, handler, im);
     let function = &device.functions()[0];
-    function.observe_fan(FanValue::Power(true), Some(1), 1);
-    function.observe_fan(FanValue::Speed(40), Some(1), 1);
-    function.observe_fan(FanValue::Mode(1), Some(1), 1);
-    function.observe_fan(FanValue::Swing(false), Some(1), 1);
+    observe_fan_state(function, true, 40, 1, false);
     let before = function.snapshot();
     block_on(async {
         for (attribute, bytes, error) in [
@@ -153,7 +119,9 @@ fn invalid_writes_are_rejected_without_queueing_or_changing_observations() {
 
 #[test]
 fn write_failures_and_timeouts_are_returned_to_the_caller() {
-    setup!(true, _device, receiver, handler, im);
+    let (device, mut receiver) = fan_device("fan-command", true);
+    device.set_availability(Availability::Available);
+    fan_model!(&device, handler, im);
     block_on(async {
         for (failure, expected) in [
             (CommandError::Timeout, ErrorCode::RxTimeout),
@@ -174,7 +142,9 @@ fn write_failures_and_timeouts_are_returned_to_the_caller() {
 
 #[test]
 fn on_off_commands_remain_independent_and_toggle_requires_observation() {
-    setup!(true, device, receiver, handler, im);
+    let (device, mut receiver) = fan_device("fan-command", true);
+    device.set_availability(Availability::Available);
+    fan_model!(&device, handler, im);
     let function = &device.functions()[0];
     block_on(async {
         let mut ctx = Context::new(&im, 6, 0);

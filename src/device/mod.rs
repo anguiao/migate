@@ -21,8 +21,8 @@ pub use model::{
     Availability, BatterySnapshot, Capability, Command, CommandError, CurtainMotion,
     CurtainSnapshot, DeviceKey, FanSnapshot, FunctionDescription, FunctionKind, FunctionSnapshot,
     FunctionState, LightMode, LightPatch, LightProfile, LightProfileKind, LightSnapshot,
-    MeasurementRange, MeasurementSnapshot, NumericRange, PhysicalDeviceDescription, Power,
-    PropertyObservation, Rgb, StateInput, StateSnapshot, TemperatureInterval,
+    MeasurementRange, MeasurementSnapshot, NumericRange, PhysicalDeviceDescription, Power, Rgb,
+    StateInput, StateSnapshot, TemperatureInterval,
 };
 pub(crate) use model::{CurtainValue, FanValue};
 pub use registry::DeviceRegistry;

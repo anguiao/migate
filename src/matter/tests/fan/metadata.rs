@@ -4,18 +4,8 @@ use rs_matter::{dm::InvokeReplyInstance, tlv::TLVElement, utils::storage::WriteB
 #[test]
 fn global_lists_and_access_match_each_fan_shape() {
     for swing in [false, true] {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let identity = store.load_identity().unwrap();
-        let device = fan(swing);
-        let handler = model_handler(vec![single_entry(&device)]);
-        let info = basic_info(&identity);
-        let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-        let buffers: MatterBuffers = MatterBuffers::new();
-        let state: InteractionModelState = InteractionModelState::new();
-        let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let kv = matter.kv(StoreAdapter::new(store.matter()));
-        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+        let device = fan_device("fan", swing).0;
+        fan_model!(&device, handler, im);
         let mut ctx = Context::new(&im, 0x202, 0);
         block_on(async {
             let mut attributes = (0..=6).collect::<Vec<_>>();
@@ -84,18 +74,8 @@ fn global_lists_and_access_match_each_fan_shape() {
 
 #[test]
 fn confirmed_on_without_speed_still_fails_until_observed() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    let identity = store.load_identity().unwrap();
-    let device = fan(true);
-    let handler = model_handler(vec![single_entry(&device)]);
-    let info = basic_info(&identity);
-    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    let buffers: MatterBuffers = MatterBuffers::new();
-    let state: InteractionModelState = InteractionModelState::new();
-    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-    let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+    let device = fan_device("fan", true).0;
+    fan_model!(&device, handler, im);
     let function = &device.functions()[0];
     function.observe_fan(FanValue::Power(true), Some(1), 1);
     function.observe_fan(FanValue::Swing(true), Some(1), 1);

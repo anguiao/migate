@@ -22,10 +22,12 @@ pub(super) async fn next_power(
 }
 
 mod context;
+mod fan;
 mod reports;
 mod source;
 pub(in crate::matter) use context::Context;
 pub(super) use context::attr;
+pub(super) use fan::{fan_device, fan_model, observe_fan_state};
 pub(super) use reports::{read_bytes, report_dataver, report_value};
 pub(crate) use source::PublishedLightModel;
 

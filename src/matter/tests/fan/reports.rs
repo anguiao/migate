@@ -4,37 +4,11 @@ use rs_matter::dm::AttrChangeNotifier;
 
 #[test]
 fn notifications_and_versions_follow_each_actual_projection() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    let identity = store.load_identity().unwrap();
-    let (device, mut receivers) = PhysicalDevice::new(
-        PhysicalDeviceDescription::new(
-            DeviceKey::new("xiaomi", "fan-reports"),
-            "Fan",
-            vec![FunctionDescription {
-                id: "main".into(),
-                label: "Fan".into(),
-                kind: FunctionKind::Fan {
-                    horizontal_swing: true,
-                },
-            }],
-        )
-        .unwrap(),
-    );
+    let (device, mut receiver) = fan_device("fan-reports", true);
     device.set_availability(Availability::Available);
     let function = &device.functions()[0];
-    function.observe_fan(FanValue::Power(true), Some(1), 1);
-    function.observe_fan(FanValue::Speed(40), Some(1), 1);
-    function.observe_fan(FanValue::Mode(0), Some(1), 1);
-    function.observe_fan(FanValue::Swing(false), Some(1), 1);
-    let handler = model_handler(vec![single_entry(&device)]);
-    let info = basic_info(&identity);
-    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    let buffers: MatterBuffers = MatterBuffers::new();
-    let state: InteractionModelState = InteractionModelState::new();
-    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-    let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+    observe_fan_state(function, true, 40, 0, false);
+    fan_model!(&device, handler, im);
     let ctx = Context::new(&im, 0x202, 0);
     let power_ctx = Context::new(&im, 6, 0);
     let speed_ctx = Context::new(&im, 0x202, 3);
@@ -66,7 +40,7 @@ fn notifications_and_versions_follow_each_actual_projection() {
         assert_eq!(version(&speed_ctx).await, fan_speed);
 
         let action = function.begin_fan(FanCommand::Swing(true)).unwrap();
-        let DeviceRequest::Fan(request) = receivers[0].next_operation().await.unwrap() else {
+        let DeviceRequest::Fan(request) = receiver.next_operation().await.unwrap() else {
             panic!("expected fan request")
         };
         request.mark_sent(FanStep::Swing(true)).unwrap();

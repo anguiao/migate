@@ -1,7 +1,8 @@
+use crate::device::model::PropertyObservation;
 use crate::device::{
     Availability, Command, CommandError, CurtainCommand, CurtainMotion, CurtainSnapshot,
     CurtainValue, DeviceKey, Function, FunctionDescription, FunctionKind, FunctionSnapshot,
-    PhysicalDevice, PhysicalDeviceDescription, PropertyObservation,
+    PhysicalDevice, PhysicalDeviceDescription,
 };
 use futures_lite::future::{block_on, poll_once};
 

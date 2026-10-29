@@ -1,25 +1,12 @@
 use super::support::{
-    Context, attr, model_handler, read_bytes, report_dataver, report_value, single_entry,
+    Context, attr, fan_device, fan_model, model_handler, observe_fan_state, read_bytes,
+    report_dataver, report_value, single_entry,
 };
-use crate::{
-    device::{
-        DeviceKey, FanValue, FunctionDescription, FunctionKind, PhysicalDevice,
-        PhysicalDeviceDescription,
-    },
-    matter::{model::basic_info, storage::StoreAdapter},
-    storage::Store,
-};
+use crate::device::FanValue;
 use futures_lite::future::{block_on, poll_once};
 use rs_matter::{
-    MATTER_PORT, Matter,
-    crypto::default_crypto,
-    dm::{
-        AsyncHandler, Metadata,
-        devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
-    },
+    dm::{AsyncHandler, Metadata},
     error::ErrorCode,
-    im::{InteractionModel, InteractionModelState},
-    transport::exchange::MatterBuffers,
 };
 use std::pin::pin;
 
@@ -30,27 +17,10 @@ mod metadata;
 #[path = "fan/reports.rs"]
 mod reports;
 
-fn fan(swing: bool) -> PhysicalDevice {
-    PhysicalDevice::new(
-        PhysicalDeviceDescription::new(
-            DeviceKey::new("xiaomi", "fan"),
-            "Fan",
-            vec![FunctionDescription {
-                id: "main".into(),
-                label: "Fan".into(),
-                kind: FunctionKind::Fan {
-                    horizontal_swing: swing,
-                },
-            }],
-        )
-        .unwrap(),
-    )
-    .0
-}
 #[test]
 fn fan_endpoint_publishes_confirmed_device_type_cluster_and_shape() {
     for swing in [false, true] {
-        let device = fan(swing);
+        let device = fan_device("fan", swing).0;
         let model = model_handler(vec![single_entry(&device)]);
         model.access(|node| {
             let endpoint = node.endpoint(2).unwrap();
@@ -92,18 +62,8 @@ fn fan_endpoint_publishes_confirmed_device_type_cluster_and_shape() {
 }
 #[test]
 fn fan_read_projection_uses_power_and_retained_speed_only() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    let identity = store.load_identity().unwrap();
-    let device = fan(true);
-    let handler = model_handler(vec![single_entry(&device)]);
-    let info = basic_info(&identity);
-    let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
-    let buffers: MatterBuffers = MatterBuffers::new();
-    let state: InteractionModelState = InteractionModelState::new();
-    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-    let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+    let device = fan_device("fan", true).0;
+    fan_model!(&device, handler, im);
     let mut ctx = Context::new(&im, 0x202, 0);
     let function = &device.functions()[0];
     block_on(async {
