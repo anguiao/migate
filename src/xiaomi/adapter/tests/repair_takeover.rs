@@ -224,8 +224,10 @@ fn newer_shared_target_retires_an_older_completed_frames_unsent_member() {
             status[0].inflight.is_none()
                 && status[0].last.as_ref().is_some_and(|last| {
                     last.result == Some(Ok(()))
-                        && last.properties.iter().any(|(binding, value)| {
-                            binding.siid == 4 && binding.piid == 1 && value == &json!(0xff0000)
+                        && last.properties.iter().any(|property| {
+                            property.binding.siid == 4
+                                && property.binding.piid == 1
+                                && property.value == json!(0xff0000)
                         })
                 })
         })

@@ -192,8 +192,10 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
                     id: 42,
                     binding: PropertyBinding { siid: 2, piid: 1 },
                     target: crate::xiaomi::adapter::CommandTarget::Power(true),
-                    properties: vec![(PropertyBinding { siid: 2, piid: 1 }, true.into())],
-                    fan_paths: Vec::new(),
+                    properties: command_properties(
+                        vec![(PropertyBinding { siid: 2, piid: 1 }, true.into())],
+                        Some(PathKind::Local),
+                    ),
                     actual_path: Some(PathKind::Local),
                     result: None,
                 }),
@@ -201,8 +203,10 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
                     id: 41,
                     binding: PropertyBinding { siid: 2, piid: 1 },
                     target: crate::xiaomi::adapter::CommandTarget::Power(false),
-                    properties: vec![(PropertyBinding { siid: 2, piid: 1 }, false.into())],
-                    fan_paths: Vec::new(),
+                    properties: command_properties(
+                        vec![(PropertyBinding { siid: 2, piid: 1 }, false.into())],
+                        Some(PathKind::Cloud),
+                    ),
                     actual_path: Some(PathKind::Cloud),
                     result: Some(Err(CommandError::Timeout)),
                 }),
@@ -280,8 +284,10 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
                     id: 8,
                     binding: PropertyBinding { siid: 3, piid: 1 },
                     target: crate::xiaomi::adapter::CommandTarget::Power(false),
-                    properties: vec![(PropertyBinding { siid: 3, piid: 1 }, false.into())],
-                    fan_paths: Vec::new(),
+                    properties: command_properties(
+                        vec![(PropertyBinding { siid: 3, piid: 1 }, false.into())],
+                        None,
+                    ),
                     actual_path: None,
                     result: None,
                 }),
@@ -289,8 +295,10 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
                     id: 7,
                     binding: PropertyBinding { siid: 3, piid: 1 },
                     target: crate::xiaomi::adapter::CommandTarget::Power(true),
-                    properties: vec![(PropertyBinding { siid: 3, piid: 1 }, true.into())],
-                    fan_paths: Vec::new(),
+                    properties: command_properties(
+                        vec![(PropertyBinding { siid: 3, piid: 1 }, true.into())],
+                        Some(PathKind::Local),
+                    ),
                     actual_path: Some(PathKind::Local),
                     result: Some(Ok(())),
                 }),
@@ -328,13 +336,15 @@ fn lighting_command_records_show_explicit_targets_actual_batch_and_no_write_resu
         target: CommandTarget::Light(
             LightTarget::temperature(Some(false), 4000.0).expect("valid test target"),
         ),
-        properties: vec![
-            (PropertyBinding { siid: 2, piid: 1 }, false.into()),
-            (PropertyBinding { siid: 2, piid: 2 }, 13.into()),
-            (PropertyBinding { siid: 2, piid: 3 }, 4000.into()),
-            (PropertyBinding { siid: 4, piid: 2 }, 0.into()),
-        ],
-        fan_paths: Vec::new(),
+        properties: command_properties(
+            vec![
+                (PropertyBinding { siid: 2, piid: 1 }, false.into()),
+                (PropertyBinding { siid: 2, piid: 2 }, 13.into()),
+                (PropertyBinding { siid: 2, piid: 3 }, 4000.into()),
+                (PropertyBinding { siid: 4, piid: 2 }, 0.into()),
+            ],
+            Some(PathKind::Local),
+        ),
         actual_path: Some(PathKind::Local),
         result: Some(Ok(())),
     };
@@ -350,10 +360,13 @@ fn lighting_command_records_show_explicit_targets_actual_batch_and_no_write_resu
             blue: 64,
         },
     ));
-    command.properties = vec![
-        (PropertyBinding { siid: 4, piid: 1 }, 0xff8040.into()),
-        (PropertyBinding { siid: 4, piid: 2 }, 1.into()),
-    ];
+    command.properties = command_properties(
+        vec![
+            (PropertyBinding { siid: 4, piid: 1 }, 0xff8040.into()),
+            (PropertyBinding { siid: 4, piid: 2 }, 1.into()),
+        ],
+        Some(PathKind::Cloud),
+    );
     command.actual_path = Some(PathKind::Cloud);
     command.result = None;
     assert_eq!(
@@ -589,4 +602,21 @@ fn battery_diagnostics_are_separate_from_physical_reachability() {
         "{report}"
     );
     assert!(!report.contains("Read unavailable"), "{report}");
+}
+
+fn command_properties(
+    properties: Vec<(
+        crate::xiaomi::capability::PropertyBinding,
+        serde_json::Value,
+    )>,
+    path: Option<PathKind>,
+) -> Vec<crate::xiaomi::adapter::CommandProperty> {
+    properties
+        .into_iter()
+        .map(|(binding, value)| crate::xiaomi::adapter::CommandProperty {
+            binding,
+            value,
+            path,
+        })
+        .collect()
 }

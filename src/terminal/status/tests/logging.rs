@@ -87,11 +87,13 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
         id: 1,
         binding: crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
         target: crate::xiaomi::adapter::CommandTarget::Power(true),
-        properties: vec![(
-            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-            true.into(),
-        )],
-        fan_paths: Vec::new(),
+        properties: super::command_properties(
+            vec![(
+                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                true.into(),
+            )],
+            Some(PathKind::Local),
+        ),
         actual_path: Some(PathKind::Local),
         result: Some(Ok(())),
     });

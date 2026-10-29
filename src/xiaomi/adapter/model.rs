@@ -173,14 +173,29 @@ impl fmt::Display for CommandTarget {
         }
     }
 }
+/// A planned property write and its path once submitted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandProperty {
+    pub binding: PropertyBinding,
+    pub value: serde_json::Value,
+    pub path: Option<PathKind>,
+}
+impl From<(PropertyBinding, serde_json::Value)> for CommandProperty {
+    fn from((binding, value): (PropertyBinding, serde_json::Value)) -> Self {
+        Self {
+            binding,
+            value,
+            path: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandStatus {
     pub id: u64,
     pub binding: PropertyBinding,
     pub target: CommandTarget,
-    pub properties: Vec<(PropertyBinding, serde_json::Value)>,
-    /// Paths of the individual fan writes, in the same order as properties.
-    pub fan_paths: Vec<PathKind>,
+    pub properties: Vec<CommandProperty>,
     pub actual_path: Option<PathKind>,
     pub result: Option<Result<(), CommandError>>,
 }
@@ -190,23 +205,21 @@ impl CommandStatus {
             return "none".into();
         }
         if matches!(self.target, CommandTarget::Power(_)) {
-            let binding = self.properties[0].0;
+            let binding = self.properties[0].binding;
             return format!("{}.{}", binding.siid, binding.piid);
-        }
-        if matches!(self.target, CommandTarget::Fan(_)) {
-            return self
-                .properties
-                .iter()
-                .zip(&self.fan_paths)
-                .map(|((binding, value), path)| {
-                    format!("{}.{}={value} ({path})", binding.siid, binding.piid)
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
         }
         self.properties
             .iter()
-            .map(|(binding, value)| format!("{}.{}={value}", binding.siid, binding.piid))
+            .map(|property| {
+                let binding = property.binding;
+                let value = &property.value;
+                if matches!(self.target, CommandTarget::Fan(_)) {
+                    let path = property.path.expect("fan records contain submitted steps");
+                    format!("{}.{}={value} ({path})", binding.siid, binding.piid)
+                } else {
+                    format!("{}.{}={value}", binding.siid, binding.piid)
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ")
     }

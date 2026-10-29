@@ -1,6 +1,8 @@
 use super::{
     bootstrap::Clock,
-    model::{AdapterError, ChannelCommands, CommandStatus, CommandTarget, PathKind},
+    model::{
+        AdapterError, ChannelCommands, CommandProperty, CommandStatus, CommandTarget, PathKind,
+    },
     routing::ControlPath,
     state::{Context, LogicalSink},
     work::DeviceWork,
@@ -176,8 +178,7 @@ impl Commands {
             id,
             binding,
             target,
-            properties,
-            fan_paths: Vec::new(),
+            properties: properties.into_iter().map(Into::into).collect(),
             actual_path: None,
             result: None,
         };
@@ -200,7 +201,7 @@ impl Commands {
             status: RefCell::new(status),
             queued_at,
             sent_at: Cell::new(None),
-            fan_step: RefCell::new(None),
+            pending_step: RefCell::new(None),
         }))
     }
     pub(super) fn snapshot(
@@ -237,11 +238,11 @@ struct CommandOperation {
     status: RefCell<CommandStatus>,
     queued_at: Instant,
     sent_at: Cell<Option<Instant>>,
-    fan_step: RefCell<Option<(PropertyBinding, serde_json::Value)>>,
+    pending_step: RefCell<Option<CommandProperty>>,
 }
 impl CommandOperation {
-    fn fan_step(&self, property: (PropertyBinding, serde_json::Value)) {
-        *self.fan_step.borrow_mut() = Some(property);
+    fn pending_step(&self, property: (PropertyBinding, serde_json::Value)) {
+        *self.pending_step.borrow_mut() = Some(property.into());
     }
     fn properties(&self, properties: Vec<(PropertyBinding, serde_json::Value)>) {
         let mut status = self.status.borrow_mut();
@@ -251,7 +252,7 @@ impl CommandOperation {
         if let Some((binding, _)) = properties.first() {
             status.binding = *binding;
         }
-        status.properties = properties;
+        status.properties = properties.into_iter().map(Into::into).collect();
         if let Some(entry) = self
             .commands
             .records
@@ -269,12 +270,16 @@ impl CommandOperation {
             if status.result.is_some() {
                 return;
             }
-            if let Some(property) = self.fan_step.borrow_mut().take() {
-                status.binding = property.0;
+            if let Some(mut property) = self.pending_step.borrow_mut().take() {
+                status.binding = property.binding;
+                property.path = Some(path);
                 status.properties.push(property);
-                status.fan_paths.push(path);
             } else if status.actual_path.is_some() {
                 return;
+            } else {
+                for property in &mut status.properties {
+                    property.path = Some(path);
+                }
             }
             status.actual_path = Some(path);
             status.clone()

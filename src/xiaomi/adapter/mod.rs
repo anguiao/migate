@@ -21,9 +21,9 @@ mod tasks;
 mod work;
 
 pub use model::{
-    AdapterError, AdapterStatus, ChannelCommands, CommandStatus, CommandTarget, DeviceStatus,
-    FunctionStatus, GatewayStatus, ObservedPropertyStatus, PathKind, PendingDevice, RecoveryStatus,
-    RoutingStatus, SubscriptionBinding, SubscriptionStatus, TopologyReady,
+    AdapterError, AdapterStatus, ChannelCommands, CommandProperty, CommandStatus, CommandTarget,
+    DeviceStatus, FunctionStatus, GatewayStatus, ObservedPropertyStatus, PathKind, PendingDevice,
+    RecoveryStatus, RoutingStatus, SubscriptionBinding, SubscriptionStatus, TopologyReady,
 };
 pub use publication::SourceHandle;
 pub use routing::PathPriority;

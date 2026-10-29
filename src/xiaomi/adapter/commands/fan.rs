@@ -87,7 +87,7 @@ pub(super) async fn send(
     };
     let mut first_step = true;
     while let Some((step, property)) = steps.pop_front() {
-        operation.0.fan_step(property.clone());
+        operation.0.pending_step(property.clone());
         let mark: Rc<dyn Fn() -> Result<(), CommandError>> = {
             let pending = pending.clone();
             let work = work.clone();

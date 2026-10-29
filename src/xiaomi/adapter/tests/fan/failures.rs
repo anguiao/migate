@@ -104,7 +104,7 @@ fn each_local_step_failure_or_timeout_stops_the_sequence() {
                     let last = control.context.diagnostics().devices[0].commands[0].last.clone().unwrap();
                     assert_eq!(last.result, Some(result.map(|_| ())));
                     assert_eq!(last.properties.len(), failure + 1);
-                    assert_eq!(last.fan_paths, vec![PathKind::Local; failure + 1]);
+                    assert_eq!(last.properties.iter().map(|property| property.path.unwrap()).collect::<Vec<_>>(), vec![PathKind::Local; failure + 1]);
                 }).await;
             }));
         }
@@ -166,7 +166,13 @@ fn each_cloud_step_failure_or_timeout_stops_the_sequence() {
                         .unwrap();
                     assert_eq!(last.result, Some(result.map(|_| ())));
                     assert_eq!(last.properties.len(), failure + 1);
-                    assert_eq!(last.fan_paths, vec![PathKind::Cloud; failure + 1]);
+                    assert_eq!(
+                        last.properties
+                            .iter()
+                            .map(|property| property.path.unwrap())
+                            .collect::<Vec<_>>(),
+                        vec![PathKind::Cloud; failure + 1]
+                    );
                 })
                 .await;
             }));

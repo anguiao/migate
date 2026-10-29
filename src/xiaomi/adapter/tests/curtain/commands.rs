@@ -86,7 +86,11 @@ fn curtain_local_commands_write_one_quantized_property_without_refresh() {
             assert_eq!(last.target.to_string(), "stop");
             assert_eq!(
                 last.properties,
-                vec![(PropertyBinding { siid: 2, piid: 1 }, json!(2))]
+                vec![super::super::model::CommandProperty {
+                    binding: PropertyBinding { siid: 2, piid: 1 },
+                    value: json!(2),
+                    path: Some(PathKind::Local),
+                }]
             );
             assert_eq!(last.actual_path, Some(PathKind::Local));
             assert_eq!(last.result, Some(Ok(())));
@@ -135,7 +139,14 @@ fn curtain_cloud_commands_write_single_values_and_retain_the_request_in_diagnost
                 .commands;
             let last = records[0].last.as_ref().unwrap();
             assert_eq!(last.target.to_string(), "32.6%");
-            assert_eq!(last.properties, vec![(TARGET, json!(33))]);
+            assert_eq!(
+                last.properties,
+                vec![super::super::model::CommandProperty {
+                    binding: TARGET,
+                    value: json!(33),
+                    path: Some(PathKind::Cloud),
+                }]
+            );
             assert_eq!(last.actual_path, Some(PathKind::Cloud));
             assert_eq!(last.result, Some(Ok(())));
         })

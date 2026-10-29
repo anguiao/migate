@@ -79,12 +79,29 @@ fn route_change_reselects_only_an_unsent_step_and_records_each_path() {
                         .clone()
                         .unwrap();
                     assert_eq!(
-                        last.fan_paths,
-                        if sent {
-                            vec![PathKind::Local, PathKind::Cloud, PathKind::Cloud]
-                        } else {
-                            vec![PathKind::Cloud; 3]
-                        }
+                        last.properties
+                            .iter()
+                            .map(|property| (
+                                property.binding.siid,
+                                property.binding.piid,
+                                property.value.clone(),
+                                property.path.unwrap(),
+                            ))
+                            .collect::<Vec<_>>(),
+                        vec![
+                            (
+                                2,
+                                1,
+                                json!(true),
+                                if sent {
+                                    PathKind::Local
+                                } else {
+                                    PathKind::Cloud
+                                }
+                            ),
+                            (2, 3, json!(0), PathKind::Cloud),
+                            (8, 1, json!(52), PathKind::Cloud),
+                        ],
                     );
                 },
             )
@@ -127,7 +144,13 @@ fn possibly_sent_rejected_step_is_never_replayed_or_followed() {
                     .last
                     .clone()
                     .unwrap();
-                assert_eq!(last.fan_paths, vec![PathKind::Local]);
+                assert_eq!(
+                    last.properties
+                        .iter()
+                        .map(|property| property.path.unwrap())
+                        .collect::<Vec<_>>(),
+                    vec![PathKind::Local]
+                );
                 assert_eq!(last.properties.len(), 1);
             },
         )
