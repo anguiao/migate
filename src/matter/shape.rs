@@ -30,6 +30,9 @@ struct FixedFunction {
 enum FixedKind {
     Outlet,
     Curtain,
+    Fan {
+        horizontal_swing: bool,
+    },
     Contact,
     Motion,
     Occupancy,
@@ -66,6 +69,7 @@ pub(crate) fn fixed_shape_with_battery<'a>(
                 kind: match function.kind {
                     FunctionKind::Outlet => FixedKind::Outlet,
                     FunctionKind::Curtain => FixedKind::Curtain,
+                    FunctionKind::Fan { horizontal_swing } => FixedKind::Fan { horizontal_swing },
                     FunctionKind::Contact => FixedKind::Contact,
                     FunctionKind::Motion => FixedKind::Motion,
                     FunctionKind::Occupancy => FixedKind::Occupancy,

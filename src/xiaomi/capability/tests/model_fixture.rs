@@ -145,6 +145,27 @@ pub(crate) fn native_for(
                     };
                     ParsedFunction::outlet(id, label, PropertyBinding { siid, piid: 1 })
                 }
+                FunctionKind::Fan { horizontal_swing } => {
+                    let mut instance: serde_json::Value = serde_json::from_str(include_str!(
+                        "../../../../tests/fixtures/miot/dmaker-p5c.json"
+                    ))
+                    .unwrap();
+                    if !horizontal_swing {
+                        instance["services"][1]["properties"][3]["access"] =
+                            serde_json::json!(["read"]);
+                    }
+                    let parsed = crate::xiaomi::capability::parse_device_for_model(
+                        description.key().clone(),
+                        "dmaker.fan.p5c",
+                        &instance,
+                    )
+                    .unwrap();
+                    ParsedFunction::fan_control(
+                        id,
+                        label,
+                        parsed.functions()[0].fan().unwrap().clone(),
+                    )
+                }
                 FunctionKind::Curtain => {
                     let instance = serde_json::from_str(include_str!(
                         "../../../../tests/fixtures/miot/xiaomi-acn010.json"
@@ -253,8 +274,14 @@ pub(crate) fn native_for(
         .functions()
         .iter()
         .any(|function| function.kind == FunctionKind::Curtain);
+    let is_fan = description
+        .functions()
+        .iter()
+        .any(|function| matches!(function.kind, FunctionKind::Fan { .. }));
     NativeDescription::new(
-        if is_curtain {
+        if is_fan {
+            "dmaker.fan.p5c"
+        } else if is_curtain {
             "xiaomi.curtain.acn010"
         } else if is_light {
             "test.light"
@@ -262,7 +289,9 @@ pub(crate) fn native_for(
             "test.outlet"
         }
         .into(),
-        if is_curtain {
+        if is_fan {
+            "urn:miot-spec-v2:device:fan:0000A005:dmaker-p5c:1"
+        } else if is_curtain {
             "urn:miot-spec-v2:device:curtain:0000A00C:xiaomi-acn010:1:0000D031"
         } else if is_light {
             "urn:miot-spec-v2:device:light:0000A001:test-v1:1"

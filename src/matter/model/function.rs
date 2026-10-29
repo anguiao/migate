@@ -8,6 +8,8 @@ pub(super) struct FunctionHandler {
 pub(super) enum FunctionHandlerKind {
     Outlet(OnOffHandler),
     Curtain(curtain::CurtainHandler),
+    Fan(fan::Fan<false>),
+    FanSwing(fan::Fan<true>),
     Light(Box<lighting::Lighting>),
     Temperature(sensors::TemperatureHandler),
     Humidity(sensors::HumidityHandler),
@@ -75,6 +77,22 @@ impl FunctionHandler {
                 endpoint,
                 Dataver::new(versions.on_off),
             )),
+            FunctionKind::Fan {
+                horizontal_swing: false,
+            } => FunctionHandlerKind::Fan(fan::Fan::new(
+                function,
+                endpoint,
+                Dataver::new(versions.on_off),
+                Dataver::new(versions.fan),
+            )),
+            FunctionKind::Fan {
+                horizontal_swing: true,
+            } => FunctionHandlerKind::FanSwing(fan::Fan::new(
+                function,
+                endpoint,
+                Dataver::new(versions.on_off),
+                Dataver::new(versions.fan),
+            )),
             FunctionKind::Curtain => FunctionHandlerKind::Curtain(curtain::CurtainHandler::new(
                 function,
                 endpoint,
@@ -92,6 +110,8 @@ impl FunctionHandler {
             FunctionHandlerKind::Light(light) => Some(light),
             FunctionHandlerKind::Outlet(_)
             | FunctionHandlerKind::Curtain(_)
+            | FunctionHandlerKind::Fan(_)
+            | FunctionHandlerKind::FanSwing(_)
             | FunctionHandlerKind::Temperature(_)
             | FunctionHandlerKind::Humidity(_)
             | FunctionHandlerKind::Co2(_)
@@ -124,6 +144,8 @@ impl FunctionHandler {
             {
                 handler.dataver_changed()
             }
+            FunctionHandlerKind::Fan(handler) => handler.bump(cluster),
+            FunctionHandlerKind::FanSwing(handler) => handler.bump(cluster),
             FunctionHandlerKind::Curtain(handler) if cluster.is_none_or(|id| id == 0x102) =>
                 <curtain::CurtainHandler as window_covering::ClusterAsyncHandler>::dataver_changed(handler),
             FunctionHandlerKind::Temperature(handler)
@@ -156,6 +178,9 @@ impl FunctionHandler {
             FunctionHandlerKind::Occupancy(_) => |_, cluster| cluster == 0x406,
             FunctionHandlerKind::Outlet(_) => |_, cluster| cluster == 6,
             FunctionHandlerKind::Curtain(_) => |_, cluster| cluster == 0x102,
+            FunctionHandlerKind::Fan(_) | FunctionHandlerKind::FanSwing(_) => {
+                |_, cluster| matches!(cluster, 6 | 0x202)
+            }
             FunctionHandlerKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
             FunctionHandlerKind::Temperature(_) => |_, cluster| cluster == 0x402,
             FunctionHandlerKind::Humidity(_) => |_, cluster| cluster == 0x405,
@@ -223,6 +248,8 @@ macro_rules! dispatch_function {
             FunctionHandlerKind::Outlet(handler) => AsyncHandler::$method(
                 &on_off::HandlerAsyncAdaptor(handler), $($arg),*
             ).await,
+            FunctionHandlerKind::Fan(handler) => AsyncHandler::$method(handler, $($arg),*).await,
+            FunctionHandlerKind::FanSwing(handler) => AsyncHandler::$method(handler, $($arg),*).await,
             FunctionHandlerKind::Curtain(handler) => AsyncHandler::$method(&window_covering::HandlerAsyncAdaptor(handler), $($arg),*).await,
             FunctionHandlerKind::Light(light) => AsyncHandler::$method(
                 &lighting::Dispatch(light), $($arg),*

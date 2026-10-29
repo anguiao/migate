@@ -18,6 +18,34 @@ impl Context {
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = &work
             && let Some(function) = work.native.device().functions().iter().find(|function| {
+                function.fan().is_some() && function.observation_bindings().contains(&binding)
+            })
+        {
+            if let Ok(value) = DeviceWork::decode_fan(function, binding, value)
+                && self.accept_state_notification(work, function.id(), source)
+            {
+                work.observe_fan(
+                    function,
+                    binding,
+                    value,
+                    Observation {
+                        source: source.kind(),
+                        source_time: update_time,
+                        received_at: self.clock.unix_now(),
+                    },
+                    if cached_report {
+                        Origin::Cache
+                    } else {
+                        Origin::Notification
+                    },
+                );
+                self.update_routing("fan property observed");
+                self.status_changed.notify(usize::MAX);
+            }
+            return;
+        }
+        if let Some(work) = &work
+            && let Some(function) = work.native.device().functions().iter().find(|function| {
                 function.curtain().is_some() && function.observation_bindings().contains(&binding)
             })
         {
@@ -119,13 +147,9 @@ impl Context {
             .is_some_and(|desired| desired.same(source))
             && work.source_ready(id, source)
         {
-            if work
-                .native
-                .device()
-                .functions()
-                .iter()
-                .any(|function| function.id() == id && function.curtain().is_some())
-            {
+            if work.native.device().functions().iter().any(|function| {
+                function.id() == id && (function.curtain().is_some() || function.fan().is_some())
+            }) {
                 work.install_observer(id, source.clone());
             } else {
                 work.install_state_observer(id, source.clone());

@@ -27,6 +27,7 @@ impl DeviceKey {
 pub enum Capability {
     OnOff,
     Curtain,
+    Fan,
     Brightness,
     ColorTemperature(TemperatureInterval),
     ColorRgb,
@@ -94,6 +95,7 @@ pub enum FunctionKind {
     Outlet,
     Light(LightProfile),
     Curtain,
+    Fan { horizontal_swing: bool },
     Temperature(MeasurementRange),
     Humidity(MeasurementRange),
     CarbonDioxide(MeasurementRange),
@@ -104,7 +106,10 @@ pub enum FunctionKind {
 }
 impl FunctionKind {
     pub fn is_control(self) -> bool {
-        matches!(self, Self::Outlet | Self::Light(_) | Self::Curtain)
+        matches!(
+            self,
+            Self::Outlet | Self::Light(_) | Self::Curtain | Self::Fan { .. }
+        )
     }
     pub fn is_state_sensor(self) -> bool {
         matches!(self, Self::Contact | Self::Motion | Self::Occupancy)
@@ -120,6 +125,7 @@ impl FunctionKind {
             Self::Light(profile) => Some(profile),
             Self::Outlet
             | Self::Curtain
+            | Self::Fan { .. }
             | Self::Temperature(_)
             | Self::Humidity(_)
             | Self::CarbonDioxide(_)
@@ -150,6 +156,7 @@ impl FunctionKind {
             Self::Occupancy => vec![Capability::Occupancy],
             Self::Outlet => vec![Capability::OnOff],
             Self::Curtain => vec![Capability::Curtain],
+            Self::Fan { .. } => vec![Capability::OnOff, Capability::Fan],
             Self::Light(profile) => {
                 let mut capabilities = vec![Capability::OnOff];
                 if profile.has_brightness() {
@@ -389,6 +396,36 @@ pub struct CurtainSnapshot {
     pub status: CurtainObservation<CurtainMotion>,
 }
 
+/// A single fan property and its independent observation metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FanObservation<T> {
+    pub value: Option<T>,
+    pub source_time: Option<i64>,
+    pub received_at: Option<i64>,
+}
+impl<T> Default for FanObservation<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            source_time: None,
+            received_at: None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FanSnapshot {
+    pub power: FanObservation<bool>,
+    pub mode: FanObservation<u32>,
+    pub speed: FanObservation<u8>,
+    pub swing: FanObservation<bool>,
+}
+pub(crate) enum FanValue {
+    Power(bool),
+    Mode(u32),
+    Speed(u8),
+    Swing(bool),
+}
+
 /// The native input participating in the latest binary-state observation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StateInput {
@@ -424,6 +461,9 @@ pub enum FunctionState {
     Curtain {
         curtain: CurtainSnapshot,
     },
+    Fan {
+        fan: FanSnapshot,
+    },
     Temperature {
         measurement: MeasurementSnapshot,
     },
@@ -447,6 +487,13 @@ pub enum FunctionState {
     },
 }
 impl FunctionSnapshot {
+    pub fn fan(&self) -> Option<FanSnapshot> {
+        match self.state {
+            FunctionState::Fan { fan } => Some(fan),
+            _ => None,
+        }
+    }
+
     pub fn state_sensor(&self) -> Option<StateSnapshot> {
         match &self.state {
             FunctionState::Contact { state }
@@ -458,6 +505,9 @@ impl FunctionSnapshot {
     pub fn power(&self) -> Option<Power> {
         match &self.state {
             FunctionState::Outlet { power } | FunctionState::Light { power, .. } => Some(*power),
+            FunctionState::Fan { fan } => {
+                Some(fan.power.value.map(Power::from).unwrap_or(Power::Unknown))
+            }
             FunctionState::Temperature { .. }
             | FunctionState::Curtain { .. }
             | FunctionState::Humidity { .. }
@@ -473,6 +523,7 @@ impl FunctionSnapshot {
             FunctionState::Light { lighting, .. } => Some(*lighting),
             FunctionState::Outlet { .. }
             | FunctionState::Curtain { .. }
+            | FunctionState::Fan { .. }
             | FunctionState::Temperature { .. }
             | FunctionState::Humidity { .. }
             | FunctionState::CarbonDioxide { .. }
@@ -491,6 +542,7 @@ impl FunctionSnapshot {
             FunctionState::Outlet { .. }
             | FunctionState::Light { .. }
             | FunctionState::Curtain { .. }
+            | FunctionState::Fan { .. }
             | FunctionState::Contact { .. }
             | FunctionState::Motion { .. }
             | FunctionState::Occupancy { .. } => None,

@@ -1,4 +1,5 @@
 mod curtain;
+mod fan;
 mod labels;
 pub(crate) mod model_fixture;
 

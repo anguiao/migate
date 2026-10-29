@@ -452,3 +452,5 @@ fn load_basic_info(
 mod sensors;
 
 mod curtain;
+
+mod fan;

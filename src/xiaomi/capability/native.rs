@@ -1,8 +1,8 @@
 //! A native device description validated once at the source boundary.
 
 use super::{
-    CapabilityError, ParsedDevice, is_curtain_type, is_light_type, is_ls2307_type, is_outlet_type,
-    ls2307, outlet,
+    CapabilityError, ParsedDevice, fan, is_curtain_type, is_fan_type, is_light_type,
+    is_ls2307_type, is_outlet_type, ls2307, outlet,
 };
 use crate::device::PhysicalDeviceDescription;
 
@@ -67,6 +67,17 @@ fn validate_model_topology(
         .collect::<Vec<_>>();
     if controls.is_empty() {
         return Ok(());
+    }
+    if is_fan_type(instance_type) {
+        return if fan::is_dmaker_fan_type(instance_type)
+            && model.starts_with("dmaker.")
+            && controls.len() == 1
+            && controls[0].fan().is_some()
+        {
+            Ok(())
+        } else {
+            Err("Xiaomi fan topology is invalid")
+        };
     }
     if is_curtain_type(instance_type) {
         if model == ls2307::MODEL || model == outlet::CP7PD_MODEL {

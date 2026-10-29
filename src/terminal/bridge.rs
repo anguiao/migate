@@ -120,6 +120,7 @@ fn capabilities(description: &crate::device::FunctionDescription) -> String {
         .map(|capability| match capability {
             Capability::OnOff => "on/off".into(),
             Capability::Curtain => "curtain".into(),
+            Capability::Fan => "fan".into(),
             Capability::Brightness => "brightness".into(),
             Capability::ColorTemperature(interval) => {
                 format!("temperature {}–{} K", interval.min(), interval.max())
@@ -205,6 +206,70 @@ fn render(
             let label = &function.description().label;
             let snapshot = function.snapshot();
             match snapshot.state {
+                crate::device::FunctionState::Fan { fan } => {
+                    lines.push(format!("  {id} ({label}):"));
+                    let properties = status.curtain_properties(&key.id, id);
+                    let mut entries = vec![
+                        (
+                            "Power",
+                            fan.power.value.map_or_else(
+                                || "unknown".into(),
+                                |v| if v { "on" } else { "off" }.into(),
+                            ),
+                            fan.power.source_time,
+                            fan.power.received_at,
+                        ),
+                        (
+                            "Native mode",
+                            fan.mode
+                                .value
+                                .map_or_else(|| "unknown".into(), |v| v.to_string()),
+                            fan.mode.source_time,
+                            fan.mode.received_at,
+                        ),
+                        (
+                            "Straight speed",
+                            fan.speed
+                                .value
+                                .map_or_else(|| "unknown".into(), |v| format!("{v}%")),
+                            fan.speed.source_time,
+                            fan.speed.received_at,
+                        ),
+                    ];
+                    if matches!(
+                        function.description().kind,
+                        crate::device::FunctionKind::Fan {
+                            horizontal_swing: true
+                        }
+                    ) {
+                        entries.push((
+                            "Horizontal swing",
+                            fan.swing.value.map_or_else(
+                                || "unknown".into(),
+                                |v| if v { "on" } else { "off" }.into(),
+                            ),
+                            fan.swing.source_time,
+                            fan.swing.received_at,
+                        ));
+                    }
+                    for (name, value, source_time, received_at) in entries {
+                        let source_time =
+                            source_time.map_or_else(|| "unknown".into(), |time| time.to_string());
+                        let received_at = received_at.map_or_else(|| "unknown".into(), timestamp);
+                        let diagnostic = super::status::property_diagnostics(
+                            properties.iter().find(|property| property.name == name),
+                        );
+                        lines.push(format!("    {name}: {value}; upstream time {source_time}; received at {received_at}; {diagnostic}."));
+                    }
+                    if show_curtain_commands {
+                        lines.extend(
+                            status
+                                .curtain_commands(&key.id, id)
+                                .into_iter()
+                                .map(|command| format!("    {command}")),
+                        );
+                    }
+                }
                 crate::device::FunctionState::Curtain { curtain } => {
                     lines.push(format!("  {id} ({label}):"));
                     let properties = status.curtain_properties(&key.id, id);

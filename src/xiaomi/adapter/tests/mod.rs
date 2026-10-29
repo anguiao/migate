@@ -5,6 +5,7 @@ mod commands;
 mod credentials;
 mod descriptions;
 mod diagnostics;
+mod fan;
 mod groups;
 mod http_routing;
 mod lighting;

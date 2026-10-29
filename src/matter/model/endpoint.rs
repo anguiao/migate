@@ -30,6 +30,40 @@ const CURTAIN_CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     identify::IdentifyHandler::<()>::CLUSTER,
     <curtain::CurtainHandler as window_covering::ClusterAsyncHandler>::CLUSTER
 );
+const FAN: DeviceType = DeviceType {
+    dtype: 0x002b,
+    drev: 4,
+};
+macro_rules! fan_clusters {
+    ($bridged:expr, $rocking:literal) => {
+        clusters!(
+            desc::DescHandler::CLUSTER,
+            groups::GroupsHandler::CLUSTER,
+            identify::IdentifyHandler::<()>::CLUSTER,
+            $bridged,
+            OnOffHandler::CLUSTER,
+            <fan::FanControl<$rocking> as fan_control::ClusterAsyncHandler>::CLUSTER
+        )
+    };
+}
+const FAN_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
+    fan_clusters!(BridgedHandler::CLUSTER, false);
+const FAN_ROCKING_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
+    fan_clusters!(BridgedHandler::CLUSTER, true);
+const FAN_CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    OnOffHandler::CLUSTER,
+    <fan::FanControl<false> as fan_control::ClusterAsyncHandler>::CLUSTER
+);
+const FAN_ROCKING_CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    OnOffHandler::CLUSTER,
+    <fan::FanControl<true> as fan_control::ClusterAsyncHandler>::CLUSTER
+);
 const CT_LIGHT: DeviceType = DeviceType {
     dtype: 0x010c,
     drev: 4,
@@ -273,6 +307,18 @@ impl Entry {
                             O_CLUSTERS,
                         ),
                     }
+                } else if matches!(function.kind, FunctionHandlerKind::Fan(_)) {
+                    Endpoint::new(
+                        self.endpoint,
+                        devices!(FAN, DEV_TYPE_BRIDGED_NODE),
+                        FAN_CLUSTERS,
+                    )
+                } else if matches!(function.kind, FunctionHandlerKind::FanSwing(_)) {
+                    Endpoint::new(
+                        self.endpoint,
+                        devices!(FAN, DEV_TYPE_BRIDGED_NODE),
+                        FAN_ROCKING_CLUSTERS,
+                    )
                 } else if matches!(function.kind, FunctionHandlerKind::Curtain(_)) {
                     Endpoint::new(
                         self.endpoint,
@@ -299,6 +345,13 @@ impl Entry {
                 }
             }
             Role::Child { function, .. } => match &function.kind {
+                FunctionHandlerKind::Fan(_) => {
+                    Endpoint::new(self.endpoint, devices!(FAN), FAN_CHILD_CLUSTERS).with_tags(tags)
+                }
+                FunctionHandlerKind::FanSwing(_) => {
+                    Endpoint::new(self.endpoint, devices!(FAN), FAN_ROCKING_CHILD_CLUSTERS)
+                        .with_tags(tags)
+                }
                 FunctionHandlerKind::Curtain(_) => Endpoint::new(
                     self.endpoint,
                     devices!(WINDOW_COVERING),

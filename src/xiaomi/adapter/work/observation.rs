@@ -2,13 +2,9 @@ use super::*;
 
 impl DeviceWork {
     pub(in crate::xiaomi::adapter) fn reconcile_state_reads(&self, context: &Context) {
-        for function in self
-            .native
-            .device()
-            .functions()
-            .iter()
-            .filter(|function| function.state().is_some() || function.curtain().is_some())
-        {
+        for function in self.native.device().functions().iter().filter(|function| {
+            function.state().is_some() || function.curtain().is_some() || function.fan().is_some()
+        }) {
             let id = function.id();
             let path = context.read_path_for(&self.key.id, id);
             let changed = {
@@ -149,7 +145,9 @@ impl DeviceWork {
             };
         }
         let Some(function) = self.native.device().functions().iter().find(|function| {
-            function.curtain().is_none() && function.observation_bindings().contains(&binding)
+            function.curtain().is_none()
+                && function.fan().is_none()
+                && function.observation_bindings().contains(&binding)
         }) else {
             return false;
         };
@@ -222,7 +220,10 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
-        if function.curtain().is_some() {
+        if function.fan().is_some() {
+            let decoded = Self::decode_fan(function, binding, value)?;
+            self.observe_fan(function, binding, decoded, observation, Origin::Read);
+        } else if function.curtain().is_some() {
             let decoded = Self::decode_curtain(function, binding, value)?;
             self.observe_curtain(function, binding, decoded, observation, Origin::Read);
         } else if function.lighting().is_some() {
@@ -258,6 +259,58 @@ impl DeviceWork {
         Ok(())
     }
 
+    pub(in crate::xiaomi::adapter) fn observe_fan(
+        &self,
+        function: &ParsedFunction,
+        binding: PropertyBinding,
+        value: crate::device::FanValue,
+        observation: Observation,
+        origin: Origin,
+    ) {
+        if self.life.is_closed() {
+            return;
+        }
+        let id = function.id();
+        self.observations.observed(self, id, binding, origin);
+        if !matches!(origin, Origin::Read) {
+            self.refresh.borrow_mut().satisfy_baseline(id, binding);
+        }
+        self.physical().function(id).unwrap().observe_fan(
+            value,
+            observation.source_time,
+            observation.received_at,
+        );
+        self.property_sources.borrow_mut().insert(
+            super::super::observations::key(id, binding),
+            observation.source,
+        );
+    }
+    pub(in crate::xiaomi::adapter) fn decode_fan(
+        function: &ParsedFunction,
+        binding: PropertyBinding,
+        value: &serde_json::Value,
+    ) -> Result<crate::device::FanValue, crate::xiaomi::capability::CapabilityError> {
+        use crate::{device::FanValue, xiaomi::capability::CapabilityError};
+        let fan = function.fan().expect("fan function");
+        if binding == fan.power() {
+            Ok(FanValue::Power(
+                value
+                    .as_bool()
+                    .ok_or(CapabilityError::InvalidValue("fan power"))?,
+            ))
+        } else if binding == fan.mode().property() {
+            Ok(FanValue::Mode(fan.mode().read_value(value)?))
+        } else if binding == fan.speed().property() {
+            Ok(FanValue::Speed(fan.speed().read_value(value)?))
+        } else {
+            debug_assert_eq!(Some(binding), fan.swing());
+            Ok(FanValue::Swing(
+                value
+                    .as_bool()
+                    .ok_or(CapabilityError::InvalidValue("fan swing"))?,
+            ))
+        }
+    }
     pub(in crate::xiaomi::adapter) fn observe_curtain(
         &self,
         function: &ParsedFunction,

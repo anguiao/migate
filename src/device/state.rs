@@ -16,6 +16,7 @@ enum RuntimeValue {
 struct ControlRuntime {
     power: Power,
     lighting: Option<super::LightSnapshot>,
+    fan: Option<super::FanSnapshot>,
     commands: CommandCoordinator,
 }
 struct CurtainRuntime {
@@ -54,11 +55,12 @@ impl RuntimeState {
             revision: 0,
         }
     }
-    fn control(lighting: Option<super::LightSnapshot>) -> Self {
+    fn control(lighting: Option<super::LightSnapshot>, fan: Option<super::FanSnapshot>) -> Self {
         Self {
             value: RuntimeValue::Control(Box::new(ControlRuntime {
                 power: Power::Unknown,
                 lighting,
+                fan,
                 commands: CommandCoordinator::new(),
             })),
             revision: 0,
@@ -439,7 +441,11 @@ impl Function {
         } else if description.kind.is_state_sensor() {
             RuntimeState::state_sensor()
         } else {
-            RuntimeState::control(lighting)
+            RuntimeState::control(
+                lighting,
+                matches!(description.kind, super::FunctionKind::Fan { .. })
+                    .then(super::FanSnapshot::default),
+            )
         };
         let controllable = state.has_control_state();
         let function = Self(Arc::new(Inner {
@@ -484,6 +490,11 @@ impl Function {
                 FunctionState::Light {
                     power: control.power,
                     lighting: control.lighting.expect("light has lighting state"),
+                }
+            }
+            (super::FunctionKind::Fan { .. }, RuntimeValue::Control(control)) => {
+                FunctionState::Fan {
+                    fan: control.fan.expect("fan has fan state"),
                 }
             }
             (super::FunctionKind::Curtain, RuntimeValue::Curtain(curtain)) => {
@@ -651,6 +662,50 @@ impl Function {
         };
         let projection_changed = before_target != curtain.projection.target(curtain.snapshot);
         if changed || projection_changed {
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+    }
+    /// Apply one validated native fan property without conflating its fields.
+    pub(crate) fn observe_fan(
+        &self,
+        value: super::FanValue,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) {
+        fn update<T: Copy + PartialEq>(
+            current: &mut super::FanObservation<T>,
+            value: T,
+            source_time: Option<i64>,
+            received_at: i64,
+        ) -> bool {
+            let changed = current.value != Some(value);
+            *current = super::FanObservation {
+                value: Some(value),
+                source_time,
+                received_at: Some(received_at),
+            };
+            changed
+        }
+        let mut state = self.0.state.lock().unwrap();
+        let RuntimeValue::Control(control) = &mut state.value else {
+            unreachable!("fan function has control state")
+        };
+        let fan = control.fan.as_mut().expect("fan has fan state");
+        let changed = match value {
+            super::FanValue::Power(value) => {
+                control.power = value.into();
+                update(&mut fan.power, value, source_time, received_at)
+            }
+            super::FanValue::Mode(value) => update(&mut fan.mode, value, source_time, received_at),
+            super::FanValue::Speed(value) => {
+                update(&mut fan.speed, value, source_time, received_at)
+            }
+            super::FanValue::Swing(value) => {
+                update(&mut fan.swing, value, source_time, received_at)
+            }
+        };
+        if changed {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }

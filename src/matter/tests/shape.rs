@@ -124,3 +124,29 @@ fn co2_fixed_shape_compares_the_published_single_precision_bounds() {
         fixed_shape(&[measurement(6000.0)])
     );
 }
+
+#[test]
+fn fan_shape_tracks_optional_horizontal_swing() {
+    let fan = FunctionDescription {
+        id: "main".into(),
+        label: "Fan".into(),
+        kind: FunctionKind::Fan {
+            horizontal_swing: true,
+        },
+    };
+    let without_swing = FunctionDescription {
+        kind: FunctionKind::Fan {
+            horizontal_swing: false,
+        },
+        ..fan.clone()
+    };
+    let outlet = FunctionDescription {
+        kind: FunctionKind::Outlet,
+        ..fan.clone()
+    };
+    assert_ne!(
+        fixed_shape(std::slice::from_ref(&fan)),
+        fixed_shape(&[without_swing])
+    );
+    assert_ne!(fixed_shape(&[fan]), fixed_shape(&[outlet]));
+}

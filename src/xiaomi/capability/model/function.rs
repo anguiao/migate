@@ -1,5 +1,5 @@
 use super::super::{MotionBinding, StateBinding};
-use super::{CurtainBindings, LightBindings, MeasurementBinding, PropertyBinding};
+use super::{CurtainBindings, FanBindings, LightBindings, MeasurementBinding, PropertyBinding};
 use crate::device::{FunctionDescription, FunctionKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +19,9 @@ enum FunctionBindings {
     },
     Curtain {
         curtain: CurtainBindings,
+    },
+    Fan {
+        fan: FanBindings,
     },
     Temperature {
         measurement: MeasurementBinding,
@@ -43,6 +46,24 @@ enum FunctionBindings {
     },
 }
 impl ParsedFunction {
+    pub(crate) fn fan_control(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        fan: FanBindings,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Fan { fan },
+        }
+    }
+    pub fn fan(&self) -> Option<&FanBindings> {
+        match &self.bindings {
+            FunctionBindings::Fan { fan } => Some(fan),
+            _ => None,
+        }
+    }
+
     pub(crate) fn curtain_control(
         id: impl Into<String>,
         label: impl Into<String>,
@@ -186,6 +207,7 @@ impl ParsedFunction {
             FunctionBindings::Outlet { power } | FunctionBindings::Light { power, .. } => {
                 Some(*power)
             }
+            FunctionBindings::Fan { fan } => Some(fan.power()),
             FunctionBindings::Temperature { .. }
             | FunctionBindings::Curtain { .. }
             | FunctionBindings::Humidity { .. }
@@ -199,6 +221,7 @@ impl ParsedFunction {
     pub fn lighting(&self) -> Option<&LightBindings> {
         match &self.bindings {
             FunctionBindings::Outlet { .. }
+            | FunctionBindings::Fan { .. }
             | FunctionBindings::Curtain { .. }
             | FunctionBindings::Temperature { .. }
             | FunctionBindings::Humidity { .. }
@@ -218,6 +241,7 @@ impl ParsedFunction {
             | FunctionBindings::Illuminance { measurement } => Some(measurement),
             FunctionBindings::Outlet { .. }
             | FunctionBindings::Light { .. }
+            | FunctionBindings::Fan { .. }
             | FunctionBindings::Curtain { .. }
             | FunctionBindings::Contact { .. }
             | FunctionBindings::Motion { .. }
@@ -231,6 +255,9 @@ impl ParsedFunction {
             FunctionBindings::Occupancy { .. } => FunctionKind::Occupancy,
             FunctionBindings::Outlet { .. } => FunctionKind::Outlet,
             FunctionBindings::Curtain { .. } => FunctionKind::Curtain,
+            FunctionBindings::Fan { fan } => FunctionKind::Fan {
+                horizontal_swing: fan.swing().is_some(),
+            },
             FunctionBindings::Light { lighting, .. } => FunctionKind::Light(lighting.profile()),
             FunctionBindings::Temperature { measurement } => {
                 FunctionKind::Temperature(measurement.range())
@@ -256,6 +283,9 @@ impl ParsedFunction {
     }
     /// Every native binding this function really reads or writes.
     pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {
+        if let Some(fan) = self.fan() {
+            return fan.bindings();
+        }
         if let Some(curtain) = self.curtain() {
             return curtain.bindings();
         }

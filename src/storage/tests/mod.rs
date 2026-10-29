@@ -1,5 +1,6 @@
 mod configuration;
 mod configuration_curtain;
+mod configuration_fan;
 mod configuration_sensors;
 pub(crate) mod fixtures;
 mod validity;

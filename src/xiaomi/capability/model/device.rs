@@ -145,7 +145,11 @@ impl ParsedDevice {
         {
             return Err(CapabilityError::InvalidDescription("battery topology"));
         }
-        if controls.iter().any(|function| function.curtain().is_some()) {
+        if controls.iter().any(|function| function.fan().is_some()) {
+            if controls.len() != 1 || controls[0].id() != "main" || refresh_trigger.is_some() {
+                return Err(CapabilityError::InvalidDescription("fan topology"));
+            }
+        } else if controls.iter().any(|function| function.curtain().is_some()) {
             if controls.len() != 1 || controls[0].id() != "main" || refresh_trigger.is_some() {
                 return Err(CapabilityError::InvalidDescription("curtain topology"));
             }

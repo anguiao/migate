@@ -6,6 +6,12 @@ impl Function {
     /// Dropping the future withdraws a queued command. An adapter that already
     /// received it still owns its result and may update the shared snapshot.
     pub async fn execute(&self, command: Command) -> Result<FunctionSnapshot, CommandError> {
+        if matches!(
+            self.description().kind,
+            super::super::FunctionKind::Fan { .. }
+        ) {
+            return Err(CommandError::Unsupported);
+        }
         let completion = Arc::new(Completion::default());
         let light = self.description().kind.is_light();
         let resolved = {

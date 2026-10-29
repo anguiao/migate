@@ -168,32 +168,64 @@ impl Context {
                         } else {
                             Vec::new()
                         },
-                        properties: function.curtain().map_or_else(Vec::new, |curtain| {
+                        properties: if let Some(fan) = function.fan() {
                             let subscriptions = work.subscription_status(function.id());
                             [
-                                ("Current position", curtain.current().property()),
-                                ("Target position", curtain.target().property()),
-                                ("Status", curtain.status().property()),
+                                ("Power", Some(fan.power())),
+                                ("Native mode", Some(fan.mode().property())),
+                                ("Straight speed", Some(fan.speed().property())),
+                                ("Horizontal swing", fan.swing()),
                             ]
                             .into_iter()
-                            .map(|(name, binding)| ObservedPropertyStatus {
-                                name,
-                                binding,
-                                observation_source: work.property_source(function.id(), binding),
-                                read_problem: work
-                                    .refresh
-                                    .borrow()
-                                    .property_problem(function.id(), binding),
-                                subscriptions: subscriptions
-                                    .iter()
-                                    .filter(|item| {
-                                        item.binding == SubscriptionBinding::Property(binding)
-                                    })
-                                    .cloned()
-                                    .collect(),
+                            .filter_map(|(name, binding)| {
+                                binding.map(|binding| ObservedPropertyStatus {
+                                    name,
+                                    binding,
+                                    observation_source: work
+                                        .property_source(function.id(), binding),
+                                    read_problem: work
+                                        .refresh
+                                        .borrow()
+                                        .property_problem(function.id(), binding),
+                                    subscriptions: subscriptions
+                                        .iter()
+                                        .filter(|item| {
+                                            item.binding == SubscriptionBinding::Property(binding)
+                                        })
+                                        .cloned()
+                                        .collect(),
+                                })
                             })
                             .collect()
-                        }),
+                        } else {
+                            function.curtain().map_or_else(Vec::new, |curtain| {
+                                let subscriptions = work.subscription_status(function.id());
+                                [
+                                    ("Current position", curtain.current().property()),
+                                    ("Target position", curtain.target().property()),
+                                    ("Status", curtain.status().property()),
+                                ]
+                                .into_iter()
+                                .map(|(name, binding)| ObservedPropertyStatus {
+                                    name,
+                                    binding,
+                                    observation_source: work
+                                        .property_source(function.id(), binding),
+                                    read_problem: work
+                                        .refresh
+                                        .borrow()
+                                        .property_problem(function.id(), binding),
+                                    subscriptions: subscriptions
+                                        .iter()
+                                        .filter(|item| {
+                                            item.binding == SubscriptionBinding::Property(binding)
+                                        })
+                                        .cloned()
+                                        .collect(),
+                                })
+                                .collect()
+                            })
+                        },
                     }
                 })
                 .collect();

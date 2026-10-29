@@ -233,6 +233,19 @@ impl DeviceWork {
             self.refresh_changed.notify(usize::MAX);
             return;
         }
+        if let Some(function) = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == id && function.fan().is_some())
+        {
+            for binding in function.observation_bindings() {
+                self.refresh.borrow_mut().request_baseline(id, binding);
+            }
+            self.refresh_changed.notify(usize::MAX);
+            return;
+        }
         if self.state_function(id) {
             let binding = self
                 .native
@@ -287,7 +300,7 @@ impl DeviceWork {
                     .device()
                     .functions()
                     .iter()
-                    .any(|function| function.curtain().is_some())
+                    .any(|function| function.curtain().is_some() || function.fan().is_some())
             {
                 drop(local.unsubscribe_properties(&self.key.id));
                 drop(local.unsubscribe_events(&self.key.id));
@@ -315,7 +328,10 @@ impl DeviceWork {
     }
     fn refresh_functions(&self, include_states: bool) {
         for function in self.native.device().functions().iter().filter(|function| {
-            include_states || function.state().is_none() && function.curtain().is_none()
+            include_states
+                || function.state().is_none()
+                    && function.curtain().is_none()
+                    && function.fan().is_none()
         }) {
             for binding in function.observation_bindings() {
                 self.refresh_property(function.id(), binding);

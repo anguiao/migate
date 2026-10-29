@@ -5,10 +5,10 @@ use crate::{
     device::{DeviceKey, MeasurementRange, NumericRange},
     xiaomi::capability::{
         BatteryBinding, BrightnessBinding, ColorBinding, CurtainBindings, CurtainMotorBinding,
-        CurtainPositionBinding, CurtainStatusBinding, EventArgument, EventBinding, LightBindings,
-        MeasurementBinding, MeasurementUnit, ModeBinding, MotionBinding, NumericFormat,
-        ParsedDevice, ParsedFunction, PropertyBinding, StateBinding, StateMapping, StateValue,
-        TemperatureBinding,
+        CurtainPositionBinding, CurtainStatusBinding, EventArgument, EventBinding, FanBindings,
+        FanModeBinding, FanSpeedBinding, LightBindings, MeasurementBinding, MeasurementUnit,
+        ModeBinding, MotionBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+        StateBinding, StateMapping, StateValue, TemperatureBinding,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,14 @@ enum WireFunction {
         label: String,
         power: WireBinding,
         lighting: WireLighting,
+    },
+    Fan {
+        id: String,
+        label: String,
+        power: WireBinding,
+        mode: WireFanMode,
+        speed: WireFormat,
+        swing: Option<WireBinding>,
     },
     Curtain {
         id: String,
@@ -86,6 +94,15 @@ enum WireFunction {
         label: String,
         state: WireState,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireFanMode {
+    property: WireBinding,
+    format: NumericFormat,
+    straight: u32,
+    values: Vec<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -317,6 +334,24 @@ impl WireNative {
 
 impl WireFunction {
     fn from_parsed(function: &ParsedFunction) -> Self {
+        if let Some(fan) = function.fan() {
+            return Self::Fan {
+                id: function.id().to_owned(),
+                label: function.label().to_owned(),
+                power: fan.power().into(),
+                mode: WireFanMode {
+                    property: fan.mode().property().into(),
+                    format: fan.mode().format(),
+                    straight: fan.mode().straight(),
+                    values: fan.mode().values().to_vec(),
+                },
+                speed: WireFormat {
+                    property: fan.speed().property().into(),
+                    format: fan.speed().format(),
+                },
+                swing: fan.swing().map(Into::into),
+            };
+        }
         if let Some(curtain) = function.curtain() {
             let motor = curtain.motor();
             let status = curtain.status();
@@ -449,6 +484,29 @@ impl WireFunction {
 
     fn into_parsed(self) -> Result<ParsedFunction, &'static str> {
         match self {
+            Self::Fan {
+                id,
+                label,
+                power,
+                mode,
+                speed,
+                swing,
+            } => {
+                let mode = FanModeBinding::new(
+                    mode.property.into(),
+                    mode.format,
+                    mode.straight,
+                    mode.values,
+                )
+                .map_err(|_| "Stored fan binding is invalid")?;
+                let speed = FanSpeedBinding::new(speed.property.into(), speed.format)
+                    .map_err(|_| "Stored fan binding is invalid")?;
+                Ok(ParsedFunction::fan_control(
+                    id,
+                    label,
+                    FanBindings::new(power.into(), mode, speed, swing.map(Into::into)),
+                ))
+            }
             Self::Curtain {
                 id,
                 label,

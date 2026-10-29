@@ -1,3 +1,4 @@
+mod fan;
 async fn next_power(
     receiver: &mut crate::device::CommandReceiver,
 ) -> Option<crate::device::CommandRequest> {
