@@ -1,6 +1,6 @@
 //! Matter fan projection from independent native observations.
 use super::on_off::OnOffHandler;
-use crate::device::Function;
+use crate::device::{CommandError, FanCommand, Function};
 use rs_matter::{
     dm::{
         AsyncHandler, ChainedHandler, Cluster, Dataver, HandlerContext, InvokeContext, InvokeReply,
@@ -30,6 +30,14 @@ impl Projection {
             swing: fan.swing.value,
         }
     }
+    fn mode(self) -> Option<fc::FanModeEnum> {
+        self.speed.map(|speed| match speed {
+            0 => fc::FanModeEnum::Off,
+            1..=33 => fc::FanModeEnum::Low,
+            34..=66 => fc::FanModeEnum::Medium,
+            _ => fc::FanModeEnum::High,
+        })
+    }
 }
 
 pub(super) struct Fan<const ROCKING: bool> {
@@ -53,7 +61,7 @@ impl<const ROCKING: bool> Fan<ROCKING> {
             <OnOffHandler as on_off::ClusterAsyncHandler>::dataver_changed(&self.on_off);
         }
         if cluster.is_none_or(|id| id == 0x202) {
-            <FanControl<ROCKING> as fc::ClusterAsyncHandler>::dataver_changed(&self.control);
+            self.control.sync();
         }
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
@@ -67,12 +75,37 @@ impl<const ROCKING: bool> Fan<ROCKING> {
 impl<const ROCKING: bool> AsyncHandler for Fan<ROCKING> {
     fn bump_dataver(&self, _: impl MatchContext) {}
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        if ctx.attr().cluster_id == 0x202
+            && <FanControl<ROCKING> as fc::ClusterAsyncHandler>::CLUSTER
+                .attribute(ctx.attr().attr_id)
+                .is_none()
+        {
+            return Err(ErrorCode::AttributeNotFound.into());
+        }
         self.handler().read(ctx, reply).await
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+        if ctx.attr().cluster_id == 0x202 {
+            if <FanControl<ROCKING> as fc::ClusterAsyncHandler>::CLUSTER
+                .attribute(ctx.attr().attr_id)
+                .is_none()
+            {
+                return Err(ErrorCode::AttributeNotFound.into());
+            }
+            // The generated enum decoder returns Invalid for unknown values.
+            // FanMode reserves those values as a protocol constraint instead.
+            if ctx.attr().attr_id == 0 && ctx.data().u8().is_ok_and(|value| value > 6) {
+                ctx.attr()
+                    .check_dataver(fc::ClusterAsyncHandler::dataver(&self.control))?;
+                return Err(ErrorCode::ConstraintError.into());
+            }
+        }
         self.handler().write(ctx).await
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
+        if ctx.cmd().cluster_id == 0x202 {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
         self.handler().invoke(ctx, reply).await
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
@@ -108,6 +141,27 @@ impl<const ROCKING: bool> FanControl<ROCKING> {
     fn speed(&self) -> Result<u8, Error> {
         self.sync().speed.ok_or_else(|| ErrorCode::Failure.into())
     }
+    async fn command(&self, command: FanCommand) -> Result<(), Error> {
+        let action = self.function.begin_fan(command).map_err(command_error)?;
+        action.accepted().await.map_err(command_error)?;
+        Ok(())
+    }
+    async fn set_speed(&self, value: Nullable<u8>) -> Result<(), Error> {
+        let value = value.into_option().ok_or(ErrorCode::InvalidInState)?;
+        if value > 100 {
+            return Err(ErrorCode::ConstraintError.into());
+        }
+        self.command(FanCommand::Speed(value)).await
+    }
+}
+fn command_error(error: CommandError) -> Error {
+    log::warn!("Matter fan command failed: {error}");
+    match error {
+        CommandError::Unsupported => ErrorCode::CommandNotFound,
+        CommandError::Timeout => ErrorCode::RxTimeout,
+        _ => ErrorCode::Failure,
+    }
+    .into()
 }
 impl<const ROCKING: bool> fc::ClusterAsyncHandler for FanControl<ROCKING> {
     const CLUSTER: Cluster<'static> = fc::FULL_CLUSTER
@@ -133,12 +187,7 @@ impl<const ROCKING: bool> fc::ClusterAsyncHandler for FanControl<ROCKING> {
         self.dataver.changed();
     }
     async fn fan_mode(&self, _: impl ReadContext) -> Result<fc::FanModeEnum, Error> {
-        Ok(match self.speed()? {
-            0 => fc::FanModeEnum::Off,
-            1..=33 => fc::FanModeEnum::Low,
-            34..=66 => fc::FanModeEnum::Medium,
-            _ => fc::FanModeEnum::High,
-        })
+        self.sync().mode().ok_or_else(|| ErrorCode::Failure.into())
     }
     async fn fan_mode_sequence(
         &self,
@@ -171,21 +220,46 @@ impl<const ROCKING: bool> fc::ClusterAsyncHandler for FanControl<ROCKING> {
             None => Err(ErrorCode::Failure.into()),
         }
     }
-    async fn set_fan_mode(&self, _: impl WriteContext, _: fc::FanModeEnum) -> Result<(), Error> {
-        Err(ErrorCode::Failure.into())
+    async fn set_fan_mode(
+        &self,
+        _: impl WriteContext,
+        value: fc::FanModeEnum,
+    ) -> Result<(), Error> {
+        let command = match value {
+            fc::FanModeEnum::Off => FanCommand::Power(false),
+            fc::FanModeEnum::Low => FanCommand::Speed(33),
+            fc::FanModeEnum::Medium => FanCommand::Speed(66),
+            fc::FanModeEnum::High | fc::FanModeEnum::On | fc::FanModeEnum::Smart => {
+                FanCommand::Speed(100)
+            }
+            fc::FanModeEnum::Auto => return Err(ErrorCode::ConstraintError.into()),
+        };
+        self.command(command).await
     }
     async fn set_percent_setting(
         &self,
         _: impl WriteContext,
-        _: Nullable<u8>,
+        value: Nullable<u8>,
     ) -> Result<(), Error> {
-        Err(ErrorCode::Failure.into())
+        self.set_speed(value).await
     }
-    async fn set_speed_setting(&self, _: impl WriteContext, _: Nullable<u8>) -> Result<(), Error> {
-        Err(ErrorCode::Failure.into())
+    async fn set_speed_setting(
+        &self,
+        _: impl WriteContext,
+        value: Nullable<u8>,
+    ) -> Result<(), Error> {
+        self.set_speed(value).await
     }
-    async fn set_rock_setting(&self, _: impl WriteContext, _: fc::RockBitmap) -> Result<(), Error> {
-        Err(ErrorCode::Failure.into())
+    async fn set_rock_setting(
+        &self,
+        _: impl WriteContext,
+        value: fc::RockBitmap,
+    ) -> Result<(), Error> {
+        match value.bits() {
+            0 => self.command(FanCommand::Swing(false)).await,
+            1 => self.command(FanCommand::Swing(true)).await,
+            _ => Err(ErrorCode::ConstraintError.into()),
+        }
     }
     async fn handle_step(
         &self,
@@ -199,8 +273,11 @@ impl<const ROCKING: bool> fc::ClusterAsyncHandler for FanControl<ROCKING> {
         loop {
             let projection = self.sync();
             let previous = self.reported.replace(projection);
+            if previous.mode() != projection.mode() {
+                ctx.notify_attr_changed(self.endpoint, 0x202, 0);
+            }
             if previous.speed != projection.speed {
-                for id in [0, 2, 3, 5, 6] {
+                for id in [2, 3, 5, 6] {
                     ctx.notify_attr_changed(self.endpoint, 0x202, id);
                 }
             }

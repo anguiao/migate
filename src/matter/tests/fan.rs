@@ -23,6 +23,13 @@ use rs_matter::{
 };
 use std::pin::pin;
 
+#[path = "fan/commands.rs"]
+mod commands;
+#[path = "fan/metadata.rs"]
+mod metadata;
+#[path = "fan/reports.rs"]
+mod reports;
+
 fn fan(swing: bool) -> PhysicalDevice {
     PhysicalDevice::new(
         PhysicalDeviceDescription::new(
