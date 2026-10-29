@@ -382,28 +382,15 @@ pub(crate) enum CurtainValue {
     Status(CurtainMotion),
 }
 
+/// A native property and its independent observation metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CurtainObservation<T> {
+pub struct PropertyObservation<T> {
     pub value: Option<T>,
     pub source_time: Option<i64>,
     pub received_at: Option<i64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CurtainSnapshot {
-    pub current_position: CurtainObservation<u32>,
-    pub target_position: CurtainObservation<u32>,
-    pub status: CurtainObservation<CurtainMotion>,
-}
-
-/// A single fan property and its independent observation metadata.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FanObservation<T> {
-    pub value: Option<T>,
-    pub source_time: Option<i64>,
-    pub received_at: Option<i64>,
-}
-impl<T> Default for FanObservation<T> {
+impl<T> Default for PropertyObservation<T> {
     fn default() -> Self {
         Self {
             value: None,
@@ -412,12 +399,31 @@ impl<T> Default for FanObservation<T> {
         }
     }
 }
+impl<T: PartialEq> PropertyObservation<T> {
+    pub(super) fn update(&mut self, value: T, source_time: Option<i64>, received_at: i64) -> bool {
+        let changed = self.value.as_ref() != Some(&value);
+        *self = Self {
+            value: Some(value),
+            source_time,
+            received_at: Some(received_at),
+        };
+        changed
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CurtainSnapshot {
+    pub current_position: PropertyObservation<u32>,
+    pub target_position: PropertyObservation<u32>,
+    pub status: PropertyObservation<CurtainMotion>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FanSnapshot {
-    pub power: FanObservation<bool>,
-    pub mode: FanObservation<u32>,
-    pub speed: FanObservation<u8>,
-    pub swing: FanObservation<bool>,
+    pub power: PropertyObservation<bool>,
+    pub mode: PropertyObservation<u32>,
+    pub speed: PropertyObservation<u8>,
+    pub swing: PropertyObservation<bool>,
 }
 pub(crate) enum FanValue {
     Power(bool),

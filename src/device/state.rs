@@ -36,23 +36,7 @@ impl RuntimeState {
     fn curtain() -> Self {
         Self {
             value: RuntimeValue::Curtain(Box::new(CurtainRuntime {
-                snapshot: super::CurtainSnapshot {
-                    current_position: super::CurtainObservation {
-                        value: None,
-                        source_time: None,
-                        received_at: None,
-                    },
-                    target_position: super::CurtainObservation {
-                        value: None,
-                        source_time: None,
-                        received_at: None,
-                    },
-                    status: super::CurtainObservation {
-                        value: None,
-                        source_time: None,
-                        received_at: None,
-                    },
-                },
+                snapshot: super::CurtainSnapshot::default(),
                 commands: super::curtain_command::CurtainCoordinator::default(),
                 projection: super::curtain_projection::CurtainProjection::default(),
             })),
@@ -656,20 +640,6 @@ impl Function {
         received_at: i64,
         notification: bool,
     ) {
-        fn update<T: Copy + PartialEq>(
-            current: &mut super::CurtainObservation<T>,
-            value: T,
-            source_time: Option<i64>,
-            received_at: i64,
-        ) -> bool {
-            let changed = current.value != Some(value);
-            *current = super::CurtainObservation {
-                value: Some(value),
-                source_time,
-                received_at: Some(received_at),
-            };
-            changed
-        }
         let mut state = self.0.state.lock().unwrap();
         let RuntimeValue::Curtain(curtain) = &mut state.value else {
             unreachable!("curtain function has curtain state")
@@ -678,25 +648,21 @@ impl Function {
         curtain
             .projection
             .observe(&value, curtain.snapshot, notification);
+        let snapshot = &mut curtain.snapshot;
         let changed = match value {
-            super::CurtainValue::CurrentPosition(value) => update(
-                &mut curtain.snapshot.current_position,
-                value,
-                source_time,
-                received_at,
-            ),
-            super::CurtainValue::TargetPosition(value) => update(
-                &mut curtain.snapshot.target_position,
-                value,
-                source_time,
-                received_at,
-            ),
-            super::CurtainValue::Status(value) => update(
-                &mut curtain.snapshot.status,
-                value,
-                source_time,
-                received_at,
-            ),
+            super::CurtainValue::CurrentPosition(value) => {
+                snapshot
+                    .current_position
+                    .update(value, source_time, received_at)
+            }
+            super::CurtainValue::TargetPosition(value) => {
+                snapshot
+                    .target_position
+                    .update(value, source_time, received_at)
+            }
+            super::CurtainValue::Status(value) => {
+                snapshot.status.update(value, source_time, received_at)
+            }
         };
         let projection_changed = before_target != curtain.projection.target(curtain.snapshot);
         if changed || projection_changed {
@@ -728,20 +694,6 @@ impl Function {
         received_at: i64,
         fresh: bool,
     ) {
-        fn update<T: Copy + PartialEq>(
-            current: &mut super::FanObservation<T>,
-            value: T,
-            source_time: Option<i64>,
-            received_at: i64,
-        ) -> bool {
-            let changed = current.value != Some(value);
-            *current = super::FanObservation {
-                value: Some(value),
-                source_time,
-                received_at: Some(received_at),
-            };
-            changed
-        }
         let mut state = self.0.state.lock().unwrap();
         let RuntimeValue::Fan(fan) = &mut state.value else {
             unreachable!("fan function has fan state")
@@ -749,16 +701,16 @@ impl Function {
         let changed = match value {
             super::FanValue::Power(value) => {
                 fan.commands.observe_power(value, fresh);
-                update(&mut fan.snapshot.power, value, source_time, received_at)
+                fan.snapshot.power.update(value, source_time, received_at)
             }
             super::FanValue::Mode(value) => {
-                update(&mut fan.snapshot.mode, value, source_time, received_at)
+                fan.snapshot.mode.update(value, source_time, received_at)
             }
             super::FanValue::Speed(value) => {
-                update(&mut fan.snapshot.speed, value, source_time, received_at)
+                fan.snapshot.speed.update(value, source_time, received_at)
             }
             super::FanValue::Swing(value) => {
-                update(&mut fan.snapshot.swing, value, source_time, received_at)
+                fan.snapshot.swing.update(value, source_time, received_at)
             }
         };
         if changed {

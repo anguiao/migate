@@ -6,7 +6,7 @@ fn curtain_ignores_power_observations_without_publishing_a_change() {
     let function = &device.functions()[0];
     let original = function.snapshot();
     let curtain = original.curtain().unwrap();
-    let unknown = CurtainObservation {
+    let unknown = PropertyObservation {
         value: None,
         source_time: None,
         received_at: None,
