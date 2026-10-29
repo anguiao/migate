@@ -7,6 +7,7 @@ mod credentials;
 mod descriptions;
 mod diagnostics;
 mod fan;
+mod group_composition;
 mod groups;
 mod http_routing;
 mod lighting;

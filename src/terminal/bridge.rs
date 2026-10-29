@@ -182,6 +182,11 @@ fn configuration_lines(view: &View, did: &str) -> Vec<String> {
         } else {
             lines.push(format!("  Not published: {}.", unpublished_reason(group)));
         }
+        if let Some(issues) = current.derived.member_issues.get(did) {
+            for issue in issues {
+                lines.push(format!("  Member relation: {issue}."));
+            }
+        }
         if let Some(error) = &group.error {
             lines.push(format!("  Relation: {error}."));
         }
@@ -540,7 +545,10 @@ fn current_hidden_light(
     key: &DeviceKey,
     function: &crate::device::FunctionDescription,
 ) -> bool {
-    function.kind.is_light() && view.current.derived.memberships.contains_key(&key.id)
+    view.current
+        .derived
+        .memberships
+        .contains_key(&crate::device::FunctionKey::new(key.clone(), &function.id))
 }
 
 fn power_text(power: Power) -> &'static str {

@@ -97,7 +97,7 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
 
 #[test]
 fn native_group_publication_preserves_complete_configuration_on_storage_failure() {
-    let rig = Rig::new(false, &["one"]);
+    let rig = Rig::unrestored_with_member_light(&["one"]);
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/miot/group3-instance.json"
     ))
@@ -153,7 +153,7 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
             c.context.graph.borrow().rules["group-1"]
                 .members
                 .iter()
-                .cloned()
+                .map(|member| member.device.id.as_str())
                 .collect::<Vec<_>>(),
             ["one"]
         );

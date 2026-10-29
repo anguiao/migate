@@ -119,8 +119,14 @@ fn refresh_after_write(
             let color = light
                 .color()
                 .is_some_and(|binding| written(binding.property()));
-            for member in context.group_member_work(&work.key.id) {
-                let function = member.native.device().unique_light().unwrap();
+            for (member, member_id) in context.group_member_work(&work.key.id) {
+                let function = member
+                    .native
+                    .device()
+                    .functions()
+                    .iter()
+                    .find(|function| function.id() == member_id)
+                    .unwrap();
                 let light = function.lighting().unwrap();
                 // Power can restore the member's remembered settings. Other
                 // writes refresh the affected value and its actual mode.
@@ -206,7 +212,12 @@ pub(super) async fn send(
         }
     };
     if current(&request) {
-        context.take_over_related_targets(&did, power, light_target.map(LightTarget::dimension));
+        context.take_over_related_targets(
+            &did,
+            id,
+            power,
+            light_target.map(LightTarget::dimension),
+        );
     }
     if let Some(target) = light_target
         && let Some(LightColorTarget::Rgb(rgb)) = target.color_target()
@@ -215,7 +226,7 @@ pub(super) async fn send(
         let DeviceRequest::Light(request) = request else {
             unreachable!("RGB requests are light requests");
         };
-        return repair::send(request, rgb, context, work, sink, plan).await;
+        return repair::send(request, rgb, context, work, sink, id, plan).await;
     }
     let properties =
         match super::super::lighting::encode(&work, id, power, light_target, native_group) {
@@ -269,7 +280,7 @@ pub(super) async fn send(
             operation.0.finish(skip(request));
             return Ok(());
         }
-        let retain_feedback = context.is_independent_light(&did);
+        let retain_feedback = context.is_independent_light(&did, id);
         let pending = Rc::new(RefCell::new(Some(request)));
         let mark: Rc<dyn Fn() -> Result<(), CommandError>> = {
             let pending = pending.clone();

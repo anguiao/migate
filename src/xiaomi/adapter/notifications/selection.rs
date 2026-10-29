@@ -9,10 +9,31 @@ impl Context {
             self.control_path(did)?;
             let graph = self.graph.borrow().clone();
             let group = graph.rules.get(did)?;
+            if group.members.len() != group.confirmed_members {
+                return None;
+            }
             return group.members.iter().try_fold(
                 super::super::model::PathKind::Local,
                 |path, member| {
-                    let member_path = self.active_notification(member)?;
+                    let member_path = if self.is_virtual_group(&member.device.id) {
+                        self.active_notification(&member.device.id)?
+                    } else {
+                        let work = self
+                            .live
+                            .borrow()
+                            .devices
+                            .get(&member.device.id)?
+                            .admitted
+                            .clone()?;
+                        let source = work.function_observer(&member.id)?;
+                        if !self.source_valid_for(&member.device.id, &member.id, &source) {
+                            return None;
+                        }
+                        match source {
+                            NotificationSource::Local(_) => super::super::model::PathKind::Local,
+                            NotificationSource::Cloud(_) => super::super::model::PathKind::Cloud,
+                        }
+                    };
                     Some(if member_path == super::super::model::PathKind::Cloud {
                         member_path
                     } else {

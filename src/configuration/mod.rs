@@ -6,7 +6,7 @@
 //! projection and never reads storage, the network, randomness or time.
 
 use crate::{
-    device::{DeviceKey, FunctionDescription, PhysicalDeviceDescription},
+    device::{DeviceKey, FunctionDescription, FunctionKey, PhysicalDeviceDescription},
     xiaomi::capability::{NativeDescription, RepairPlan},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,7 +46,8 @@ pub(crate) struct GroupRelation {
 pub(crate) struct GroupRule {
     pub group_did: String,
     pub is_physical: bool,
-    pub members: BTreeSet<String>,
+    pub members: BTreeSet<FunctionKey>,
+    pub confirmed_members: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,7 +103,8 @@ pub(crate) struct DerivedConfiguration {
     pub served: BTreeMap<DeviceKey, ServedDevice>,
     pub published: BTreeSet<DeviceKey>,
     pub groups: BTreeMap<String, GroupRelation>,
-    pub memberships: BTreeMap<String, BTreeSet<String>>,
+    pub memberships: BTreeMap<FunctionKey, BTreeSet<String>>,
+    pub member_issues: BTreeMap<String, Vec<String>>,
     pub rules: BTreeMap<String, GroupRule>,
 }
 
@@ -200,7 +202,11 @@ impl DerivedConfiguration {
             .description
             .functions()
             .iter()
-            .filter(|function| !self.memberships.contains_key(&key.id) || !function.kind.is_light())
+            .filter(|function| {
+                !self
+                    .memberships
+                    .contains_key(&FunctionKey::new(key.clone(), &function.id))
+            })
             .collect()
     }
 }
@@ -358,6 +364,42 @@ struct DerivationDevice<'a> {
     label: &'a str,
 }
 
+/// Resolved member identities and relationship diagnostics from the same
+/// candidate configuration. Unresolved members never claim a function.
+struct ResolvedMembers {
+    members: Vec<FunctionKey>,
+    issues: Vec<String>,
+}
+
+fn resolve_members(
+    group: &GroupRelation,
+    natives: &BTreeMap<String, &NativeDescription>,
+) -> ResolvedMembers {
+    let mut members = Vec::new();
+    let mut issues = Vec::new();
+    for did in &group.members {
+        let Some(native) = natives.get(did) else {
+            issues.push(format!("member {did} description is missing"));
+            continue;
+        };
+        let lights = native
+            .device()
+            .functions()
+            .iter()
+            .filter(|function| function.kind().is_light())
+            .collect::<Vec<_>>();
+        match lights.as_slice() {
+            [function] => members.push(FunctionKey::new(
+                native.device().key().clone(),
+                function.id(),
+            )),
+            [] => issues.push(format!("member {did} has no valid light function")),
+            _ => issues.push(format!("member {did} light function is ambiguous")),
+        }
+    }
+    ResolvedMembers { members, issues }
+}
+
 /// Derive the served graph from one complete configuration, using its saved
 /// labels, native descriptions and canonical group relations together.
 fn derive_picture<'a>(
@@ -374,11 +416,10 @@ fn derive_picture<'a>(
         .filter(|group| group.active && natives.contains_key(&group.group_did))
         .map(|group| group.group_did.clone())
         .collect::<BTreeSet<_>>();
-    let hidden = groups
+    let resolved = groups
         .values()
-        .filter(|group| publishable.contains(&group.group_did))
-        .flat_map(|group| group.members.iter().cloned())
-        .collect::<BTreeSet<_>>();
+        .map(|group| (group.group_did.clone(), resolve_members(group, &natives)))
+        .collect::<BTreeMap<_, _>>();
     let rules = groups
         .values()
         .filter(|group| publishable.contains(&group.group_did))
@@ -388,42 +429,12 @@ fn derive_picture<'a>(
                 GroupRule {
                     group_did: group.group_did.clone(),
                     is_physical: group.is_physical,
-                    members: group.members.iter().cloned().collect(),
+                    members: resolved[&group.group_did].members.iter().cloned().collect(),
+                    confirmed_members: group.members.len(),
                 },
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let served = devices
-        .iter()
-        .map(|device| {
-            (
-                device.key.clone(),
-                derive_served(
-                    device.native,
-                    device.label,
-                    groups.get(&device.key.id),
-                    &natives,
-                ),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let published = devices
-        .iter()
-        .filter(|device| {
-            if groups.contains_key(&device.key.id) {
-                publishable.contains(&device.key.id)
-            } else {
-                !hidden.contains(&device.key.id)
-                    || device
-                        .native
-                        .device()
-                        .functions()
-                        .iter()
-                        .any(|function| function.kind().is_read_only())
-            }
-        })
-        .map(|device| device.key.clone())
-        .collect();
     let memberships = {
         let mut memberships = BTreeMap::new();
         for rule in rules.values() {
@@ -436,25 +447,59 @@ fn derive_picture<'a>(
         }
         memberships
     };
+    let served = devices
+        .iter()
+        .map(|device| {
+            (
+                device.key.clone(),
+                derive_served(
+                    device.native,
+                    device.label,
+                    resolved.get(&device.key.id),
+                    &natives,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let published = devices
+        .iter()
+        .filter(|device| {
+            if groups.contains_key(&device.key.id) {
+                publishable.contains(&device.key.id)
+            } else {
+                device.native.device().functions().iter().any(|function| {
+                    !memberships.contains_key(&FunctionKey::new(device.key.clone(), function.id()))
+                })
+            }
+        })
+        .map(|device| device.key.clone())
+        .collect();
+    let member_issues = resolved
+        .into_iter()
+        .filter_map(|(did, resolved)| {
+            (!resolved.issues.is_empty()).then_some((did, resolved.issues))
+        })
+        .collect();
     DerivedConfiguration {
         served,
         published,
         groups: groups.clone(),
         memberships,
+        member_issues,
         rules,
     }
 }
 
 /// Build one served logical description from canonical native facts and the
-/// committed graph. This is the only RGB repair / interval derivation.
+/// already resolved committed graph.
 fn derive_served(
     native: &NativeDescription,
     label: &str,
-    group: Option<&GroupRelation>,
+    group: Option<&ResolvedMembers>,
     member_natives: &BTreeMap<String, &NativeDescription>,
 ) -> ServedDevice {
     let description = native.physical_description(label);
-    let Some(group) = group else {
+    let Some(resolved) = group else {
         return ServedDevice {
             description,
             repair: None,
@@ -468,54 +513,57 @@ fn derive_served(
             repair_reason: Some("native group light is missing or ambiguous".into()),
         };
     };
-    let native_interval = function
-        .lighting()
-        .and_then(|lighting| lighting.temperature())
-        .map(|temperature| temperature.interval());
-    let Some(native_interval) = native_interval else {
-        return ServedDevice {
-            description,
-            repair: None,
-            repair_reason: Some("native group has no color temperature".into()),
-        };
-    };
-    let Some(members) = group
-        .members
-        .iter()
-        .map(|did| member_natives.get(did).copied())
-        .collect::<Option<Vec<_>>>()
+    let light = function.lighting().expect("group light has bindings");
+    let native_profile = light.profile();
+    let native_rgb = light.color().is_some();
+    let Some(native_interval) = light
+        .temperature()
+        .map(|temperature| temperature.interval())
     else {
         return ServedDevice {
             description,
             repair: None,
-            repair_reason: Some(
-                "every effective member needs a description before RGB repair".into(),
-            ),
+            repair_reason: (!native_rgb).then(|| "native group cannot be extended with RGB".into()),
         };
     };
-    let logical = members
+    let members = resolved
+        .members
         .iter()
-        .map(|member| {
-            member
+        .map(|key| {
+            let function = member_natives[&key.device.id]
                 .device()
-                .unique_light()
-                .and_then(|function| function.lighting())
-                .and_then(|lighting| lighting.temperature())
-                .map(|temperature| temperature.interval())
+                .functions()
+                .iter()
+                .find(|function| function.id() == key.id)
+                .expect("resolved member function exists");
+            (key, function)
         })
-        .collect::<Option<Vec<_>>>()
-        .map(|intervals| {
-            crate::xiaomi::capability::effective_temperature_range(native_interval, &intervals)
-        })
-        .unwrap_or(native_interval);
-    let native_profile = function
-        .lighting()
-        .expect("a color-temperature group function has light bindings")
-        .profile();
-    let (repair, repair_reason, profile) = match crate::xiaomi::capability::plan_rgb_repair(
-        native.device(),
-        members.iter().copied(),
-    ) {
+        .collect::<Vec<_>>();
+    let logical = if resolved.issues.is_empty() {
+        members
+            .iter()
+            .map(|(_, function)| {
+                function
+                    .lighting()
+                    .and_then(|light| light.temperature())
+                    .map(|temperature| temperature.interval())
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|intervals| {
+                crate::xiaomi::capability::effective_temperature_range(native_interval, &intervals)
+            })
+            .unwrap_or(native_interval)
+    } else {
+        native_interval
+    };
+    let plan = if native_rgb {
+        Ok(None)
+    } else if let Some(issue) = resolved.issues.first() {
+        Err(issue.clone())
+    } else {
+        crate::xiaomi::capability::plan_rgb_repair(native.device(), members)
+    };
+    let (repair, repair_reason, profile) = match plan {
         Ok(Some(plan)) => (
             Some(plan),
             None,

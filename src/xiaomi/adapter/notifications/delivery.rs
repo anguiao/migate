@@ -115,7 +115,7 @@ impl Context {
                 value,
                 update_time,
                 cached_report,
-                self.is_independent_light(did),
+                self.is_independent_light(did, id),
                 self.clock.unix_now(),
             );
             if work.battery_problem() != battery_problem {

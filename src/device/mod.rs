@@ -24,7 +24,7 @@ pub use model::{
     MeasurementRange, MeasurementSnapshot, NumericRange, PhysicalDeviceDescription, Power, Rgb,
     StateInput, StateSnapshot, TemperatureInterval,
 };
-pub(crate) use model::{CurtainValue, FanValue};
+pub(crate) use model::{CurtainValue, FanValue, FunctionKey};
 pub use registry::DeviceRegistry;
 pub use state::{Function, PhysicalDevice};
 

@@ -2,7 +2,8 @@ use super::*;
 
 #[test]
 fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state() {
-    let rig = Rig::new(false, &["one", "two"]).with_stall_timeout(Duration::from_secs(15));
+    let rig = Rig::unrestored_with_member_light(&["one", "two"])
+        .with_stall_timeout(Duration::from_secs(15));
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/miot/group3-instance.json"
     ))
@@ -376,7 +377,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 c.context.graph.borrow().rules["group-1"]
                     .members
                     .iter()
-                    .cloned()
+                    .map(|member| member.device.id.as_str())
                     .collect::<Vec<_>>(),
                 ["one"]
             );

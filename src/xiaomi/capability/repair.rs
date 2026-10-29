@@ -1,21 +1,17 @@
-//! Concrete `devcea.light.ls2307` RGB repair planning and the independent
-//! effective color-temperature interval rule.
+//! Group capability composition from already adapted light functions.
 //!
-//! Native group capabilities stay exactly as parsed; this module only decides
-//! whether every effective member provides the genuine cross-service RGB and
-//! color-mode bindings, and computes the logical color-temperature interval
-//! shared with the native group. No group RGB MIoT binding is invented and the
-//! genuine native binding grid stays untouched.
+//! Native group bindings remain unchanged; member RGB uses the same normalized
+//! function contracts and execution policies as independent lights.
 
-use super::{NativeDescription, ParsedDevice, ls2307};
+use super::{ParsedDevice, ParsedFunction};
 
-use crate::device::{DeviceKey, FunctionKind, LightProfile, TemperatureInterval};
+use crate::device::{FunctionKey, FunctionKind, LightProfile, TemperatureInterval};
 
 /// The committed RGB repair inputs for one native group.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RepairPlan {
-    /// Effective member identities in the order carried by the relation.
-    pub(crate) members: Vec<DeviceKey>,
+    /// Exact effective member functions in the order carried by the relation.
+    pub(crate) members: Vec<FunctionKey>,
 }
 
 /// The logical published color-temperature interval.
@@ -43,19 +39,16 @@ pub(crate) fn effective_temperature_range(
     TemperatureInterval::new(min, max).unwrap_or(native)
 }
 
-/// Plan RGB repair for a native group whose members are all genuine ls2307
-/// adapters. `Ok(None)` means the native group already provides RGB; `Err`
-/// carries the reason the native group stays unrepaired.
+/// Plan RGB enhancement using resolved, adapted member functions.
+/// `Ok(None)` means that the native group already provides RGB.
 pub(crate) fn plan_rgb_repair<'a>(
-    group: &'a ParsedDevice,
-    members: impl IntoIterator<Item = &'a NativeDescription>,
+    group: &ParsedDevice,
+    members: impl IntoIterator<Item = (&'a FunctionKey, &'a ParsedFunction)>,
 ) -> Result<Option<RepairPlan>, String> {
     let function = group
         .unique_light()
         .ok_or_else(|| "native group light is missing or ambiguous".to_string())?;
-    let light = function
-        .lighting()
-        .ok_or_else(|| "native group is not a light".to_string())?;
+    let light = function.lighting().expect("group light has bindings");
     if light.color().is_some() {
         return Ok(None);
     }
@@ -63,23 +56,22 @@ pub(crate) fn plan_rgb_repair<'a>(
         function.kind(),
         FunctionKind::Light(LightProfile::ColorTemperature(_))
     ) {
-        return Err("native group is not a color-temperature light".into());
+        return Err("native group cannot be extended with RGB".into());
     }
     let mut keys = Vec::new();
-    for member in members {
-        if member.model() != ls2307::MODEL {
+    for (key, function) in members {
+        if function
+            .lighting()
+            .expect("resolved member has light bindings")
+            .color()
+            .is_none()
+        {
             return Err(format!(
-                "member {} is not the ls2307 adapter",
-                member.device().key().id
+                "member {} {} lacks the RGB light contract",
+                key.device.id, key.id
             ));
         }
-        if member.device().unique_light().is_none() {
-            return Err(format!(
-                "member {} light is missing or ambiguous",
-                member.device().key().id
-            ));
-        }
-        keys.push(member.device().key().clone());
+        keys.push(key.clone());
     }
     if keys.is_empty() {
         return Err("native group has no effective members".into());

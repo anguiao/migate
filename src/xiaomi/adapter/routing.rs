@@ -444,7 +444,7 @@ impl Context {
             path => path,
         }
     }
-    pub(super) fn group_member_work(&self, did: &str) -> Vec<Rc<DeviceWork>> {
+    pub(super) fn group_member_work(&self, did: &str) -> Vec<(Rc<DeviceWork>, String)> {
         let graph = self.graph.borrow().clone();
         let Some(group) = graph.rules.get(did) else {
             return Vec::new();
@@ -455,20 +455,18 @@ impl Context {
             .iter()
             .filter_map(|member| {
                 live.devices
-                    .get(member)?
+                    .get(&member.device.id)?
                     .admitted
                     .as_ref()
-                    .filter(|work| {
-                        !work.life.is_closed() && work.native.device().unique_light().is_some()
-                    })
-                    .cloned()
+                    .filter(|work| !work.life.is_closed())
+                    .map(|work| (work.clone(), member.id.clone()))
             })
             .collect()
     }
     /// Refresh the actual feedback source, sharing ordinary member work.
     pub(super) fn refresh_source(&self, did: &str) {
         if self.is_virtual_group(did) {
-            for work in self.group_member_work(did) {
+            for (work, _) in self.group_member_work(did) {
                 work.refresh();
             }
         } else if let Some(work) = self

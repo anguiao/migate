@@ -69,7 +69,11 @@ fn outlet_native_with_piid(id: &str, siid: u32, piid: u32) -> NativeDescription 
 }
 
 fn ct_light_native(id: &str, min: u32, max: u32) -> NativeDescription {
-    let power = PropertyBinding { siid: 2, piid: 1 };
+    ct_light_native_with_power(id, min, max, 1)
+}
+
+fn ct_light_native_with_power(id: &str, min: u32, max: u32, piid: u32) -> NativeDescription {
+    let power = PropertyBinding { siid: 2, piid };
     let brightness = BrightnessBinding::new(
         PropertyBinding { siid: 2, piid: 3 },
         NumericFormat::Uint8,
@@ -251,6 +255,122 @@ fn grouping_a_mixed_light_hides_only_control_and_preserves_sensors_and_battery()
     grouped.configuration.validate().unwrap();
 }
 
+#[test]
+fn group_member_resolution_preserves_other_controls_and_rejects_ambiguity() {
+    let member = ct_light_native("member", 2700, 6500);
+    let fan_source = serde_json::json!({
+        "type": "urn:miot-spec-v2:device:fan:0000A005:example:1", "services": [{
+            "iid": 3, "type": "urn:miot-spec-v2:service:fan:00007808:example:1", "properties": [
+                {"iid": 1, "type": "urn:miot-spec-v2:property:on:00000006:example:1", "format": "bool", "access": ["read", "write", "notify"]},
+                {"iid": 2, "type": "urn:miot-spec-v2:property:fan-level:00000016:example:1", "format": "uint8", "access": ["read", "write", "notify"], "value-range": [1, 3, 1]}
+            ]
+        }]
+    });
+    let fan = crate::xiaomi::capability::parse_device_for_model(
+        key("member"),
+        "example.fan",
+        &fan_source,
+    )
+    .unwrap();
+    let mut functions = member.device().functions().to_vec();
+    functions.extend_from_slice(fan.functions());
+    let composite = native("member", "vendor.light", LIGHT_TYPE, functions, None);
+    let group = ct_light_native("group", 2700, 6500);
+    let relation = GroupRelation {
+        group_did: "group".into(),
+        record_did: "record".into(),
+        model: "vendor.group".into(),
+        instance_type: Some(LIGHT_TYPE.into()),
+        is_physical: false,
+        active: true,
+        error: None,
+        members: vec!["member".into()],
+    };
+    let configuration = CommittedConfiguration {
+        scope: Some(scope()),
+        root_version: 1,
+        devices: vec![
+            committed_at("member", composite.clone(), "Member", 1, 2),
+            committed_at("group", group.clone(), "Group", 1, 10),
+        ],
+        groups: vec![relation.clone()],
+    };
+    let derived = configuration.derive();
+    assert!(derived.published.contains(&key("member")));
+    assert_eq!(
+        derived
+            .visible_functions(&key("member"))
+            .iter()
+            .map(|f| f.id.as_str())
+            .collect::<Vec<_>>(),
+        ["fan:3"]
+    );
+
+    let mut functions = composite.device().functions().to_vec();
+    functions.push(ParsedFunction::light(
+        "light:9",
+        "Second",
+        PropertyBinding { siid: 9, piid: 1 },
+        LightBindings::OnOff,
+    ));
+    let ambiguous = native("member", "vendor.light", LIGHT_TYPE, functions, None);
+    let configuration = CommittedConfiguration {
+        devices: vec![
+            committed_at("member", ambiguous, "Member", 1, 2),
+            committed_at("group", group, "Group", 1, 10),
+        ],
+        ..configuration
+    };
+    let derived = configuration.derive();
+    assert!(derived.published.contains(&key("member")));
+    assert_eq!(derived.visible_functions(&key("member")).len(), 3);
+    assert!(derived.rules["group"].members.is_empty());
+    assert!(
+        derived.served[&key("group")]
+            .repair_reason
+            .as_deref()
+            .unwrap()
+            .contains("ambiguous")
+    );
+}
+
+#[test]
+fn native_rgb_stays_native_without_member_description() {
+    let instance: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/miot/devcea-light-ls2307.json"
+    ))
+    .unwrap();
+    let parsed =
+        crate::xiaomi::capability::parse_group(key("group"), "devcea.light.ls2307", &instance)
+            .unwrap();
+    let native = NativeDescription::new(
+        "devcea.light.ls2307".into(),
+        instance["type"].as_str().unwrap().into(),
+        parsed,
+    )
+    .unwrap();
+    let configuration = CommittedConfiguration {
+        scope: Some(scope()),
+        root_version: 1,
+        devices: vec![committed("group", native, "Group", 1)],
+        groups: vec![GroupRelation {
+            group_did: "group".into(),
+            record_did: "record".into(),
+            model: "vendor.group".into(),
+            instance_type: Some(LIGHT_TYPE.into()),
+            is_physical: true,
+            active: true,
+            error: None,
+            members: vec!["missing".into()],
+        }],
+    };
+    let derived = configuration.derive();
+    let served = &derived.served[&key("group")];
+    assert!(served.description.functions()[0].supports_rgb());
+    assert!(served.repair.is_none());
+    assert!(served.repair_reason.is_none(), "native RGB needs no repair");
+}
+
 fn plan(
     current: CommittedConfiguration,
     facts: SourceFacts,
@@ -339,7 +459,7 @@ fn identical_facts_reuse_without_change() {
 #[test]
 fn hidden_member_republishes_with_a_version_bump() {
     let group_native = ct_light_native("group-1", 2700, 6500);
-    let member_native = outlet_native("member", 2);
+    let member_native = ct_light_native("member", 2700, 6500);
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
@@ -812,8 +932,8 @@ fn scope_change_replaces_the_native_instance_with_the_same_key() {
 #[test]
 fn hidden_member_replacement_rebuilds_without_a_version_bump() {
     let group_native = ct_light_native("group-1", 2700, 6500);
-    let before = outlet_native("member", 2);
-    let after = outlet_native_with_piid("member", 2, 7);
+    let before = ct_light_native("member", 2700, 6500);
+    let after = ct_light_native_with_power("member", 2700, 6500, 7);
     let relation = GroupRelation {
         group_did: "group-1".into(),
         record_did: "record-1".into(),

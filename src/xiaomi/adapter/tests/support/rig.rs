@@ -96,6 +96,35 @@ impl Rig {
     pub(in super::super) fn new(restore: bool, members: &[&str]) -> Self {
         Self::build(restore, members, None)
     }
+    /// A fresh catalog containing one real on/off light among ordinary devices.
+    pub(in super::super) fn unrestored_with_member_light(members: &[&str]) -> Self {
+        let instance = json!({
+            "type": "urn:miot-spec-v2:device:light:0000A001:example:1",
+            "services": [{
+                "iid": 2, "type": "urn:miot-spec-v2:service:light:00007802:example:1",
+                "properties": [{"iid": 1, "type": "urn:miot-spec-v2:property:on:00000006:example:1",
+                    "format": "bool", "access": ["read", "write", "notify"]}]
+            }]
+        });
+        let rig = Self::build_with(
+            false,
+            members,
+            None,
+            None,
+            &[("one", "example.light", instance)],
+            &[],
+        );
+        let outlet: Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/miot/outlet.json"
+        ))
+        .unwrap();
+        rig.cloud
+            .lock()
+            .unwrap()
+            .catalog_instances
+            .insert(outlet["type"].as_str().unwrap().into(), outlet);
+        rig
+    }
     pub(in super::super) fn light(model: &str) -> Self {
         Self::build(true, &["one"], Some(model))
     }

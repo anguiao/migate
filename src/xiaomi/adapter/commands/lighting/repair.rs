@@ -1,8 +1,7 @@
-//! RGB-only dispatch for admitted ls2307 native groups.
+//! RGB dispatch through the admitted member light functions.
 //!
-//! Each currently ON member receives one real RGB property write. The first
-//! acceptance settles the group request; other owned sends keep their place
-//! in the shared per-device queue without retaining skipped color targets.
+//! The first acceptance settles the group request; other owned sends keep
+//! their place in the shared per-device queue without retaining skipped targets.
 
 use super::super::super::{
     model::{AdapterError, CommandTarget},
@@ -15,7 +14,6 @@ use crate::{
     xiaomi::capability::RepairPlan,
 };
 use event_listener::Event;
-use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -34,6 +32,7 @@ pub(super) async fn send(
     context: Rc<Context>,
     work: Rc<DeviceWork>,
     sink: Rc<LogicalSink>,
+    id: &str,
     plan: Rc<RepairPlan>,
 ) -> Result<(), AdapterError> {
     if let Err(error) = request.current_result() {
@@ -46,6 +45,7 @@ pub(super) async fn send(
         .borrow_mut()
         .next_light(token, || snapshot_members(&context, &plan));
     let group = SourceRef {
+        id: id.to_owned(),
         work: work.clone(),
         sink: sink.clone(),
     };
@@ -97,10 +97,13 @@ fn snapshot_members(context: &Context, plan: &RepairPlan) -> Vec<SourceRef> {
     plan.members
         .iter()
         .filter_map(|key| {
-            let work = live.devices.get(&key.id)?.admitted.clone()?;
-            work.native.device().unique_light()?;
+            let work = live.devices.get(&key.device.id)?.admitted.clone()?;
             let sink = work.current_sink();
-            Some(SourceRef { work, sink })
+            Some(SourceRef {
+                id: key.id.clone(),
+                work,
+                sink,
+            })
         })
         .collect()
 }
@@ -114,24 +117,8 @@ async fn member_task(
     epoch: u64,
     pending: Rc<RefCell<Option<LightRequest>>>,
 ) -> (Result<(), CommandError>, Option<AdapterError>) {
-    let Some(member_id) = member
-        .work
-        .native
-        .device()
-        .unique_light()
-        .map(|function| function.id().to_owned())
-    else {
-        return (Err(CommandError::Unsupported), None);
-    };
-    let Some(group_id) = group
-        .work
-        .native
-        .device()
-        .unique_light()
-        .map(|function| function.id().to_owned())
-    else {
-        return (Err(CommandError::Unsupported), None);
-    };
+    let member_id = member.id.clone();
+    let group_id = group.id.clone();
     let gate = context
         .write_gates
         .for_device(&member.work.key.id, context.clock.clone());
@@ -180,23 +167,22 @@ async fn member_task(
     if let Err(error) = current() {
         return (Err(error), None);
     }
-    let property = member
-        .work
-        .native
-        .device()
-        .unique_light()
-        .unwrap()
-        .lighting()
-        .unwrap()
-        .color()
-        .unwrap()
-        .property();
-    let properties = vec![(property, json!(rgb.packed()))];
+    let target = LightTarget::rgb(None, rgb);
+    let properties = match super::super::super::lighting::encode(
+        &member.work,
+        &member_id,
+        None,
+        Some(target),
+        true,
+    ) {
+        Ok(properties) => properties,
+        Err(error) => return (Err(error), None),
+    };
     let operation = context.commands.begin_operation(
         &member.work.key.id,
         &member_id,
-        property,
-        CommandTarget::Light(LightTarget::rgb(None, rgb)),
+        properties[0].0,
+        CommandTarget::Light(target),
         properties.clone(),
         std::time::Instant::now(),
     );
@@ -234,13 +220,17 @@ async fn member_task(
 }
 
 /// Automatic mode changes still need real feedback when no notification arrives.
-fn refresh_mode(work: &DeviceWork) {
+fn refresh_mode(work: &DeviceWork, id: &str) {
     if work.life.is_closed() {
         return;
     }
-    let Some(function) = work.native.device().unique_light() else {
-        return;
-    };
+    let function = work
+        .native
+        .device()
+        .functions()
+        .iter()
+        .find(|function| function.id() == id)
+        .expect("resolved member function exists");
     if let Some(mode) = function.lighting().and_then(|light| light.mode()) {
         work.request_dirty_read(function.id(), mode.property());
     }
@@ -249,7 +239,7 @@ fn refresh_mode(work: &DeviceWork) {
 pub(super) fn refresh_native_color_mode(context: &Context, did: &str) {
     if let Some(plan) = context.group_repair(did) {
         for member in snapshot_members(context, &plan) {
-            refresh_mode(&member.work);
+            refresh_mode(&member.work, &member.id);
         }
     }
 }

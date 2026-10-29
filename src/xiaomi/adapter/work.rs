@@ -47,6 +47,7 @@ mod test_access;
 /// same pair.
 #[derive(Clone)]
 pub(super) struct SourceRef {
+    pub(super) id: String,
     pub(super) work: Rc<DeviceWork>,
     pub(super) sink: Rc<LogicalSink>,
 }

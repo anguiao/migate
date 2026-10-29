@@ -602,7 +602,7 @@ impl fmt::Display for CommandError {
 
 impl Error for CommandError {}
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FunctionKey {
     pub device: DeviceKey,
     pub id: String,

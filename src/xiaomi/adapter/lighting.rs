@@ -6,8 +6,8 @@ use super::{
 };
 use crate::{
     device::{
-        Availability, CommandError, DeviceKey, LightColorTarget, LightDimension, LightMode,
-        LightPatch, LightSnapshot, LightTarget, Power, Rgb,
+        Availability, CommandError, DeviceKey, FunctionKey, LightColorTarget, LightDimension,
+        LightMode, LightPatch, LightSnapshot, LightTarget, Power, Rgb,
     },
     xiaomi::capability::{CapabilityError, ParsedFunction, PropertyBinding},
 };
@@ -272,23 +272,26 @@ pub(super) fn observe(
 }
 
 impl Context {
-    pub(super) fn is_independent_light(&self, did: &str) -> bool {
+    pub(super) fn is_independent_light(&self, did: &str, id: &str) -> bool {
         let graph = self.graph.borrow().clone();
         self.live.borrow().devices.contains_key(did)
             && !graph.rules.contains_key(did)
-            && !graph.memberships.contains_key(did)
+            && !graph
+                .memberships
+                .contains_key(&FunctionKey::new(DeviceKey::new("xiaomi", did), id))
     }
 
     /// New source targets take over other effective groups sharing members.
     pub(super) fn take_over_related_targets(
         &self,
         did: &str,
+        id: &str,
         power: Option<bool>,
         dimension: Option<LightDimension>,
     ) {
         let graph = self.graph.borrow().clone();
         let members = graph.rules.get(did).map_or_else(
-            || vec![did.to_owned()],
+            || vec![FunctionKey::new(DeviceKey::new("xiaomi", did), id)],
             |group| group.members.iter().cloned().collect(),
         );
         let off = power == Some(false);
@@ -353,8 +356,10 @@ impl Context {
         if graph.rules.contains_key(member_did) {
             groups.insert(member_did.to_owned());
         }
-        if let Some(affected) = graph.memberships.get(member_did) {
-            groups.extend(affected.iter().cloned());
+        for (member, affected) in &graph.memberships {
+            if member.device.id == member_did {
+                groups.extend(affected.iter().cloned());
+            }
         }
         for did in groups {
             self.refresh_group_state(&did);
@@ -417,8 +422,8 @@ impl Context {
         let members = group
             .members
             .iter()
-            .filter_map(|did| {
-                let slot = live.devices.get(did)?;
+            .filter_map(|member| {
+                let slot = live.devices.get(&member.device.id)?;
                 let work = slot.admitted.as_ref()?;
                 if work.life.is_closed() {
                     return None;
@@ -427,22 +432,21 @@ impl Context {
                 if physical.availability() != Availability::Available {
                     return None;
                 }
-                let id = work.native.device().unique_light()?.id();
-                let function = physical.function(id)?;
+                let function = physical.function(&member.id)?;
                 let snapshot = function.snapshot();
                 let light = snapshot.lighting()?;
                 let description = function.description();
                 let supports_color =
                     description.supports_color_temperature() || description.supports_rgb();
                 Some(Member {
-                    did,
+                    did: &member.device.id,
                     power: snapshot.power()?,
                     lighting: light,
                     supports_color,
                 })
             })
             .collect::<Vec<_>>();
-        let (power, state) = aggregate(function.description(), &members, group.members.len());
+        let (power, state) = aggregate(function.description(), &members, group.confirmed_members);
         if group.is_physical {
             function.replace_light_color(state.color, state.mode);
             return;

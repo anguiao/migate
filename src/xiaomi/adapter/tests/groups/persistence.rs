@@ -283,7 +283,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
 
 #[test]
 fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
-    let rig = Rig::new(false, &["one"]);
+    let rig = Rig::unrestored_with_member_light(&["one"]);
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/miot/group3-instance.json"
     ))

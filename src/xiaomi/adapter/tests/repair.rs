@@ -81,7 +81,7 @@ fn repaired_group_publishes_extended_color_and_dispatches_rgb_to_members() {
                     .cloned(),
                 Some(json!(0x112233))
             );
-            assert!(member_writes(&c, did, 4, 2).is_empty());
+            assert_eq!(member_writes(&c, did, 4, 2), [json!(1)]);
             assert!(member_writes(&c, did, 2, 1).is_empty());
         }
         wait_for(
@@ -783,7 +783,10 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                     !member_writes(&c, did, 4, 1).is_empty(),
                     powers[index] == Some(true)
                 );
-                assert!(member_writes(&c, did, 4, 2).is_empty());
+                assert_eq!(
+                    !member_writes(&c, did, 4, 2).is_empty(),
+                    powers[index] == Some(true)
+                );
                 assert!(member_writes(&c, did, 2, 1).is_empty());
                 if powers[index] != Some(true) {
                     let work = c.context.live.borrow().devices[did]
@@ -809,4 +812,79 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
             }
         }));
     }
+}
+
+#[test]
+fn rgb_action_keeps_the_member_sources_captured_by_its_first_frame() {
+    block_on(repair_rig(0, true).run(|c| async move {
+        repair_ready(&c).await;
+        let group = function(&c.context.registry, "group-1", "light:2");
+        // A committed member can temporarily have no admitted runtime. It must
+        // not join an action already in progress when that runtime appears.
+        let delayed = c
+            .context
+            .live
+            .borrow_mut()
+            .devices
+            .get_mut("member-b")
+            .unwrap()
+            .admitted
+            .take()
+            .unwrap();
+        let action = group.begin_light_action(rgb(0x010203), false).unwrap();
+        action.accepted().await.unwrap();
+        c.context
+            .live
+            .borrow_mut()
+            .devices
+            .get_mut("member-b")
+            .unwrap()
+            .admitted = Some(delayed);
+        group
+            .submit_light_frame(action.token(), rgb(0x040506), true)
+            .unwrap();
+        action.ended().await.unwrap();
+        assert!(member_writes(&c, "member-a", 4, 1).contains(&json!(0x040506)));
+        assert!(member_writes(&c, "member-b", 4, 1).is_empty());
+        group
+            .begin_light_action(rgb(0x070809), true)
+            .unwrap()
+            .accepted()
+            .await
+            .unwrap();
+        wait_for(
+            || member_writes(&c, "member-b", 4, 1).contains(&json!(0x070809)),
+            "new action must capture the restored member",
+        )
+        .await;
+    }));
+}
+
+#[test]
+fn first_member_acceptance_does_not_discard_another_members_queued_write() {
+    let (rig, release) = gated_rig(0, true);
+    block_on(rig.run(|c| async move {
+        repair_ready(&c).await;
+        let member = function(&c.context.registry, "member-b", "light:2");
+        let holding = async { member.execute(Command::Off).await.unwrap() };
+        let scenario = async {
+            wait_holding_member_b(&c).await;
+            let group = function(&c.context.registry, "group-1", "light:2");
+            group
+                .begin_light_action(rgb(0x224466), true)
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            assert!(member_writes(&c, "member-b", 4, 1).is_empty());
+            c.cloud.lock().unwrap().write_gates.remove("member-b");
+            release.send(()).unwrap();
+            wait_for(
+                || member_writes(&c, "member-b", 4, 1).contains(&json!(0x224466)),
+                "queued member must continue after the first acceptance",
+            )
+            .await;
+        };
+        future::zip(holding, scenario).await;
+    }));
 }

@@ -1,7 +1,9 @@
-use crate::device::{DeviceKey, LightProfile, LightProfileKind, NumericRange, TemperatureInterval};
+use crate::device::{
+    DeviceKey, FunctionKey, LightProfile, LightProfileKind, NumericRange, TemperatureInterval,
+};
 use crate::xiaomi::capability::{
     NativeDescription, ParsedDevice, effective_temperature_range, parse_device_for_model,
-    parse_group, plan_rgb_repair, repaired_profile,
+    parse_group, repaired_profile,
 };
 use serde_json::{Value, json};
 
@@ -45,6 +47,27 @@ fn parse_model(did: &str, model: &str, instance: &Value) -> NativeDescription {
     .unwrap()
 }
 
+fn test_plan<'a>(
+    group: &ParsedDevice,
+    members: impl IntoIterator<Item = &'a NativeDescription>,
+) -> Result<Option<super::super::RepairPlan>, String> {
+    let mut resolved = Vec::new();
+    for member in members {
+        let function = member
+            .device()
+            .unique_light()
+            .ok_or_else(|| "member light is missing or ambiguous".to_string())?;
+        resolved.push((
+            FunctionKey::new(member.device().key().clone(), function.id()),
+            function,
+        ));
+    }
+    super::super::plan_rgb_repair(
+        group,
+        resolved.iter().map(|(key, function)| (key, *function)),
+    )
+}
+
 fn member_temperature(device: &ParsedDevice) -> TemperatureInterval {
     device.functions()[0]
         .lighting()
@@ -59,14 +82,14 @@ fn ls2307_members_extend_group_profile_and_narrow_temperature() {
     let group = parse_group3();
     let a = parse_model("member-a", "devcea.light.ls2307", &ls2307());
     let b = parse_model("member-b", "devcea.light.ls2307", &ls2307());
-    let plan = plan_rgb_repair(&group, [&a, &b])
+    let plan = test_plan(&group, [&a, &b])
         .unwrap()
         .expect("repair applies");
     assert_eq!(
         plan.members,
         [
-            DeviceKey::new("xiaomi", "member-a"),
-            DeviceKey::new("xiaomi", "member-b"),
+            FunctionKey::new(DeviceKey::new("xiaomi", "member-a"), "light:2"),
+            FunctionKey::new(DeviceKey::new("xiaomi", "member-b"), "light:2"),
         ]
     );
     let logical = effective_temperature_range(
@@ -84,15 +107,19 @@ fn ls2307_members_extend_group_profile_and_narrow_temperature() {
 }
 
 #[test]
-fn repair_requires_every_member_to_be_the_concrete_ls2307_adapter() {
+fn repair_requires_every_member_to_have_an_rgb_contract() {
     let group = parse_group3();
     let ls = parse_model("member-a", "devcea.light.ls2307", &ls2307());
     assert!(
-        plan_rgb_repair(&group, []).is_err(),
+        test_plan(&group, []).is_err(),
         "a group without members cannot be repaired"
     );
     let obct = parse_model("member-b", "yeelink.light.light3", &light3());
-    assert!(plan_rgb_repair(&group, [&ls, &obct]).is_err());
+    let reason = test_plan(&group, [&ls, &obct]).unwrap_err();
+    assert!(
+        reason.contains("member-b") && reason.contains("RGB light contract"),
+        "{reason}"
+    );
     assert!(
         NativeDescription::new(
             "not.light.ls2307".into(),
@@ -123,14 +150,41 @@ fn native_rgb_is_not_repaired_and_scene_mode_is_not_rgb() {
     )
     .unwrap();
     assert!(
-        matches!(plan_rgb_repair(&native, [],), Ok(None)),
+        matches!(test_plan(&native, [],), Ok(None)),
         "native RGB needs no repair"
     );
     // group3 carries a scene mode property; it is not an RGB binding, so
     // repair planning still applies.
     let group = parse_group3();
     let ls = parse_model("member-a", "devcea.light.ls2307", &ls2307());
-    assert!(plan_rgb_repair(&group, [&ls]).unwrap().is_some());
+    assert!(test_plan(&group, [&ls]).unwrap().is_some());
+}
+
+#[test]
+fn generic_rgb_and_patched_lights_can_extend_one_group() {
+    let group = parse_group3();
+    let patched = parse_model("patched", "devcea.light.ls2307", &ls2307());
+    let mut generic = light3();
+    generic["services"][1]["properties"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "iid": 4, "type": "urn:miot-spec-v2:property:color:0000000E:example:1",
+            "format": "uint32", "access": ["read", "write", "notify"], "unit": "rgb",
+            "value-range": [0, 16777215, 1]
+        }));
+    let generic = parse_model("generic", "example.rgb", &generic);
+    assert!(
+        generic
+            .device()
+            .unique_light()
+            .unwrap()
+            .lighting()
+            .unwrap()
+            .color()
+            .is_some()
+    );
+    assert!(test_plan(&group, [&patched, &generic]).unwrap().is_some());
 }
 
 #[test]
@@ -200,6 +254,6 @@ fn repair_never_selects_an_arbitrary_member_light() {
         ParsedDevice::new(original.device().key().clone(), functions, None).unwrap(),
     )
     .unwrap();
-    let reason = plan_rgb_repair(&group, [&member]).unwrap_err();
+    let reason = test_plan(&group, [&member]).unwrap_err();
     assert!(reason.contains("ambiguous"), "{reason}");
 }
