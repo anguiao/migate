@@ -1,6 +1,6 @@
 //! Matter fan projection from independent native observations.
 use super::on_off::OnOffHandler;
-use crate::device::{CommandError, FanCommand, Function};
+use crate::device::{CommandError, FanCommand, Function, FunctionKind};
 use rs_matter::{
     dm::{
         AsyncHandler, ChainedHandler, Cluster, Dataver, HandlerContext, InvokeContext, InvokeReply,
@@ -30,12 +30,17 @@ impl Projection {
             swing: fan.swing.value,
         }
     }
-    fn mode(self) -> Option<fc::FanModeEnum> {
-        self.speed.map(|speed| match speed {
-            0 => fc::FanModeEnum::Off,
-            1..=33 => fc::FanModeEnum::Low,
-            34..=66 => fc::FanModeEnum::Medium,
-            _ => fc::FanModeEnum::High,
+    fn mode(self, count: u8) -> Option<fc::FanModeEnum> {
+        self.speed.map(|speed| {
+            if speed == 0 {
+                fc::FanModeEnum::Off
+            } else if count == 2 && speed == 1 || count >= 3 && speed <= count / 3 {
+                fc::FanModeEnum::Low
+            } else if count >= 3 && u16::from(speed) <= 2 * u16::from(count) / 3 {
+                fc::FanModeEnum::Medium
+            } else {
+                fc::FanModeEnum::High
+            }
         })
     }
 }
@@ -138,20 +143,35 @@ impl<const ROCKING: bool> FanControl<ROCKING> {
         }
         projection
     }
+    fn count(&self) -> u8 {
+        let FunctionKind::Fan { speed_count, .. } = self.function.description().kind else {
+            unreachable!("fan handler has a fan function");
+        };
+        speed_count
+    }
     fn speed(&self) -> Result<u8, Error> {
         self.sync().speed.ok_or_else(|| ErrorCode::Failure.into())
+    }
+    fn percent(&self) -> Result<u8, Error> {
+        Ok((u16::from(self.speed()?) * 100 / u16::from(self.count())) as u8)
     }
     async fn command(&self, command: FanCommand) -> Result<(), Error> {
         let action = self.function.begin_fan(command).map_err(command_error)?;
         action.accepted().await.map_err(command_error)?;
         Ok(())
     }
-    async fn set_speed(&self, value: Nullable<u8>) -> Result<(), Error> {
+    async fn set_speed(&self, value: Nullable<u8>, percent: bool) -> Result<(), Error> {
         let value = value.into_option().ok_or(ErrorCode::InvalidInState)?;
-        if value > 100 {
+        let limit = if percent { 100 } else { self.count() };
+        if value > limit {
             return Err(ErrorCode::ConstraintError.into());
         }
-        self.command(FanCommand::Speed(value)).await
+        let speed = if percent {
+            (u16::from(self.count()) * u16::from(value)).div_ceil(100) as u8
+        } else {
+            value
+        };
+        self.command(FanCommand::Speed(speed)).await
     }
 }
 fn command_error(error: CommandError) -> Error {
@@ -187,22 +207,28 @@ impl<const ROCKING: bool> fc::ClusterAsyncHandler for FanControl<ROCKING> {
         self.dataver.changed();
     }
     async fn fan_mode(&self, _: impl ReadContext) -> Result<fc::FanModeEnum, Error> {
-        self.sync().mode().ok_or_else(|| ErrorCode::Failure.into())
+        self.sync()
+            .mode(self.count())
+            .ok_or_else(|| ErrorCode::Failure.into())
     }
     async fn fan_mode_sequence(
         &self,
         _: impl ReadContext,
     ) -> Result<fc::FanModeSequenceEnum, Error> {
-        Ok(fc::FanModeSequenceEnum::OffLowMedHigh)
+        Ok(match self.count() {
+            1 => fc::FanModeSequenceEnum::OffHigh,
+            2 => fc::FanModeSequenceEnum::OffLowHigh,
+            _ => fc::FanModeSequenceEnum::OffLowMedHigh,
+        })
     }
     async fn percent_setting(&self, _: impl ReadContext) -> Result<Nullable<u8>, Error> {
-        Ok(Nullable::new(Some(self.speed()?)))
+        Ok(Nullable::new(Some(self.percent()?)))
     }
     async fn percent_current(&self, _: impl ReadContext) -> Result<u8, Error> {
-        self.speed()
+        self.percent()
     }
     async fn speed_max(&self, _: impl ReadContext) -> Result<u8, Error> {
-        Ok(100)
+        Ok(self.count())
     }
     async fn speed_setting(&self, _: impl ReadContext) -> Result<Nullable<u8>, Error> {
         Ok(Nullable::new(Some(self.speed()?)))
@@ -227,12 +253,20 @@ impl<const ROCKING: bool> fc::ClusterAsyncHandler for FanControl<ROCKING> {
     ) -> Result<(), Error> {
         let command = match value {
             fc::FanModeEnum::Off => FanCommand::Power(false),
-            fc::FanModeEnum::Low => FanCommand::Speed(33),
-            fc::FanModeEnum::Medium => FanCommand::Speed(66),
-            fc::FanModeEnum::High | fc::FanModeEnum::On | fc::FanModeEnum::Smart => {
-                FanCommand::Speed(100)
+            fc::FanModeEnum::Low if self.count() >= 2 => FanCommand::Speed(if self.count() == 2 {
+                1
+            } else {
+                self.count() / 3
+            }),
+            fc::FanModeEnum::Medium if self.count() >= 3 => {
+                FanCommand::Speed((u16::from(self.count()) * 2 / 3) as u8)
             }
-            fc::FanModeEnum::Auto => return Err(ErrorCode::ConstraintError.into()),
+            fc::FanModeEnum::High | fc::FanModeEnum::On | fc::FanModeEnum::Smart => {
+                FanCommand::Speed(self.count())
+            }
+            fc::FanModeEnum::Low | fc::FanModeEnum::Medium | fc::FanModeEnum::Auto => {
+                return Err(ErrorCode::ConstraintError.into());
+            }
         };
         self.command(command).await
     }
@@ -241,14 +275,14 @@ impl<const ROCKING: bool> fc::ClusterAsyncHandler for FanControl<ROCKING> {
         _: impl WriteContext,
         value: Nullable<u8>,
     ) -> Result<(), Error> {
-        self.set_speed(value).await
+        self.set_speed(value, true).await
     }
     async fn set_speed_setting(
         &self,
         _: impl WriteContext,
         value: Nullable<u8>,
     ) -> Result<(), Error> {
-        self.set_speed(value).await
+        self.set_speed(value, false).await
     }
     async fn set_rock_setting(
         &self,
@@ -273,7 +307,7 @@ impl<const ROCKING: bool> fc::ClusterAsyncHandler for FanControl<ROCKING> {
         loop {
             let projection = self.sync();
             let previous = self.reported.replace(projection);
-            if previous.mode() != projection.mode() {
+            if previous.mode(self.count()) != projection.mode(self.count()) {
                 ctx.notify_attr_changed(self.endpoint, 0x202, 0);
             }
             if previous.speed != projection.speed {

@@ -243,26 +243,43 @@ fn render(view: &View, did: Option<&str>, status: &AuthStatus, show_commands: bo
                             fan.power.received_at,
                         ),
                         (
-                            "Native mode",
-                            fan.mode
-                                .value
-                                .map_or_else(|| "unknown".into(), |v| v.to_string()),
-                            fan.mode.source_time,
-                            fan.mode.received_at,
-                        ),
-                        (
-                            "Straight speed",
-                            fan.speed
-                                .value
-                                .map_or_else(|| "unknown".into(), |v| format!("{v}%")),
+                            "Speed",
+                            fan.speed.value.map_or_else(
+                                || "unknown".into(),
+                                |v| {
+                                    let crate::device::FunctionKind::Fan { speed_count, .. } =
+                                        function.description().kind
+                                    else {
+                                        unreachable!()
+                                    };
+                                    format!("level {v}/{speed_count}")
+                                },
+                            ),
                             fan.speed.source_time,
                             fan.speed.received_at,
                         ),
                     ];
+                    if let Some(mode) = status
+                        .function_properties(&key.id, id)
+                        .iter()
+                        .find_map(|property| property.native_mode)
+                    {
+                        entries.insert(
+                            1,
+                            (
+                                "Native mode",
+                                mode.value
+                                    .map_or_else(|| "unknown".into(), |v| v.to_string()),
+                                mode.source_time,
+                                mode.received_at,
+                            ),
+                        );
+                    }
                     if matches!(
                         function.description().kind,
                         crate::device::FunctionKind::Fan {
-                            horizontal_swing: true
+                            horizontal_swing: true,
+                            ..
                         }
                     ) {
                         entries.push((

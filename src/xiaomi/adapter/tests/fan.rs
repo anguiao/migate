@@ -77,7 +77,7 @@ fn fan_reads_and_subscribes_each_independent_native_property() {
             until(|| {
                 let value = fan(control);
                 value.power.value == Some(true)
-                    && value.mode.value == Some(1)
+                    && work(control).fan_mode_observation("main").value == Some(1)
                     && value.speed.value == Some(40)
                     && value.swing.value == Some(false)
                     && work(control).function_observer("main").is_some()
@@ -107,7 +107,7 @@ fn fan_reads_and_subscribes_each_independent_native_property() {
             until(|| fan(control).speed.source_time == Some(700)).await;
             assert_eq!(function.snapshot().revision, revision);
             peer.notify_value_at("one", MODE, json!(0), Some(701), false);
-            until(|| fan(control).mode.value == Some(0)).await;
+            until(|| work(control).fan_mode_observation("main").value == Some(0)).await;
             assert_eq!(fan(control).speed.value, Some(40));
             assert!(
                 !peer
@@ -165,7 +165,7 @@ fn fan_recovery_reads_all_fields_and_rejects_retired_sources() {
         c.peer(peer(), |_| async move {
             until(|| {
                 fan(control).power.value == Some(true)
-                    && fan(control).mode.value == Some(1)
+                    && work(control).fan_mode_observation("main").value == Some(1)
                     && fan(control).speed.value == Some(40)
                     && fan(control).swing.value == Some(false)
                     && work(control).function_observer("main").is_some()
@@ -190,7 +190,7 @@ fn fan_recovery_reads_all_fields_and_rejects_retired_sources() {
         c.peer(replacement, |peer| async move {
             until(|| {
                 fan(control).power.value == Some(false)
-                    && fan(control).mode.value == Some(0)
+                    && work(control).fan_mode_observation("main").value == Some(0)
                     && fan(control).speed.value == Some(72)
                     && fan(control).swing.value == Some(true)
                     && work(control).function_observer("main").is_some()
@@ -280,7 +280,7 @@ fn fan_pushless_device_keeps_local_reads_and_uses_cloud_notifications() {
                 until(|| fan(control).speed.value == Some(62)).await;
                 peer.notify_value_at("one", SPEED, json!(99), Some(900), false);
                 cloud.property_at("one", 2, 3, json!(0));
-                until(|| fan(control).mode.value == Some(0)).await;
+                until(|| work(control).fan_mode_observation("main").value == Some(0)).await;
                 assert_eq!(fan(control).speed.value, Some(62));
                 assert_eq!(
                     work(control).property_source("main", SPEED),
@@ -306,7 +306,7 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
         c.peer(peer, |peer| async move {
             until(|| {
                 fan(control).power.value == Some(true)
-                    && fan(control).mode.value == Some(1)
+                    && work(control).fan_mode_observation("main").value == Some(1)
                     && peer.state.borrow().held.iter().any(|(publish, _)| {
                         let payload = decode_mips(&publish.payload).unwrap().payload;
                         payload["siid"] == 8 && payload["piid"] == 1
@@ -330,7 +330,7 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
             for expected in [
                 "Power: on",
                 "Native mode: 1",
-                "Straight speed: unknown",
+                "Speed: unknown",
                 "Horizontal swing: unknown",
                 "8.1",
             ] {
@@ -403,7 +403,7 @@ fn fan_failed_property_read_keeps_last_value_and_reports_its_own_problem() {
                 .unwrap();
                 let line = text
                     .lines()
-                    .find(|line| line.contains("Straight speed: 40%"))
+                    .find(|line| line.contains("Speed: level 40/100"))
                     .unwrap();
                 for expected in [
                     "property 8.1",

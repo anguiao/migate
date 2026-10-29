@@ -56,24 +56,70 @@ impl FanModeBinding {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum FanSpeedEncoding {
+    Range { min: i64, max: i64, step: i64 },
+    Discrete { values: Vec<i64> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FanSpeedBinding {
     property: PropertyBinding,
     format: NumericFormat,
+    encoding: FanSpeedEncoding,
+    count: u8,
 }
 impl FanSpeedBinding {
     pub(crate) fn new(
         property: PropertyBinding,
         format: NumericFormat,
+        encoding: FanSpeedEncoding,
     ) -> Result<Self, CapabilityError> {
-        if property.siid == 0
-            || property.piid == 0
-            || format == NumericFormat::Float
-            || format.maximum() < 100
-        {
-            return Err(CapabilityError::InvalidDescription("fan speed format"));
+        let bounds = match format {
+            NumericFormat::Uint8 => (0, u8::MAX as i64),
+            NumericFormat::Uint16 => (0, u16::MAX as i64),
+            NumericFormat::Uint32 => (0, u32::MAX as i64),
+            NumericFormat::Int8 => (i8::MIN as i64, i8::MAX as i64),
+            NumericFormat::Int16 => (i16::MIN as i64, i16::MAX as i64),
+            NumericFormat::Int32 => (i32::MIN as i64, i32::MAX as i64),
+            NumericFormat::Float => {
+                return Err(CapabilityError::InvalidDescription("fan speed format"));
+            }
+        };
+        let valid = |value: i64| (bounds.0..=bounds.1).contains(&value);
+        if property.siid == 0 || property.piid == 0 {
+            return Err(CapabilityError::InvalidDescription("fan speed property"));
         }
-        Ok(Self { property, format })
+        let count = match &encoding {
+            FanSpeedEncoding::Range { min, max, step } => {
+                if !valid(*min) || !valid(*max) || min > max || *step <= 0 {
+                    return Err(CapabilityError::InvalidDescription("fan speed range"));
+                }
+                (max - min) / step + 1
+            }
+            FanSpeedEncoding::Discrete { values } => {
+                let mut unique = std::collections::HashSet::new();
+                if values
+                    .iter()
+                    .any(|value| !valid(*value) || !unique.insert(*value))
+                {
+                    return Err(CapabilityError::InvalidDescription("fan speed enumeration"));
+                }
+                values.len() as i64
+            }
+        };
+        if !(1..=100).contains(&count) {
+            return Err(CapabilityError::InvalidDescription(
+                "fan speed mapping requires 1..100 levels",
+            ));
+        }
+        Ok(Self {
+            property,
+            format,
+            encoding,
+            count: count as u8,
+        })
     }
     pub fn property(&self) -> PropertyBinding {
         self.property
@@ -81,12 +127,35 @@ impl FanSpeedBinding {
     pub fn format(&self) -> NumericFormat {
         self.format
     }
+    pub(crate) fn encoding(&self) -> &FanSpeedEncoding {
+        &self.encoding
+    }
+    pub fn count(&self) -> u8 {
+        self.count
+    }
     pub fn read_value(&self, value: &Value) -> Result<u8, CapabilityError> {
-        let value = raw_integer(value)?;
-        if (1..=100).contains(&value) {
-            Ok(value as u8)
-        } else {
-            Err(CapabilityError::InvalidValue("fan speed"))
+        let raw = value
+            .as_i64()
+            .ok_or(CapabilityError::InvalidValue("fan speed"))?;
+        let index = match &self.encoding {
+            FanSpeedEncoding::Range { min, max, step }
+                if (*min..=*max).contains(&raw) && (raw - min) % step == 0 =>
+            {
+                Some(((raw - min) / step) as usize)
+            }
+            FanSpeedEncoding::Range { .. } => None,
+            FanSpeedEncoding::Discrete { values } => values.iter().position(|value| *value == raw),
+        };
+        index
+            .map(|index| index as u8 + 1)
+            .ok_or(CapabilityError::InvalidValue("fan speed"))
+    }
+    pub(crate) fn encode(&self, speed: u8) -> i64 {
+        debug_assert!((1..=self.count).contains(&speed));
+        let index = i64::from(speed - 1);
+        match &self.encoding {
+            FanSpeedEncoding::Range { min, step, .. } => min + index * step,
+            FanSpeedEncoding::Discrete { values } => values[index as usize],
         }
     }
 }
@@ -94,14 +163,14 @@ impl FanSpeedBinding {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FanBindings {
     power: PropertyBinding,
-    mode: FanModeBinding,
+    mode: Option<FanModeBinding>,
     speed: FanSpeedBinding,
     swing: Option<PropertyBinding>,
 }
 impl FanBindings {
     pub(crate) fn new(
         power: PropertyBinding,
-        mode: FanModeBinding,
+        mode: Option<FanModeBinding>,
         speed: FanSpeedBinding,
         swing: Option<PropertyBinding>,
     ) -> Self {
@@ -115,8 +184,8 @@ impl FanBindings {
     pub fn power(&self) -> PropertyBinding {
         self.power
     }
-    pub fn mode(&self) -> &FanModeBinding {
-        &self.mode
+    pub fn mode(&self) -> Option<&FanModeBinding> {
+        self.mode.as_ref()
     }
     pub fn speed(&self) -> &FanSpeedBinding {
         &self.speed
@@ -127,7 +196,7 @@ impl FanBindings {
     pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {
         [
             Some(self.power),
-            Some(self.mode.property()),
+            self.mode.as_ref().map(FanModeBinding::property),
             Some(self.speed.property()),
             self.swing,
         ]

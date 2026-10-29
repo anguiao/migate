@@ -69,10 +69,12 @@ fn validate_model_topology(
         return Ok(());
     }
     if is_fan_type(instance_type) {
-        return if fan::is_dmaker_fan_type(instance_type)
-            && model.starts_with("dmaker.")
-            && controls.len() == 1
-            && controls[0].fan().is_some()
+        let dmaker_instance = fan::is_dmaker_fan_type(instance_type);
+        let dmaker_model = model.starts_with("dmaker.");
+        return if controls.len() == 1
+            && controls[0]
+                .fan()
+                .is_some_and(|fan| fan.mode().is_none() || dmaker_instance && dmaker_model)
         {
             Ok(())
         } else {

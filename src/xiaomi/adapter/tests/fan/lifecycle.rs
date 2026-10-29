@@ -13,7 +13,7 @@ fn retired_instance_cannot_resume_a_sent_speed_or_affect_its_replacement() {
             until(|| {
                 fan(control).power.value == Some(true)
                     && fan(control).speed.value == Some(40)
-                    && fan(control).mode.value == Some(1)
+                    && work(control).fan_mode_observation("main").value == Some(1)
                     && work(control).function_observer("main").is_some()
             })
             .await;

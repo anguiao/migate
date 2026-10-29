@@ -10,7 +10,7 @@ fn cloud_speed_waits_for_each_single_property_receipt() {
             until(|| {
                 fan(&c).power.value == Some(false)
                     && fan(&c).speed.value == Some(40)
-                    && fan(&c).mode.value == Some(1)
+                    && work(&c).fan_mode_observation("main").value == Some(1)
                     && fan(&c).swing.value == Some(false)
                     && [POWER, MODE, SPEED, SWING]
                         .iter()
@@ -78,7 +78,7 @@ fn each_local_step_failure_or_timeout_stops_the_sequence() {
                 peer.value("one", POWER, json!(false));
                 let control = &c;
                 c.peer(peer, |peer| async move {
-                    until(|| fan(control).power.value == Some(false) && fan(control).speed.value == Some(40) && fan(control).mode.value == Some(1) && fan(control).swing.value == Some(false)).await;
+                    until(|| fan(control).power.value == Some(false) && fan(control).speed.value == Some(40) && work(control).fan_mode_observation("main").value == Some(1) && fan(control).swing.value == Some(false)).await;
                     peer.state.borrow_mut().hold_writes = true;
                     let function = function(&control.context.registry, "one", "main");
                     let before = function.snapshot().fan();
@@ -121,7 +121,7 @@ fn each_cloud_step_failure_or_timeout_stops_the_sequence() {
                     until(|| {
                         fan(&c).power.value == Some(false)
                             && fan(&c).speed.value == Some(40)
-                            && fan(&c).mode.value == Some(1)
+                            && work(&c).fan_mode_observation("main").value == Some(1)
                             && fan(&c).swing.value == Some(false)
                     })
                     .await;

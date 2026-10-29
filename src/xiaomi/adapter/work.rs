@@ -1,6 +1,8 @@
 use super::{
     commands::DeviceWriteGate,
-    model::{AdapterError, PathKind, SubscriptionBinding, SubscriptionStatus},
+    model::{
+        AdapterError, NativeModeObservation, PathKind, SubscriptionBinding, SubscriptionStatus,
+    },
     notifications::NotificationSource,
     observations::{Observation, Observations, Origin},
     refresh::RefreshState,
@@ -67,6 +69,7 @@ pub(super) struct DeviceWork {
     active: RefCell<BTreeMap<String, NotificationSource>>,
     observation_sources: RefCell<BTreeMap<String, PathKind>>,
     property_sources: RefCell<BTreeMap<super::observations::PropertyKey, PathKind>>,
+    fan_modes: RefCell<BTreeMap<String, NativeModeObservation>>,
     state_read_paths: RefCell<BTreeMap<String, Option<super::routing::ControlPath>>>,
     condition_generation: Cell<u64>,
     pub(super) refresh: RefCell<RefreshState>,
@@ -97,6 +100,7 @@ impl DeviceWork {
             active: RefCell::new(BTreeMap::new()),
             observation_sources: RefCell::new(BTreeMap::new()),
             property_sources: RefCell::new(BTreeMap::new()),
+            fan_modes: RefCell::new(BTreeMap::new()),
             state_read_paths: RefCell::new(BTreeMap::new()),
             condition_generation: Cell::new(0),
             refresh: RefCell::new(RefreshState::default()),
@@ -107,6 +111,9 @@ impl DeviceWork {
             retry_requested: Cell::new(false),
             changed: Event::new(),
         }
+    }
+    pub(super) fn fan_mode_observation(&self, id: &str) -> NativeModeObservation {
+        self.fan_modes.borrow().get(id).copied().unwrap_or_default()
     }
     pub(super) fn current_sink(&self) -> Rc<LogicalSink> {
         self.sink.borrow().clone()

@@ -33,16 +33,18 @@ fn encode(
             if needs_power_on {
                 steps.push_back((FanStep::Power(true), (bindings.power(), json!(true))));
             }
-            steps.push_back((
-                FanStep::Mode,
-                (
-                    bindings.mode().property(),
-                    json!(bindings.mode().straight()),
-                ),
-            ));
+            if let Some(mode) = bindings.mode() {
+                steps.push_back((
+                    FanStep::Auxiliary,
+                    (mode.property(), json!(mode.straight())),
+                ));
+            }
             steps.push_back((
                 FanStep::Speed(value),
-                (bindings.speed().property(), json!(value)),
+                (
+                    bindings.speed().property(),
+                    json!(bindings.speed().encode(value)),
+                ),
             ));
         }
         FanCommand::Swing(value) => steps.push_back((

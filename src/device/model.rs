@@ -95,7 +95,10 @@ pub enum FunctionKind {
     Outlet,
     Light(LightProfile),
     Curtain,
-    Fan { horizontal_swing: bool },
+    Fan {
+        horizontal_swing: bool,
+        speed_count: u8,
+    },
     Temperature(MeasurementRange),
     Humidity(MeasurementRange),
     CarbonDioxide(MeasurementRange),
@@ -234,6 +237,17 @@ impl PhysicalDeviceDescription {
             return Err(DescriptionError(
                 "a device description needs at least one function",
             ));
+        }
+        if functions.iter().any(|function| {
+            matches!(
+                function.kind,
+                FunctionKind::Fan {
+                    speed_count: 0 | 101..=u8::MAX,
+                    ..
+                }
+            )
+        }) {
+            return Err(DescriptionError("fan speed count must be in 1..=100"));
         }
         let mut ids = std::collections::HashSet::new();
         if functions
@@ -421,13 +435,11 @@ pub struct CurtainSnapshot {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FanSnapshot {
     pub power: PropertyObservation<bool>,
-    pub mode: PropertyObservation<u32>,
     pub speed: PropertyObservation<u8>,
     pub swing: PropertyObservation<bool>,
 }
 pub(crate) enum FanValue {
     Power(bool),
-    Mode(u32),
     Speed(u8),
     Swing(bool),
 }

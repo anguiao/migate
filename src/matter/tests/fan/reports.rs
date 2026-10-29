@@ -33,7 +33,6 @@ fn notifications_and_versions_follow_each_actual_projection() {
         assert_ne!(fan_speed, fan_initial);
 
         function.observe_fan(FanValue::Speed(41), Some(3), 3);
-        function.observe_fan(FanValue::Mode(1), Some(3), 3);
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(ctx.changes.borrow().is_empty());
         assert_eq!(version(&power_ctx).await, on_initial);
@@ -94,7 +93,6 @@ fn notifications_and_versions_follow_each_actual_projection() {
         assert_ne!(on_off, on_initial);
         assert_ne!(fan_off, fan_high);
         function.observe_fan(FanValue::Speed(80), Some(7), 7);
-        function.observe_fan(FanValue::Mode(0), Some(7), 7);
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(ctx.changes.borrow().is_empty());
         assert_eq!(version(&power_ctx).await, on_off);
@@ -122,6 +120,69 @@ fn notifications_and_versions_follow_each_actual_projection() {
                 .u8()
                 .unwrap(),
             80
+        );
+    });
+}
+
+#[test]
+fn discrete_level_reports_follow_observed_changes() {
+    let (device, mut receiver) = fan_device_levels("fan-discrete-reports", false, 3);
+    device.set_availability(Availability::Available);
+    fan_model!(&device, handler, im);
+    let function = &device.functions()[0];
+    function.observe_fan(FanValue::Power(true), Some(1), 1);
+    function.observe_fan(FanValue::Speed(1), Some(1), 1);
+    let ctx = Context::new(&im, 0x202, 2);
+    block_on(async {
+        let mut run = pin!(handler.run(&ctx));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        ctx.changes.borrow_mut().clear();
+        assert_eq!(
+            report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                .u8()
+                .unwrap(),
+            33
+        );
+        let action = function.begin_fan(FanCommand::Speed(2)).unwrap();
+        let DeviceRequest::Fan(request) = receiver.next_operation().await.unwrap() else {
+            panic!("expected fan request")
+        };
+        request.mark_sent(FanStep::Speed(2)).unwrap();
+        request.step_accepted().unwrap();
+        request.accept().unwrap();
+        action.accepted().await.unwrap();
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().is_empty());
+        assert_eq!(
+            report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                .u8()
+                .unwrap(),
+            33
+        );
+        function.observe_fan(FanValue::Speed(2), Some(2), 2);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(
+            ctx.changes.replace(Vec::new()),
+            [
+                (2, 0x202, 0),
+                (2, 0x202, 2),
+                (2, 0x202, 3),
+                (2, 0x202, 5),
+                (2, 0x202, 6)
+            ]
+        );
+        assert_eq!(
+            report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                .u8()
+                .unwrap(),
+            66
+        );
+        let level_ctx = Context::new(&im, 0x202, 5);
+        assert_eq!(
+            report_value(&read_bytes(&handler, &level_ctx).await.unwrap())
+                .u8()
+                .unwrap(),
+            2
         );
     });
 }

@@ -50,7 +50,7 @@ fn writes_dispatch_fan_commands_and_wait_for_all_receipts() {
                         request.step_accepted().unwrap();
                         assert!(poll_once(write.as_mut()).await.is_none());
                     }
-                    request.mark_sent(FanStep::Mode).unwrap();
+                    request.mark_sent(FanStep::Auxiliary).unwrap();
                     request.step_accepted().unwrap();
                     assert!(poll_once(write.as_mut()).await.is_none());
                     request.mark_sent(FanStep::Speed(speed)).unwrap();
@@ -77,7 +77,6 @@ fn writes_dispatch_fan_commands_and_wait_for_all_receipts() {
         let observed = function.snapshot().fan().unwrap();
         assert_eq!(observed.power.value, Some(true));
         assert_eq!(observed.speed.value, Some(40));
-        assert_eq!(observed.mode.value, Some(1));
         assert_eq!(observed.swing.value, Some(false));
     });
 }
@@ -180,4 +179,72 @@ fn on_off_commands_remain_independent_and_toggle_requires_observation() {
         }
         assert_eq!(function.snapshot().fan().unwrap().power.value, Some(true));
     });
+}
+
+#[test]
+fn percent_speed_and_mode_writes_select_reachable_levels() {
+    for (count, cases) in [
+        (1, vec![(2, 1, 1), (2, 100, 1), (0, 3, 1)]),
+        (
+            2,
+            vec![(2, 1, 1), (2, 50, 1), (2, 51, 2), (0, 1, 1), (0, 3, 2)],
+        ),
+        (
+            5,
+            vec![
+                (2, 1, 1),
+                (2, 20, 1),
+                (2, 21, 2),
+                (2, 99, 5),
+                (5, 4, 4),
+                (0, 1, 1),
+                (0, 2, 3),
+                (0, 3, 5),
+            ],
+        ),
+    ] {
+        let (device, mut receiver) = fan_device_levels("levels-command", false, count);
+        device.set_availability(Availability::Available);
+        fan_model!(&device, handler, im);
+        let function = &device.functions()[0];
+        function.observe_fan(FanValue::Power(true), Some(1), 1);
+        function.observe_fan(FanValue::Speed(1), Some(1), 1);
+        block_on(async {
+            for (attribute, raw, expected) in cases {
+                let before = function.snapshot().fan().unwrap();
+                let bytes = [0x04, raw];
+                let mut ctx = Context::new(&im, 0x202, attribute);
+                ctx.data = TLVElement::new(&bytes);
+                let mut write = pin!(handler.write(&ctx));
+                assert!(poll_once(write.as_mut()).await.is_none());
+                let request = next_fan(&mut receiver).await;
+                assert_eq!(request.command, FanCommand::Speed(expected));
+                request.mark_sent(FanStep::Speed(expected)).unwrap();
+                request.step_accepted().unwrap();
+                request.accept().unwrap();
+                write.await.unwrap();
+                assert_eq!(function.snapshot().fan().unwrap(), before);
+            }
+            for (mode, unsupported) in [(1, count == 1), (2, count < 3)] {
+                if unsupported {
+                    let bytes = [0x04, mode];
+                    let mut ctx = Context::new(&im, 0x202, 0);
+                    ctx.data = TLVElement::new(&bytes);
+                    assert_eq!(
+                        handler.write(&ctx).await.unwrap_err().code(),
+                        ErrorCode::ConstraintError
+                    );
+                    assert!(poll_once(receiver.next_operation()).await.is_none());
+                }
+            }
+            let bytes = [0x04, count + 1];
+            let mut ctx = Context::new(&im, 0x202, 5);
+            ctx.data = TLVElement::new(&bytes);
+            assert_eq!(
+                handler.write(&ctx).await.unwrap_err().code(),
+                ErrorCode::ConstraintError
+            );
+            assert!(poll_once(receiver.next_operation()).await.is_none());
+        });
+    }
 }

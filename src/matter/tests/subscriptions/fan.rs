@@ -105,7 +105,6 @@ fn fan_live_subscription_reports_only_changed_projections() {
                     assert_ne!(speed.fan[&2].0, initial.fan[&2].0);
                     wait_committed(&state).await;
                     function.observe_fan(FanValue::Speed(41), Some(3), 3);
-                    function.observe_fan(FanValue::Mode(1), Some(3), 3);
                     function.observe_fan(FanValue::Swing(false), Some(3), 3);
                     no_report(&client, id).await;
 
@@ -156,7 +155,6 @@ fn fan_live_subscription_reports_only_changed_projections() {
                     assert_ne!(off.fan[&0].0, high.fan[&0].0);
                     wait_committed(&state).await;
                     function.observe_fan(FanValue::Speed(80), Some(7), 7);
-                    function.observe_fan(FanValue::Mode(0), Some(7), 7);
                     no_report(&client, id).await;
                     assert_eq!(function.snapshot().fan().unwrap().speed.value, Some(80));
 
@@ -302,7 +300,6 @@ fn locked_stack_fan_write_report_preserves_observations_and_concurrent_feedback(
                     let actual_observed = function.snapshot().fan().unwrap();
                     assert_eq!(actual_observed.swing.value, Some(true));
                     assert_eq!(actual_observed.power, observed.power);
-                    assert_eq!(actual_observed.mode, observed.mode);
                     assert_eq!(actual_observed.speed, observed.speed);
                     assert!(
                         futures_lite::future::poll_once(receiver.next_operation())
@@ -319,7 +316,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_concurrent_feedback(
                         };
                         assert_eq!(request.command, FanCommand::Speed(100));
                         assert!(!request.needs_power_on());
-                        request.mark_sent(FanStep::Mode).unwrap();
+                        request.mark_sent(FanStep::Auxiliary).unwrap();
                         request.step_accepted().unwrap();
                         request.mark_sent(FanStep::Speed(100)).unwrap();
                         request.step_accepted().unwrap();
@@ -391,7 +388,6 @@ fn locked_stack_fan_write_report_preserves_observations_and_concurrent_feedback(
                     let actual_observed = function.snapshot().fan().unwrap();
                     assert_eq!(actual_observed.speed.value, Some(100));
                     assert_eq!(actual_observed.power, observed.power);
-                    assert_eq!(actual_observed.mode, observed.mode);
                     assert_eq!(actual_observed.swing, observed.swing);
                 };
                 or(
@@ -533,7 +529,7 @@ fn persistent_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                 let DeviceRequest::Fan(request) = receiver.next_operation().await.unwrap() else {
                     panic!("expected fan request")
                 };
-                request.mark_sent(FanStep::Mode).unwrap();
+                request.mark_sent(FanStep::Auxiliary).unwrap();
                 request.step_accepted().unwrap();
                 request.mark_sent(FanStep::Speed(40)).unwrap();
                 request.step_accepted().unwrap();

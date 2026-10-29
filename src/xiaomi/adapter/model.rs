@@ -146,7 +146,7 @@ impl fmt::Display for CommandTarget {
             Self::Fan(crate::device::FanCommand::Power(value)) => {
                 write!(f, "power {}", if *value { "on" } else { "off" })
             }
-            Self::Fan(crate::device::FanCommand::Speed(value)) => write!(f, "speed {value}%"),
+            Self::Fan(crate::device::FanCommand::Speed(value)) => write!(f, "speed level {value}"),
             Self::Fan(crate::device::FanCommand::Swing(value)) => {
                 write!(f, "swing {}", if *value { "on" } else { "off" })
             }
@@ -268,11 +268,18 @@ pub struct SubscriptionStatus {
     pub ready: bool,
     pub problem: Option<String>,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NativeModeObservation {
+    pub value: Option<u32>,
+    pub source_time: Option<i64>,
+    pub received_at: Option<i64>,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservedPropertyStatus {
     pub name: &'static str,
     pub binding: PropertyBinding,
     pub observation_source: Option<PathKind>,
+    pub native_mode: Option<NativeModeObservation>,
     pub read_problem: Option<String>,
     pub subscriptions: Vec<SubscriptionStatus>,
 }

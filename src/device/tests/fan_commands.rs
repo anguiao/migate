@@ -10,6 +10,7 @@ fn fan(swing: bool) -> (PhysicalDevice, CommandReceiver) {
             label: "Fan".into(),
             kind: FunctionKind::Fan {
                 horizontal_swing: swing,
+                speed_count: 100,
             },
         }],
     )
@@ -36,7 +37,7 @@ fn fan_merges_only_adjacent_unsent_speeds_and_off_interrupts_sent_speed() {
         let second = function.begin_fan(FanCommand::Speed(30)).unwrap();
         assert_eq!(first.accepted().await, Err(CommandError::Superseded));
         assert_eq!(
-            unsent.mark_sent(FanStep::Mode),
+            unsent.mark_sent(FanStep::Auxiliary),
             Err(CommandError::Superseded)
         );
         drop(unsent);
@@ -69,7 +70,7 @@ fn fan_merges_only_adjacent_unsent_speeds_and_off_interrupts_sent_speed() {
         off.accepted().await.unwrap();
         let request = next_fan(&mut receiver).await;
         assert_eq!(request.command, FanCommand::Speed(70));
-        request.mark_sent(FanStep::Mode).unwrap();
+        request.mark_sent(FanStep::Auxiliary).unwrap();
         request.step_accepted().unwrap();
         request.accept().unwrap();
         after.accepted().await.unwrap();
@@ -82,7 +83,6 @@ fn fan_uses_only_observed_power_and_invalidates_cached_on_after_off_is_sent() {
         let (device, mut receiver) = fan(true);
         let function = &device.functions()[0];
         function.observe_fan(FanValue::Power(true), Some(1), 1);
-        function.observe_fan(FanValue::Mode(1), Some(1), 1);
         function.observe_fan(FanValue::Speed(40), Some(1), 1);
         let before = function.snapshot();
         let off = function.begin_fan(FanCommand::Power(false)).unwrap();
@@ -97,7 +97,7 @@ fn fan_uses_only_observed_power_and_invalidates_cached_on_after_off_is_sent() {
         assert!(request.needs_power_on());
         request.mark_sent(FanStep::Power(true)).unwrap();
         request.step_accepted().unwrap();
-        request.mark_sent(FanStep::Mode).unwrap();
+        request.mark_sent(FanStep::Auxiliary).unwrap();
         request.step_accepted().unwrap();
         request.mark_sent(FanStep::Speed(40)).unwrap();
         request.step_accepted().unwrap();

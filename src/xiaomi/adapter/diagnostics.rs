@@ -177,8 +177,8 @@ impl Context {
                                 function.id(),
                                 [
                                     ("Power", Some(fan.power())),
-                                    ("Native mode", Some(fan.mode().property())),
-                                    ("Straight speed", Some(fan.speed().property())),
+                                    ("Native mode", fan.mode().map(|mode| mode.property())),
+                                    ("Speed", Some(fan.speed().property())),
                                     ("Horizontal swing", fan.swing()),
                                 ]
                                 .into_iter()
@@ -347,6 +347,7 @@ fn property_statuses(
             name,
             binding,
             observation_source: work.property_source(id, binding),
+            native_mode: (name == "Native mode").then(|| work.fan_mode_observation(id)),
             read_problem: refresh.property_problem(id, binding),
             subscriptions: subscriptions
                 .iter()

@@ -6,9 +6,9 @@ use crate::{
     xiaomi::capability::{
         BatteryBinding, BrightnessBinding, ColorBinding, CurtainBindings, CurtainMotorBinding,
         CurtainPositionBinding, CurtainStatusBinding, EventArgument, EventBinding, FanBindings,
-        FanModeBinding, FanSpeedBinding, LightBindings, MeasurementBinding, MeasurementUnit,
-        ModeBinding, MotionBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
-        StateBinding, StateMapping, StateValue, TemperatureBinding,
+        FanModeBinding, FanSpeedBinding, FanSpeedEncoding, LightBindings, MeasurementBinding,
+        MeasurementUnit, ModeBinding, MotionBinding, NumericFormat, ParsedDevice, ParsedFunction,
+        PropertyBinding, StateBinding, StateMapping, StateValue, TemperatureBinding,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -45,8 +45,8 @@ enum WireFunction {
         id: String,
         label: String,
         power: WireBinding,
-        mode: WireFanMode,
-        speed: WireFormat,
+        mode: Option<WireFanMode>,
+        speed: WireFanSpeed,
         swing: Option<WireBinding>,
     },
     Curtain {
@@ -94,6 +94,14 @@ enum WireFunction {
         label: String,
         state: WireState,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireFanSpeed {
+    property: WireBinding,
+    format: NumericFormat,
+    encoding: FanSpeedEncoding,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -339,15 +347,16 @@ impl WireFunction {
                 id: function.id().to_owned(),
                 label: function.label().to_owned(),
                 power: fan.power().into(),
-                mode: WireFanMode {
-                    property: fan.mode().property().into(),
-                    format: fan.mode().format(),
-                    straight: fan.mode().straight(),
-                    values: fan.mode().values().to_vec(),
-                },
-                speed: WireFormat {
+                mode: fan.mode().map(|mode| WireFanMode {
+                    property: mode.property().into(),
+                    format: mode.format(),
+                    straight: mode.straight(),
+                    values: mode.values().to_vec(),
+                }),
+                speed: WireFanSpeed {
                     property: fan.speed().property().into(),
                     format: fan.speed().format(),
+                    encoding: fan.speed().encoding().clone(),
                 },
                 swing: fan.swing().map(Into::into),
             };
@@ -492,15 +501,20 @@ impl WireFunction {
                 speed,
                 swing,
             } => {
-                let mode = FanModeBinding::new(
-                    mode.property.into(),
-                    mode.format,
-                    mode.straight,
-                    mode.values,
-                )
-                .map_err(|_| "Stored fan binding is invalid")?;
-                let speed = FanSpeedBinding::new(speed.property.into(), speed.format)
+                let mode = mode
+                    .map(|mode| {
+                        FanModeBinding::new(
+                            mode.property.into(),
+                            mode.format,
+                            mode.straight,
+                            mode.values,
+                        )
+                    })
+                    .transpose()
                     .map_err(|_| "Stored fan binding is invalid")?;
+                let speed =
+                    FanSpeedBinding::new(speed.property.into(), speed.format, speed.encoding)
+                        .map_err(|_| "Stored fan binding is invalid")?;
                 Ok(ParsedFunction::fan_control(
                     id,
                     label,

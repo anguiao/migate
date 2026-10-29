@@ -12,6 +12,7 @@ pub use curtain::{
 };
 pub use device::ParsedDevice;
 pub use error::CapabilityError;
+pub(crate) use fan::FanSpeedEncoding;
 pub use fan::{FanBindings, FanModeBinding, FanSpeedBinding};
 pub use function::ParsedFunction;
 pub use light::{BrightnessBinding, ColorBinding, LightBindings, ModeBinding, TemperatureBinding};

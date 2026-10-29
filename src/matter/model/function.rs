@@ -79,6 +79,7 @@ impl FunctionHandler {
             )),
             FunctionKind::Fan {
                 horizontal_swing: false,
+                ..
             } => FunctionHandlerKind::Fan(fan::Fan::new(
                 function,
                 endpoint,
@@ -87,6 +88,7 @@ impl FunctionHandler {
             )),
             FunctionKind::Fan {
                 horizontal_swing: true,
+                ..
             } => FunctionHandlerKind::FanSwing(fan::Fan::new(
                 function,
                 endpoint,

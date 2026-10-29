@@ -132,14 +132,27 @@ fn fan_shape_tracks_optional_horizontal_swing() {
         label: "Fan".into(),
         kind: FunctionKind::Fan {
             horizontal_swing: true,
+            speed_count: 100,
         },
     };
     let without_swing = FunctionDescription {
         kind: FunctionKind::Fan {
             horizontal_swing: false,
+            speed_count: 100,
         },
         ..fan.clone()
     };
+    let different_levels = FunctionDescription {
+        kind: FunctionKind::Fan {
+            horizontal_swing: true,
+            speed_count: 3,
+        },
+        ..fan.clone()
+    };
+    assert_ne!(
+        fixed_shape(std::slice::from_ref(&fan)),
+        fixed_shape(&[different_levels])
+    );
     let outlet = FunctionDescription {
         kind: FunctionKind::Outlet,
         ..fan.clone()

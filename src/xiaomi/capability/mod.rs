@@ -15,6 +15,7 @@ pub(crate) use fan::is_fan_type;
 pub(crate) use group::parse_group;
 pub(crate) use light::is_light_type;
 pub(crate) use ls2307::is_type as is_ls2307_type;
+pub(crate) use model::FanSpeedEncoding;
 pub use model::{
     BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding, CurtainBindings,
     CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding, FanBindings, FanModeBinding,

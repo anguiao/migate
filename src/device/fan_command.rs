@@ -30,7 +30,7 @@ impl FanCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FanStep {
     Power(bool),
-    Mode,
+    Auxiliary,
     Speed(u8),
     Swing(bool),
 }
@@ -164,16 +164,20 @@ impl Function {
 
     /// Queue a fan operation without changing the observed device state.
     pub fn begin_fan(&self, command: FanCommand) -> Result<super::FanAction, CommandError> {
-        if matches!(command, FanCommand::Speed(101..=u8::MAX)) {
+        if let (FanCommand::Speed(speed), FunctionKind::Fan { speed_count, .. }) =
+            (command, self.description().kind)
+            && speed > speed_count
+        {
             return Err(CommandError::Rejected(
-                "fan speed is outside 0..100 percent".into(),
+                "fan speed is outside the available levels".into(),
             ));
         }
         if matches!(command, FanCommand::Swing(_))
             && !matches!(
                 self.description().kind,
                 FunctionKind::Fan {
-                    horizontal_swing: true
+                    horizontal_swing: true,
+                    ..
                 }
             )
         {

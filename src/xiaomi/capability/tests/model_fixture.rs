@@ -145,7 +145,9 @@ pub(crate) fn native_for(
                     };
                     ParsedFunction::outlet(id, label, PropertyBinding { siid, piid: 1 })
                 }
-                FunctionKind::Fan { horizontal_swing } => {
+                FunctionKind::Fan {
+                    horizontal_swing, ..
+                } => {
                     let mut instance: serde_json::Value = serde_json::from_str(include_str!(
                         "../../../../tests/fixtures/miot/dmaker-p5c.json"
                     ))

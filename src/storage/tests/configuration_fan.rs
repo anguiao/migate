@@ -142,3 +142,64 @@ fn fan_stored_bindings_are_validated() {
         assert!(store.devices().load_configuration().is_err(), "{pointer}");
     }
 }
+
+#[test]
+fn generic_fan_encodings_round_trip_and_invalid_mapping_is_rejected() {
+    use super::configuration::{corrupt, native, raw};
+    use serde_json::json;
+    for shape in [
+        json!({"value-range": [10, 30, 10]}),
+        json!({"value-list": [
+            {"value": 42, "description": "Level3"},
+            {"value": 0, "description": "Level1"},
+            {"value": 7, "description": "Level2"}
+        ]}),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::storage::Store::open(directory.path()).unwrap();
+        let mut speed = json!({"iid": 2, "type": "urn:miot-spec-v2:property:fan-level:00000016:example-fan:1", "format": "uint8", "access": ["read", "write", "notify"]});
+        speed
+            .as_object_mut()
+            .unwrap()
+            .extend(shape.as_object().unwrap().clone());
+        let description = json!({
+            "type": "urn:miot-spec-v2:device:fan:0000A005:example-fan:1",
+            "services": [{"iid": 2, "type": "urn:miot-spec-v2:service:fan:00007808:example-fan:1", "properties": [
+                {"iid": 1, "type": "urn:miot-spec-v2:property:on:00000006:example-fan:1", "format": "bool", "access": ["read", "write", "notify"]}, speed
+            ]}]
+        });
+        let fan = native("fan", "example.fan.model", description);
+        let planned = next(
+            &CommittedConfiguration::empty(),
+            scope("account", "home"),
+            vec![fan],
+        )
+        .configuration;
+        save(&store, &planned);
+        let restored = load(&store);
+        assert_eq!(restored, planned);
+        let binding = restored.devices[0]
+            .native
+            .as_ref()
+            .unwrap()
+            .device()
+            .functions()[0]
+            .fan()
+            .unwrap();
+        assert!(binding.mode().is_none());
+        assert_eq!(binding.speed().count(), 3);
+        assert_eq!(
+            binding
+                .speed()
+                .read_value(&json!(binding.speed().encode(2)))
+                .unwrap(),
+            2
+        );
+        let mut invalid: serde_json::Value = serde_json::from_str(&raw(&store)).unwrap();
+        *invalid
+            .pointer_mut("/devices/0/native/functions/0/speed/encoding")
+            .unwrap() = json!({"kind": "discrete", "values": [0, 0]});
+        corrupt(&store, &invalid);
+        assert!(store.devices().load_configuration().is_err());
+    }
+}

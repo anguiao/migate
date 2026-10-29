@@ -7,6 +7,14 @@ pub(in crate::matter::tests) fn fan_device(
     did: &str,
     swing: bool,
 ) -> (PhysicalDevice, CommandReceiver) {
+    fan_device_levels(did, swing, 100)
+}
+
+pub(in crate::matter::tests) fn fan_device_levels(
+    did: &str,
+    swing: bool,
+    speed_count: u8,
+) -> (PhysicalDevice, CommandReceiver) {
     let (device, mut receivers) = PhysicalDevice::new(
         PhysicalDeviceDescription::new(
             DeviceKey::new("xiaomi", did),
@@ -16,6 +24,7 @@ pub(in crate::matter::tests) fn fan_device(
                 label: "Fan".into(),
                 kind: FunctionKind::Fan {
                     horizontal_swing: swing,
+                    speed_count,
                 },
             }],
         )
@@ -28,13 +37,12 @@ pub(in crate::matter::tests) fn observe_fan_state(
     function: &Function,
     power: bool,
     speed: u8,
-    mode: u32,
+    _mode: u32,
     swing: bool,
 ) {
     for value in [
         FanValue::Power(power),
         FanValue::Speed(speed),
-        FanValue::Mode(mode),
         FanValue::Swing(swing),
     ] {
         function.observe_fan(value, Some(1), 1);

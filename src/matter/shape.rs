@@ -32,6 +32,7 @@ enum FixedKind {
     Curtain,
     Fan {
         horizontal_swing: bool,
+        speed_count: u8,
     },
     Contact,
     Motion,
@@ -69,7 +70,13 @@ pub(crate) fn fixed_shape_with_battery<'a>(
                 kind: match function.kind {
                     FunctionKind::Outlet => FixedKind::Outlet,
                     FunctionKind::Curtain => FixedKind::Curtain,
-                    FunctionKind::Fan { horizontal_swing } => FixedKind::Fan { horizontal_swing },
+                    FunctionKind::Fan {
+                        horizontal_swing,
+                        speed_count,
+                    } => FixedKind::Fan {
+                        horizontal_swing,
+                        speed_count,
+                    },
                     FunctionKind::Contact => FixedKind::Contact,
                     FunctionKind::Motion => FixedKind::Motion,
                     FunctionKind::Occupancy => FixedKind::Occupancy,

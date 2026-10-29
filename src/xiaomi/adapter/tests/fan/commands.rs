@@ -40,7 +40,7 @@ fn local_speed_waits_for_each_receipt_and_keeps_observations_unchanged() {
             until(|| {
                 fan(control).power.value == Some(false)
                     && fan(control).speed.value == Some(40)
-                    && fan(control).mode.value == Some(1)
+                    && work(control).fan_mode_observation("main").value == Some(1)
                     && fan(control).swing.value == Some(false)
                     && [POWER, MODE, SPEED, SWING]
                         .iter()
@@ -99,7 +99,7 @@ fn off_waits_for_sent_step_and_new_speed_reopens_after_stale_on() {
             status.update_adapter(control.context.diagnostics());
             let terminal = crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
             let text = terminal.handle_line("status one", 0).await.unwrap().unwrap();
-            assert!(text.contains("queued fan commands: swing on, power off, speed 80%."), "{text}");
+            assert!(text.contains("queued fan commands: swing on, power off, speed level 80."), "{text}");
             accept(&peer, MODE).await;
             until(|| writes(&peer).len() == 2).await;
             assert_eq!(writes(&peer)[1], (json!(2), json!(4), json!(true)));
@@ -120,7 +120,7 @@ fn off_waits_for_sent_step_and_new_speed_reopens_after_stale_on() {
             assert_eq!(function.snapshot(), before);
             status.update_adapter(control.context.diagnostics());
             let text = terminal.handle_line("status one", 0).await.unwrap().unwrap();
-            assert!(text.contains("target speed 80%; properties 2.1=true (local), 2.3=0 (local), 8.1=80 (local); actual path local; accepted."), "{text}");
+            assert!(text.contains("target speed level 80; properties 2.1=true (local), 2.3=0 (local), 8.1=80 (local); actual path local; accepted."), "{text}");
         }).await;
     }));
 }
@@ -165,7 +165,7 @@ fn terminal_power_zero_speed_and_swing_write_only_their_own_properties() {
             until(|| {
                 fan(control).power.value == Some(true)
                     && fan(control).speed.value == Some(40)
-                    && fan(control).mode.value == Some(1)
+                    && work(control).fan_mode_observation("main").value == Some(1)
                     && fan(control).swing.value == Some(false)
             })
             .await;
@@ -244,6 +244,66 @@ fn off_waits_for_the_old_step_timeout_and_ignores_its_late_receipt() {
             assert_eq!(writes(&peer).len(), 2);
             accept(&peer, POWER).await;
             off.accepted().await.unwrap();
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn generic_fan_writes_real_discrete_codes_and_observes_actual_speed() {
+    let instance = json!({
+        "type": "urn:miot-spec-v2:device:fan:0000A005:example-fan:1",
+        "services": [{
+            "iid": 2,
+            "type": "urn:miot-spec-v2:service:fan:00007808:example-fan:1",
+            "properties": [
+                {"iid": 1, "type": "urn:miot-spec-v2:property:on:00000006:example-fan:1", "format": "bool", "access": ["read", "write", "notify"]},
+                {"iid": 2, "type": "urn:miot-spec-v2:property:fan-level:00000016:example-fan:1", "format": "uint8", "access": ["read", "write", "notify"], "value-list": [
+                    {"value": 42, "description": "Level3"},
+                    {"value": 0, "description": "Level1"},
+                    {"value": 7, "description": "Level2"}
+                ]}
+            ]
+        }]
+    });
+    let rig = Rig::custom_lights(&[("one", "example.fan.model", instance)]);
+    let speed = PropertyBinding { siid: 2, piid: 2 };
+    let peer = Rc::new(Peer::default());
+    peer.value("one", POWER, json!(true));
+    peer.value("one", speed, json!(7));
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                fan(control).power.value == Some(true)
+                    && fan(control).speed.value == Some(2)
+                    && work(control).function_observer("main").is_some()
+            })
+            .await;
+            let function = function(&control.context.registry, "one", "main");
+            peer.state.borrow_mut().hold_writes = true;
+            let action = function.begin_fan(FanCommand::Speed(1)).unwrap();
+            until(|| writes(&peer).len() == 1).await;
+            assert_eq!(writes(&peer)[0], (json!(2), json!(2), json!(0)));
+            accept(&peer, speed).await;
+            action.accepted().await.unwrap();
+            assert_eq!(fan(control).speed.value, Some(2));
+            peer.notify_value_at("one", speed, json!(0), Some(123), false);
+            until(|| fan(control).speed.value == Some(1)).await;
+            let action = function.begin_fan(FanCommand::Speed(3)).unwrap();
+            until(|| writes(&peer).len() == 2).await;
+            assert_eq!(writes(&peer)[1], (json!(2), json!(2), json!(42)));
+            accept(&peer, speed).await;
+            action.accepted().await.unwrap();
+            assert_eq!(fan(control).speed.value, Some(1));
+            peer.notify_value_at("one", speed, json!(42), Some(124), false);
+            until(|| fan(control).speed.value == Some(3)).await;
+            let action = function.begin_fan(FanCommand::Speed(0)).unwrap();
+            until(|| writes(&peer).len() == 3).await;
+            assert_eq!(writes(&peer)[2], (json!(2), json!(1), json!(false)));
+            accept(&peer, POWER).await;
+            action.accepted().await.unwrap();
         })
         .await;
     }));

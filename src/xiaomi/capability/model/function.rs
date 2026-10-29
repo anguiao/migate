@@ -257,6 +257,7 @@ impl ParsedFunction {
             FunctionBindings::Curtain { .. } => FunctionKind::Curtain,
             FunctionBindings::Fan { fan } => FunctionKind::Fan {
                 horizontal_swing: fan.swing().is_some(),
+                speed_count: fan.speed().count(),
             },
             FunctionBindings::Light { lighting, .. } => FunctionKind::Light(lighting.profile()),
             FunctionBindings::Temperature { measurement } => {

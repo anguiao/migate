@@ -703,9 +703,6 @@ impl Function {
                 fan.commands.observe_power(value, fresh);
                 fan.snapshot.power.update(value, source_time, received_at)
             }
-            super::FanValue::Mode(value) => {
-                fan.snapshot.mode.update(value, source_time, received_at)
-            }
             super::FanValue::Speed(value) => {
                 fan.snapshot.speed.update(value, source_time, received_at)
             }
