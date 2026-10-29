@@ -19,7 +19,7 @@ fn battery_reads_and_notifications_keep_independent_source_and_reception_times()
             assert_eq!(first.source_time, Some(1_700_000_600));
             assert!(first.received_at.is_some());
             assert_eq!(
-                measurement(&control.context, "sensor", "temperature").source_time,
+                measurement(&control.context, "sensor", "temperature:3:1001").source_time,
                 None
             );
 
@@ -30,7 +30,7 @@ fn battery_reads_and_notifications_keep_independent_source_and_reception_times()
             })
             .await;
             assert_eq!(
-                measurement(&control.context, "sensor", "temperature").value,
+                measurement(&control.context, "sensor", "temperature:3:1001").value,
                 Some(21.0)
             );
             peer.notify_value_at("sensor", BATTERY, json!(57), None, false);
@@ -86,11 +86,11 @@ fn invalid_battery_data_and_read_failures_preserve_last_value_and_measurements()
                 Some(55.0)
             );
             assert_eq!(
-                measurement(&control.context, "sensor", "temperature").value,
+                measurement(&control.context, "sensor", "temperature:3:1001").value,
                 Some(21.0)
             );
             assert_eq!(
-                measurement(&control.context, "sensor", "humidity").value,
+                measurement(&control.context, "sensor", "humidity:3:1008").value,
                 Some(45.0)
             );
             assert_eq!(
@@ -151,7 +151,8 @@ fn battery_subscription_denial_or_timeout_does_not_block_measurement_notificatio
                 );
                 peer.notify_value_at("sensor", TEMPERATURE, json!(22.5), Some(22), false);
                 until(|| {
-                    measurement(&control.context, "sensor", "temperature").value == Some(22.5)
+                    measurement(&control.context, "sensor", "temperature:3:1001").value
+                        == Some(22.5)
                 })
                 .await;
                 // Further silence does not reset the established measurement link.
@@ -340,8 +341,10 @@ fn measurement_notifications_activate_while_battery_subscribe_is_pending() {
             .await;
             // The optional battery handshake is still outstanding here.
             peer.notify_value_at("sensor", TEMPERATURE, json!(22.5), Some(22), false);
-            until(|| measurement(&control.context, "sensor", "temperature").value == Some(22.5))
-                .await;
+            until(|| {
+                measurement(&control.context, "sensor", "temperature:3:1001").value == Some(22.5)
+            })
+            .await;
             assert!(
                 !peer.state.borrow().held_subs.is_empty(),
                 "measurement updates must not wait for the optional battery subscription"
@@ -381,7 +384,8 @@ fn cloud_battery_subscription_failure_keeps_active_measurements_and_retries_fini
                 "measurement readiness must not wait for battery retries"
             );
             cloud.property_at("sensor", 3, 1001, json!(22.5));
-            until(|| measurement(&c.context, "sensor", "temperature").value == Some(22.5)).await;
+            until(|| measurement(&c.context, "sensor", "temperature:3:1001").value == Some(22.5))
+                .await;
             until(|| {
                 cloud.count(battery_path) == 4
                     && work(&c.context, "sensor").battery_problem().is_some()
@@ -397,7 +401,7 @@ fn cloud_battery_subscription_failure_keeps_active_measurements_and_retries_fini
             assert_eq!(status.notification_source, Some(PathKind::Cloud));
             assert!(status.battery_problem.is_some(), "{status:?}");
             assert_eq!(
-                measurement(&c.context, "sensor", "temperature").value,
+                measurement(&c.context, "sensor", "temperature:3:1001").value,
                 Some(22.5)
             );
         })
@@ -543,7 +547,7 @@ fn a_restored_sensor_without_battery_still_reports_why_capability_is_missing() {
             status
                 .battery_problem
                 .as_deref()
-                .is_some_and(|problem| problem.contains("not declared")),
+                .is_some_and(|problem| problem.contains("battery service is missing")),
             "{status:?}"
         );
         assert_eq!(battery(&c.context, "sensor"), None);

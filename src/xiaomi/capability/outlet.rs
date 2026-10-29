@@ -15,12 +15,13 @@ pub(super) fn parse_outlet(
     if instance.urn.vendor == "cuco-cp7pd" {
         parse_cp7pd(key, instance)
     } else {
+        let power = standard_main_power(instance)?;
         ParsedDevice::new(
             key,
             vec![ParsedFunction::outlet(
-                "main",
+                format!("outlet:{}", power.siid),
                 "主电源",
-                standard_main_power(instance)?,
+                power,
             )],
             None,
         )
@@ -41,9 +42,9 @@ pub(crate) fn is_cp7pd_type(value: &str) -> bool {
 /// The exact cp7pd channel bindings and master trigger in their fixed layout.
 pub(crate) fn is_cp7pd_topology(device: &ParsedDevice) -> bool {
     const CHANNELS: [(&str, PropertyBinding); 3] = [
-        ("outlet_1", PropertyBinding { siid: 3, piid: 1 }),
-        ("outlet_2", PropertyBinding { siid: 4, piid: 1 }),
-        ("usb", PropertyBinding { siid: 9, piid: 1 }),
+        ("outlet:3", PropertyBinding { siid: 3, piid: 1 }),
+        ("outlet:4", PropertyBinding { siid: 4, piid: 1 }),
+        ("outlet:9", PropertyBinding { siid: 9, piid: 1 }),
     ];
     if device.refresh_trigger() != Some(PropertyBinding { siid: 2, piid: 1 })
         || device
@@ -124,7 +125,7 @@ fn parse_cp7pd(
         ("usb", "USB", 9, "miot-spec-v2", 0x0000780C),
     ] {
         functions.push(ParsedFunction::outlet(
-            id,
+            format!("outlet:{siid}"),
             label,
             cp7pd_binding(instance, id, siid, namespace, type_id)?,
         ));

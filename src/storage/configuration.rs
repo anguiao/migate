@@ -1,4 +1,4 @@
-//! Private schema 8 codec and transactions for the singleton configuration.
+//! Private schema 9 codec and transactions for the singleton configuration.
 //!
 //! The stored JSON is a storage-private encoding: every layer is tagged and
 //! rejects unknown fields and missing required values, and decoded values are

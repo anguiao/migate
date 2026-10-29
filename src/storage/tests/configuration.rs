@@ -172,7 +172,7 @@ fn damaged_cache_and_identity_fail_without_replacing_stored_data() {
         ("/devices/0/unique_id", json!("broken")),
         ("/devices/0/configuration_version", json!(0)),
         ("/devices/0/endpoint", json!(3)),
-        ("/devices/0/functions/0/endpoint", json!(3)),
+        ("/devices/0/functions/0/endpoint", json!(2)),
         ("/root_version", json!(0)),
         ("/scope", Value::Null),
     ] {
@@ -299,8 +299,8 @@ fn all_seven_lights_restore_complete_static_bindings_and_identities() {
     );
     for device in &expected.devices {
         assert_eq!(device.functions.len(), 1);
-        assert_eq!(device.functions[0].id, "main");
-        assert_eq!(device.functions[0].endpoint, device.endpoint);
+        assert_eq!(device.functions[0].id, "light:2");
+        assert_ne!(device.functions[0].endpoint, device.endpoint);
     }
     drop(store);
     assert_eq!(load(&Store::open(dir.path()).unwrap()), expected);
@@ -711,5 +711,40 @@ fn late_transaction_failure_rolls_back_the_whole_first_publication() {
     let restored = load(&Store::open(dir.path()).unwrap());
     assert_eq!(restored, planned);
     assert_eq!(restored.devices[0].endpoint, 2);
-    assert_eq!(restored.devices[0].functions[0].endpoint, 2);
+    assert_eq!(restored.devices[0].functions[0].endpoint, 3);
+}
+
+#[test]
+fn adding_light_capabilities_keeps_its_function_and_endpoint_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let expanded: Value = serde_json::from_str(CEILING).unwrap();
+    let mut basic = expanded.clone();
+    basic["services"][1]["properties"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|property| property["type"].as_str().unwrap().contains(":on:"));
+    let initial = seed(&store, vec![native("light", "xiaomi.light.ceil04", basic)]);
+    let before = &initial.devices[0];
+    assert_eq!(before.functions[0].id, "light:2");
+    assert_ne!(before.endpoint, before.functions[0].endpoint);
+    let plan = next(
+        &initial,
+        scope("account", "home"),
+        vec![native("light", "xiaomi.light.ceil04", expanded)],
+    );
+    assert!(plan.rebuild);
+    assert_eq!(plan.configuration.devices[0].functions, before.functions);
+    assert_eq!(plan.configuration.devices[0].endpoint, before.endpoint);
+    save(&store, &plan.configuration);
+    drop(store);
+    let restored = load(&Store::open(dir.path()).unwrap());
+    assert_eq!(restored.devices[0].functions, before.functions);
+    assert_eq!(restored.devices[0].endpoint, before.endpoint);
+    let unchanged = next(
+        &restored,
+        scope("account", "home"),
+        vec![restored.devices[0].native.clone().unwrap()],
+    );
+    assert!(!unchanged.changed);
 }

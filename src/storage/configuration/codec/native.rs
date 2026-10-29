@@ -320,19 +320,12 @@ impl WireNative {
             .into_iter()
             .map(WireFunction::into_parsed)
             .collect::<Result<Vec<_>, _>>()?;
-        let battery_issue = self.battery_issue.or_else(|| {
-            (battery.is_none()
-                && functions
-                    .iter()
-                    .any(|function| function.kind().is_read_only()))
-            .then(|| "battery capability not declared".into())
-        });
         let device = ParsedDevice::new_with_battery_diagnostic(
             key.clone(),
             functions,
             refresh_trigger,
             battery,
-            battery_issue,
+            self.battery_issue,
         )
         .map_err(|_| "Stored native description is invalid")?;
         NativeDescription::new(self.model, self.instance_type, device)

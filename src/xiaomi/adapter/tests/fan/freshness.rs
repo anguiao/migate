@@ -19,15 +19,15 @@ fn read_started_before_off_cannot_clear_the_on_write_barrier() {
         c.peer(peer(), |peer| async move {
             until(|| {
                 fan(control).power.value == Some(true)
-                    && work(control).function_observer("main").is_some()
-                    && !work(control).refresh.borrow().contains("main", POWER)
+                    && work(control).function_observer("fan:2").is_some()
+                    && !work(control).refresh.borrow().contains("fan:2", POWER)
             })
             .await;
             peer.state
                 .borrow_mut()
                 .read_timeout
                 .insert(("one".into(), POWER.siid, POWER.piid));
-            work(control).refresh_property("main", POWER);
+            work(control).refresh_property("fan:2", POWER);
             until(|| {
                 peer.state.borrow().held.iter().any(|(publish, _)| {
                     let payload = decode_mips(&publish.payload).unwrap().payload;
@@ -35,7 +35,7 @@ fn read_started_before_off_cannot_clear_the_on_write_barrier() {
                 })
             })
             .await;
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "fan:2");
             function
                 .begin_fan(FanCommand::Power(false))
                 .unwrap()
@@ -44,7 +44,7 @@ fn read_started_before_off_cannot_clear_the_on_write_barrier() {
                 .unwrap();
             peer.release_property("one", POWER, json!({"value": true, "updateTime": 1}))
                 .await;
-            until(|| !work(control).refresh.borrow().contains("main", POWER)).await;
+            until(|| !work(control).refresh.borrow().contains("fan:2", POWER)).await;
             peer.state.borrow_mut().hold_writes = true;
             let action = function.begin_fan(FanCommand::Speed(60)).unwrap();
             until(|| writes(&peer).len() == 2).await;
@@ -65,10 +65,10 @@ fn cached_on_notification_cannot_clear_the_on_write_barrier() {
         c.peer(peer(), |peer| async move {
             until(|| {
                 fan(control).power.value == Some(true)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("fan:2").is_some()
             })
             .await;
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "fan:2");
             function
                 .begin_fan(FanCommand::Power(false))
                 .unwrap()

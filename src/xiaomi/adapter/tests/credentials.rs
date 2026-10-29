@@ -69,7 +69,7 @@ fn certificate_failure_does_not_delay_cloud_directory_or_control() {
     }
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().certs == 1).await;
-        let one = function(&c.context.registry, "one", "main");
+        let one = function(&c.context.registry, "one", "outlet:2");
         assert_eq!(one.snapshot().availability, Availability::Available);
         one.execute(Command::On).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
@@ -107,7 +107,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
                     .access_token,
                 "fresh-access"
             );
-            function(&c.context.registry, "one", "main")
+            function(&c.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -165,7 +165,7 @@ fn expiry_wakes_availability_and_closes_mqtt_while_refresh_hangs() {
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one")).await;
-            let one = function(&c.context.registry, "one", "main");
+            let one = function(&c.context.registry, "one", "outlet:2");
             c.clock.advance(Duration::from_secs(5));
             until(|| c.cloud.lock().unwrap().tokens == 1).await;
             assert_eq!(one.snapshot().availability, Availability::Available);
@@ -232,7 +232,7 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
                 control.context.control_path("one"),
                 Some(super::super::routing::ControlPath::Local(_))
             ));
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -269,7 +269,7 @@ fn expired_local_certificate_revokes_only_the_local_candidate() {
             control.clock.advance(by);
             until(|| control.context.local_candidate("one", false).is_err()).await;
             assert!(control.context.cloud_candidate("one", true).is_ok());
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -457,7 +457,7 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
         until(|| c.cloud.lock().unwrap().infos == before + 2).await;
         c.cloud.lock().unwrap().property_status = 503;
         assert!(
-            function(&c.context.registry, "one", "main")
+            function(&c.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .is_err()
@@ -509,7 +509,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             })
             .await;
             let before = control.cloud.lock().unwrap().certs;
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -528,7 +528,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             })
             .await;
             assert_eq!(
-                function(&control.context.registry, "one", "main")
+                function(&control.context.registry, "one", "outlet:2")
                     .snapshot()
                     .availability,
                 Availability::Available
@@ -564,7 +564,7 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
             control.cloud.lock().unwrap().status = 200;
             control.clock.advance(Duration::from_secs(600));
             peer.list_changed(&["one"]);
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -636,7 +636,7 @@ fn candidate_unauthorized_requests_coalesce_into_one_token_refresh_and_resume_pr
                     .access_token,
                 "fresh-access"
             );
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -791,7 +791,7 @@ fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopp
                 assert_eq!(control.cloud.lock().unwrap().tokens, 1);
                 control.clock.advance(Duration::from_secs(600));
                 control.context.request_sync();
-                function(&control.context.registry, "one", "main")
+                function(&control.context.registry, "one", "outlet:2")
                     .execute(Command::On)
                     .await
                     .unwrap();
@@ -877,7 +877,7 @@ fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
                     .authentication,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();

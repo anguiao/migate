@@ -81,20 +81,6 @@ pub(crate) fn plan<Shape: PartialEq>(
                         });
                     }
                 }
-                if source.native.device().functions().len() > 1
-                    || source
-                        .native
-                        .device()
-                        .functions()
-                        .iter()
-                        .any(|function| function.kind().is_read_only())
-                {
-                    for function in &mut device.functions {
-                        if function.endpoint == device.endpoint {
-                            function.endpoint = allocator.allocate(&key)?;
-                        }
-                    }
-                }
                 device.native = Some(source.native);
                 device
             }
@@ -102,16 +88,10 @@ pub(crate) fn plan<Shape: PartialEq>(
                 let unique_id = new_identities
                     .remove(&key)
                     .ok_or_else(|| PlanError::MissingIdentity { key: key.clone() })?;
-                let single = source.native.device().functions().len() == 1
-                    && !source.native.device().functions()[0].kind().is_read_only();
                 let endpoint = allocator.allocate(&key)?;
                 let mut functions = Vec::new();
                 for function in source.native.device().functions() {
-                    let endpoint = if single {
-                        endpoint
-                    } else {
-                        allocator.allocate(&key)?
-                    };
+                    let endpoint = allocator.allocate(&key)?;
                     functions.push(CommittedFunction {
                         id: function.id().to_owned(),
                         endpoint,

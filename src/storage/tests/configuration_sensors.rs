@@ -1,4 +1,4 @@
-//! Sensor capability persistence in the current schema-8 private codec.
+//! Sensor capability persistence in the current schema-9 private codec.
 
 use super::configuration::{corrupt, fixture, load, next, raw, save, scope, seed};
 use crate::{
@@ -27,7 +27,7 @@ fn sensor(id: &str) -> crate::xiaomi::capability::NativeDescription {
 
 #[test]
 fn single_measurements_and_mixed_controls_round_trip_with_current_parent_layout() {
-    for wanted in ["temperature", "humidity", "mixed"] {
+    for wanted in ["temperature:3:1001", "humidity:3:1008", "mixed"] {
         let directory = tempfile::tempdir().unwrap();
         let store = crate::storage::Store::open(directory.path()).unwrap();
         let original = sensor("sensor");
@@ -121,7 +121,7 @@ fn sensor_bindings_round_trip_with_parent_and_child_endpoints() {
             .iter()
             .map(|function| (function.id.as_str(), function.endpoint))
             .collect::<Vec<_>>(),
-        [("temperature", 3), ("humidity", 4)]
+        [("temperature:3:1001", 3), ("humidity:3:1008", 4)]
     );
     let native = device.native.as_ref().unwrap();
     assert_eq!(native.model(), "miaomiaoce.sensor_ht.t6");
@@ -202,14 +202,14 @@ fn old_outlet_and_light_configurations_remain_readable_alongside_sensors() {
         .unwrap();
     assert_eq!(sensor.functions.len(), 2);
     assert_eq!(outlet.endpoint, 2);
-    assert_eq!(sensor.endpoint, 3);
+    assert_eq!(sensor.endpoint, 4);
     assert_eq!(
         sensor
             .functions
             .iter()
             .map(|f| f.endpoint)
             .collect::<Vec<_>>(),
-        [4, 5]
+        [5, 6]
     );
 }
 
@@ -246,7 +246,7 @@ fn multiple_sensors_keep_distinct_identities_names_and_bindings() {
 }
 
 #[test]
-fn schema8_records_without_the_optional_battery_field_remain_readable() {
+fn absent_optional_battery_field_remains_readable() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
     seed(&store, vec![sensor("sensor")]);
@@ -442,7 +442,7 @@ fn a_sensor_range_change_is_a_publish_shape_change_but_keeps_its_identity() {
         ParsedDevice::new_with_battery(
             original.device().key().clone(),
             vec![
-                ParsedFunction::temperature("temperature", "Temperature", changed_binding),
+                ParsedFunction::temperature("temperature:3:1001", "Temperature", changed_binding),
                 functions[1].clone(),
             ],
             None,
@@ -620,7 +620,7 @@ fn specific_battery_parse_diagnostics_survive_save_and_load() {
 }
 
 #[test]
-fn old_schema8_sensor_records_without_a_diagnostic_get_a_truthful_generic_reason() {
+fn absent_optional_battery_diagnostic_remains_absent() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
     let instance: Value = serde_json::from_str(SENSOR).unwrap();
@@ -658,11 +658,7 @@ fn old_schema8_sensor_records_without_a_diagnostic_get_a_truthful_generic_reason
     let loaded = load(&store);
     let device = loaded.devices[0].native.as_ref().unwrap().device();
     assert!(device.battery().is_none());
-    assert!(
-        device
-            .battery_issue()
-            .is_some_and(|issue| issue.contains("not declared"))
-    );
+    assert_eq!(device.battery_issue(), None);
 }
 
 #[test]
@@ -682,7 +678,7 @@ fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readi
                 .device()
                 .functions()
                 .iter()
-                .filter(|function| function.id() == "co2")
+                .filter(|function| function.id() == "co2:8:1029")
                 .cloned()
                 .collect(),
             None,
@@ -718,7 +714,7 @@ fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readi
     assert_eq!(device.functions.len(), 1);
     assert_ne!(device.functions[0].endpoint, device.endpoint);
     let co2 = &device.native.as_ref().unwrap().device().functions()[0];
-    assert_eq!(co2.id(), "co2");
+    assert_eq!(co2.id(), "co2:8:1029");
     assert_eq!(
         co2.kind(),
         FunctionKind::CarbonDioxide(MeasurementRange::new(400.0, 5000.0).unwrap())

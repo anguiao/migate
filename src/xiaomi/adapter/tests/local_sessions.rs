@@ -25,19 +25,19 @@ fn cached_local_control_survives_temporary_cloud_detail_failures() {
                             .authentication,
                         crate::xiaomi::auth::AuthenticationState::Authenticated
                     )
-                    && function(&control.context.registry, "one", "main")
+                    && function(&control.context.registry, "one", "outlet:2")
                         .snapshot()
                         .power()
                         != Some(Power::Unknown)
             })
             .await;
             assert_eq!(
-                function(&control.context.registry, "one", "main")
+                function(&control.context.registry, "one", "outlet:2")
                     .snapshot()
                     .availability,
                 Availability::Available
             );
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -61,12 +61,12 @@ fn cached_local_access_recovers_while_cloud_member_sync_is_stalled() {
             until(|| control.cloud.lock().unwrap().homes == 1).await;
             assert_eq!(control.cloud.lock().unwrap().homes, 1);
             assert_eq!(
-                function(&control.context.registry, "one", "main")
+                function(&control.context.registry, "one", "outlet:2")
                     .snapshot()
                     .availability,
                 Availability::Available
             );
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -105,7 +105,7 @@ fn whole_gateway_list_failures_preserve_confirmed_access_and_availability() {
                 until(|| control.context.status.borrow().catalog_problem.is_some()).await;
                 peer.notify("one", 2, true);
                 until(|| {
-                    function(&control.context.registry, "one", "main")
+                    function(&control.context.registry, "one", "outlet:2")
                         .snapshot()
                         .power()
                         == Some(Power::On)
@@ -114,7 +114,7 @@ fn whole_gateway_list_failures_preserve_confirmed_access_and_availability() {
                 for physical in control.context.registry.list() {
                     assert_eq!(physical.availability(), Availability::Available);
                 }
-                function(&control.context.registry, "multi", "usb")
+                function(&control.context.registry, "multi", "outlet:9")
                     .execute(Command::On)
                     .await
                     .unwrap();
@@ -163,7 +163,7 @@ fn gateway_list_retries_recover_without_events_and_preserve_cloud_diagnostics() 
                     control.context.status.borrow().catalog_problem,
                     *control.context.cloud_problem.borrow()
                 );
-                function(&control.context.registry, "one", "main")
+                function(&control.context.registry, "one", "outlet:2")
                     .execute(Command::On)
                     .await
                     .unwrap();
@@ -200,7 +200,7 @@ fn disconnect_cancels_gateway_list_backoff_before_a_new_session_starts() {
             super::super::local::refresh_access(&control.context);
             until(|| {
                 matches!(
-                    function(&control.context.registry, "one", "main")
+                    function(&control.context.registry, "one", "outlet:2")
                         .snapshot()
                         .availability,
                     Availability::Unavailable(_)
@@ -250,7 +250,7 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
                 ))
                 .unwrap();
             until(|| control.discovery.snapshot().gateways.len() == 3).await;
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -289,10 +289,10 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
                 before
             );
             for (did, id, siid) in [
-                ("one", "main", 2),
-                ("multi", "outlet_1", 3),
-                ("multi", "outlet_2", 4),
-                ("multi", "usb", 9),
+                ("one", "outlet:2", 2),
+                ("multi", "outlet:3", 3),
+                ("multi", "outlet:4", 4),
+                ("multi", "outlet:9", 9),
             ] {
                 let function = function(&control.context.registry, did, id);
                 until(|| {
@@ -392,7 +392,7 @@ fn masters_failing_after_connack_cannot_starve_a_later_healthy_master() {
                     c.context.status.borrow().gateway,
                     GatewayStatus::Connected("789".into())
                 );
-                let function = function(&c.context.registry, "one", "main");
+                let function = function(&c.context.registry, "one", "outlet:2");
                 function.execute(Command::On).await.unwrap();
                 peer.notify("one", 2, false);
                 until(|| function.snapshot().power() == Some(Power::Off)).await;
@@ -452,7 +452,7 @@ fn a_new_master_in_the_current_group_wakes_connection_retry() {
 fn reconnect_keeps_command_consumers_cancels_old_writes_and_rebuilds_only_registered_devices() {
     block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
         c.announce();
-        let one = function(&c.context.registry, "one", "main");
+        let one = function(&c.context.registry, "one", "outlet:2");
         let mut command = Box::pin(one.execute(Command::On));
         let peer = Rc::new(Peer::default());
         let control = &c;
@@ -496,7 +496,7 @@ fn reconnect_keeps_command_consumers_cancels_old_writes_and_rebuilds_only_regist
             initialized(control, &peer, &["multi"]).await;
             assert_eq!(peer.count("subscribe", "one", 2), 0);
             assert_eq!(peer.count("rpcReq", "one", 2), 0);
-            let usb = function(&control.context.registry, "multi", "usb");
+            let usb = function(&control.context.registry, "multi", "outlet:9");
             usb.execute(Command::On).await.unwrap();
             usb.execute(Command::Toggle).await.unwrap();
             assert_eq!(usb.snapshot().power(), Some(Power::Off));
@@ -690,10 +690,10 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
                     == Some(super::super::model::PathKind::Local)
             })
             .await;
-            let member = function(&control.context.registry, "one", "main");
+            let member = function(&control.context.registry, "one", "light:2");
             until(|| member.snapshot().power() == Some(Power::Off)).await;
-            let physical = function(&control.context.registry, "group-p", "main");
-            let virtual_group = function(&control.context.registry, "group-v", "main");
+            let physical = function(&control.context.registry, "group-p", "light:2");
+            let virtual_group = function(&control.context.registry, "group-v", "light:2");
             assert_eq!(member.snapshot().availability, Availability::Available);
             assert!(control.context.control_path("group-p").is_none());
             assert!(matches!(

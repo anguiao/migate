@@ -60,94 +60,66 @@ fn validate_model_topology(
     model: &str,
     instance_type: &str,
 ) -> Result<(), &'static str> {
-    let controls = device
-        .functions()
-        .iter()
-        .filter(|function| function.kind().is_control())
-        .collect::<Vec<_>>();
-    if controls.is_empty() {
-        return Ok(());
-    }
-    if is_fan_type(instance_type) {
-        let dmaker_instance = fan::is_dmaker_fan_type(instance_type);
-        let dmaker_model = model.starts_with("dmaker.");
-        return if controls.len() == 1
-            && controls[0]
-                .fan()
-                .is_some_and(|fan| fan.mode().is_none() || dmaker_instance && dmaker_model)
-        {
-            Ok(())
-        } else {
-            Err("Xiaomi fan topology is invalid")
-        };
-    }
-    if is_curtain_type(instance_type) {
-        if model == ls2307::MODEL || model == outlet::CP7PD_MODEL {
-            return Err("Xiaomi device model is incompatible with its instance type");
-        }
-        return if controls.len() == 1 && controls[0].curtain().is_some() {
-            Ok(())
-        } else {
-            Err("Xiaomi curtain topology is invalid")
-        };
-    }
-    if is_light_type(instance_type) {
-        let function = controls[0];
-        let Some(lighting) = function.lighting() else {
-            return Err("Xiaomi light topology is invalid");
-        };
-        if model == ls2307::MODEL && !is_ls2307_type(instance_type) {
-            return Err("Xiaomi device model is incompatible with its instance type");
-        }
-        if model == ls2307::MODEL {
-            let (Some(brightness), Some(temperature), Some(color), Some(mode)) = (
-                lighting.brightness(),
-                lighting.temperature(),
-                lighting.color(),
-                lighting.mode(),
-            ) else {
-                return Err("Xiaomi ls2307 adapter is incompatible");
-            };
-            if !ls2307::main_bindings(
-                function.power().expect("light functions have power"),
-                brightness,
-                temperature,
-            ) || !ls2307::is_color(color)
-                || !ls2307::is_mode(mode)
-            {
-                return Err("Xiaomi ls2307 adapter is incompatible");
-            }
-        }
-        return Ok(());
-    }
-    if is_outlet_type(instance_type) {
-        if model == ls2307::MODEL {
-            return Err("Xiaomi device model is incompatible with its instance type");
-        }
-        if device.functions().iter().any(|function| {
-            function.kind() != crate::device::FunctionKind::Outlet && function.kind().is_control()
-        }) {
-            return Err("Xiaomi outlet description is invalid");
-        }
-        let cp7pd_type = outlet::is_cp7pd_type(instance_type);
-        let cp7pd_model = model == outlet::CP7PD_MODEL;
+    let cp7pd_type = outlet::is_cp7pd_type(instance_type);
+    let cp7pd_model = model == outlet::CP7PD_MODEL;
+    if cp7pd_model || cp7pd_type {
         if cp7pd_model != cp7pd_type {
             return Err("Xiaomi device model is incompatible with its instance type");
         }
-        if cp7pd_model {
-            return if outlet::is_cp7pd_topology(device) {
-                Ok(())
-            } else {
-                Err("Xiaomi outlet topology is invalid")
-            };
+        if !outlet::is_cp7pd_topology(device) {
+            return Err("Xiaomi outlet topology is invalid");
         }
-        let single_main =
-            controls.len() == 1 && controls[0].id() == "main" && device.refresh_trigger().is_none();
-        return if single_main {
-            Ok(())
-        } else {
-            Err("Xiaomi outlet topology is invalid")
-        };
+    } else if device.refresh_trigger().is_some() {
+        return Err("Xiaomi refresh trigger is unsupported");
     }
-    Err("Xiaomi device type is unsupported")
+
+    if model == ls2307::MODEL {
+        if !is_ls2307_type(instance_type) {
+            return Err("Xiaomi device model is incompatible with its instance type");
+        }
+        let function = device
+            .functions()
+            .iter()
+            .find(|function| {
+                function.power() == Some(ls2307::POWER) && function.lighting().is_some()
+            })
+            .ok_or("Xiaomi ls2307 adapter is incompatible")?;
+        let lighting = function.lighting().unwrap();
+        let (Some(brightness), Some(temperature), Some(color), Some(mode)) = (
+            lighting.brightness(),
+            lighting.temperature(),
+            lighting.color(),
+            lighting.mode(),
+        ) else {
+            return Err("Xiaomi ls2307 adapter is incompatible");
+        };
+        if !ls2307::main_bindings(ls2307::POWER, brightness, temperature)
+            || !ls2307::is_color(color)
+            || !ls2307::is_mode(mode)
+        {
+            return Err("Xiaomi ls2307 adapter is incompatible");
+        }
+    }
+
+    let dmaker = fan::is_dmaker_fan_type(instance_type) && model.starts_with("dmaker.");
+    if device.functions().iter().any(|function| {
+        function
+            .fan()
+            .is_some_and(|fan| fan.mode().is_some() && !dmaker)
+    }) {
+        return Err("Xiaomi fan mode is incompatible with its model");
+    }
+    if device
+        .functions()
+        .iter()
+        .all(|function| !function.kind().is_control())
+        || is_fan_type(instance_type)
+        || is_curtain_type(instance_type)
+        || is_light_type(instance_type)
+        || is_outlet_type(instance_type)
+    {
+        Ok(())
+    } else {
+        Err("Xiaomi device type is unsupported")
+    }
 }

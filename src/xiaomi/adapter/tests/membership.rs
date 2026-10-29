@@ -39,7 +39,7 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
                     missing_push
                 );
                 assert!(control.context.local_candidate("multi", true).is_err());
-                function(&control.context.registry, "multi", "usb")
+                function(&control.context.registry, "multi", "outlet:9")
                     .execute(Command::On)
                     .await
                     .unwrap();
@@ -63,7 +63,7 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
                 }
                 peer.list_changed(&["multi"]);
                 initialized(control, &peer, &["one", "multi"]).await;
-                function(&control.context.registry, "multi", "usb")
+                function(&control.context.registry, "multi", "outlet:9")
                     .execute(Command::Off)
                     .await
                     .unwrap();
@@ -105,7 +105,7 @@ fn stale_local_metadata_does_not_block_local_control_after_cloud_admission() {
             .await;
             // Directory metadata disagreement is not an access qualification.
             assert!(control.context.local_candidate("multi", false).is_ok());
-            let usb = function(&control.context.registry, "multi", "usb");
+            let usb = function(&control.context.registry, "multi", "outlet:9");
             usb.execute(Command::On).await.unwrap();
             assert_eq!(peer.count("rpcReq", "multi", 9), 1);
             assert!(control.cloud.lock().unwrap().property_writes.is_empty());
@@ -256,7 +256,7 @@ fn five_minute_member_sync_does_not_poll_healthy_channel_power() {
             control.clock.advance(Duration::from_secs(3));
             peer.notify("one", 2, true);
             until(|| {
-                function(&control.context.registry, "one", "main")
+                function(&control.context.registry, "one", "outlet:2")
                     .snapshot()
                     .power()
                     == Some(Power::On)
@@ -304,7 +304,7 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
                 .device(&key)
                 .cloned()
                 .unwrap();
-            let old = function(&registry, "multi", "outlet_1");
+            let old = function(&registry, "multi", "outlet:3");
             control.cloud.lock().unwrap().members.clear();
             peer.list_changed(&["multi"]);
             until(|| registry.list().is_empty() && peer.state.borrow().unsubscribes.len() == 4)
@@ -341,7 +341,7 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
             assert_eq!(after.functions, before.functions);
             assert_eq!(after.label, "Kitchen saved");
             assert_eq!(
-                function(&registry, "multi", "outlet_1").snapshot().power(),
+                function(&registry, "multi", "outlet:3").snapshot().power(),
                 Some(Power::Off)
             );
         })
@@ -403,7 +403,7 @@ fn incomplete_foreign_or_failed_cloud_sync_cannot_remove_published_devices() {
                         .is_some()
                 );
                 assert_eq!(
-                    function(&control.context.registry, "one", "main")
+                    function(&control.context.registry, "one", "outlet:2")
                         .snapshot()
                         .availability,
                     Availability::Available
@@ -436,7 +436,7 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
             peer.list_changed(&["one"]);
             until(|| peer.count("get", "one", 2) == 1 && peer.count("subscribe", "one", 2) == 1)
                 .await;
-            let one = function(&control.context.registry, "one", "main");
+            let one = function(&control.context.registry, "one", "outlet:2");
             peer.state.borrow_mut().hold_writes = true;
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
@@ -465,7 +465,7 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
             peer.notify("one", 2, true);
             peer.notify("multi", 4, true);
             until(|| {
-                function(&control.context.registry, "multi", "outlet_2")
+                function(&control.context.registry, "multi", "outlet:4")
                     .snapshot()
                     .power()
                     == Some(Power::On)
@@ -535,7 +535,7 @@ fn a_complete_cloud_snapshot_remains_valid_across_a_local_reconnect() {
                     .get(&DeviceKey::new("xiaomi", "multi"))
                     .is_some()
             );
-            function(&control.context.registry, "multi", "usb")
+            function(&control.context.registry, "multi", "outlet:9")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -565,7 +565,7 @@ fn pending_cloud_descriptions_retry_on_a_later_event_without_blocking_cached_con
             })
             .await;
             initialized(control, &peer, &["one"]).await;
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();

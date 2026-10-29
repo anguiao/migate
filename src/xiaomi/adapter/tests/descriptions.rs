@@ -136,7 +136,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
             // Hold one old-instance temperature read; its late value stays
             // inside the widened range, so only instance filtering can reject it.
             peer.state.borrow_mut().hold_reads = true;
-            device_work(control, "one").refresh_property("main", TEMPERATURE);
+            device_work(control, "one").refresh_property("light:2", TEMPERATURE);
             until(|| !peer.state.borrow().held.is_empty()).await;
             let mut changed = device_work(control, "one").native.clone();
             changed = crate::xiaomi::capability::NativeDescription::new(
@@ -174,7 +174,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
                 )));
             }
             peer.state.borrow_mut().hold_reads = false;
-            let current = function(&control.context.registry, "one", "main");
+            let current = function(&control.context.registry, "one", "light:2");
             device_work(control, "one").refresh();
             until(|| current.snapshot().lighting().unwrap().temperature_kelvin == Some(6000)).await;
             // The old held read (2700 K) belongs to the retired instance and
@@ -264,7 +264,7 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
                     .cloned()
                     .is_none()
             );
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -306,7 +306,7 @@ fn publication_database_failure_keeps_the_complete_cached_configuration() {
                     .and_then(|device| device.native.as_ref())
                     .is_none()
             );
-            function(&control.context.registry, "one", "main")
+            function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();

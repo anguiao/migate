@@ -11,14 +11,14 @@ fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
         repair_ready(&c).await;
         until(|| {
             ["member-a", "member-b"].iter().all(|did| {
-                function(&c.context.registry, did, "main")
+                function(&c.context.registry, did, "light:2")
                     .snapshot()
                     .lighting()
                     .is_some_and(|state| state.mode.is_some() && state.color.is_some())
             })
         })
         .await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         let work = c.context.live.borrow().devices["member-a"]
             .admitted
             .clone()
@@ -78,7 +78,7 @@ fn physical_repair_preserves_native_power_brightness_and_temperature() {
                     && cloud_active(&c, "member-b")
             })
             .await;
-            let group = function(&c.context.registry, "group-1", "main");
+            let group = function(&c.context.registry, "group-1", "light:2");
             for (did, siid, piid, value) in [
                 ("group-1", 2, 1, json!(false)),
                 ("group-1", 2, 2, json!(13)),

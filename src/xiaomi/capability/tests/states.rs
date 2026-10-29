@@ -8,32 +8,32 @@ fn state_samples_expose_independent_stable_functions() {
         (
             "isa.magnet.dw2hl",
             include_str!("../../../../tests/fixtures/miot/isa-dw2hl.json"),
-            vec!["contact"],
+            vec!["contact:2:2"],
         ),
         (
             "xiaomi.motion.pir1",
             include_str!("../../../../tests/fixtures/miot/xiaomi-pir1.json"),
-            vec!["illuminance", "motion"],
+            vec!["illuminance:2:1005", "motion:2:1024"],
         ),
         (
             "izq.sensor_occupy.trio",
             include_str!("../../../../tests/fixtures/miot/izq-trio.json"),
-            vec!["illuminance", "occupancy"],
+            vec!["illuminance:2:2", "occupancy:2:1"],
         ),
         (
             "linp.sensor_occupy.hb01",
             include_str!("../../../../tests/fixtures/miot/linp-hb01.json"),
-            vec!["illuminance", "occupancy"],
+            vec!["illuminance:2:5", "occupancy:2:1"],
         ),
         (
             "xiaomi.sensor_occupy.03",
             include_str!("../../../../tests/fixtures/miot/xiaomi-occupy-03.json"),
-            vec!["illuminance", "occupancy"],
+            vec!["illuminance:2:1005", "occupancy:2:1078"],
         ),
         (
             "xiaomi.sensor_occupy.p1",
             include_str!("../../../../tests/fixtures/miot/xiaomi-occupy-p1.json"),
-            vec!["illuminance", "occupancy"],
+            vec!["illuminance:2:5", "occupancy:2:1"],
         ),
     ] {
         let instance: Value = serde_json::from_str(text).unwrap();
@@ -72,7 +72,7 @@ fn state_native_values_follow_explicit_semantics() {
     let function = motion
         .functions()
         .iter()
-        .find(|f| f.id() == "motion")
+        .find(|f| f.id() == "motion:2:1024")
         .unwrap();
     let binding = function.state().unwrap();
     assert_eq!(
@@ -103,7 +103,7 @@ fn state_native_values_follow_explicit_semantics() {
         let binding = parsed
             .functions()
             .iter()
-            .find(|f| f.id() == "occupancy")
+            .find(|f| f.kind() == FunctionKind::Occupancy)
             .unwrap()
             .state()
             .unwrap();
@@ -129,7 +129,7 @@ fn state_capabilities_require_real_access_and_motion_recovery() {
             .iter()
             .map(|f| f.id())
             .collect::<Vec<_>>(),
-        ["illuminance"]
+        ["illuminance:2:1005"]
     );
     let mut value: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/xiaomi-occupy-p1.json"
@@ -138,7 +138,12 @@ fn state_capabilities_require_real_access_and_motion_recovery() {
     value["services"][1]["properties"][0]["access"] = json!(["read"]);
     let device =
         parse_device_for_model(DeviceKey::new("xiaomi", "occupancy"), "sample", &value).unwrap();
-    assert!(device.functions().iter().all(|f| f.id() != "occupancy"));
+    assert!(
+        device
+            .functions()
+            .iter()
+            .all(|f| f.kind() != FunctionKind::Occupancy)
+    );
 }
 
 #[test]
@@ -192,7 +197,7 @@ fn motion_retains_event_arguments_and_requires_the_matching_recovery_property() 
     let event = parsed
         .functions()
         .iter()
-        .find(|function| function.id() == "motion")
+        .find(|function| function.id() == "motion:2:1024")
         .unwrap()
         .motion()
         .unwrap();
@@ -222,7 +227,7 @@ fn motion_retains_event_arguments_and_requires_the_matching_recovery_property() 
                 .iter()
                 .map(|function| function.id())
                 .collect::<Vec<_>>(),
-            ["illuminance"]
+            ["illuminance:2:1005"]
         );
     }
     let p1: Value = serde_json::from_str(include_str!(
@@ -234,7 +239,7 @@ fn motion_retains_event_arguments_and_requires_the_matching_recovery_property() 
         parsed
             .functions()
             .iter()
-            .find(|function| function.id() == "occupancy")
+            .find(|function| function.id() == "occupancy:2:1")
             .unwrap()
             .state()
             .unwrap()

@@ -30,19 +30,22 @@ fn fan_endpoint_publishes_confirmed_device_type_cluster_and_shape() {
                     .iter()
                     .any(|device| device.dtype == 0x2b && device.drev == 4)
             );
+            let parent = node.endpoint(3).unwrap();
             assert!(
-                endpoint
+                parent
                     .device_types
                     .iter()
                     .any(|device| device.dtype == 0x13)
             );
+            assert!(parent.cluster(0x39).is_some());
+            assert!(parent.cluster(0x202).is_none());
             assert_eq!(
                 endpoint
                     .clusters
                     .iter()
                     .map(|cluster| cluster.id)
                     .collect::<Vec<_>>(),
-                [0x1d, 4, 3, 0x39, 6, 0x202]
+                [0x1d, 4, 3, 6, 0x202]
             );
             let cluster = endpoint.cluster(0x202).unwrap();
             assert_eq!(cluster.revision, 6);

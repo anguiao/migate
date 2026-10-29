@@ -32,7 +32,7 @@ fn public_fan_description_selects_confirmed_native_inputs() {
     let parsed = parse(&instance()).unwrap();
     assert_eq!(parsed.functions().len(), 1);
     let function = &parsed.functions()[0];
-    assert_eq!(function.id(), "main");
+    assert_eq!(function.id(), "fan:2");
     assert_eq!(
         function.kind(),
         FunctionKind::Fan {

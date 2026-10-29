@@ -51,7 +51,7 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
             until(|| c.clock.deadlines.lock().unwrap()[cursor..].contains(&due)).await;
             c.clock.advance(Duration::from_secs(10));
             until(|| cloud_active(&c, "one")).await;
-            let one = function(&c.context.registry, "one", "main");
+            let one = function(&c.context.registry, "one", "outlet:2");
             until(|| one.snapshot().power() == Some(Power::Off)).await;
             c.context.property_value_event(
                 &super::super::super::notifications::NotificationSource::Cloud(old),
@@ -137,7 +137,7 @@ fn held_online_subscription_cannot_retry_after_device_access_is_revoked() {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let token_requests = c.cloud.lock().unwrap().tokens;
             c.cloud.lock().unwrap().property_code = -704_012_904;
-            let one = function(&c.context.registry, "one", "main");
+            let one = function(&c.context.registry, "one", "outlet:2");
             assert_eq!(
                 one.execute(Command::On).await,
                 Err(crate::device::CommandError::Rejected(

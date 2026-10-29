@@ -56,13 +56,13 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                             && pending.reason.contains("subscribe"))
                 );
                 assert_eq!(
-                    function(&control.context.registry, "one", "main")
+                    function(&control.context.registry, "one", "outlet:2")
                         .snapshot()
                         .power(),
                     Some(Power::Unknown)
                 );
                 assert_eq!(
-                    function(&control.context.registry, "one", "main")
+                    function(&control.context.registry, "one", "outlet:2")
                         .snapshot()
                         .availability,
                     Availability::Available
@@ -96,7 +96,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 .await;
                 if timeout {
                     until(|| {
-                        function(&control.context.registry, "one", "main")
+                        function(&control.context.registry, "one", "outlet:2")
                             .snapshot()
                             .power()
                             == Some(Power::On)
@@ -110,7 +110,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 peer.list_changed(&["one"]);
                 until(|| {
                     matches!(
-                        function(&control.context.registry, "one", "main")
+                        function(&control.context.registry, "one", "outlet:2")
                             .snapshot()
                             .availability,
                         Availability::Unavailable(_)
@@ -120,7 +120,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 peer.state.borrow_mut().online.insert("one".into(), true);
                 peer.list_changed(&["one"]);
                 until(|| {
-                    function(&control.context.registry, "one", "main")
+                    function(&control.context.registry, "one", "outlet:2")
                         .snapshot()
                         .power()
                         == Some(Power::On)

@@ -87,7 +87,7 @@ fn state_bindings_restore_without_runtime_observations_or_endpoint_changes() {
 }
 
 #[test]
-fn adding_state_converts_single_control_then_preserves_existing_child_endpoints() {
+fn adding_state_preserves_existing_child_endpoints() {
     let outlet = fixture(
         "mixed",
         "cuco.plug.v3",
@@ -110,7 +110,7 @@ fn adding_state_converts_single_control_then_preserves_existing_child_endpoints(
     )
     .configuration;
     let old = &initial.devices[0];
-    assert_eq!(old.functions[0].endpoint, old.endpoint);
+    assert_ne!(old.functions[0].endpoint, old.endpoint);
     let mixed = |extra: bool| {
         let mut functions = outlet.device().functions().to_vec();
         functions.extend_from_slice(contact.device().functions());
@@ -119,10 +119,10 @@ fn adding_state_converts_single_control_then_preserves_existing_child_endpoints(
                 .device()
                 .functions()
                 .iter()
-                .find(|function| function.id() == "occupancy")
+                .find(|function| function.id() == "occupancy:2:1")
                 .unwrap();
             functions.push(crate::xiaomi::capability::ParsedFunction::occupancy(
-                "occupancy",
+                "occupancy:50:1",
                 "Occupancy",
                 crate::xiaomi::capability::StateBinding::new(
                     crate::xiaomi::capability::PropertyBinding { siid: 50, piid: 1 },
@@ -151,7 +151,7 @@ fn adding_state_converts_single_control_then_preserves_existing_child_endpoints(
             .iter()
             .all(|function| function.endpoint != current.endpoint)
     );
-    assert_ne!(current.functions[0].endpoint, old.functions[0].endpoint);
+    assert_eq!(current.functions[0].endpoint, old.functions[0].endpoint);
     let plan = next(&converted, scope("account", "home"), vec![mixed(true)]);
     assert!(plan.rebuild);
     assert_eq!(

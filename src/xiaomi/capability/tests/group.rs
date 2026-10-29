@@ -20,7 +20,7 @@ fn parses_real_group3_native_light_profile() {
     .unwrap();
     assert_eq!(parsed.functions().len(), 1);
     let function = &parsed.functions()[0];
-    assert_eq!(function.id(), "main");
+    assert_eq!(function.id(), "light:2");
     assert_eq!(
         function.kind(),
         FunctionKind::Light(LightProfile::ColorTemperature(

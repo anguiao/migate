@@ -27,7 +27,7 @@ fn work(c: &Control) -> Rc<super::work::DeviceWork> {
         .clone()
 }
 fn curtain(c: &Control) -> CurtainSnapshot {
-    function(&c.context.registry, "one", "main")
+    function(&c.context.registry, "one", "curtain:2")
         .snapshot()
         .curtain()
         .unwrap()
@@ -46,10 +46,10 @@ async fn settled(c: &Control) {
         value.current_position.value.is_some()
             && value.target_position.value.is_some()
             && value.status.value.is_some()
-            && work(c).function_observer("main").is_some()
+            && work(c).function_observer("curtain:2").is_some()
             && [STATUS, CURRENT, TARGET]
                 .iter()
-                .all(|binding| !work(c).refresh.borrow().contains("main", *binding))
+                .all(|binding| !work(c).refresh.borrow().contains("curtain:2", *binding))
     })
     .await;
 }

@@ -98,10 +98,12 @@ pub(super) fn sensor_native_without_battery(did: &str) -> NativeDescription {
     ))
     .unwrap();
     let parsed = parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap();
-    let device = crate::xiaomi::capability::ParsedDevice::new(
+    let device = crate::xiaomi::capability::ParsedDevice::new_with_battery_diagnostic(
         parsed.key().clone(),
         parsed.functions().to_vec(),
         parsed.refresh_trigger(),
+        None,
+        Some("battery service is missing".into()),
     )
     .unwrap();
     NativeDescription::new(
@@ -150,8 +152,6 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
     let mut endpoint = 2u16;
     for native in natives {
         let id = native.device().key().id.clone();
-        let single = native.device().functions().len() == 1
-            && !native.device().functions()[0].kind().is_read_only();
         let functions = native
             .device()
             .functions()
@@ -159,11 +159,7 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
             .enumerate()
             .map(|(index, function)| CommittedFunction {
                 id: function.id().to_owned(),
-                endpoint: if single {
-                    endpoint
-                } else {
-                    endpoint + 1 + index as u16
-                },
+                endpoint: endpoint + 1 + index as u16,
             })
             .collect();
         configuration.devices.push(CommittedDevice {
@@ -175,11 +171,7 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
             functions,
             native: Some(native.clone()),
         });
-        endpoint += if single {
-            1
-        } else {
-            native.device().functions().len() as u16 + 1
-        };
+        endpoint += native.device().functions().len() as u16 + 1;
     }
     configuration.devices.sort_by(|a, b| a.key.cmp(&b.key));
     store

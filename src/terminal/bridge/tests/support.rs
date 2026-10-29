@@ -39,8 +39,10 @@ pub(super) fn add_device(store: &Store, description: &PhysicalDeviceDescription)
         .max()
         .unwrap_or(1)
         + 1;
-    let mut device = crate::storage::tests::fixtures::identity(description, endpoint);
-    device.native = Some(native_for(description));
+    let native = native_for(description);
+    let native_description = native.physical_description(description.label());
+    let mut device = crate::storage::tests::fixtures::identity(&native_description, endpoint);
+    device.native = Some(native);
     configuration.devices.push(device);
     configuration.scope = Some(crate::storage::tests::fixtures::scope());
     store
@@ -143,7 +145,11 @@ pub(crate) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
     let registry = DeviceRegistry::new();
     registry.insert(device.clone());
     let line = if matches!(line, "on" | "off") {
-        format!("{line} {}", device.key().id)
+        format!(
+            "{line} {} {}",
+            device.key().id,
+            device.functions()[0].function_key().id
+        )
     } else {
         line.into()
     };

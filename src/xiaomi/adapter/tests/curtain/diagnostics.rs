@@ -10,7 +10,7 @@ fn terminal_lists_each_curtain_value_source_and_subscription() {
                 curtain(control).current_position.value == Some(37)
                     && curtain(control).target_position.value == Some(80)
                     && curtain(control).status.value == Some(CurtainMotion::Opening)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("curtain:2").is_some()
             })
             .await;
             peer.notify_value_at("one", CURRENT, json!(38), Some(201), false);
@@ -30,7 +30,7 @@ fn terminal_lists_each_curtain_value_source_and_subscription() {
                     assert!(text.contains(expected), "missing {expected}: {text}");
                 }
             }
-            for command in ["on one", "off one"] {
+            for command in ["on one curtain:2", "off one curtain:2"] {
                 let text = terminal(control, command).await;
                 assert!(
                     text.contains("device does not support this command"),
@@ -60,7 +60,7 @@ fn curtain_unknown_and_individual_read_failure_are_visible_and_clear_on_recovery
                     && work(control)
                         .refresh
                         .borrow()
-                        .property_problem("main", TARGET)
+                        .property_problem("curtain:2", TARGET)
                         .is_some()
             })
             .await;
@@ -82,13 +82,13 @@ fn curtain_unknown_and_individual_read_failure_are_visible_and_clear_on_recovery
                 }
             }
             peer.state.borrow_mut().read_fail.clear();
-            work(control).refresh_property("main", TARGET);
+            work(control).refresh_property("curtain:2", TARGET);
             until(|| {
                 curtain(control).target_position.value == Some(80)
                     && work(control)
                         .refresh
                         .borrow()
-                        .property_problem("main", TARGET)
+                        .property_problem("curtain:2", TARGET)
                         .is_none()
             })
             .await;

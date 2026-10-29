@@ -353,3 +353,32 @@ fn a_member_with_hidden_control_lists_only_visible_measurement_endpoints_for_sha
         );
     });
 }
+
+#[test]
+fn single_control_keeps_identity_and_shared_battery_on_its_parent() {
+    let (device, _) = PhysicalDevice::new(
+        PhysicalDeviceDescription::new(
+            DeviceKey::new("xiaomi", "plug"),
+            "Plug",
+            vec![FunctionDescription {
+                id: "outlet".into(),
+                label: "Power".into(),
+                kind: FunctionKind::Outlet,
+            }],
+        )
+        .unwrap()
+        .with_battery(),
+    );
+    let handler = model_handler(vec![entry(&device, 2, &[("outlet", 3)])]);
+    handler.access(|node| {
+        let parent = node.endpoint(2).unwrap();
+        let child = node.endpoint(3).unwrap();
+        assert!(parent.cluster(0x39).is_some());
+        assert!(parent.cluster(0x2f).is_some());
+        assert!(parent.cluster(6).is_none());
+        assert!(child.cluster(6).is_some());
+        assert!(child.cluster(0x39).is_none());
+        assert!(child.cluster(0x2f).is_none());
+        assert_eq!(child.semantic_tags[0].label, Some("Power"));
+    });
+}

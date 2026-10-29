@@ -47,7 +47,11 @@ pub(super) fn parse_curtain(
     );
     ParsedDevice::new(
         key,
-        vec![ParsedFunction::curtain_control("main", "窗帘", curtain)],
+        vec![ParsedFunction::curtain_control(
+            format!("curtain:{}", service.iid),
+            "窗帘",
+            curtain,
+        )],
         None,
     )
 }

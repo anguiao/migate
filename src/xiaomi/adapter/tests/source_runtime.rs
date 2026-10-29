@@ -11,7 +11,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let group = function(&c.context.registry, "group-1", "main");
+        let group = function(&c.context.registry, "group-1", "light:2");
         assert_eq!(
             group.description().temperature_interval(),
             Some(TemperatureInterval::new(2700, 6500).unwrap())
@@ -35,7 +35,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
         }
         c.context.reconcile("member-a").unwrap();
         until(|| {
-            function(&c.context.registry, "group-1", "main")
+            function(&c.context.registry, "group-1", "light:2")
                 .description()
                 .temperature_interval()
                 == Some(TemperatureInterval::new(3000, 6400).unwrap())
@@ -129,7 +129,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
                 Some(super::super::model::PathKind::Local)
             );
 
-            let old = function(&control.context.registry, "group-1", "main");
+            let old = function(&control.context.registry, "group-1", "light:2");
             assert_eq!(
                 old.description().temperature_interval(),
                 Some(TemperatureInterval::new(2700, 6500).unwrap())
@@ -148,7 +148,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             }
             control.context.reconcile("member-a").unwrap();
             until(|| {
-                function(&control.context.registry, "group-1", "main")
+                function(&control.context.registry, "group-1", "light:2")
                     .description()
                     .temperature_interval()
                     == Some(TemperatureInterval::new(3000, 6400).unwrap())
@@ -177,7 +177,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             assert_eq!(peer.count("rpcReq", "group-1", 2), writes);
 
             // Native notifications now project into the new logical sink.
-            let new = function(&control.context.registry, "group-1", "main");
+            let new = function(&control.context.registry, "group-1", "light:2");
             peer.notify_value(
                 "group-1",
                 PropertyBinding { siid: 2, piid: 1 },
@@ -205,7 +205,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().homes > 0).await;
-        let old = function(&c.context.registry, "one", "main");
+        let old = function(&c.context.registry, "one", "outlet:2");
         until(|| old.snapshot().power() == Some(Power::Off)).await;
 
         c.cloud.lock().unwrap().property_gate = Some(gate);
@@ -246,7 +246,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
                 .is_some_and(|now| !before.same_instance(&now))
         })
         .await;
-        let new = function(&c.context.registry, "one", "main");
+        let new = function(&c.context.registry, "one", "outlet:2");
         assert!(new.snapshot().power() != Some(Power::On));
 
         // The original HTTP future is still in flight after the consumer and
@@ -254,7 +254,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
         let inflight = || {
             c.context
                 .commands
-                .snapshot("one", ["main".to_owned()].into_iter())[0]
+                .snapshot("one", ["outlet:2".to_owned()].into_iter())[0]
                 .inflight
                 .is_some()
         };
@@ -269,7 +269,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
         let last = &c
             .context
             .commands
-            .snapshot("one", ["main".to_owned()].into_iter())[0]
+            .snapshot("one", ["outlet:2".to_owned()].into_iter())[0]
             .last;
         assert_eq!(
             last.as_ref().and_then(|status| status.result.clone()),

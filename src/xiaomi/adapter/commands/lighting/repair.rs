@@ -98,6 +98,7 @@ fn snapshot_members(context: &Context, plan: &RepairPlan) -> Vec<SourceRef> {
         .iter()
         .filter_map(|key| {
             let work = live.devices.get(&key.id)?.admitted.clone()?;
+            work.native.device().unique_light()?;
             let sink = work.current_sink();
             Some(SourceRef { work, sink })
         })
@@ -113,6 +114,24 @@ async fn member_task(
     epoch: u64,
     pending: Rc<RefCell<Option<LightRequest>>>,
 ) -> (Result<(), CommandError>, Option<AdapterError>) {
+    let Some(member_id) = member
+        .work
+        .native
+        .device()
+        .unique_light()
+        .map(|function| function.id().to_owned())
+    else {
+        return (Err(CommandError::Unsupported), None);
+    };
+    let Some(group_id) = group
+        .work
+        .native
+        .device()
+        .unique_light()
+        .map(|function| function.id().to_owned())
+    else {
+        return (Err(CommandError::Unsupported), None);
+    };
     let gate = context
         .write_gates
         .for_device(&member.work.key.id, context.clock.clone());
@@ -120,6 +139,7 @@ async fn member_task(
     let current: Rc<dyn Fn() -> Result<(), CommandError>> = {
         let member = member.clone();
         let pending = pending.clone();
+        let member_id = member_id.clone();
         Rc::new(move || {
             if let Some(request) = pending.borrow().as_ref() {
                 request.current_result()?;
@@ -136,7 +156,7 @@ async fn member_task(
                 || !group
                     .work
                     .physical()
-                    .function("main")
+                    .function(&group_id)
                     .unwrap()
                     .light_action_owns_writes(token)
             {
@@ -145,7 +165,7 @@ async fn member_task(
             if member
                 .sink
                 .physical
-                .function("main")
+                .function(&member_id)
                 .unwrap()
                 .snapshot()
                 .power()
@@ -164,9 +184,7 @@ async fn member_task(
         .work
         .native
         .device()
-        .functions()
-        .iter()
-        .find(|function| function.id() == "main")
+        .unique_light()
         .unwrap()
         .lighting()
         .unwrap()
@@ -176,7 +194,7 @@ async fn member_task(
     let properties = vec![(property, json!(rgb.packed()))];
     let operation = context.commands.begin_operation(
         &member.work.key.id,
-        "main",
+        &member_id,
         property,
         CommandTarget::Light(LightTarget::rgb(None, rgb)),
         properties.clone(),
@@ -195,7 +213,7 @@ async fn member_task(
             &member.sink,
             Batch {
                 after_write: Some(super::refresh_after_write),
-                function_id: "main",
+                function_id: &member_id,
                 properties: properties.clone(),
                 retain_feedback: false,
                 gate: &gate,
@@ -220,19 +238,12 @@ fn refresh_mode(work: &DeviceWork) {
     if work.life.is_closed() {
         return;
     }
-    let mode = work
-        .native
-        .device()
-        .functions()
-        .iter()
-        .find(|function| function.id() == "main")
-        .unwrap()
-        .lighting()
-        .unwrap()
-        .mode()
-        .unwrap()
-        .property();
-    work.request_dirty_read("main", mode);
+    let Some(function) = work.native.device().unique_light() else {
+        return;
+    };
+    if let Some(mode) = function.lighting().and_then(|light| light.mode()) {
+        work.request_dirty_read(function.id(), mode.property());
+    }
 }
 
 pub(super) fn refresh_native_color_mode(context: &Context, did: &str) {

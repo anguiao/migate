@@ -106,7 +106,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
         let mut run = pin!(handler.run(&ctx));
         assert!(poll_once(run.as_mut()).await.is_none());
         assert!(ctx.changes.borrow().contains(&(2, 6, 0)));
-        assert!(ctx.changes.borrow().contains(&(2, 57, 17)));
+        assert!(ctx.changes.borrow().contains(&(3, 57, 17)));
         ctx.changes.borrow_mut().clear();
         device.functions()[0].observe(true);
         assert!(poll_once(run.as_mut()).await.is_none());
@@ -121,8 +121,8 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
         assert_eq!(ctx.changes.borrow().len(), count);
         device.set_availability(Availability::Unavailable("offline".into()));
         assert!(poll_once(run.as_mut()).await.is_none());
-        assert!(ctx.changes.borrow().contains(&(2, 57, 17)));
-        assert!(ctx.events.borrow().contains(&(2, 57, 3)));
+        assert!(ctx.changes.borrow().contains(&(3, 57, 17)));
+        assert!(ctx.events.borrow().contains(&(3, 57, 3)));
         let count = ctx.changes.borrow().len();
         let events = ctx.events.borrow().len();
         device.set_availability(Availability::Unavailable("another reason".into()));
@@ -257,7 +257,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
 
         let (single, mut single_receivers) = super::physical("single", false);
         let (multi, mut receivers) = super::physical("multi", true);
-        let multi_entry = entry(&multi, 3, &[("outlet_1", 4), ("outlet_2", 5), ("usb", 6)]);
+        let multi_entry = entry(&multi, 4, &[("outlet_1", 5), ("outlet_2", 6), ("usb", 7)]);
         let stored = multi_entry.identity.clone();
         {
             let handler = model_handler(vec![single_entry(&single), multi_entry.clone()]);
@@ -271,13 +271,14 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
                     .iter()
                     .map(|endpoint| endpoint.id)
                     .collect::<Vec<_>>()),
-                [0, 1, 2, 3, 4, 5, 6]
+                [0, 1, 2, 3, 4, 5, 6, 7]
             );
             for (endpoint, expected) in [
-                (0, vec![1, 2, 3, 4, 5, 6]),
-                (1, vec![2, 3, 4, 5, 6]),
-                (3, vec![4, 5, 6]),
-                (4, vec![]),
+                (0, vec![1, 2, 3, 4, 5, 6, 7]),
+                (1, vec![2, 3, 4, 5, 6, 7]),
+                (3, vec![2]),
+                (4, vec![5, 6, 7]),
+                (5, vec![]),
             ] {
                 let bytes = read_bytes(&handler, &Context::at(&im, endpoint, 0x1d, 3))
                     .await
@@ -305,7 +306,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
                 );
             }
             handler.access(|node| {
-                assert!(node.endpoint(3).unwrap().cluster(6).is_none());
+                assert!(node.endpoint(4).unwrap().cluster(6).is_none());
                 for (index, function) in stored.functions.iter().enumerate() {
                     let endpoint = node.endpoint(function.endpoint).unwrap();
                     assert_eq!(endpoint.device_types.len(), 1);
@@ -338,7 +339,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
             assert!(poll_once(run.as_mut()).await.is_none());
             assert!(
                 report_value(
-                    &read_bytes(&handler, &Context::at(&im, 3, 0x39, 17))
+                    &read_bytes(&handler, &Context::at(&im, 4, 0x39, 17))
                         .await
                         .unwrap()
                 )
@@ -465,14 +466,15 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
                     .iter()
                     .map(|endpoint| endpoint.id)
                     .collect::<Vec<_>>()),
-                [0, 1, 2]
+                [0, 1, 2, 3]
             );
         }
 
         let mut entries = vec![single_entry(&rejoined)];
-        for endpoint in 7..27 {
+        for index in 0..20 {
+            let endpoint = 8 + index * 2;
             let (device, _receivers) = super::physical(&format!("extra-{endpoint}"), false);
-            entries.push(entry(&device, endpoint, &[("main", endpoint)]));
+            entries.push(entry(&device, endpoint, &[("main", endpoint + 1)]));
         }
         {
             let handler = model_handler(entries);
@@ -480,7 +482,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
             assert!(poll_once(run.as_mut()).await.is_none());
-            assert_eq!(handler.access(|node| node.endpoints.len()), 23);
+            assert_eq!(handler.access(|node| node.endpoints.len()), 44);
         }
         protocol.check_failure().unwrap();
     });

@@ -430,7 +430,7 @@ fn frozen_light_report_action_carries_root_bdbi_and_changed_bounds() {
             let directory = tempfile::tempdir().unwrap();
             let (subscription, before) = frozen_light_boot(directory.path(), 1, None);
             assert_eq!(before.roots[&0].1, 1);
-            assert_eq!(before.bdbis[&2].1, 1);
+            assert_eq!(before.bdbis[&3].1, 1);
             assert_eq!(before.lighting[&(2, 0x300, 0x400b)].1, 154);
             assert_eq!(before.lighting[&(2, 0x300, 0x400c)].1, 370);
 
@@ -439,7 +439,7 @@ fn frozen_light_report_action_carries_root_bdbi_and_changed_bounds() {
             // supplied root, frozen endpoint version and changed effective
             // bounds coherently through the protocol.
             assert_eq!(after.roots[&0].1, 2);
-            assert_eq!(after.bdbis[&2].1, 2);
+            assert_eq!(after.bdbis[&3].1, 2);
             assert_eq!(after.lighting[&(2, 0x300, 0x400b)].1, 250);
             assert_eq!(after.lighting[&(2, 0x300, 0x400c)].1, 333);
         })

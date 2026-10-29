@@ -50,7 +50,9 @@ pub(crate) fn plan_rgb_repair<'a>(
     group: &'a ParsedDevice,
     members: impl IntoIterator<Item = &'a NativeDescription>,
 ) -> Result<Option<RepairPlan>, String> {
-    let function = &group.functions()[0];
+    let function = group
+        .unique_light()
+        .ok_or_else(|| "native group light is missing or ambiguous".to_string())?;
     let light = function
         .lighting()
         .ok_or_else(|| "native group is not a light".to_string())?;
@@ -68,6 +70,12 @@ pub(crate) fn plan_rgb_repair<'a>(
         if member.model() != ls2307::MODEL {
             return Err(format!(
                 "member {} is not the ls2307 adapter",
+                member.device().key().id
+            ));
+        }
+        if member.device().unique_light().is_none() {
+            return Err(format!(
+                "member {} light is missing or ambiguous",
                 member.device().key().id
             ));
         }

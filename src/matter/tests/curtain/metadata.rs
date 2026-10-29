@@ -12,10 +12,13 @@ fn curtain_publishes_only_supported_window_covering_elements() {
                 .iter()
                 .any(|d| d.dtype == 0x0202 && d.drev == 6)
         );
-        assert!(endpoint.device_types.iter().any(|d| d.dtype == 0x0013));
+        let parent = node.endpoint(3).unwrap();
+        assert!(parent.device_types.iter().any(|d| d.dtype == 0x0013));
+        assert!(parent.cluster(0x39).is_some());
+        assert!(parent.cluster(0x102).is_none());
         assert_eq!(
             endpoint.clusters.iter().map(|c| c.id).collect::<Vec<_>>(),
-            [0x1d, 4, 3, 0x39, 0x102]
+            [0x1d, 4, 3, 0x102]
         );
         let cluster = endpoint.cluster(0x102).unwrap();
         assert_eq!(cluster.revision, 8);

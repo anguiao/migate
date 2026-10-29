@@ -9,7 +9,7 @@ fn http_pause_keeps_cloud_notifications_and_online_reports_cannot_resume_http() 
             c.clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let one = function(&c.context.registry, "one", "main");
+            let one = function(&c.context.registry, "one", "outlet:2");
             c.cloud.lock().unwrap().property_status = 503;
             assert!(one.execute(Command::On).await.is_err());
             assert!(c.context.http_paused.get());
@@ -55,7 +55,7 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
         block_on(rig.run(|c| async move {
             future::or(peer.run(&listener), async {
                 until(|| cloud_active(&c, "one")).await;
-                let one = function(&c.context.registry, "one", "main");
+                let one = function(&c.context.registry, "one", "outlet:2");
                 c.clock
                     .automatic
                     .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -165,7 +165,7 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                             .authentication,
                         crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                     ));
-                    function(&control.context.registry, "one", "main")
+                    function(&control.context.registry, "one", "outlet:2")
                         .execute(Command::On)
                         .await
                         .unwrap();

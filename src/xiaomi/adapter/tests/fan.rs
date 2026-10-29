@@ -13,7 +13,7 @@ fn rig() -> Rig {
     Rig::custom_lights(&[("one", "dmaker.fan.p5c", instance)])
 }
 fn fan(c: &Control) -> FanSnapshot {
-    function(&c.context.registry, "one", "main")
+    function(&c.context.registry, "one", "fan:2")
         .snapshot()
         .fan()
         .unwrap()
@@ -77,13 +77,13 @@ fn fan_reads_and_subscribes_each_independent_native_property() {
             until(|| {
                 let value = fan(control);
                 value.power.value == Some(true)
-                    && work(control).fan_mode_observation("main").value == Some(1)
+                    && work(control).fan_mode_observation("fan:2").value == Some(1)
                     && value.speed.value == Some(40)
                     && value.swing.value == Some(false)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("fan:2").is_some()
             })
             .await;
-            let subscriptions = work(control).subscription_status("main");
+            let subscriptions = work(control).subscription_status("fan:2");
             for binding in [POWER, MODE, SPEED, SWING] {
                 assert!(
                     subscriptions
@@ -101,13 +101,13 @@ fn fan_reads_and_subscribes_each_independent_native_property() {
                     .count(),
                 4
             );
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "fan:2");
             let revision = function.snapshot().revision;
             peer.notify_value_at("one", SPEED, json!(40), Some(700), false);
             until(|| fan(control).speed.source_time == Some(700)).await;
             assert_eq!(function.snapshot().revision, revision);
             peer.notify_value_at("one", MODE, json!(0), Some(701), false);
-            until(|| work(control).fan_mode_observation("main").value == Some(0)).await;
+            until(|| work(control).fan_mode_observation("fan:2").value == Some(0)).await;
             assert_eq!(fan(control).speed.value, Some(40));
             assert!(
                 !peer
@@ -129,14 +129,14 @@ fn fan_notification_wins_over_an_older_read() {
         c.peer(peer(), |peer| async move {
             until(|| {
                 fan(control).speed.value == Some(40)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("fan:2").is_some()
             })
             .await;
             peer.state
                 .borrow_mut()
                 .read_timeout
                 .insert(("one".into(), 8, 1));
-            work(control).refresh_property("main", SPEED);
+            work(control).refresh_property("fan:2", SPEED);
             until(|| {
                 peer.state.borrow().held.iter().any(|(publish, _)| {
                     let payload = decode_mips(&publish.payload).unwrap().payload;
@@ -148,7 +148,7 @@ fn fan_notification_wins_over_an_older_read() {
             until(|| fan(control).speed.value == Some(64)).await;
             peer.release_property("one", SPEED, json!({"value": 20, "updateTime": 1}))
                 .await;
-            until(|| !work(control).refresh.borrow().contains("main", SPEED)).await;
+            until(|| !work(control).refresh.borrow().contains("fan:2", SPEED)).await;
             assert_eq!(fan(control).speed.value, Some(64));
         })
         .await;
@@ -165,13 +165,13 @@ fn fan_recovery_reads_all_fields_and_rejects_retired_sources() {
         c.peer(peer(), |_| async move {
             until(|| {
                 fan(control).power.value == Some(true)
-                    && work(control).fan_mode_observation("main").value == Some(1)
+                    && work(control).fan_mode_observation("fan:2").value == Some(1)
                     && fan(control).speed.value == Some(40)
                     && fan(control).swing.value == Some(false)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("fan:2").is_some()
             })
             .await;
-            *captured.borrow_mut() = work(control).function_observer("main");
+            *captured.borrow_mut() = work(control).function_observer("fan:2");
         })
         .await;
         until(|| c.context.live.borrow().session.is_none()).await;
@@ -190,10 +190,10 @@ fn fan_recovery_reads_all_fields_and_rejects_retired_sources() {
         c.peer(replacement, |peer| async move {
             until(|| {
                 fan(control).power.value == Some(false)
-                    && work(control).fan_mode_observation("main").value == Some(0)
+                    && work(control).fan_mode_observation("fan:2").value == Some(0)
                     && fan(control).speed.value == Some(72)
                     && fan(control).swing.value == Some(true)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("fan:2").is_some()
             })
             .await;
             let observed = fan(control);
@@ -260,7 +260,7 @@ fn fan_pushless_device_keeps_local_reads_and_uses_cloud_notifications() {
             c.peer(peer, |peer| async move {
                 until(|| {
                     matches!(
-                        work(control).function_observer("main"),
+                        work(control).function_observer("fan:2"),
                         Some(NotificationSource::Cloud(_))
                     ) && fan(control).speed.value == Some(40)
                 })
@@ -280,10 +280,10 @@ fn fan_pushless_device_keeps_local_reads_and_uses_cloud_notifications() {
                 until(|| fan(control).speed.value == Some(62)).await;
                 peer.notify_value_at("one", SPEED, json!(99), Some(900), false);
                 cloud.property_at("one", 2, 3, json!(0));
-                until(|| work(control).fan_mode_observation("main").value == Some(0)).await;
+                until(|| work(control).fan_mode_observation("fan:2").value == Some(0)).await;
                 assert_eq!(fan(control).speed.value, Some(62));
                 assert_eq!(
-                    work(control).property_source("main", SPEED),
+                    work(control).property_source("fan:2", SPEED),
                     Some(PathKind::Cloud)
                 );
             })
@@ -306,7 +306,7 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
         c.peer(peer, |peer| async move {
             until(|| {
                 fan(control).power.value == Some(true)
-                    && work(control).fan_mode_observation("main").value == Some(1)
+                    && work(control).fan_mode_observation("fan:2").value == Some(1)
                     && peer.state.borrow().held.iter().any(|(publish, _)| {
                         let payload = decode_mips(&publish.payload).unwrap().payload;
                         payload["siid"] == 8 && payload["piid"] == 1
@@ -355,8 +355,8 @@ fn fan_failed_property_read_keeps_last_value_and_reports_its_own_problem() {
         c.peer(peer(), |peer| async move {
             until(|| {
                 fan(control).speed.value == Some(40)
-                    && work(control).function_observer("main").is_some()
-                    && !work(control).refresh.borrow().contains("main", SPEED)
+                    && work(control).function_observer("fan:2").is_some()
+                    && !work(control).refresh.borrow().contains("fan:2", SPEED)
             })
             .await;
             peer.notify_value_at("one", SPEED, json!(101), Some(801), false);
@@ -364,16 +364,16 @@ fn fan_failed_property_read_keeps_last_value_and_reports_its_own_problem() {
                 .borrow_mut()
                 .read_fail
                 .insert(("one".into(), 8, 1));
-            work(control).refresh_property("main", SPEED);
+            work(control).refresh_property("fan:2", SPEED);
             work(control)
                 .refresh
                 .borrow_mut()
-                .exhaust_pending("main", SPEED);
+                .exhaust_pending("fan:2", SPEED);
             until(|| {
                 work(control)
                     .refresh
                     .borrow()
-                    .property_problem("main", SPEED)
+                    .property_problem("fan:2", SPEED)
                     .is_some()
             })
             .await;
@@ -383,7 +383,7 @@ fn fan_failed_property_read_keeps_last_value_and_reports_its_own_problem() {
                 work(control)
                     .refresh
                     .borrow()
-                    .property_problem("main", MODE)
+                    .property_problem("fan:2", MODE)
                     .is_none()
             );
             let status = crate::terminal::AuthStatus::new(
@@ -415,12 +415,12 @@ fn fan_failed_property_read_keeps_last_value_and_reports_its_own_problem() {
                 }
             }
             peer.state.borrow_mut().read_fail.clear();
-            work(control).refresh_property("main", SPEED);
+            work(control).refresh_property("fan:2", SPEED);
             until(|| {
                 work(control)
                     .refresh
                     .borrow()
-                    .property_problem("main", SPEED)
+                    .property_problem("fan:2", SPEED)
                     .is_none()
             })
             .await;

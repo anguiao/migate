@@ -7,7 +7,7 @@ fn external_stop_converges_without_writes_and_cached_target_does_not_resume_it()
         let control = &c;
         c.peer(peer(), |peer| async move {
             settled(control).await;
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "curtain:2");
             peer.notify_value_at("one", STATUS, json!(2), Some(700), false);
             until(|| curtain(control).status.source_time == Some(700)).await;
             assert_eq!(function.matter_curtain().1, Some(37));
@@ -53,16 +53,16 @@ fn local_curtain_reads_and_subscribes_only_the_three_reported_properties() {
                     .is_some_and(|slot| slot.admitted.is_some())
             })
             .await;
-            assert_eq!(work(control).channels(), vec!["main"]);
+            assert_eq!(work(control).channels(), vec!["curtain:2"]);
             until(|| {
                 let value = curtain(control);
                 value.status.value == Some(CurtainMotion::Opening)
                     && value.current_position.value == Some(37)
                     && value.target_position.value == Some(80)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("curtain:2").is_some()
             })
             .await;
-            let subscriptions = work(control).subscription_status("main");
+            let subscriptions = work(control).subscription_status("curtain:2");
             for binding in [STATUS, CURRENT, TARGET] {
                 assert!(
                     subscriptions
@@ -109,7 +109,7 @@ fn curtain_local_notification_wins_over_old_read_and_failures_keep_observations(
                 .borrow_mut()
                 .read_timeout
                 .insert(("one".into(), 2, 3));
-            work(control).refresh_property("main", CURRENT);
+            work(control).refresh_property("curtain:2", CURRENT);
             until(|| {
                 peer.state.borrow().held.iter().any(|(publish, _)| {
                     let payload = decode_mips(&publish.payload).unwrap().payload;
@@ -126,7 +126,7 @@ fn curtain_local_notification_wins_over_old_read_and_failures_keep_observations(
             assert_eq!(curtain(control).current_position.value, Some(64));
             assert_eq!(curtain(control).target_position.value, Some(80));
 
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "curtain:2");
             let revision = function.snapshot().revision;
             peer.notify_value_at("one", CURRENT, json!(64), Some(403), false);
             until(|| curtain(control).current_position.source_time == Some(403)).await;
@@ -141,16 +141,16 @@ fn curtain_local_notification_wins_over_old_read_and_failures_keep_observations(
                 .borrow_mut()
                 .read_fail
                 .insert(("one".into(), 2, 4));
-            work(control).refresh_property("main", TARGET);
+            work(control).refresh_property("curtain:2", TARGET);
             work(control)
                 .refresh
                 .borrow_mut()
-                .exhaust_pending("main", TARGET);
+                .exhaust_pending("curtain:2", TARGET);
             until(|| {
                 work(control)
                     .refresh
                     .borrow()
-                    .property_problem("main", TARGET)
+                    .property_problem("curtain:2", TARGET)
                     .is_some()
             })
             .await;
@@ -159,7 +159,7 @@ fn curtain_local_notification_wins_over_old_read_and_failures_keep_observations(
                 work(control)
                     .refresh
                     .borrow()
-                    .property_problem("main", CURRENT)
+                    .property_problem("curtain:2", CURRENT)
                     .is_none()
             );
             let before = peer
@@ -207,9 +207,12 @@ fn curtain_baselines_are_independent_when_notification_arrives_with_last_suback(
                     && value.target_position.value == Some(80)
                     && value.status.value == Some(CurtainMotion::Opening)
                     && !peer.state.borrow().held_subs.is_empty()
-                    && [STATUS, CURRENT, TARGET]
-                        .iter()
-                        .all(|binding| !work(control).refresh.borrow().contains("main", *binding))
+                    && [STATUS, CURRENT, TARGET].iter().all(|binding| {
+                        !work(control)
+                            .refresh
+                            .borrow()
+                            .contains("curtain:2", *binding)
+                    })
             })
             .await;
             let reads = |binding: PropertyBinding| {
@@ -259,13 +262,13 @@ fn curtain_cloud_reads_and_reports_are_independent_and_old_http_read_cannot_over
             assert_eq!(initial.target_position.value, Some(75));
             assert_eq!(initial.status.value, Some(CurtainMotion::Stopped));
             assert_eq!(
-                function(&c.context.registry, "one", "main")
+                function(&c.context.registry, "one", "curtain:2")
                     .matter_curtain()
                     .1,
                 Some(25)
             );
             assert_eq!(
-                work(&c).property_source("main", CURRENT),
+                work(&c).property_source("curtain:2", CURRENT),
                 Some(PathKind::Cloud)
             );
             let reads = c.cloud.lock().unwrap().property_reads.clone();
@@ -281,7 +284,7 @@ fn curtain_cloud_reads_and_reports_are_independent_and_old_http_read_cannot_over
                 .read_gates
                 .insert(("one".into(), 2, 3), gate);
             let before = c.cloud.lock().unwrap().property_reads.len();
-            work(&c).refresh_property("main", CURRENT);
+            work(&c).refresh_property("curtain:2", CURRENT);
             until(|| c.cloud.lock().unwrap().property_reads.len() > before).await;
             cloud.property_at("one", 2, 3, json!(40));
             until(|| curtain(&c).current_position.value == Some(40)).await;
@@ -298,11 +301,11 @@ fn curtain_cloud_reads_and_reports_are_independent_and_old_http_read_cannot_over
                 .read_gates
                 .remove(&("one".into(), 2, 3));
             release.send(()).unwrap();
-            until(|| !work(&c).refresh.borrow().contains("main", CURRENT)).await;
+            until(|| !work(&c).refresh.borrow().contains("curtain:2", CURRENT)).await;
             assert_eq!(curtain(&c).current_position.value, Some(40));
             for binding in [STATUS, CURRENT, TARGET] {
                 assert_eq!(
-                    work(&c).property_source("main", binding),
+                    work(&c).property_source("curtain:2", binding),
                     Some(PathKind::Cloud)
                 );
             }

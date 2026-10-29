@@ -40,8 +40,10 @@ impl AppSource {
         if configuration.scope.is_none() {
             configuration.scope = Some(fixtures::scope());
             if let Some(description) = description {
-                let mut identity = fixtures::identity(&description, 2);
-                identity.native = Some(native_for(&description));
+                let native = native_for(&description);
+                let native_description = native.physical_description(description.label());
+                let mut identity = fixtures::identity(&native_description, 2);
+                identity.native = Some(native);
                 configuration.devices.push(identity);
             }
             fixtures::save(store, &configuration);

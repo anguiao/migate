@@ -31,7 +31,11 @@ pub(super) fn parse_fan(
     let fan = parse_fan_service(model, instance, service)?;
     ParsedDevice::new(
         key,
-        vec![ParsedFunction::fan_control("main", "风扇", fan)],
+        vec![ParsedFunction::fan_control(
+            format!("fan:{}", service.iid),
+            "风扇",
+            fan,
+        )],
         None,
     )
 }

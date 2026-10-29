@@ -25,7 +25,7 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
     // Supply each frozen topology directly. Only Matter subscription state is persisted.
     let mut entries = vec![single_entry(&single)];
     if boot != 2 {
-        let mut multi_entry = entry(&multi, 3, &[("outlet_1", 4), ("outlet_2", 5), ("usb", 6)]);
+        let mut multi_entry = entry(&multi, 4, &[("outlet_1", 5), ("outlet_2", 6), ("usb", 7)]);
         multi_entry.identity.configuration_version = boot as u32;
         entries.push(multi_entry);
     }
@@ -68,19 +68,19 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                     let (_, first) = subscribe_paths(&client, &paths).await.unwrap();
                     wait_committed(&state).await;
                     assert!(first.powers.is_empty());
-                    assert_eq!(first.parts[&0], [1, 2, 3, 4, 5, 6]);
-                    assert_eq!(first.parts[&1], [2, 3, 4, 5, 6]);
+                    assert_eq!(first.parts[&0], [1, 2, 3, 4, 5, 6, 7]);
+                    assert_eq!(first.parts[&1], [2, 3, 4, 5, 6, 7]);
                     paths.insert(
                         0,
                         AttrPath::from_gp(&GenericPath::new(None, Some(6), Some(0))),
                     );
                     paths.push(AttrPath::from_gp(&GenericPath::new(
-                        Some(4),
+                        Some(5),
                         Some(6),
                         Some(0),
                     )));
                     paths.push(AttrPath::from_gp(&GenericPath::new(
-                        Some(2),
+                        Some(3),
                         Some(0x39),
                         Some(24),
                     )));
@@ -88,15 +88,15 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                     wait_committed(&state).await;
                     assert_eq!(
                         baseline.powers.keys().copied().collect::<Vec<_>>(),
-                        [2, 4, 5, 6]
+                        [2, 5, 6, 7]
                     );
                     assert!(baseline.powers.values().all(|(_, power)| !power));
-                    assert_eq!(baseline.bdbis[&2].1, 1);
+                    assert_eq!(baseline.bdbis[&3].1, 1);
                     multi.function("usb").unwrap().observe(true);
                     let changed = receive_observed(&client, id).await.unwrap();
                     assert_eq!(
-                        changed.powers[&6],
-                        (baseline.powers[&6].0.wrapping_add(1), true)
+                        changed.powers[&7],
+                        (baseline.powers[&7].0.wrapping_add(1), true)
                     );
                     assert!(!changed.powers.contains_key(&2));
                     wait_committed(&state).await;
@@ -105,9 +105,9 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                 2 => {
                     let id = previous.unwrap();
                     let restored = receive_observed(&client, id).await.unwrap();
-                    assert_eq!(restored.unsupported, [4]);
-                    assert_eq!(restored.parts[&0], [1, 2]);
-                    assert_eq!(restored.parts[&1], [2]);
+                    assert_eq!(restored.unsupported, [5]);
+                    assert_eq!(restored.parts[&0], [1, 2, 3]);
+                    assert_eq!(restored.parts[&1], [2, 3]);
                     assert_eq!(restored.powers.keys().copied().collect::<Vec<_>>(), [2]);
                     wait_committed(&state).await;
                     id
@@ -115,20 +115,20 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                 _ => {
                     let id = previous.unwrap();
                     let added = receive_observed(&client, id).await.unwrap();
-                    assert_eq!(added.parts[&0], [1, 2, 3, 4, 5, 6]);
-                    assert_eq!(added.parts[&1], [2, 3, 4, 5, 6]);
+                    assert_eq!(added.parts[&0], [1, 2, 3, 4, 5, 6, 7]);
+                    assert_eq!(added.parts[&1], [2, 3, 4, 5, 6, 7]);
                     assert_eq!(
                         added.powers.keys().copied().collect::<Vec<_>>(),
-                        [2, 4, 5, 6]
+                        [2, 5, 6, 7]
                     );
                     assert!(!added.powers[&2].1);
-                    assert!(!added.powers[&4].1);
+                    assert!(!added.powers[&5].1);
                     wait_committed(&state).await;
                     multi.function("outlet_1").unwrap().observe(true);
                     let changed = receive_observed(&client, id).await.unwrap();
                     assert_eq!(
-                        changed.powers[&4],
-                        (added.powers[&4].0.wrapping_add(1), true)
+                        changed.powers[&5],
+                        (added.powers[&5].0.wrapping_add(1), true)
                     );
                     wait_committed(&state).await;
                     id

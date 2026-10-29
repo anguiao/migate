@@ -51,14 +51,18 @@ fn native(
 }
 
 fn outlet_native(id: &str, siid: u32) -> NativeDescription {
+    outlet_native_with_piid(id, siid, 1)
+}
+
+fn outlet_native_with_piid(id: &str, siid: u32, piid: u32) -> NativeDescription {
     native(
         id,
         "vendor.plug",
         OUTLET_TYPE,
         vec![ParsedFunction::outlet(
-            "main",
+            format!("outlet:{siid}"),
             "Main power",
-            PropertyBinding { siid, piid: 1 },
+            PropertyBinding { siid, piid },
         )],
         None,
     )
@@ -83,7 +87,7 @@ fn ct_light_native(id: &str, min: u32, max: u32) -> NativeDescription {
         id,
         "vendor.light",
         LIGHT_TYPE,
-        vec![ParsedFunction::light("main", "Light", power, lighting)],
+        vec![ParsedFunction::light("light:2", "Light", power, lighting)],
         None,
     )
 }
@@ -104,8 +108,6 @@ fn committed_at(
     configuration_version: u32,
     endpoint: u16,
 ) -> CommittedDevice {
-    let single = native.device().functions().len() == 1
-        && !native.device().functions()[0].kind().is_measurement();
     let functions = native
         .device()
         .functions()
@@ -113,11 +115,7 @@ fn committed_at(
         .enumerate()
         .map(|(index, function)| CommittedFunction {
             id: function.id().to_owned(),
-            endpoint: if single {
-                endpoint
-            } else {
-                endpoint + 1 + index as u16
-            },
+            endpoint: endpoint + 1 + index as u16,
         })
         .collect();
     CommittedDevice {
@@ -233,7 +231,7 @@ fn grouping_a_mixed_light_hides_only_control_and_preserves_sensors_and_battery()
             .iter()
             .map(|function| function.id.as_str())
             .collect::<Vec<_>>(),
-        ["temperature", "humidity", "contact"]
+        ["temperature:3:1001", "humidity:3:1008", "contact:2:2"]
     );
     assert_eq!(
         grouped.derived.served[&key("member")]
@@ -300,8 +298,8 @@ fn new_identity_starts_at_version_one() {
     assert_eq!(
         device.functions,
         [CommittedFunction {
-            id: "main".into(),
-            endpoint: 2
+            id: "outlet:2".into(),
+            endpoint: 3
         }]
     );
     assert_eq!(plan.derived.published, BTreeSet::from([key("outlet")]));
@@ -420,7 +418,7 @@ fn urn_only_change_is_reused_without_rebuild_or_a_version_bump() {
 #[test]
 fn native_control_change_replaces_and_rebuilds_without_a_version_bump() {
     let before = outlet_native("outlet", 2);
-    let after = outlet_native("outlet", 7);
+    let after = outlet_native_with_piid("outlet", 2, 7);
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
@@ -815,7 +813,7 @@ fn scope_change_replaces_the_native_instance_with_the_same_key() {
 fn hidden_member_replacement_rebuilds_without_a_version_bump() {
     let group_native = ct_light_native("group-1", 2700, 6500);
     let before = outlet_native("member", 2);
-    let after = outlet_native("member", 7);
+    let after = outlet_native_with_piid("member", 2, 7);
     let relation = GroupRelation {
         group_did: "group-1".into(),
         record_did: "record-1".into(),

@@ -21,12 +21,17 @@ fn one_failed_measurement_subscription_keeps_other_measurements_live() {
                 battery_status(&control.context, "sensor").notification_source,
                 Some(PathKind::Local)
             );
-            until(|| measurement(&control.context, "sensor", "humidity").value == Some(45.0)).await;
+            until(|| {
+                measurement(&control.context, "sensor", "humidity:3:1008").value == Some(45.0)
+            })
+            .await;
             peer.notify_value_at("sensor", TEMPERATURE, json!(22.5), Some(22), false);
-            until(|| measurement(&control.context, "sensor", "temperature").value == Some(22.5))
-                .await;
+            until(|| {
+                measurement(&control.context, "sensor", "temperature:3:1001").value == Some(22.5)
+            })
+            .await;
             assert_eq!(
-                measurement(&control.context, "sensor", "humidity").value,
+                measurement(&control.context, "sensor", "humidity:3:1008").value,
                 Some(45.0)
             );
         })
@@ -59,16 +64,18 @@ fn measurement_notification_sources_switch_and_recover_independently() {
                         .collect::<BTreeMap<_, _>>()
                 };
                 until(|| {
-                    sources().get("temperature") == Some(&Some(PathKind::Local))
-                        && sources().get("humidity") == Some(&Some(PathKind::Cloud))
+                    sources().get("temperature:3:1001") == Some(&Some(PathKind::Local))
+                        && sources().get("humidity:3:1008") == Some(&Some(PathKind::Cloud))
                 })
                 .await;
                 peer.value("sensor", TEMPERATURE, json!(22.0));
                 peer.notify_value_at("sensor", TEMPERATURE, json!(22.0), Some(100), false);
                 cloud.property_at("sensor", 3, 1008, json!(46.0));
                 until(|| {
-                    measurement(&control.context, "sensor", "temperature").value == Some(22.0)
-                        && measurement(&control.context, "sensor", "humidity").value == Some(46.0)
+                    measurement(&control.context, "sensor", "temperature:3:1001").value
+                        == Some(22.0)
+                        && measurement(&control.context, "sensor", "humidity:3:1008").value
+                            == Some(46.0)
                 })
                 .await;
                 let temperature_subscriptions = peer
@@ -86,27 +93,29 @@ fn measurement_notification_sources_switch_and_recover_independently() {
                 peer.state.borrow_mut().sub_reject.clear();
                 peer.list_changed(&["sensor"]);
                 until(|| {
-                    sources().get("humidity") == Some(&Some(PathKind::Local))
+                    sources().get("humidity:3:1008") == Some(&Some(PathKind::Local))
                         && !work(&control.context, "sensor")
                             .refresh
                             .borrow()
-                            .contains("humidity", HUMIDITY)
+                            .contains("humidity:3:1008", HUMIDITY)
                 })
                 .await;
                 peer.value("sensor", HUMIDITY, json!(47.0));
                 cloud.property_at("sensor", 3, 1008, json!(90.0));
                 peer.notify_value_at("sensor", HUMIDITY, json!(47.0), Some(101), false);
-                until(|| measurement(&control.context, "sensor", "humidity").value == Some(47.0))
-                    .await;
+                until(|| {
+                    measurement(&control.context, "sensor", "humidity:3:1008").value == Some(47.0)
+                })
+                .await;
                 for _ in 0..30 {
                     future::yield_now().await;
                 }
                 assert_eq!(
-                    measurement(&control.context, "sensor", "humidity").value,
+                    measurement(&control.context, "sensor", "humidity:3:1008").value,
                     Some(47.0)
                 );
                 assert_eq!(
-                    measurement(&control.context, "sensor", "temperature").value,
+                    measurement(&control.context, "sensor", "temperature:3:1001").value,
                     Some(22.0)
                 );
                 assert_eq!(
@@ -136,8 +145,10 @@ fn a_read_only_device_is_available_without_notifications_and_recovers_them() {
         peer.state.borrow_mut().pushless.insert("sensor".into());
         let control = &c;
         c.peer(peer, |peer| async move {
-            until(|| measurement(&control.context, "sensor", "temperature").value == Some(19.0))
-                .await;
+            until(|| {
+                measurement(&control.context, "sensor", "temperature:3:1001").value == Some(19.0)
+            })
+            .await;
             let status = control
                 .context
                 .status
@@ -181,8 +192,10 @@ fn a_read_only_device_is_available_without_notifications_and_recovers_them() {
             })
             .await;
             peer.notify_value_at("sensor", TEMPERATURE, json!(19.5), Some(9), false);
-            until(|| measurement(&control.context, "sensor", "temperature").value == Some(19.5))
-                .await;
+            until(|| {
+                measurement(&control.context, "sensor", "temperature:3:1001").value == Some(19.5)
+            })
+            .await;
         })
         .await;
     }));
@@ -196,8 +209,9 @@ fn losing_the_notification_path_retains_readings_and_recovers() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
-                measurement(&control.context, "sensor", "temperature").value == Some(20.0)
-                    && measurement(&control.context, "sensor", "humidity").value == Some(40.0)
+                measurement(&control.context, "sensor", "temperature:3:1001").value == Some(20.0)
+                    && measurement(&control.context, "sensor", "humidity:3:1008").value
+                        == Some(40.0)
                     && control
                         .context
                         .status
@@ -226,11 +240,11 @@ fn losing_the_notification_path_retains_readings_and_recovers() {
             })
             .await;
             assert_eq!(
-                measurement(&control.context, "sensor", "temperature").value,
+                measurement(&control.context, "sensor", "temperature:3:1001").value,
                 Some(20.0)
             );
             assert_eq!(
-                measurement(&control.context, "sensor", "humidity").value,
+                measurement(&control.context, "sensor", "humidity:3:1008").value,
                 Some(40.0)
             );
             assert_eq!(
@@ -262,9 +276,12 @@ fn losing_the_notification_path_retains_readings_and_recovers() {
             })
             .await;
             peer.notify_value_at("sensor", HUMIDITY, json!(41.0), Some(5), false);
-            until(|| measurement(&control.context, "sensor", "humidity").value == Some(41.0)).await;
+            until(|| {
+                measurement(&control.context, "sensor", "humidity:3:1008").value == Some(41.0)
+            })
+            .await;
             assert_eq!(
-                measurement(&control.context, "sensor", "temperature").value,
+                measurement(&control.context, "sensor", "temperature:3:1001").value,
                 Some(20.0)
             );
         })
@@ -280,8 +297,9 @@ fn a_retired_or_old_source_cannot_update_sensor_state() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
-                measurement(&control.context, "sensor", "temperature").value == Some(20.0)
-                    && measurement(&control.context, "sensor", "humidity").value == Some(40.0)
+                measurement(&control.context, "sensor", "temperature:3:1001").value == Some(20.0)
+                    && measurement(&control.context, "sensor", "humidity:3:1008").value
+                        == Some(40.0)
             })
             .await;
             work(&control.context, "sensor").retire();
@@ -291,11 +309,11 @@ fn a_retired_or_old_source_cannot_update_sensor_state() {
                 future::yield_now().await;
             }
             assert_eq!(
-                measurement(&control.context, "sensor", "temperature").value,
+                measurement(&control.context, "sensor", "temperature:3:1001").value,
                 Some(20.0)
             );
             assert_eq!(
-                measurement(&control.context, "sensor", "humidity").value,
+                measurement(&control.context, "sensor", "humidity:3:1008").value,
                 Some(40.0)
             );
         })

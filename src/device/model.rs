@@ -214,9 +214,6 @@ impl FunctionDescription {
     pub fn is_measurement(&self) -> bool {
         self.kind.is_measurement()
     }
-    pub fn is_read_only(&self) -> bool {
-        self.kind.is_read_only()
-    }
 }
 
 /// A physical device description with non-empty, uniquely keyed functions.
@@ -277,9 +274,15 @@ impl PhysicalDeviceDescription {
     pub(crate) fn set_label(&mut self, label: impl Into<String>) {
         self.label = label.into();
     }
-    /// A native light group keeps its stable main function and identity.
-    pub(crate) fn with_main_light_profile(mut self, profile: LightProfile) -> Self {
-        self.functions[0].kind = FunctionKind::Light(profile);
+    /// Update a selected light without changing its function identity.
+    pub(crate) fn with_light_profile(mut self, id: &str, profile: LightProfile) -> Self {
+        let function = self
+            .functions
+            .iter_mut()
+            .find(|function| function.id == id)
+            .unwrap();
+        debug_assert!(function.kind.is_light());
+        function.kind = FunctionKind::Light(profile);
         self
     }
     pub(crate) fn into_parts(self) -> (DeviceKey, String, Vec<FunctionDescription>, bool) {

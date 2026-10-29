@@ -71,7 +71,7 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
                 .admitted
                 .clone()
                 .unwrap();
-            let old_read = work.observations.read_stamp("main", BRIGHTNESS);
+            let old_read = work.observations.read_stamp("light:2", BRIGHTNESS);
             light
                 .begin_light_action(brightness(80.0), true)
                 .unwrap()
@@ -81,7 +81,7 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
             // Neither a read started before the receipt nor a cached report
             // proves that the displayed value still matches the device.
             work.observe_read_at(
-                "main",
+                "light:2",
                 BRIGHTNESS,
                 &old_read,
                 &json!(32768),
@@ -102,7 +102,12 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
             assert_eq!(peer.count("rpcReq", "one", 0), 2);
 
             peer.notify_value("one", BRIGHTNESS, json!(32768), false);
-            until(|| !work.observations.has_unconfirmed_write("main", BRIGHTNESS)).await;
+            until(|| {
+                !work
+                    .observations
+                    .has_unconfirmed_write("light:2", BRIGHTNESS)
+            })
+            .await;
             light
                 .begin_light_action(brightness(value + 0.00001), true)
                 .unwrap()
@@ -200,7 +205,7 @@ fn retired_consumer_keeps_sent_http_startup_owned_until_original_receipt() {
     }
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
-        let light = function(&c.context.registry, "one", "main");
+        let light = function(&c.context.registry, "one", "light:2");
         until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         c.cloud.lock().unwrap().property_gate = Some(gate);
         let action = light.begin_light_action(brightness(60.0), false).unwrap();
@@ -250,7 +255,7 @@ fn cloud_partial_auth_rejection_clears_runtime_light_state_when_access_is_restri
     }
     block_on(rig.run(|c| async move {
         until(|| c.context.cloud_scope_valid.get()).await;
-        let light = function(&c.context.registry, "one", "main");
+        let light = function(&c.context.registry, "one", "light:2");
         until(|| {
             light.snapshot().lighting().unwrap().mode == Some(LightMode::Temperature)
                 && light.snapshot().lighting().unwrap().color.is_some()
@@ -445,7 +450,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
     }
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
-        let old = function(&c.context.registry, "one", "main");
+        let old = function(&c.context.registry, "one", "light:2");
         until(|| old.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         c.cloud.lock().unwrap().property_gate = Some(gate);
         let first = old.begin_light_action(brightness(60.0), false).unwrap();
@@ -485,7 +490,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
                 .is_some_and(|now| !before.same_instance(&now))
         })
         .await;
-        let new = function(&c.context.registry, "one", "main");
+        let new = function(&c.context.registry, "one", "light:2");
         until(|| new.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         let next = new.begin_light_action(brightness(70.0), true).unwrap();
         async_io::Timer::after(std::time::Duration::from_millis(30)).await;

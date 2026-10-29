@@ -35,8 +35,8 @@ fn new_group_and_member_targets_take_over_shared_groups_by_dimension() {
     block_on(overlapping_groups().run(|c| async move {
         repair_ready(&c).await;
         until(|| c.context.group_repair("group-2").is_some()).await;
-        let first = function(&c.context.registry, "group-1", "main");
-        let second = function(&c.context.registry, "group-2", "main");
+        let first = function(&c.context.registry, "group-1", "light:2");
+        let second = function(&c.context.registry, "group-2", "light:2");
         let earlier = first.begin_light_action(rgb(0x19aa33), false).unwrap();
         earlier.accepted().await.unwrap();
         assert!(first.light_action_current(earlier.token()));
@@ -66,7 +66,7 @@ fn new_group_and_member_targets_take_over_shared_groups_by_dimension() {
             "brightness and color remain independent"
         );
 
-        let member = function(&c.context.registry, "member-a", "main");
+        let member = function(&c.context.registry, "member-a", "light:2");
         member.execute(Command::Off).await.unwrap();
         assert!(!first.light_action_current(brightness.token()));
         assert!(
@@ -100,14 +100,14 @@ fn member_notifications_update_feedback_without_stopping_group_actions() {
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("member-a") == Some(PathKind::Local))
                 .await;
-            let member = function(&control.context.registry, "member-a", "main");
+            let member = function(&control.context.registry, "member-a", "light:2");
             until(|| {
                 member.snapshot().power() == Some(Power::On)
                     && member.snapshot().lighting().unwrap().mode
                         == Some(crate::device::LightMode::Temperature)
             })
             .await;
-            let group = function(&control.context.registry, "group-1", "main");
+            let group = function(&control.context.registry, "group-1", "light:2");
             // Local reads alone must refresh the representative, without a push.
             let work = control.context.live.borrow().devices["member-a"]
                 .admitted
@@ -116,7 +116,7 @@ fn member_notifications_update_feedback_without_stopping_group_actions() {
             for (piid, value) in [(1, json!(0xaabbcc)), (2, json!(1))] {
                 let binding = crate::xiaomi::capability::PropertyBinding { siid: 4, piid };
                 peer.value("member-a", binding, value);
-                work.request_dirty_read("main", binding);
+                work.request_dirty_read("light:2", binding);
             }
             until(|| {
                 let state = group.snapshot().lighting().unwrap();
@@ -181,7 +181,7 @@ fn newer_shared_target_retires_an_older_completed_frames_unsent_member() {
             .unwrap()
             .write_gates
             .insert("member-b".into(), gate);
-        let member = function(&c.context.registry, "member-b", "main");
+        let member = function(&c.context.registry, "member-b", "light:2");
         let holding = async {
             member.execute(Command::Off).await.unwrap();
         };
@@ -196,14 +196,14 @@ fn newer_shared_target_retires_an_older_completed_frames_unsent_member() {
                     .any(|item| item["did"] == "member-b" && item["siid"] == 2 && item["piid"] == 1)
             })
             .await;
-            let first = function(&c.context.registry, "group-1", "main");
+            let first = function(&c.context.registry, "group-1", "light:2");
             first
                 .begin_light_action(rgb(0x00ff00), true)
                 .unwrap()
                 .accepted()
                 .await
                 .unwrap();
-            let second = function(&c.context.registry, "group-2", "main");
+            let second = function(&c.context.registry, "group-2", "light:2");
             second
                 .begin_light_action(rgb(0xff0000), true)
                 .unwrap()
@@ -220,7 +220,7 @@ fn newer_shared_target_retires_an_older_completed_frames_unsent_member() {
             let status = c
                 .context
                 .commands
-                .snapshot("member-b", ["main".to_owned()].into_iter());
+                .snapshot("member-b", ["light:2".to_owned()].into_iter());
             status[0].inflight.is_none()
                 && status[0].last.as_ref().is_some_and(|last| {
                     last.result == Some(Ok(()))

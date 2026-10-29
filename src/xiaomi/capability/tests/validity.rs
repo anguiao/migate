@@ -202,52 +202,56 @@ fn mired_conversion_keeps_precision_until_one_native_quantization() {
 
 #[test]
 fn parsed_devices_require_non_empty_unique_functions_and_supported_topologies() {
-    let outlet = ParsedFunction::outlet("main", "Main", property(2, 1));
+    let outlet = ParsedFunction::outlet("outlet:2", "Main", property(2, 1));
     assert!(ParsedDevice::new(key(), vec![], None).is_err());
     assert!(ParsedDevice::new(key(), vec![outlet.clone(), outlet.clone()], None).is_err());
     assert!(ParsedDevice::new(key(), vec![outlet.clone()], None).is_ok());
 
-    // Arbitrary multi-outlet layouts are outside the supported range.
-    let second = ParsedFunction::outlet("outlet_2", "Second", property(3, 1));
-    assert!(ParsedDevice::new(key(), vec![outlet.clone(), second.clone()], None).is_err());
+    // Distinct source services have distinct stable function identities.
+    let second = ParsedFunction::outlet("outlet:3", "Second", property(3, 1));
+    assert!(ParsedDevice::new(key(), vec![outlet.clone(), second.clone()], None).is_ok());
 
     // The concrete cp7pd three-channel layout is admitted with its trigger.
     let cp7pd = |id, siid| ParsedFunction::outlet(id, id, property(siid, 1));
     assert!(
         ParsedDevice::new(
             key(),
-            vec![cp7pd("outlet_1", 3), cp7pd("outlet_2", 4), cp7pd("usb", 9),],
+            vec![
+                cp7pd("outlet:3", 3),
+                cp7pd("outlet:4", 4),
+                cp7pd("outlet:9", 9),
+            ],
             Some(property(2, 1)),
         )
         .is_ok()
     );
     assert!(
-        ParsedDevice::new(key(), vec![cp7pd("outlet_1", 3)], Some(property(2, 1))).is_err(),
-        "a trigger alone does not make a cp7pd layout"
+        ParsedDevice::new(key(), vec![cp7pd("outlet:3", 3)], Some(property(2, 1))).is_ok(),
+        "model-specific topology is validated at the native boundary"
     );
 
     // Unsupported combinations stay rejected even when bindings differ.
-    let overlapping = ParsedFunction::outlet("outlet_2", "Second", property(2, 1));
+    let overlapping = ParsedFunction::outlet("outlet:2", "Second", property(2, 1));
     assert!(ParsedDevice::new(key(), vec![outlet.clone(), overlapping], None).is_err());
 
     let light = ParsedFunction::light(
-        "main",
+        "light:2",
         "Light",
         property(2, 1),
         LightBindings::new(None, None, None, None).unwrap(),
     );
     assert!(ParsedDevice::new(key(), vec![light.clone(), outlet.clone()], None).is_err());
-    assert!(ParsedDevice::new(key(), vec![light.clone()], Some(property(9, 1))).is_err());
+    assert!(ParsedDevice::new(key(), vec![light.clone()], Some(property(9, 1))).is_ok());
     assert!(ParsedDevice::new(key(), vec![light], None).is_ok());
 }
 
 #[test]
-fn native_description_rejects_kind_and_cp7pd_recovery_mismatches() {
+fn native_description_rejects_cp7pd_recovery_mismatches() {
     let outlet_type = "urn:miot-spec-v2:device:outlet:0000A002:test:1";
     let cp7pd_type = "urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:1";
 
     let light = ParsedFunction::light(
-        "main",
+        "light:2",
         "Light",
         property(2, 1),
         LightBindings::new(None, None, None, None).unwrap(),
@@ -259,17 +263,17 @@ fn native_description_rejects_kind_and_cp7pd_recovery_mismatches() {
             outlet_type.into(),
             light_device.clone()
         )
-        .is_err(),
-        "a light kind cannot hide behind an outlet instance type"
+        .is_ok(),
+        "a control function is independent of the physical device category"
     );
 
     let channel = |id, siid| ParsedFunction::outlet(id, id, property(siid, 1));
     let valid = ParsedDevice::new(
         key(),
         vec![
-            channel("outlet_1", 3),
-            channel("outlet_2", 4),
-            channel("usb", 9),
+            channel("outlet:3", 3),
+            channel("outlet:4", 4),
+            channel("outlet:9", 9),
         ],
         Some(property(2, 1)),
     )
@@ -292,9 +296,9 @@ fn native_description_rejects_kind_and_cp7pd_recovery_mismatches() {
     let wrong_trigger = ParsedDevice::new(
         key(),
         vec![
-            channel("outlet_1", 3),
-            channel("outlet_2", 4),
-            channel("usb", 9),
+            channel("outlet:3", 3),
+            channel("outlet:4", 4),
+            channel("outlet:9", 9),
         ],
         Some(property(2, 2)),
     )
@@ -312,9 +316,9 @@ fn native_description_rejects_kind_and_cp7pd_recovery_mismatches() {
     let wrong_channel = ParsedDevice::new(
         key(),
         vec![
-            channel("outlet_1", 5),
-            channel("outlet_2", 4),
-            channel("usb", 9),
+            channel("outlet:5", 5),
+            channel("outlet:4", 4),
+            channel("outlet:9", 9),
         ],
         Some(property(2, 1)),
     )
@@ -341,5 +345,22 @@ fn declared_temperature_maximum_still_bounds_the_native_grid() {
     assert!(
         TemperatureBinding::new(property(2, 3), NumericFormat::Uint32, range).is_err(),
         "the declared maximum is part of the accepted domain"
+    );
+}
+
+#[test]
+fn native_source_model_accepts_distinct_control_services() {
+    let functions = vec![
+        ParsedFunction::outlet("outlet:2", "First", property(2, 1)),
+        ParsedFunction::outlet("outlet:3", "Second", property(3, 1)),
+    ];
+    let device = ParsedDevice::new(key(), functions, None).unwrap();
+    assert!(
+        NativeDescription::new(
+            "vendor.plug".into(),
+            "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1".into(),
+            device,
+        )
+        .is_ok()
     );
 }

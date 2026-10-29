@@ -13,13 +13,13 @@ fn retired_instance_cannot_resume_a_sent_speed_or_affect_its_replacement() {
             until(|| {
                 fan(control).power.value == Some(true)
                     && fan(control).speed.value == Some(40)
-                    && work(control).fan_mode_observation("main").value == Some(1)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).fan_mode_observation("fan:2").value == Some(1)
+                    && work(control).function_observer("fan:2").is_some()
             })
             .await;
             let key = DeviceKey::new("xiaomi", "one");
             let old_device = control.context.registry.get(&key).unwrap();
-            let old = old_device.function("main").unwrap();
+            let old = old_device.function("fan:2").unwrap();
             peer.state.borrow_mut().hold_writes = true;
             let sent = old.begin_fan(FanCommand::Speed(60)).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
@@ -61,7 +61,7 @@ fn retired_instance_cannot_resume_a_sent_speed_or_affect_its_replacement() {
                 .registry
                 .get(&key)
                 .unwrap()
-                .function("main")
+                .function("fan:2")
                 .unwrap();
             until(|| {
                 replacement.snapshot().availability == Availability::Available

@@ -88,7 +88,7 @@ fn degraded_local_can_still_accept_explicit_writes_when_cloud_is_ineligible() {
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let one = function(&control.context.registry, "one", "main");
+            let one = function(&control.context.registry, "one", "outlet:2");
             let reads = peer.count("get", "one", 2);
             peer.state.borrow_mut().hold_writes = true;
             assert!(one.execute(Command::On).await.is_err());
@@ -126,7 +126,7 @@ fn sent_timeout_degrades_without_replaying_the_write_or_revoking_local_notificat
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let one = function(&control.context.registry, "one", "main");
+            let one = function(&control.context.registry, "one", "outlet:2");
             peer.state.borrow_mut().hold_writes = true;
             assert_eq!(
                 one.execute(Command::On).await,
@@ -160,7 +160,7 @@ fn valid_recovery_list_restores_priority_even_when_the_device_is_still_offline()
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let one = function(&control.context.registry, "one", "main");
+            let one = function(&control.context.registry, "one", "outlet:2");
             peer.state.borrow_mut().hold_writes = true;
             assert!(one.execute(Command::On).await.is_err());
             let lists = peer.lists();

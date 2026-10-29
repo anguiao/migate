@@ -126,7 +126,7 @@ fn connect(matter: &Matter<'_>, local: u64, peer: u64, session_id: u16) {
 async fn subscribe(client: &Matter<'_>, initial: bool) -> Result<u32, Error> {
     let paths = [
         AttrPath::from_gp(&GenericPath::new(Some(2), Some(6), Some(0))),
-        AttrPath::from_gp(&GenericPath::new(Some(2), Some(57), Some(17))),
+        AttrPath::from_gp(&GenericPath::new(Some(3), Some(57), Some(17))),
     ];
     let exchange = Exchange::initiate(
         client,
@@ -158,7 +158,7 @@ async fn subscribe(client: &Matter<'_>, initial: bool) -> Result<u32, Error> {
                 .attrs::<bool>(57, 17)
                 .map(|(endpoint, value)| (endpoint, value.unwrap()))
                 .collect::<Vec<_>>(),
-            [(2, true)]
+            [(3, true)]
         );
         match chunk.complete().await? {
             SubscribeOutcome::NextChunk(next) => chunk = next,
@@ -194,7 +194,7 @@ async fn expect_report(
                     .attrs::<bool>(57, 17)
                     .map(|(endpoint, value)| (endpoint, value.unwrap()))
                     .collect::<Vec<_>>(),
-                [(2, expected)]
+                [(3, expected)]
             );
         }
         if let Some(power) = power {
@@ -347,10 +347,10 @@ async fn read_state(
 ) {
     let attrs = [
         AttrPath::from_gp(&GenericPath::new(Some(2), Some(6), Some(0))),
-        AttrPath::from_gp(&GenericPath::new(Some(2), Some(57), Some(17))),
+        AttrPath::from_gp(&GenericPath::new(Some(3), Some(57), Some(17))),
     ];
     let events = [EventPath::from_gp(&GenericPath::new(
-        Some(2),
+        Some(3),
         Some(57),
         Some(3),
     ))];
@@ -410,7 +410,7 @@ async fn read_state(
                     let EventResp::Data(event) = event.unwrap() else {
                         panic!("event data expected")
                     };
-                    assert_eq!(event.path.endpoint, Some(2));
+                    assert_eq!(event.path.endpoint, Some(3));
                     assert_eq!(event.path.cluster, Some(57));
                     assert_eq!(event.path.event, Some(3));
                     observed_events.push(

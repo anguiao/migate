@@ -53,7 +53,7 @@ impl TestProcess {
         lookup.wait_for_output(Stream::Stdout, &format!(":{port} (interface"));
         process.send("status\n");
         process.wait_for_output(Stream::Stdout, "test-outlet (Test Outlet): initializing\n");
-        process.wait_for_output(Stream::Stdout, "  main (Main power): unknown");
+        process.wait_for_output(Stream::Stdout, "  outlet:2 (Main power): unknown");
         fs::write(&gate, b"ready").unwrap();
         process.wait_for_output(
             Stream::Stderr,
@@ -84,7 +84,7 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
     for (close_input, initial) in [(false, false), (true, true)] {
         let (mut process, port) = TestProcess::bridge(directory.path(), initial);
         assert_ne!(port, peer_port);
-        process.send("status\non test-outlet\nstatus\n");
+        process.send("status\non test-outlet outlet:2\nstatus\n");
         if close_input {
             process.close_input();
         }
@@ -104,12 +104,12 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
         assert!(output.contains("Manual pairing code: "), "{output}");
         assert!(
             output.contains(&format!(
-                "main (Main power): {}",
+                "outlet:2 (Main power): {}",
                 if initial { "on" } else { "off" }
             )),
             "{output}"
         );
-        assert!(output.contains("main (Main power): on"), "{output}");
+        assert!(output.contains("outlet:2 (Main power): on"), "{output}");
         assert!(errors.contains("Fake source stopped"), "{errors}");
         assert!(errors.contains(directory.path().to_str().unwrap()));
         let reopened = crate::storage::Store::open(directory.path()).unwrap();
@@ -130,7 +130,7 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
         }
     }
     peer.send("status\n");
-    peer.wait_for_output(Stream::Stdout, "main (Main power): off\n");
+    peer.wait_for_output(Stream::Stdout, "outlet:2 (Main power): off\n");
     peer.interrupt();
 }
 
@@ -144,7 +144,7 @@ fn shared_runtime_recovers_corrupt_matter_settings_and_keeps_identity() {
         .put(rs_matter::persist::BASIC_INFO_KEY, &[0xff, 0x11])
         .unwrap();
     let (mut process, _) = TestProcess::bridge(directory.path(), false);
-    process.send("on test-outlet\n");
+    process.send("on test-outlet outlet:2\n");
     process.wait_for_output(Stream::Stdout, "test-outlet: command accepted\n");
     let (_, stderr) = process.interrupt();
     assert!(

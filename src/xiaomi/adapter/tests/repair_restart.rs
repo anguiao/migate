@@ -40,7 +40,7 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         let registry = restored.context.registry.clone();
         let group = registry.get(&key).unwrap();
         assert!(!original.same_instance(&group));
-        let light = group.function("main").unwrap();
+        let light = group.function("light:2").unwrap();
         assert!(light.description().supports_rgb());
         let initial = light.snapshot();
         assert_eq!(initial.power(), Some(Power::Unknown));
@@ -91,7 +91,7 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
             until(|| group.availability() == Availability::Available).await;
             until(|| {
                 ["member-a", "member-b"].iter().all(|did| {
-                    function(&registry, did, "main").snapshot().power() == Some(Power::On)
+                    function(&registry, did, "light:2").snapshot().power() == Some(Power::On)
                 })
             })
             .await;

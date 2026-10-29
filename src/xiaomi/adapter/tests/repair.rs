@@ -38,7 +38,7 @@ fn repaired_group_publishes_extended_color_and_dispatches_rgb_to_members() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         let capabilities = light.description().capabilities().clone();
         assert!(
             capabilities.contains(&Capability::ColorRgb),
@@ -110,7 +110,7 @@ fn repaired_group_native_controls_do_not_depend_on_member_writes() {
     let rig = repair_rig(1, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         for did in ["member-a", "member-b"] {
             force_unavailable(&c.context, did, "member unavailable");
         }
@@ -158,7 +158,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         let work = c.context.live.borrow().devices["member-a"]
             .admitted
             .clone()
@@ -269,13 +269,13 @@ fn queued_rgb_rechecks_action_and_member_power_before_sending() {
         let (rig, release) = gated_rig(0, true);
         block_on(rig.run(|c| async move {
             repair_ready(&c).await;
-            let member = function(&c.context.registry, "member-b", "main");
+            let member = function(&c.context.registry, "member-b", "light:2");
             let holding = async {
                 member.execute(Command::Off).await.unwrap();
             };
             let scenario = async {
                 wait_holding_member_b(&c).await;
-                let light = function(&c.context.registry, "group-1", "main");
+                let light = function(&c.context.registry, "group-1", "light:2");
                 let action = light.begin_light_action(rgb(0x00ff00), true).unwrap();
                 action.accepted().await.unwrap();
                 match change {
@@ -360,7 +360,7 @@ fn submitted_rgb_receipt_survives_stop_before_or_after_early_success() {
         }
         block_on(rig.run(|c| async move {
             repair_ready(&c).await;
-            let light = function(&c.context.registry, "group-1", "main");
+            let light = function(&c.context.registry, "group-1", "light:2");
             let action = light.begin_light_action(rgb(0x0000ff), true).unwrap();
             if early_success {
                 action.accepted().await.unwrap();
@@ -389,7 +389,7 @@ fn submitted_rgb_receipt_survives_stop_before_or_after_early_success() {
                     let status = c
                         .context
                         .commands
-                        .snapshot(held, ["main".to_owned()].into_iter());
+                        .snapshot(held, ["light:2".to_owned()].into_iter());
                     status[0].inflight.is_none()
                         && status[0]
                             .last
@@ -446,7 +446,7 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
     }
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         assert_eq!(
             light.description().temperature_interval(),
             Some(TemperatureInterval::new(2700, 6450).unwrap())
@@ -475,7 +475,7 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
             .clone()
             .unwrap();
         work.request_dirty_read(
-            "main",
+            "light:2",
             crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 3 },
         );
         wait_for(
@@ -498,7 +498,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         let committed = c
             .store
             .devices()
@@ -557,7 +557,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
                 c.context
                     .registry
                     .get(&group_key)
-                    .and_then(|physical| physical.function("main"))
+                    .and_then(|physical| physical.function("light:2"))
                     .is_none_or(|function| !function.description().supports_rgb())
             },
             "successful commit must fall back to the native profile",
@@ -585,7 +585,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
                 .is_none(),
             "the persisted confirmed input is the genuine new Native description"
         );
-        assert_eq!(stored_a.functions[0].id, "main");
+        assert_eq!(stored_a.functions[0].id, "light:2");
         assert!(saved.root_version > root);
 
         // A restart rebuild sees the persisted Native input: the committed
@@ -620,7 +620,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
             "re-confirmed members must restore repair",
         )
         .await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         assert!(light.description().supports_rgb());
         let again = c
             .store
@@ -641,7 +641,7 @@ fn repaired_group_unauthorized_member_path_recovers_after_token_refresh() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         c.cloud.lock().unwrap().property_status = 401;
         let denied = light.begin_light_action(rgb(0x00ff00), true).unwrap();
         assert!(denied.accepted().await.is_err());
@@ -651,7 +651,7 @@ fn repaired_group_unauthorized_member_path_recovers_after_token_refresh() {
         until(|| c.context.token_usable()).await;
         until(|| {
             ["member-a", "member-b"].iter().all(|did| {
-                function(&c.context.registry, did, "main")
+                function(&c.context.registry, did, "light:2")
                     .snapshot()
                     .power()
                     == Some(Power::On)
@@ -689,7 +689,7 @@ fn repaired_group_native_partial_failure_fails_without_optimistic_state() {
     }
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         wait_for(
             || light.snapshot().lighting().unwrap().temperature_kelvin == Some(2700),
             "native CT did not settle",
@@ -738,7 +738,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
         }
         block_on(rig.run(|c| async move {
             repair_ready(&c).await;
-            let light = function(&c.context.registry, "group-1", "main");
+            let light = function(&c.context.registry, "group-1", "light:2");
             for (index, did) in ["member-a", "member-b"].into_iter().enumerate() {
                 c.cloud
                     .lock()
@@ -757,7 +757,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                     .iter()
                     .enumerate()
                     .all(|(index, did)| {
-                        let snapshot = function(&c.context.registry, did, "main").snapshot();
+                        let snapshot = function(&c.context.registry, did, "light:2").snapshot();
                         snapshot.power().and_then(crate::device::Power::value) == powers[index]
                             && snapshot.lighting().unwrap().mode.is_some()
                     })

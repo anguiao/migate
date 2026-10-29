@@ -49,7 +49,7 @@ fn standard_lights_are_admitted_as_one_main_function() {
             .unwrap_or_else(|error| panic!("{model}: {error}"));
         assert_eq!(parsed.functions().len(), 1);
         let function = &parsed.functions()[0];
-        assert_eq!(function.id(), "main");
+        assert_eq!(function.id(), "light:2");
         assert!(function.kind().is_light());
         let lighting = function.lighting().unwrap();
         let brightness = lighting.brightness().unwrap();
@@ -140,7 +140,7 @@ fn ls2307_combines_exact_rgb_and_mode_binding_without_scene_inference() {
     let instance = description("devcea.light.ls2307");
     let parsed = parse_device_for_model(key(), "devcea.light.ls2307", &instance).unwrap();
     assert_eq!(parsed.functions().len(), 1);
-    assert_eq!(parsed.functions()[0].id(), "main");
+    assert_eq!(parsed.functions()[0].id(), "light:2");
     let lighting = parsed.functions()[0].lighting().unwrap();
     assert_eq!(
         lighting.color().unwrap().property(),

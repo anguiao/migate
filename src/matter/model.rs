@@ -147,18 +147,13 @@ pub(super) fn handler_from(
     let mut built = Vec::new();
     for FrozenEntry { device, identity } in entries {
         let versions = Versions::new(&mut random);
-        let multiple = identity.functions.len() > 1
-            || device
-                .functions()
-                .iter()
-                .any(|function| function.description().is_read_only());
-        let parent = multiple.then_some((identity.endpoint, None));
+        let parent = std::iter::once((identity.endpoint, None));
         let functions = identity
             .functions
             .iter()
             .enumerate()
             .map(|(index, function)| (function.endpoint, Some((index, function))));
-        for (endpoint, function) in parent.into_iter().chain(functions) {
+        for (endpoint, function) in parent.chain(functions) {
             let bridged = || {
                 BridgedHandler::new(
                     device.clone(),
@@ -193,17 +188,10 @@ pub(super) fn handler_from(
                     let function_device = device.function(&function.id).unwrap();
                     let label = function_device.description().label.clone();
                     let function = FunctionHandler::new(function_device, endpoint, versions);
-                    if multiple {
-                        Role::Child {
-                            function,
-                            tag: index as u8 + 1,
-                            label,
-                        }
-                    } else {
-                        Role::Single {
-                            function,
-                            bridged: bridged(),
-                        }
+                    Role::Child {
+                        function,
+                        tag: index as u8 + 1,
+                        label,
                     }
                 }
             };

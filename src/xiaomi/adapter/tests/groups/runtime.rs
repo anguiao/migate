@@ -308,7 +308,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             // writes for did "two".
             c.cloud.lock().unwrap().property_writes.clear();
             assert_eq!(
-                terminal_command(&mut terminal_input, &replies, "on two").await,
+                terminal_command(&mut terminal_input, &replies, "on two outlet:2").await,
                 "two: command accepted\n"
             );
             until(|| {
@@ -321,7 +321,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             })
             .await;
             assert_eq!(
-                terminal_command(&mut terminal_input, &replies, "off two").await,
+                terminal_command(&mut terminal_input, &replies, "off two outlet:2").await,
                 "two: command accepted\n"
             );
             until(|| {

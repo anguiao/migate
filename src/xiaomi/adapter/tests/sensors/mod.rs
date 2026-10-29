@@ -38,8 +38,8 @@ fn work(context: &super::super::state::Context, did: &str) -> Rc<super::super::w
 
 async fn wait_cloud_values(c: &Control, did: &str) {
     for _ in 0..500 {
-        if measurement(&c.context, did, "temperature").value == Some(18.0)
-            && measurement(&c.context, did, "humidity").value == Some(38.0)
+        if measurement(&c.context, did, "temperature:3:1001").value == Some(18.0)
+            && measurement(&c.context, did, "humidity:3:1008").value == Some(38.0)
         {
             return;
         }

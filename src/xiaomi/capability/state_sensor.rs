@@ -295,7 +295,12 @@ pub(super) fn functions(description: &Description<'_>) -> Vec<ParsedFunction> {
         .filter(|service| service.urn.standard("service", "magnet-sensor", 0x7827))
         .find_map(contact)
     {
-        result.push(ParsedFunction::contact("contact", "Contact", binding));
+        let property = binding.property();
+        result.push(ParsedFunction::contact(
+            format!("contact:{}:{}", property.siid, property.piid),
+            "Contact",
+            binding,
+        ));
     }
     if let Some(binding) = description
         .services
@@ -303,7 +308,12 @@ pub(super) fn functions(description: &Description<'_>) -> Vec<ParsedFunction> {
         .filter(|service| service.urn.standard("service", "motion-sensor", 0x7825))
         .find_map(motion)
     {
-        result.push(ParsedFunction::motion_sensor("motion", "Motion", binding));
+        let property = binding.state().property();
+        result.push(ParsedFunction::motion_sensor(
+            format!("motion:{}:{}", property.siid, property.piid),
+            "Motion",
+            binding,
+        ));
     }
     if let Some(service) = description
         .services
@@ -329,7 +339,12 @@ pub(super) fn functions(description: &Description<'_>) -> Vec<ParsedFunction> {
                 .ok()
             })
     {
-        result.push(ParsedFunction::occupancy("occupancy", "Occupancy", binding));
+        let property = binding.property();
+        result.push(ParsedFunction::occupancy(
+            format!("occupancy:{}:{}", property.siid, property.piid),
+            "Occupancy",
+            binding,
+        ));
     }
     result
 }

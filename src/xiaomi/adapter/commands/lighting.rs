@@ -120,13 +120,7 @@ fn refresh_after_write(
                 .color()
                 .is_some_and(|binding| written(binding.property()));
             for member in context.group_member_work(&work.key.id) {
-                let function = member
-                    .native
-                    .device()
-                    .functions()
-                    .iter()
-                    .find(|function| function.id() == "main")
-                    .unwrap();
+                let function = member.native.device().unique_light().unwrap();
                 let light = function.lighting().unwrap();
                 // Power can restore the member's remembered settings. Other
                 // writes refresh the affected value and its actual mode.
@@ -156,8 +150,8 @@ fn refresh_after_write(
                     .collect()
                 };
                 for binding in bindings {
-                    member.observations.invalidate_write("main", binding);
-                    member.request_dirty_read("main", binding);
+                    member.observations.invalidate_write(function.id(), binding);
+                    member.request_dirty_read(function.id(), binding);
                 }
             }
             return;

@@ -167,7 +167,10 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
     });
     assert_eq!(records[0].model(), records[1].model());
     assert_ne!(records[0].device().key(), records[1].device().key());
-    assert_eq!(records[0].device().functions()[0].description().id, "main");
+    assert_eq!(
+        records[0].device().functions()[0].description().id,
+        "outlet:2"
+    );
     assert_eq!(
         records[2]
             .device()
@@ -179,7 +182,7 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
                 function.power().unwrap().piid
             ))
             .collect::<Vec<_>>(),
-        [("outlet_1", 3, 1), ("outlet_2", 4, 1), ("usb", 9, 1)]
+        [("outlet:3", 3, 1), ("outlet:4", 4, 1), ("outlet:9", 9, 1)]
     );
     let captured = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(captured.len(), 6);

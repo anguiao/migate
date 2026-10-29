@@ -469,7 +469,7 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_uses_new_bounds() {
                 .unwrap(),
         );
         let bridged_before = report_dataver(
-            &read_bytes(&handler, &Context::at(&im, 2, 0x39, 24))
+            &read_bytes(&handler, &Context::at(&im, 3, 0x39, 24))
                 .await
                 .unwrap(),
         );
@@ -521,7 +521,7 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_uses_new_bounds() {
         );
         assert_eq!(
             report_dataver(
-                &read_bytes(&handler, &Context::at(&im, 2, 0x39, 24))
+                &read_bytes(&handler, &Context::at(&im, 3, 0x39, 24))
                     .await
                     .unwrap()
             ),
@@ -569,7 +569,7 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_uses_new_bounds() {
         );
         let version = read_bytes(
             &replacement_handler,
-            &Context::at(&replacement_im, 2, 0x39, 24),
+            &Context::at(&replacement_im, 3, 0x39, 24),
         )
         .await
         .unwrap();

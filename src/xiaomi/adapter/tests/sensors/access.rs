@@ -42,8 +42,8 @@ fn mixed_proxy_measurements_do_not_require_an_eligible_control_path() {
     }
     block_on(rig.run(|c| async move {
         until(|| {
-            measurement(&c.context, "proxy.sensor", "temperature").value == Some(21.0)
-                && measurement(&c.context, "proxy.sensor", "humidity").value == Some(45.0)
+            measurement(&c.context, "proxy.sensor", "temperature:42:1001").value == Some(21.0)
+                && measurement(&c.context, "proxy.sensor", "humidity:42:1008").value == Some(45.0)
         })
         .await;
         let status = battery_status(&c.context, "proxy.sensor");
@@ -54,7 +54,7 @@ fn mixed_proxy_measurements_do_not_require_an_eligible_control_path() {
             status
                 .functions
                 .iter()
-                .find(|function| function.function == "main")
+                .find(|function| function.function == "light:2")
                 .unwrap()
                 .selected_read
                 .is_none()
@@ -63,7 +63,7 @@ fn mixed_proxy_measurements_do_not_require_an_eligible_control_path() {
             status
                 .functions
                 .iter()
-                .filter(|function| function.function != "main")
+                .filter(|function| function.function != "light:2")
                 .all(|function| function.selected_read == Some(PathKind::Cloud))
         );
         assert_eq!(
@@ -90,17 +90,17 @@ fn mixed_proxy_cloud_notifications_cannot_borrow_another_functions_access() {
             })
             .await;
             let current = work(&c.context, "proxy.sensor");
-            let source = current.function_observer("main").unwrap();
+            let source = current.function_observer("light:2").unwrap();
             let power = current
                 .native
                 .device()
                 .functions()
                 .iter()
-                .find(|function| function.id() == "main")
+                .find(|function| function.id() == "light:2")
                 .unwrap()
                 .power()
                 .unwrap();
-            let main = current.physical().function("main").unwrap();
+            let main = current.physical().function("light:2").unwrap();
             main.observe(false);
 
             // Revoke the actual control eligibility and deliver queued values
@@ -115,7 +115,7 @@ fn mixed_proxy_cloud_notifications_cannot_borrow_another_functions_access() {
                 .as_mut()
                 .unwrap()
                 .online = false;
-            assert!(current.function_observer("main").is_some());
+            assert!(current.function_observer("light:2").is_some());
             c.context.property_value_event(
                 &source,
                 "proxy.sensor",
@@ -136,7 +136,7 @@ fn mixed_proxy_cloud_notifications_cannot_borrow_another_functions_access() {
                 false,
             );
             assert_eq!(
-                measurement(&c.context, "proxy.sensor", "temperature").value,
+                measurement(&c.context, "proxy.sensor", "temperature:42:1001").value,
                 Some(22.0)
             );
             assert_eq!(main.snapshot().power(), Some(Power::Off));
@@ -182,13 +182,16 @@ fn unreliable_ble_and_proxy_cloud_offline_does_not_block_reads() {
             assert_eq!(status.selected_read, Some(PathKind::Cloud));
             assert_eq!(status.physical_online, None);
             assert_eq!(
-                measurement(&c.context, did, "temperature").value,
+                measurement(&c.context, did, "temperature:3:1001").value,
                 Some(18.0)
             );
-            assert_eq!(measurement(&c.context, did, "humidity").value, Some(38.0));
+            assert_eq!(
+                measurement(&c.context, did, "humidity:3:1008").value,
+                Some(38.0)
+            );
         }
         assert_eq!(
-            measurement(&c.context, "blt.sensor", "temperature").source_time,
+            measurement(&c.context, "blt.sensor", "temperature:3:1001").source_time,
             Some(1_700_000_500)
         );
         // The skipped online flag never bypasses an explicit authorization
@@ -210,11 +213,11 @@ fn unreliable_ble_and_proxy_cloud_offline_does_not_block_reads() {
             Availability::Unavailable("no usable read or notification path".into())
         );
         assert_eq!(
-            measurement(&c.context, "blt.sensor", "temperature").value,
+            measurement(&c.context, "blt.sensor", "temperature:3:1001").value,
             Some(18.0)
         );
         assert_eq!(
-            measurement(&c.context, "blt.sensor", "humidity").value,
+            measurement(&c.context, "blt.sensor", "humidity:3:1008").value,
             Some(38.0)
         );
     }));
@@ -265,8 +268,14 @@ fn a_reliable_offline_sensor_does_not_read_or_become_available() {
         assert_eq!(status.selected_control, None);
         assert_eq!(status.selected_read, None);
         assert_eq!(status.physical_online, Some(false));
-        assert_eq!(measurement(&c.context, "sensor", "temperature").value, None);
-        assert_eq!(measurement(&c.context, "sensor", "humidity").value, None);
+        assert_eq!(
+            measurement(&c.context, "sensor", "temperature:3:1001").value,
+            None
+        );
+        assert_eq!(
+            measurement(&c.context, "sensor", "humidity:3:1008").value,
+            None
+        );
     }));
 }
 

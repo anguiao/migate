@@ -116,7 +116,7 @@ fn renaming_a_sensor_keeps_its_battery_capability() {
         "Sensor",
         vec![
             crate::device::FunctionDescription {
-                id: "temperature".into(),
+                id: "temperature:3:1001".into(),
                 label: "Temperature".into(),
                 kind: FunctionKind::Temperature(MeasurementRange::new(-30.0, 100.0).unwrap()),
             },

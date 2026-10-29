@@ -21,9 +21,8 @@ pub(crate) struct FixedShape {
 struct FixedFunction {
     id: String,
     kind: FixedKind,
-    /// Compound controls and all sensor layouts publish child labels in
-    /// Descriptor TagList; a single control keeps its combined endpoint.
-    child_label: Option<String>,
+    /// Every visible function publishes a child label in Descriptor TagList.
+    child_label: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,10 +57,9 @@ enum FixedKind {
 /// Project the actual visible functions into the canonical publication shape.
 /// Planning compares this value for the committed and final candidate graphs.
 pub(crate) fn fixed_shape_with_battery<'a>(
-    functions: impl ExactSizeIterator<Item = &'a FunctionDescription> + Clone,
+    functions: impl Iterator<Item = &'a FunctionDescription>,
     battery: bool,
 ) -> FixedShape {
-    let multiple = functions.len() > 1 || functions.clone().any(|function| function.is_read_only());
     FixedShape {
         battery,
         functions: functions
@@ -98,7 +96,7 @@ pub(crate) fn fixed_shape_with_battery<'a>(
                             .map(|(min, max)| (min.to_bits(), max.to_bits())),
                     },
                 },
-                child_label: multiple.then(|| function.label.clone()),
+                child_label: function.label.clone(),
             })
             .collect(),
     }

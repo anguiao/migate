@@ -7,7 +7,7 @@ fn published_cloud_only_device_is_refreshed_without_a_local_subscription() {
     block_on(rig.run(|c| async move {
         until(|| !c.cloud.lock().unwrap().property_reads.is_empty()).await;
         until(|| {
-            function(&c.context.registry, "one", "main")
+            function(&c.context.registry, "one", "outlet:2")
                 .snapshot()
                 .power()
                 == Some(Power::Off)
@@ -51,9 +51,9 @@ fn a_slow_cloud_channel_does_not_block_other_cloud_reads_or_commands() {
         cloud.read_values.insert(("multi".into(), 9, 1), true);
     }
     block_on(rig.run(|c| async move {
-        let outlet_1 = function(&c.context.registry, "multi", "outlet_1");
-        let outlet_2 = function(&c.context.registry, "multi", "outlet_2");
-        let usb = function(&c.context.registry, "multi", "usb");
+        let outlet_1 = function(&c.context.registry, "multi", "outlet:3");
+        let outlet_2 = function(&c.context.registry, "multi", "outlet:4");
+        let usb = function(&c.context.registry, "multi", "outlet:9");
         until(|| {
             cloud_reads(&c, "multi", 3) == 1
                 && outlet_2.snapshot().power() == Some(Power::On)
@@ -112,13 +112,13 @@ fn a_slow_cloud_did_preserves_local_round_spacing_and_local_commands() {
                 until(|| peer.count("get", "multi", siid) == before[index] + 1).await;
                 assert_eq!(cloud_reads(control, "one", 2), 1);
                 assert_eq!(
-                    function(&control.context.registry, "one", "main")
+                    function(&control.context.registry, "one", "outlet:2")
                         .snapshot()
                         .power(),
                     Some(Power::Unknown)
                 );
                 if index == 0 {
-                    let usb = function(&control.context.registry, "multi", "usb");
+                    let usb = function(&control.context.registry, "multi", "outlet:9");
                     assert_eq!(
                         usb.execute(Command::On).await.unwrap().power(),
                         Some(Power::On)
@@ -132,7 +132,7 @@ fn a_slow_cloud_did_preserves_local_round_spacing_and_local_commands() {
 
             release.send(()).unwrap();
             until(|| {
-                function(&control.context.registry, "one", "main")
+                function(&control.context.registry, "one", "outlet:2")
                     .snapshot()
                     .power()
                     == Some(Power::Off)
@@ -155,7 +155,7 @@ fn refreshes_during_a_cloud_read_coalesce_and_invalidate_its_old_value() {
     }
     block_on(rig.run(|c| async move {
         until(|| cloud_reads(&c, "one", 2) == 1).await;
-        let one = function(&c.context.registry, "one", "main");
+        let one = function(&c.context.registry, "one", "outlet:2");
         let work = work(&c, "one");
         for _ in 0..10 {
             work.refresh();
@@ -204,7 +204,7 @@ fn switching_to_local_reads_retires_a_held_cloud_read_and_returns_its_demand() {
         let control = &c;
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
-            let one = function(&control.context.registry, "one", "main");
+            let one = function(&control.context.registry, "one", "outlet:2");
             assert_eq!(one.snapshot().power(), Some(Power::On));
             assert!(Rc::ptr_eq(&before, &work(control, "one")));
             assert!(peer.count("get", "one", 2) > 0);
@@ -230,7 +230,7 @@ fn retiring_a_source_releases_a_cloud_read_slot_before_its_response_arrives() {
     }
     block_on(rig.run(|c| async move {
         until(|| cloud_reads(&c, "one", 2) == 1).await;
-        let one = function(&c.context.registry, "one", "main");
+        let one = function(&c.context.registry, "one", "outlet:2");
         let work = work(&c, "one");
         {
             let mut cloud = c.cloud.lock().unwrap();

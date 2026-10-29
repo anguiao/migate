@@ -19,7 +19,7 @@ pub(crate) fn native_for(
     let controls = description
         .functions()
         .iter()
-        .filter(|function| !function.is_read_only())
+        .filter(|function| !function.kind.is_read_only())
         .count();
     let multiple = controls > 1;
     let sensor = description
@@ -30,8 +30,26 @@ pub(crate) fn native_for(
         .functions()
         .iter()
         .map(|function| {
-            let id = function.id.clone();
             let label = function.label.clone();
+            let id = match function.kind {
+                FunctionKind::Temperature(_) => "temperature:3:1001",
+                FunctionKind::Humidity(_) => "humidity:3:1008",
+                FunctionKind::CarbonDioxide(_) => "co2:8:1029",
+                FunctionKind::Illuminance(_) => "illuminance:42:1",
+                FunctionKind::Contact => "contact:50:1",
+                FunctionKind::Motion => "motion:51:1",
+                FunctionKind::Occupancy => "occupancy:52:1",
+                FunctionKind::Fan { .. } => "fan:2",
+                FunctionKind::Curtain => "curtain:2",
+                FunctionKind::Light(_) => "light:2",
+                FunctionKind::Outlet => match (multiple, function.id.as_str()) {
+                    (true, "outlet_1" | "outlet:3") => "outlet:3",
+                    (true, "outlet_2" | "outlet:4") => "outlet:4",
+                    (true, "usb" | "outlet:9") => "outlet:9",
+                    _ => "outlet:2",
+                },
+            }
+            .to_owned();
             match function.kind {
                 FunctionKind::Temperature(range) => ParsedFunction::temperature(
                     id,
@@ -138,9 +156,9 @@ pub(crate) fn native_for(
                 ),
                 FunctionKind::Outlet => {
                     let siid = match (multiple, id.as_str()) {
-                        (true, "outlet_1") => 3,
-                        (true, "outlet_2") => 4,
-                        (true, "usb") => 9,
+                        (true, "outlet:3") => 3,
+                        (true, "outlet:4") => 4,
+                        (true, "outlet:9") => 9,
                         _ => 2,
                     };
                     ParsedFunction::outlet(id, label, PropertyBinding { siid, piid: 1 })

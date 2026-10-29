@@ -48,7 +48,7 @@ fn peer_values(c: &Control) -> Rc<Peer> {
 }
 async fn ready_light(c: &Control) -> crate::device::Function {
     until(|| c.context.active_notification("one") == Some(PathKind::Local)).await;
-    let function = function(&c.context.registry, "one", "main");
+    let function = function(&c.context.registry, "one", "light:2");
     until(|| {
         let snapshot = function.snapshot();
         let light = snapshot.lighting().unwrap();

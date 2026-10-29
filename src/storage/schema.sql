@@ -45,4 +45,4 @@ CREATE TABLE publication_revocation (
 INSERT INTO bridge_configuration (id, json)
 VALUES (1, '{"scope":null,"root_version":1,"devices":[],"groups":[]}');
 
-PRAGMA user_version = 8;
+PRAGMA user_version = 9;

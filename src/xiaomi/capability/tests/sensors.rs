@@ -77,13 +77,13 @@ fn environment_temperature_is_selected_by_service_semantics() {
     measurement_service_mut(&mut description)["type"] =
         json!("urn:miot-spec-v2:service:environment:0000780A:sample:1");
     let device = parse_device(sensor_key(), &description).unwrap();
-    assert_eq!(device.functions()[0].id(), "temperature");
+    assert_eq!(device.functions()[0].id(), "temperature:3:1001");
 
     measurement_service_mut(&mut description)["type"] =
         json!("urn:miot-spec-v2:service:outlet:00007802:sample:1");
     let device = parse_device(sensor_key(), &description).unwrap();
     assert_eq!(device.functions().len(), 1);
-    assert_eq!(device.functions()[0].id(), "humidity");
+    assert_eq!(device.functions()[0].id(), "humidity:3:1008");
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn supported_controls_and_measurements_share_one_physical_device() {
             .iter()
             .map(|function| function.id())
             .collect::<Vec<_>>(),
-        ["main", "temperature", "humidity"]
+        ["outlet:2", "temperature:42:1001", "humidity:42:1008"]
     );
     assert!(!device.is_read_only());
 }
@@ -143,7 +143,7 @@ fn standard_sensor_admits_independent_temperature_and_humidity_bindings() {
             .iter()
             .map(|function| function.id())
             .collect::<Vec<_>>(),
-        ["temperature", "humidity"]
+        ["temperature:3:1001", "humidity:3:1008"]
     );
 
     let temperature = &device.functions()[0];
@@ -501,16 +501,16 @@ fn battery_values_follow_the_declared_integer_percentage_range() {
 }
 
 #[test]
-fn a_battery_binding_alone_cannot_create_a_device() {
+fn a_control_can_share_a_physical_battery_binding() {
     use crate::xiaomi::capability::ParsedFunction;
     let battery = parse_device(sensor_key(), &sensor_description())
         .unwrap()
         .battery()
         .unwrap()
         .clone();
-    let outlet = ParsedFunction::outlet("main", "Main", PropertyBinding { siid: 2, piid: 1 });
+    let outlet = ParsedFunction::outlet("outlet:2", "Main", PropertyBinding { siid: 2, piid: 1 });
     assert!(
-        ParsedDevice::new_with_battery(sensor_key(), vec![outlet], None, Some(battery),).is_err()
+        ParsedDevice::new_with_battery(sensor_key(), vec![outlet], None, Some(battery),).is_ok()
     );
 }
 
@@ -566,7 +566,7 @@ fn public_new3pr_extracts_co2_independently_in_standard_measurement_order() {
             }
         }
         let device = parse_device(sensor_key(), &instance).unwrap();
-        let expected = ["temperature", "humidity", "co2"]
+        let expected = ["temperature:7:1001", "humidity:7:1002", "co2:8:1029"]
             .into_iter()
             .enumerate()
             .filter_map(|(index, id)| (mask & (1 << index) != 0).then_some(id))
@@ -585,7 +585,7 @@ fn public_new3pr_extracts_co2_independently_in_standard_measurement_order() {
         if let Some(co2) = device
             .functions()
             .iter()
-            .find(|function| function.id() == "co2")
+            .find(|function| function.id() == "co2:8:1029")
         {
             let measurement = co2.measurement().unwrap();
             assert_eq!(
@@ -630,7 +630,7 @@ fn co2_requires_its_declared_ppm_read_and_notify_capabilities_and_combines_with_
             .iter()
             .map(|function| function.id())
             .collect::<Vec<_>>(),
-        ["main", "co2"]
+        ["outlet:2", "co2:42:1029"]
     );
     assert_eq!(
         parsed.functions()[0].power(),
@@ -666,7 +666,7 @@ fn co2_requires_its_declared_ppm_read_and_notify_capabilities_and_combines_with_
                 .iter()
                 .map(|function| function.id())
                 .collect::<Vec<_>>(),
-            ["main"]
+            ["outlet:2"]
         );
     }
 }
@@ -734,7 +734,10 @@ fn public_illuminance_descriptions_are_admitted_independently_of_host_services()
                 .count(),
             1
         );
-        assert_eq!(device.functions()[0].id(), "illuminance");
+        assert_eq!(
+            device.functions()[0].id(),
+            format!("illuminance:{siid}:{piid}")
+        );
         assert!(device.is_read_only());
         let measurement = device.functions()[0].measurement().unwrap();
         assert_eq!(measurement.property(), PropertyBinding { siid, piid });
@@ -799,11 +802,16 @@ fn all_fifteen_measurement_combinations_keep_independent_standard_keys() {
             }
         }
         let device = parse_device(sensor_key(), &candidate).unwrap();
-        let expected = ["temperature", "humidity", "co2", "illuminance"]
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, id)| (mask & (1 << index) != 0).then_some(id))
-            .collect::<Vec<_>>();
+        let expected = [
+            "temperature:7:1001",
+            "humidity:7:1002",
+            "co2:8:1029",
+            "illuminance:2:5",
+        ]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, id)| (mask & (1 << index) != 0).then_some(id))
+        .collect::<Vec<_>>();
         assert_eq!(
             device
                 .functions()
@@ -846,7 +854,7 @@ fn illuminance_uses_the_first_qualified_property_and_combines_with_supported_con
             .iter()
             .map(|function| function.id())
             .collect::<Vec<_>>(),
-        ["main", "illuminance"]
+        ["light:2", "illuminance:4:1"]
     );
     for (field, value) in [
         ("access", json!(["read"])),

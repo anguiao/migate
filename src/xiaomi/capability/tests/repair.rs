@@ -182,3 +182,25 @@ fn narrowed_profile_preserves_native_rgb_but_replaces_only_the_interval() {
         LightProfile::ExtendedColor(TemperatureInterval::new(3000, 6000).unwrap())
     );
 }
+
+#[test]
+fn repair_never_selects_an_arbitrary_member_light() {
+    use crate::xiaomi::capability::{LightBindings, ParsedFunction, PropertyBinding};
+    let group = parse_group3();
+    let original = parse_model("member", "devcea.light.ls2307", &ls2307());
+    let mut functions = original.device().functions().to_vec();
+    functions.push(ParsedFunction::light(
+        "light:99",
+        "Second light",
+        PropertyBinding { siid: 99, piid: 1 },
+        LightBindings::OnOff,
+    ));
+    let member = NativeDescription::new(
+        original.model().into(),
+        original.instance_type().into(),
+        ParsedDevice::new(original.device().key().clone(), functions, None).unwrap(),
+    )
+    .unwrap();
+    let reason = plan_rgb_repair(&group, [&member]).unwrap_err();
+    assert!(reason.contains("ambiguous"), "{reason}");
+}

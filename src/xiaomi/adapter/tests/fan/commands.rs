@@ -40,14 +40,14 @@ fn local_speed_waits_for_each_receipt_and_keeps_observations_unchanged() {
             until(|| {
                 fan(control).power.value == Some(false)
                     && fan(control).speed.value == Some(40)
-                    && work(control).fan_mode_observation("main").value == Some(1)
+                    && work(control).fan_mode_observation("fan:2").value == Some(1)
                     && fan(control).swing.value == Some(false)
                     && [POWER, MODE, SPEED, SWING]
                         .iter()
-                        .all(|binding| !work(control).refresh.borrow().contains("main", *binding))
+                        .all(|binding| !work(control).refresh.borrow().contains("fan:2", *binding))
             })
             .await;
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "fan:2");
             let before = function.snapshot();
             peer.state.borrow_mut().hold_writes = true;
             let action = function.begin_fan(FanCommand::Speed(40)).unwrap();
@@ -76,8 +76,8 @@ fn off_waits_for_sent_step_and_new_speed_reopens_after_stale_on() {
         c.announce();
         let control = &c;
         c.peer(peer(), |peer| async move {
-            until(|| fan(control).power.value == Some(true) && fan(control).speed.value == Some(40) && fan(control).swing.value == Some(false) && work(control).function_observer("main").is_some()).await;
-            let function = function(&control.context.registry, "one", "main");
+            until(|| fan(control).power.value == Some(true) && fan(control).speed.value == Some(40) && fan(control).swing.value == Some(false) && work(control).function_observer("fan:2").is_some()).await;
+            let function = function(&control.context.registry, "one", "fan:2");
             let before = function.snapshot();
             peer.state.borrow_mut().hold_writes = true;
             let old = function.begin_fan(FanCommand::Speed(40)).unwrap();
@@ -134,10 +134,10 @@ fn external_notification_does_not_interrupt_started_speed() {
             until(|| {
                 fan(control).power.value == Some(true)
                     && fan(control).speed.value == Some(40)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("fan:2").is_some()
             })
             .await;
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "fan:2");
             peer.state.borrow_mut().hold_writes = true;
             let action = function.begin_fan(FanCommand::Speed(55)).unwrap();
             until(|| writes(&peer).len() == 1).await;
@@ -165,11 +165,11 @@ fn terminal_power_zero_speed_and_swing_write_only_their_own_properties() {
             until(|| {
                 fan(control).power.value == Some(true)
                     && fan(control).speed.value == Some(40)
-                    && work(control).fan_mode_observation("main").value == Some(1)
+                    && work(control).fan_mode_observation("fan:2").value == Some(1)
                     && fan(control).swing.value == Some(false)
             })
             .await;
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "fan:2");
             let before = function.snapshot().fan();
             let status = crate::terminal::AuthStatus::new(
                 control.context.status.borrow().authentication.clone(),
@@ -179,11 +179,19 @@ fn terminal_power_zero_speed_and_swing_write_only_their_own_properties() {
             let terminal =
                 crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
             assert_eq!(
-                terminal.handle_line("off one", 0).await.unwrap().unwrap(),
+                terminal
+                    .handle_line("off one fan:2", 0)
+                    .await
+                    .unwrap()
+                    .unwrap(),
                 "one: command accepted"
             );
             assert_eq!(
-                terminal.handle_line("on one", 0).await.unwrap().unwrap(),
+                terminal
+                    .handle_line("on one fan:2", 0)
+                    .await
+                    .unwrap()
+                    .unwrap(),
                 "one: command accepted"
             );
             function
@@ -222,11 +230,11 @@ fn off_waits_for_the_old_step_timeout_and_ignores_its_late_receipt() {
             until(|| {
                 fan(control).power.value == Some(true)
                     && fan(control).speed.value == Some(40)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("fan:2").is_some()
             })
             .await;
             peer.state.borrow_mut().hold_writes = true;
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "fan:2");
             let old = function.begin_fan(FanCommand::Speed(55)).unwrap();
             until(|| writes(&peer).len() == 1).await;
             let off = function.begin_fan(FanCommand::Power(false)).unwrap();
@@ -278,10 +286,10 @@ fn generic_fan_writes_real_discrete_codes_and_observes_actual_speed() {
             until(|| {
                 fan(control).power.value == Some(true)
                     && fan(control).speed.value == Some(2)
-                    && work(control).function_observer("main").is_some()
+                    && work(control).function_observer("fan:2").is_some()
             })
             .await;
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "fan:2");
             peer.state.borrow_mut().hold_writes = true;
             let action = function.begin_fan(FanCommand::Speed(1)).unwrap();
             until(|| writes(&peer).len() == 1).await;

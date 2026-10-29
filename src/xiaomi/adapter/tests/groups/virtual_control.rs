@@ -5,7 +5,7 @@ fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
     let rig = super::super::support::repair_rig(1, true);
     block_on(rig.run(|c| async move {
         super::super::support::repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         // Native control acceptance does not manufacture actual state. Reads
         // must use the members, including mode when a CT command selects white.
         for (dimension, target, values) in [

@@ -11,7 +11,7 @@ fn curtain_local_commands_write_one_quantized_property_without_refresh() {
         let control = &c;
         c.peer(peer(), |peer| async move {
             settled(control).await;
-            let function = function(&control.context.registry, "one", "main");
+            let function = function(&control.context.registry, "one", "curtain:2");
             let before = function.snapshot();
             let reads = peer.count("get", "one", 0);
             for command in [
@@ -106,7 +106,7 @@ fn curtain_cloud_commands_write_single_values_and_retain_the_request_in_diagnost
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
             settled(&c).await;
-            let function = function(&c.context.registry, "one", "main");
+            let function = function(&c.context.registry, "one", "curtain:2");
             let before = function.snapshot();
             assert_eq!(function.matter_curtain().1, Some(25));
             let reads = c.cloud.lock().unwrap().property_reads.len();
@@ -172,15 +172,15 @@ fn curtain_local_stop_waits_for_old_receipt_and_other_device_is_independent() {
         c.peer(peer, |peer| async move {
             settled(control).await;
             until(|| {
-                function(&control.context.registry, "two", "main")
+                function(&control.context.registry, "two", "curtain:2")
                     .snapshot()
                     .availability
                     == Availability::Available
             })
             .await;
             peer.state.borrow_mut().hold_writes = true;
-            let one = function(&control.context.registry, "one", "main");
-            let two = function(&control.context.registry, "two", "main");
+            let one = function(&control.context.registry, "one", "curtain:2");
+            let two = function(&control.context.registry, "two", "curtain:2");
             let before = one.snapshot();
             let first = one.begin_curtain(CurtainCommand::Target(10.0)).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;

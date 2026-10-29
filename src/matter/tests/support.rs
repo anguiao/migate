@@ -121,7 +121,11 @@ pub(in crate::matter) fn entry(
 }
 
 pub(in crate::matter) fn single_entry(device: &PhysicalDevice) -> FrozenEntry {
-    entry(device, 2, &[("main", 2)])
+    entry(
+        device,
+        3,
+        &[(device.functions()[0].description().id.as_str(), 2)],
+    )
 }
 
 pub(in crate::matter) fn model_handler(entries: Vec<FrozenEntry>) -> crate::matter::model::Model {

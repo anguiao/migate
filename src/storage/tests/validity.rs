@@ -367,3 +367,19 @@ fn in_memory_native_key_mismatch_is_rejected() {
     };
     assert!(configuration.validate().is_err());
 }
+
+#[test]
+fn stored_source_keys_must_match_their_real_bindings_without_rewriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    outlet(&store);
+    let valid = stored(&store);
+    for id in ["main", "outlet:9"] {
+        let mut changed = valid.clone();
+        changed["devices"][0]["functions"][0]["id"] = json!(id);
+        changed["devices"][0]["native"]["functions"][0]["id"] = json!(id);
+        overwrite(&store, &changed);
+        assert!(store.devices().load_configuration().is_err(), "{id}");
+        assert_eq!(stored(&store), changed);
+    }
+}

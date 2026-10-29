@@ -14,7 +14,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
     block_on(rig.run(|c| async move {
         let key = DeviceKey::new("xiaomi", "one");
         until(|| {
-            function(&c.context.registry, "one", "main")
+            function(&c.context.registry, "one", "light:2")
                 .snapshot()
                 .lighting()
                 .unwrap()
@@ -85,7 +85,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
                 .unwrap()
                 .same_instance(&old_physical)
         );
-        assert!(old_physical.function("contact").is_none());
+        assert!(old_physical.function("contact:42:2").is_none());
 
         db.execute_batch("DROP TRIGGER fail_state_upgrade").unwrap();
         c.context.request_sync();
@@ -102,7 +102,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
             c.context
                 .registry
                 .get(&key)
-                .and_then(|physical| physical.function("contact"))
+                .and_then(|physical| physical.function("contact:42:2"))
                 .is_some_and(|function| {
                     function.snapshot().state_sensor().unwrap().active == Some(false)
                 })
@@ -122,7 +122,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
                 .iter()
                 .map(|function| function.id.as_str())
                 .collect::<Vec<_>>(),
-            ["main", "contact"]
+            ["light:2", "contact:42:2"]
         );
         assert!(
             saved
@@ -148,7 +148,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
         let restored_physical = restored.context.registry.get(&key).unwrap();
         assert_eq!(
             restored_physical
-                .function("contact")
+                .function("contact:42:2")
                 .unwrap()
                 .snapshot()
                 .state_sensor()
@@ -160,7 +160,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
             restored.context.diagnostics().devices[0]
                 .functions
                 .iter()
-                .find(|function| function.function == "contact")
+                .find(|function| function.function == "contact:42:2")
                 .unwrap()
                 .observation_source,
             None

@@ -25,7 +25,7 @@ fn fan_configuration_restores_shape_identity_and_unknown_state() {
     let restored = load(&reopened);
     assert_eq!(restored, planned);
     let entry = &restored.devices[0];
-    assert_eq!(entry.functions[0].endpoint, entry.endpoint);
+    assert_ne!(entry.functions[0].endpoint, entry.endpoint);
     let unchanged = next(
         &restored,
         scope("account", "home"),

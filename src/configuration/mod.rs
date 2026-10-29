@@ -285,18 +285,7 @@ impl CommittedConfiguration {
                 }
                 reserve_endpoint(&mut endpoints, function.endpoint, &device.key)?;
             }
-            let single = device.functions.len() == 1
-                && device.native.as_ref().map_or_else(
-                    || own_endpoints.contains(&device.endpoint),
-                    |native| {
-                        !native
-                            .device()
-                            .functions()
-                            .iter()
-                            .any(|function| function.kind().is_read_only())
-                    },
-                );
-            if own_endpoints.contains(&device.endpoint) != single {
+            if own_endpoints.contains(&device.endpoint) {
                 return Err("Committed device endpoint does not match its function topology");
             }
             reserve_endpoint(&mut endpoints, device.endpoint, &device.key)?;
@@ -472,7 +461,14 @@ fn derive_served(
             repair_reason: None,
         };
     };
-    let native_interval = native.device().functions()[0]
+    let Some(function) = native.device().unique_light() else {
+        return ServedDevice {
+            description,
+            repair: None,
+            repair_reason: Some("native group light is missing or ambiguous".into()),
+        };
+    };
+    let native_interval = function
         .lighting()
         .and_then(|lighting| lighting.temperature())
         .map(|temperature| temperature.interval());
@@ -500,8 +496,10 @@ fn derive_served(
     let logical = members
         .iter()
         .map(|member| {
-            member.device().functions()[0]
-                .lighting()
+            member
+                .device()
+                .unique_light()
+                .and_then(|function| function.lighting())
                 .and_then(|lighting| lighting.temperature())
                 .map(|temperature| temperature.interval())
         })
@@ -510,7 +508,6 @@ fn derive_served(
             crate::xiaomi::capability::effective_temperature_range(native_interval, &intervals)
         })
         .unwrap_or(native_interval);
-    let function = &native.device().functions()[0];
     let native_profile = function
         .lighting()
         .expect("a color-temperature group function has light bindings")
@@ -536,7 +533,7 @@ fn derive_served(
         ),
     };
     ServedDevice {
-        description: description.with_main_light_profile(profile),
+        description: description.with_light_profile(function.id(), profile),
         repair,
         repair_reason,
     }

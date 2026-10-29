@@ -19,8 +19,8 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
         devices: vec![
             kept_record,
             identity(&deleted.physical_description("deleted"), 6),
-            identity(&other.physical_description("other"), 7),
-            identity(&foreign.physical_description("foreign"), 8),
+            identity(&other.physical_description("other"), 8),
+            identity(&foreign.physical_description("foreign"), 10),
         ],
         groups: Vec::new(),
     };
@@ -67,8 +67,8 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
     let single = state.devices[0].clone();
     let mut groups = Vec::new();
     for (endpoint, did, model) in [
-        (3, "group.42", "xiaomi.light.ceil04"),
-        (4, "43", "mijia.light.group3"),
+        (4, "group.42", "xiaomi.light.ceil04"),
+        (6, "43", "mijia.light.group3"),
     ] {
         let native = &rig.data[0];
         let group = crate::xiaomi::capability::NativeDescription::new(
@@ -156,7 +156,7 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
                         .len(),
                     3
                 );
-                let one = function(registry, "one", "main");
+                let one = function(registry, "one", "outlet:2");
                 assert_eq!(one.snapshot().power(), Some(Power::Unknown));
                 assert_eq!(
                     one.execute(Command::Toggle).await,
@@ -177,17 +177,17 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
                 peer.notify("two", 2, true);
                 peer.notify("multi", 4, true);
                 until(|| {
-                    function(registry, "two", "main").snapshot().power() == Some(Power::On)
-                        && function(registry, "multi", "outlet_2").snapshot().power()
+                    function(registry, "two", "outlet:2").snapshot().power() == Some(Power::On)
+                        && function(registry, "multi", "outlet:4").snapshot().power()
                             == Some(Power::On)
                 })
                 .await;
                 assert_eq!(
-                    function(registry, "multi", "outlet_1").snapshot().power(),
+                    function(registry, "multi", "outlet:3").snapshot().power(),
                     Some(Power::Unknown)
                 );
                 assert_eq!(
-                    function(registry, "multi", "usb").snapshot().power(),
+                    function(registry, "multi", "outlet:9").snapshot().power(),
                     Some(Power::Unknown)
                 );
             })
@@ -200,7 +200,7 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
 fn cached_build_dropped_before_run_releases_its_context_and_closes_commands() {
     let rig = Rig::new(true, &["one"]);
     let weak = Rc::downgrade(&rig.source.context);
-    let function = function(&rig.source.context.registry, "one", "main");
+    let function = function(&rig.source.context.registry, "one", "outlet:2");
     drop(rig);
     assert!(weak.upgrade().is_none());
     assert_eq!(

@@ -308,7 +308,8 @@ impl Context {
             .iter()
             .filter_map(|group_did| {
                 let work = live.devices.get(group_did)?.admitted.as_ref()?;
-                Some((work.physical().function("main")?, work.clone()))
+                let id = work.native.device().unique_light()?.id();
+                Some((work.physical().function(id)?, work.clone()))
             })
             .collect::<Vec<_>>();
         drop(live);
@@ -388,7 +389,17 @@ impl Context {
             return;
         };
         let physical = work.physical();
-        let function = physical.function("main").unwrap();
+        let Some(id) = work
+            .native
+            .device()
+            .unique_light()
+            .map(|function| function.id())
+        else {
+            return;
+        };
+        let Some(function) = physical.function(id) else {
+            return;
+        };
         let state = LightSnapshot {
             brightness_percent: None,
             temperature_kelvin: None,
@@ -416,7 +427,8 @@ impl Context {
                 if physical.availability() != Availability::Available {
                     return None;
                 }
-                let function = physical.function("main")?;
+                let id = work.native.device().unique_light()?.id();
+                let function = physical.function(id)?;
                 let snapshot = function.snapshot();
                 let light = snapshot.lighting()?;
                 let description = function.description();

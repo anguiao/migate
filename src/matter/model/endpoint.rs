@@ -5,25 +5,10 @@ const ON_OFF_PLUG: DeviceType = DeviceType {
     dtype: 0x010a,
     drev: 3,
 };
-const SINGLE_TYPES: &[DeviceType] = devices!(ON_OFF_PLUG, DEV_TYPE_BRIDGED_NODE);
-const SINGLE_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
-    desc::DescHandler::CLUSTER,
-    groups::GroupsHandler::CLUSTER,
-    identify::IdentifyHandler::<()>::CLUSTER,
-    BridgedHandler::CLUSTER,
-    OnOffHandler::CLUSTER
-);
 const WINDOW_COVERING: DeviceType = DeviceType {
     dtype: 0x0202,
     drev: 6,
 };
-const CURTAIN_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
-    desc::DescHandler::CLUSTER,
-    groups::GroupsHandler::CLUSTER,
-    identify::IdentifyHandler::<()>::CLUSTER,
-    BridgedHandler::CLUSTER,
-    <curtain::CurtainHandler as window_covering::ClusterAsyncHandler>::CLUSTER
-);
 const CURTAIN_CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
@@ -34,22 +19,6 @@ const FAN: DeviceType = DeviceType {
     dtype: 0x002b,
     drev: 4,
 };
-macro_rules! fan_clusters {
-    ($bridged:expr, $rocking:literal) => {
-        clusters!(
-            desc::DescHandler::CLUSTER,
-            groups::GroupsHandler::CLUSTER,
-            identify::IdentifyHandler::<()>::CLUSTER,
-            $bridged,
-            OnOffHandler::CLUSTER,
-            <fan::FanControl<$rocking> as fan_control::ClusterAsyncHandler>::CLUSTER
-        )
-    };
-}
-const FAN_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
-    fan_clusters!(BridgedHandler::CLUSTER, false);
-const FAN_ROCKING_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
-    fan_clusters!(BridgedHandler::CLUSTER, true);
 const FAN_CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
@@ -72,29 +41,6 @@ const RGB_LIGHT: DeviceType = DeviceType {
     dtype: 0x010d,
     drev: 4,
 };
-macro_rules! light_clusters {
-    ($($extra:expr),* $(,)?) => {
-        clusters!(
-            desc::DescHandler::CLUSTER,
-            groups::GroupsHandler::CLUSTER,
-            lighting::IDENTIFY,
-            BridgedHandler::CLUSTER,
-            lighting::OnOffHandler::CLUSTER
-            $(, $extra)*
-        )
-    };
-}
-const O_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = light_clusters!();
-const OB_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
-    light_clusters!(<lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER);
-const OBC_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = light_clusters!(
-    <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER,
-    <lighting::ColorHandler<false> as color_control::ClusterAsyncHandler>::CLUSTER
-);
-const OBCR_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = light_clusters!(
-    <lighting::LevelHandler as level_control::ClusterAsyncHandler>::CLUSTER,
-    <lighting::ColorHandler<true> as color_control::ClusterAsyncHandler>::CLUSTER
-);
 const CHILD_O_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
@@ -206,10 +152,6 @@ pub(super) struct Entry {
     pub(super) role: Role,
 }
 pub(super) enum Role {
-    Single {
-        function: FunctionHandler,
-        bridged: BridgedHandler,
-    },
     Parent {
         children: Vec<u16>,
         bridged: BridgedHandler,
@@ -224,20 +166,20 @@ pub(super) enum Role {
 impl Role {
     fn function(&self) -> Option<&FunctionHandler> {
         match self {
-            Self::Single { function, .. } | Self::Child { function, .. } => Some(function),
+            Self::Child { function, .. } => Some(function),
             Self::Parent { .. } => None,
         }
     }
     fn bridged(&self) -> Option<&BridgedHandler> {
         match self {
-            Self::Single { bridged, .. } | Self::Parent { bridged, .. } => Some(bridged),
+            Self::Parent { bridged, .. } => Some(bridged),
             Self::Child { .. } => None,
         }
     }
     fn battery(&self) -> Option<&sensors::BatteryHandler> {
         match self {
             Self::Parent { battery, .. } => battery.as_ref(),
-            Self::Single { .. } | Self::Child { .. } => None,
+            Self::Child { .. } => None,
         }
     }
 }
@@ -245,13 +187,6 @@ impl Role {
 macro_rules! dispatch {
     ($entry:expr, $method:ident($($arg:expr),* $(,)?)) => {
         match &$entry.role {
-            Role::Single { function, bridged, .. } => AsyncHandler::$method(
-                &ChainedHandler::new(
-                    |_, cluster| cluster == 0x39,
-                    Async(bridged::HandlerAdaptor(bridged)),
-                    function,
-                ), $($arg),*
-            ).await,
             Role::Parent { bridged, battery, .. } => match battery {
                 Some(battery) => AsyncHandler::$method(
                     &EmptyHandler
@@ -283,52 +218,6 @@ impl Entry {
     }
     pub(super) fn metadata<'a>(&'a self, tags: &'a [SemanticTag<'a>]) -> Endpoint<'a> {
         match &self.role {
-            Role::Single { function, .. } => {
-                if let Some(light) = function.light() {
-                    match light.profile().kind() {
-                        LightProfileKind::ExtendedColor => Endpoint::new(
-                            self.endpoint,
-                            devices!(RGB_LIGHT, DEV_TYPE_BRIDGED_NODE),
-                            OBCR_CLUSTERS,
-                        ),
-                        LightProfileKind::ColorTemperature => Endpoint::new(
-                            self.endpoint,
-                            devices!(CT_LIGHT, DEV_TYPE_BRIDGED_NODE),
-                            OBC_CLUSTERS,
-                        ),
-                        LightProfileKind::Dimmable => Endpoint::new(
-                            self.endpoint,
-                            devices!(DEV_TYPE_DIMMABLE_LIGHT, DEV_TYPE_BRIDGED_NODE),
-                            OB_CLUSTERS,
-                        ),
-                        LightProfileKind::OnOff => Endpoint::new(
-                            self.endpoint,
-                            devices!(DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_BRIDGED_NODE),
-                            O_CLUSTERS,
-                        ),
-                    }
-                } else if matches!(function.kind, FunctionHandlerKind::Fan(_)) {
-                    Endpoint::new(
-                        self.endpoint,
-                        devices!(FAN, DEV_TYPE_BRIDGED_NODE),
-                        FAN_CLUSTERS,
-                    )
-                } else if matches!(function.kind, FunctionHandlerKind::FanSwing(_)) {
-                    Endpoint::new(
-                        self.endpoint,
-                        devices!(FAN, DEV_TYPE_BRIDGED_NODE),
-                        FAN_ROCKING_CLUSTERS,
-                    )
-                } else if matches!(function.kind, FunctionHandlerKind::Curtain(_)) {
-                    Endpoint::new(
-                        self.endpoint,
-                        devices!(WINDOW_COVERING, DEV_TYPE_BRIDGED_NODE),
-                        CURTAIN_CLUSTERS,
-                    )
-                } else {
-                    Endpoint::new(self.endpoint, SINGLE_TYPES, SINGLE_CLUSTERS)
-                }
-            }
             Role::Parent { battery, .. } => {
                 if battery.is_some() {
                     Endpoint::new(
@@ -467,7 +356,7 @@ impl desc::PartsMatcher for Entry {
     fn matches(&self, _our_endpoint: u16, endpoint: u16) -> bool {
         match &self.role {
             Role::Parent { children, .. } => children.contains(&endpoint),
-            Role::Single { .. } | Role::Child { .. } => false,
+            Role::Child { .. } => false,
         }
     }
 }

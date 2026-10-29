@@ -459,10 +459,7 @@ impl Context {
                     .admitted
                     .as_ref()
                     .filter(|work| {
-                        !work.life.is_closed()
-                            && work.native.device().functions().iter().any(|function| {
-                                function.id() == "main" && function.lighting().is_some()
-                            })
+                        !work.life.is_closed() && work.native.device().unique_light().is_some()
                     })
                     .cloned()
             })

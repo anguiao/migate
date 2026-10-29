@@ -10,14 +10,14 @@ fn cloud_speed_waits_for_each_single_property_receipt() {
             until(|| {
                 fan(&c).power.value == Some(false)
                     && fan(&c).speed.value == Some(40)
-                    && work(&c).fan_mode_observation("main").value == Some(1)
+                    && work(&c).fan_mode_observation("fan:2").value == Some(1)
                     && fan(&c).swing.value == Some(false)
                     && [POWER, MODE, SPEED, SWING]
                         .iter()
-                        .all(|binding| !work(&c).refresh.borrow().contains("main", *binding))
+                        .all(|binding| !work(&c).refresh.borrow().contains("fan:2", *binding))
             })
             .await;
-            let function = function(&c.context.registry, "one", "main");
+            let function = function(&c.context.registry, "one", "fan:2");
             let before = function.snapshot();
             let (release, gate) = flume::bounded(1);
             c.cloud
@@ -78,9 +78,9 @@ fn each_local_step_failure_or_timeout_stops_the_sequence() {
                 peer.value("one", POWER, json!(false));
                 let control = &c;
                 c.peer(peer, |peer| async move {
-                    until(|| fan(control).power.value == Some(false) && fan(control).speed.value == Some(40) && work(control).fan_mode_observation("main").value == Some(1) && fan(control).swing.value == Some(false)).await;
+                    until(|| fan(control).power.value == Some(false) && fan(control).speed.value == Some(40) && work(control).fan_mode_observation("fan:2").value == Some(1) && fan(control).swing.value == Some(false)).await;
                     peer.state.borrow_mut().hold_writes = true;
-                    let function = function(&control.context.registry, "one", "main");
+                    let function = function(&control.context.registry, "one", "fan:2");
                     let before = function.snapshot().fan();
                     let action = function.begin_fan(FanCommand::Speed(56)).unwrap();
                     let steps = [POWER, MODE, SPEED];
@@ -121,11 +121,11 @@ fn each_cloud_step_failure_or_timeout_stops_the_sequence() {
                     until(|| {
                         fan(&c).power.value == Some(false)
                             && fan(&c).speed.value == Some(40)
-                            && work(&c).fan_mode_observation("main").value == Some(1)
+                            && work(&c).fan_mode_observation("fan:2").value == Some(1)
                             && fan(&c).swing.value == Some(false)
                     })
                     .await;
-                    let function = function(&c.context.registry, "one", "main");
+                    let function = function(&c.context.registry, "one", "fan:2");
                     let before = function.snapshot().fan();
                     let (release, gate) = flume::bounded(1);
                     let steps = [POWER, MODE, SPEED];

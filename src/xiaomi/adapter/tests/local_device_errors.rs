@@ -20,8 +20,8 @@ fn local_offline_or_missing_writes_revoke_only_the_target_until_a_new_list_obser
                     .clock
                     .automatic
                     .store(false, std::sync::atomic::Ordering::Relaxed);
-                let one = function(&control.context.registry, "one", "main");
-                let two = function(&control.context.registry, "two", "main");
+                let one = function(&control.context.registry, "one", "outlet:2");
+                let two = function(&control.context.registry, "two", "outlet:2");
                 peer.state.borrow_mut().hold_writes = true;
                 let mut failed = Box::pin(one.execute(Command::On));
                 assert!(poll_once(failed.as_mut()).await.is_none());
@@ -73,7 +73,7 @@ fn local_business_rejections_and_device_operation_timeouts_keep_the_local_candid
                 initialized(control, &peer, &["one"]).await;
                 until(|| control.context.cloud_candidate("one", true).is_ok()).await;
                 peer.state.borrow_mut().hold_writes = true;
-                let one = function(&control.context.registry, "one", "main");
+                let one = function(&control.context.registry, "one", "outlet:2");
                 let mut failed = Box::pin(one.execute(Command::On));
                 assert!(poll_once(failed.as_mut()).await.is_none());
                 peer.release("one", 2, accepted("one", 2, code)).await;
@@ -120,7 +120,7 @@ fn local_device_offline_reads_continue_over_cloud_without_degrading_other_device
             })
             .await;
             peer.state.borrow_mut().hold_reads = true;
-            let one = function(&control.context.registry, "one", "main");
+            let one = function(&control.context.registry, "one", "outlet:2");
             let work = control.context.live.borrow().devices["one"]
                 .admitted
                 .clone()

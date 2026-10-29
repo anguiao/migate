@@ -22,8 +22,8 @@ fn curtain_configuration_reloads_with_stable_identity_and_endpoint() {
     planned.devices[0].label = "Bedroom curtain".into();
     let entry = &planned.devices[0];
     assert_eq!(entry.functions.len(), 1);
-    assert_eq!(entry.functions[0].id, "main");
-    assert_eq!(entry.functions[0].endpoint, entry.endpoint);
+    assert_eq!(entry.functions[0].id, "curtain:2");
+    assert_ne!(entry.functions[0].endpoint, entry.endpoint);
     save(&store, &planned);
     drop(store);
     let reopened = crate::storage::Store::open(directory.path()).unwrap();
@@ -176,8 +176,8 @@ fn two_curtains_keep_independent_identities_names_and_endpoints() {
     };
     assert_ne!(first.unique_id, second.unique_id);
     assert_ne!(first.endpoint, second.endpoint);
-    assert_eq!(first.functions[0].endpoint, first.endpoint);
-    assert_eq!(second.functions[0].endpoint, second.endpoint);
+    assert_ne!(first.functions[0].endpoint, first.endpoint);
+    assert_ne!(second.functions[0].endpoint, second.endpoint);
     assert_eq!((&*first.label, &*second.label), ("Fabric", "Sheer"));
 }
 

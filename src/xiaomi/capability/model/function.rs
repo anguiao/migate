@@ -196,6 +196,32 @@ impl ParsedFunction {
             bindings: FunctionBindings::Illuminance { measurement },
         }
     }
+    /// Stable source identity from the owning service or observed property.
+    pub(crate) fn source_id(&self) -> String {
+        match &self.bindings {
+            FunctionBindings::Outlet { power } => format!("outlet:{}", power.siid),
+            FunctionBindings::Light { power, .. } => format!("light:{}", power.siid),
+            FunctionBindings::Fan { fan } => format!("fan:{}", fan.power().siid),
+            FunctionBindings::Curtain { curtain } => {
+                format!("curtain:{}", curtain.motor().property().siid)
+            }
+            FunctionBindings::Temperature { measurement } => {
+                property_id("temperature", measurement.property())
+            }
+            FunctionBindings::Humidity { measurement } => {
+                property_id("humidity", measurement.property())
+            }
+            FunctionBindings::CarbonDioxide { measurement } => {
+                property_id("co2", measurement.property())
+            }
+            FunctionBindings::Illuminance { measurement } => {
+                property_id("illuminance", measurement.property())
+            }
+            FunctionBindings::Contact { state } => property_id("contact", state.property()),
+            FunctionBindings::Motion { motion } => property_id("motion", motion.state().property()),
+            FunctionBindings::Occupancy { state } => property_id("occupancy", state.property()),
+        }
+    }
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -314,4 +340,8 @@ impl ParsedFunction {
             self.bindings()
         }
     }
+}
+
+fn property_id(kind: &str, binding: PropertyBinding) -> String {
+    format!("{kind}:{}:{}", binding.siid, binding.piid)
 }

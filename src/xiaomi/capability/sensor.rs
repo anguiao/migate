@@ -56,11 +56,13 @@ pub(super) fn measurements(instance: &Description<'_>) -> Vec<ParsedFunction> {
                     })
             });
         if let Some(binding) = candidate {
+            let property = binding.property();
+            let id = format!("{name}:{}:{}", property.siid, property.piid);
             functions.push(match name {
-                "temperature" => ParsedFunction::temperature(name, "Temperature", binding),
-                "humidity" => ParsedFunction::humidity(name, "Humidity", binding),
-                "co2" => ParsedFunction::co2(name, "CO₂", binding),
-                "illuminance" => ParsedFunction::illuminance(name, "Illuminance", binding),
+                "temperature" => ParsedFunction::temperature(id, "Temperature", binding),
+                "humidity" => ParsedFunction::humidity(id, "Humidity", binding),
+                "co2" => ParsedFunction::co2(id, "CO₂", binding),
+                "illuminance" => ParsedFunction::illuminance(id, "Illuminance", binding),
                 _ => unreachable!(),
             });
         }

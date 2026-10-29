@@ -63,7 +63,7 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
                 .admitted
                 .clone()
                 .unwrap();
-            let two = function(&c.context.registry, "two", "main");
+            let two = function(&c.context.registry, "two", "light:2");
             peer.property("two", 2, true);
             until(|| two.snapshot().power() == Some(Power::On)).await;
             let urn = "urn:miot-spec-v2:device:light:0000A001:xiaomi-ceil04:2:0000C802";
@@ -77,7 +77,7 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
             }
             c.context.request_sync();
             until(|| old.life.is_closed() && cloud_active(&c, "one")).await;
-            let one = function(&c.context.registry, "one", "main");
+            let one = function(&c.context.registry, "one", "light:2");
             peer.online("one", false);
             peer.property("two", 2, false);
             until(|| two.snapshot().power() == Some(Power::Off)).await;
@@ -110,8 +110,8 @@ fn a_failed_description_update_preserves_cloud_online_notifications() {
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one") && cloud_active(&c, "two")).await;
-            let one = function(&c.context.registry, "one", "main");
-            let two = function(&c.context.registry, "two", "main");
+            let one = function(&c.context.registry, "one", "outlet:2");
+            let two = function(&c.context.registry, "two", "outlet:2");
             until(|| {
                 one.snapshot().power() == Some(Power::Off)
                     && two.snapshot().power() == Some(Power::Off)
@@ -258,7 +258,11 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
             assert!(physical.same_instance(&c.context.registry.get(&key).unwrap()));
             let writes = c.cloud.lock().unwrap().numeric_writes.len();
             assert_eq!(
-                terminal.handle_line("off one", 0).await.unwrap().unwrap(),
+                terminal
+                    .handle_line("off one light:2", 0)
+                    .await
+                    .unwrap()
+                    .unwrap(),
                 "one: command accepted"
             );
             until(|| c.cloud.lock().unwrap().numeric_writes.len() > writes).await;
@@ -378,7 +382,11 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
             .unwrap();
         assert!(!status_line.contains("temperature 2700–6500 K"));
         assert_eq!(
-            terminal.handle_line("off one", 0).await.unwrap().unwrap(),
+            terminal
+                .handle_line("off one light:2", 0)
+                .await
+                .unwrap()
+                .unwrap(),
             "one: command accepted"
         );
         db.execute_batch("DROP TRIGGER fail_urn_commit").unwrap();

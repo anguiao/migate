@@ -176,8 +176,8 @@ fn local_late_echo_after_two_accepted_frames_does_not_cancel_action() {
                     .clone()
                     .unwrap();
                 for value in [20, 40] {
-                    let stamp = work.observations.read_stamp("main", BRIGHTNESS);
-                    work.observe_read("main", BRIGHTNESS, &stamp, &json!(value))
+                    let stamp = work.observations.read_stamp("light:2", BRIGHTNESS);
+                    work.observe_read("light:2", BRIGHTNESS, &stamp, &json!(value))
                         .unwrap();
                     assert_eq!(
                         light.snapshot().lighting().unwrap().brightness_percent,
@@ -237,7 +237,7 @@ fn cloud_late_echo_after_two_accepted_frames_does_not_cancel_action() {
             }
         }
         block_on(rig.run(|c| async move {
-            let light = function(&c.context.registry, "one", "main");
+            let light = function(&c.context.registry, "one", "light:2");
             until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
             freeze_light_clock(&c);
             let action = light.begin_light_action(brightness(20.0), false).unwrap();

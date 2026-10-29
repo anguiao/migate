@@ -3,7 +3,11 @@ use super::*;
 async fn cloud_ready(c: &Control, dids: &[&str]) {
     until(|| {
         dids.iter().all(|did| {
-            function(&c.context.registry, did, "main")
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", *did))
+                .unwrap()
+                .functions()[0]
                 .snapshot()
                 .availability
                 == Availability::Available
@@ -19,7 +23,7 @@ fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
         cloud_ready(&c, &["one"]).await;
-        let one = function(&c.context.registry, "one", "main");
+        let one = function(&c.context.registry, "one", "outlet:2");
         until(|| one.snapshot().power() == Some(Power::Off)).await;
         c.clock
             .automatic
@@ -41,7 +45,7 @@ fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
             let status = c
                 .context
                 .commands
-                .snapshot("one", ["main".to_owned()].into_iter());
+                .snapshot("one", ["outlet:2".to_owned()].into_iter());
             status[0].inflight.is_none()
                 && status[0].last.as_ref().is_some_and(|last| {
                     last.result == Some(Err(crate::device::CommandError::Cancelled))
@@ -65,8 +69,8 @@ fn http_temporary_failure_pauses_the_account_until_a_complete_scoped_sync() {
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let one = function(&c.context.registry, "one", "main");
-        let two = function(&c.context.registry, "two", "main");
+        let one = function(&c.context.registry, "one", "outlet:2");
+        let two = function(&c.context.registry, "two", "outlet:2");
         {
             let mut cloud = c.cloud.lock().unwrap();
             cloud.property_status = 503;
@@ -132,8 +136,8 @@ fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_
             c.clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let one = function(&c.context.registry, "one", "main");
-            let two = function(&c.context.registry, "two", "main");
+            let one = function(&c.context.registry, "one", "outlet:2");
+            let two = function(&c.context.registry, "two", "outlet:2");
             until(|| one.snapshot().power() == Some(Power::Off)).await;
             let token_refreshes = c.cloud.lock().unwrap().tokens;
             c.cloud.lock().unwrap().property_code = code;
@@ -183,8 +187,8 @@ fn concurrent_http_token_rejections_merge_refresh_and_never_replay_failed_writes
             cloud.property_gate = Some(property_gate);
             cloud.token_gate = Some(token_gate);
         }
-        let one = function(&c.context.registry, "one", "main");
-        let two = function(&c.context.registry, "two", "main");
+        let one = function(&c.context.registry, "one", "outlet:2");
+        let two = function(&c.context.registry, "two", "outlet:2");
         let mut first = Box::pin(one.execute(Command::On));
         let mut second = Box::pin(two.execute(Command::On));
         assert!(poll_once(first.as_mut()).await.is_none());
@@ -242,7 +246,7 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
                 Availability::Unavailable(_)
             ));
         }
-        let usb = function(&c.context.registry, "multi", "usb");
+        let usb = function(&c.context.registry, "multi", "outlet:9");
         assert!(matches!(
             usb.execute(Command::On).await,
             Err(crate::device::CommandError::Unavailable(_))
@@ -357,7 +361,7 @@ fn runtime_identity_and_home_scope_failures_retire_cloud_eligibility_and_preserv
                     control.context.control_path("one"),
                     Some(super::super::routing::ControlPath::Local(_))
                 ));
-                let one = function(&control.context.registry, "one", "main");
+                let one = function(&control.context.registry, "one", "outlet:2");
                 one.execute(Command::On).await.unwrap();
                 assert_eq!(peer.count("rpcReq", "one", 2), 1);
                 peer.state.borrow_mut().online.insert("one".into(), false);
@@ -406,7 +410,7 @@ fn temporary_directory_failures_pause_existing_http_candidates_until_sync_recove
         // Settle the ordinary startup read before freezing the clock, so the
         // directory failure below is the only HTTP pause under test.
         until(|| {
-            function(&c.context.registry, "one", "main")
+            function(&c.context.registry, "one", "outlet:2")
                 .snapshot()
                 .power()
                 == Some(Power::Off)
@@ -424,7 +428,7 @@ fn temporary_directory_failures_pause_existing_http_candidates_until_sync_recove
             )
         })
         .await;
-        let one = function(&c.context.registry, "one", "main");
+        let one = function(&c.context.registry, "one", "outlet:2");
         assert!(matches!(
             one.snapshot().availability,
             Availability::Unavailable(_)
@@ -463,11 +467,11 @@ fn published_devices_restore_cloud_control_without_a_local_gateway() {
             .clone();
         until(|| c.cloud.lock().unwrap().homes > 0).await;
         async_io::Timer::after(Duration::from_millis(100)).await;
-        let one = function(&c.context.registry, "one", "main");
+        let one = function(&c.context.registry, "one", "outlet:2");
         assert_eq!(one.snapshot().availability, Availability::Available);
         assert_eq!(one.snapshot().power(), Some(Power::Off));
         one.execute(Command::On).await.unwrap();
-        let usb = function(&c.context.registry, "multi", "usb");
+        let usb = function(&c.context.registry, "multi", "outlet:9");
         usb.execute(Command::Off).await.unwrap();
         assert_eq!(one.snapshot().power(), Some(Power::On));
         assert_eq!(usb.snapshot().power(), Some(Power::Off));
@@ -492,7 +496,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
         let (release, gate) = flume::bounded(1);
         block_on(rig.run(|c| async move {
             cloud_ready(&c, &["one"]).await;
-            let one = function(&c.context.registry, "one", "main");
+            let one = function(&c.context.registry, "one", "light:2");
             until(|| one.snapshot().power() == Some(Power::Off)).await;
             c.clock
                 .automatic
@@ -549,7 +553,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
                 }
                 future::yield_now().await;
             };
-            let current = current_physical.function("main").unwrap();
+            let current = current_physical.function("light:2").unwrap();
             until(|| current.snapshot().power() == Some(Power::On)).await;
             assert!(c.context.cloud_candidate("one", true).is_ok());
             // The sent light receipt is still owned by the original request;
@@ -565,7 +569,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
                 let status = c
                     .context
                     .commands
-                    .snapshot("one", ["main".to_owned()].into_iter());
+                    .snapshot("one", ["light:2".to_owned()].into_iter());
                 status[0].inflight.is_none()
                     && status[0]
                         .last

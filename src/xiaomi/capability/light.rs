@@ -57,7 +57,12 @@ pub(super) fn parse_light(
     let lighting = LightBindings::new(brightness, temperature, color, mode)?;
     ParsedDevice::new(
         key,
-        vec![ParsedFunction::light("main", "Light", power, lighting)],
+        vec![ParsedFunction::light(
+            format!("light:{}", service.iid),
+            "Light",
+            power,
+            lighting,
+        )],
         None,
     )
 }

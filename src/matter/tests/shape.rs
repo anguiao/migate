@@ -18,7 +18,7 @@ fn curtain_has_a_distinct_stable_single_control_shape() {
         kind: FunctionKind::Outlet,
         ..curtain.clone()
     };
-    assert_eq!(
+    assert_ne!(
         fixed_shape(std::slice::from_ref(&curtain)),
         fixed_shape(&[renamed])
     );
@@ -70,7 +70,7 @@ fn profile_range_and_outlet_order_change_the_shape() {
     let second = fixed_shape(&[outlet("b"), outlet("a")]);
     assert_ne!(first, second);
 
-    // Only multi-function child labels are part of the Descriptor TagList.
+    // Every child label is part of the Descriptor TagList.
     let mut renamed = outlet("a");
     renamed.label = "Renamed".into();
     assert_ne!(
@@ -79,7 +79,7 @@ fn profile_range_and_outlet_order_change_the_shape() {
     );
     let mut light_renamed = light(LightProfile::OnOff);
     light_renamed.label = "Renamed".into();
-    assert_eq!(
+    assert_ne!(
         fixed_shape(&[light(LightProfile::OnOff)]),
         fixed_shape(&[light_renamed])
     );

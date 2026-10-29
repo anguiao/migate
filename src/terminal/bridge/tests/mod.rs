@@ -30,9 +30,9 @@ fn fixture() -> (
     let registry = DeviceRegistry::new();
     let mut receivers = Vec::new();
     for (did, ids) in [
-        ("one", vec!["main"]),
-        ("two", vec!["main"]),
-        ("multi", vec!["outlet_1", "outlet_2", "usb"]),
+        ("one", vec!["outlet:2"]),
+        ("two", vec!["outlet:2"]),
+        ("multi", vec!["outlet:3", "outlet:4", "outlet:9"]),
     ] {
         let (physical, mut consumers) = PhysicalDevice::new(
             PhysicalDeviceDescription::new(
@@ -59,6 +59,22 @@ fn fixture() -> (
 fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
     block_on(async {
         let (_dir, store, status, registry, mut receivers) = fixture();
+        let omitted = poll_once(handle_line(
+            &registry,
+            &store.devices(),
+            &status,
+            "on one",
+            0,
+        ))
+        .await;
+        let reply = omitted
+            .expect("omitting the function must return immediately")
+            .unwrap()
+            .unwrap();
+        assert!(reply.contains("Available commands:"));
+        for receiver in &mut receivers {
+            assert!(poll_once(next_power(receiver)).await.is_none());
+        }
         for invalid in [
             "on",
             "off",
@@ -85,7 +101,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
             }
         }
         let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "on one", 0),
+            handle_line(&registry, &store.devices(), &status, "on one outlet:2", 0),
             async {
                 let request = next_power(&mut receivers[0]).await.unwrap();
                 registry
@@ -99,21 +115,27 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
         .await;
         assert_eq!(result.unwrap().unwrap(), "one: command accepted");
         let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "off multi usb", 0),
+            handle_line(
+                &registry,
+                &store.devices(),
+                &status,
+                "off multi outlet:9",
+                0,
+            ),
             async {
                 let request = next_power(&mut receivers[4]).await.unwrap();
                 assert!(!request.target);
                 registry
                     .get(&DeviceKey::new("xiaomi", "multi"))
                     .unwrap()
-                    .function("usb")
+                    .function("outlet:9")
                     .unwrap()
                     .observe(false);
                 request.accept().unwrap();
             },
         )
         .await;
-        assert_eq!(result.unwrap().unwrap(), "multi/usb: command accepted");
+        assert_eq!(result.unwrap().unwrap(), "multi/outlet:9: command accepted");
         assert_eq!(
             registry
                 .get(&DeviceKey::new("xiaomi", "one"))
@@ -126,6 +148,62 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
     })
 }
 #[test]
+fn explicit_target_does_not_redirect_a_mixed_device_command() {
+    block_on(async {
+        let (_dir, store, status, registry, mut existing_receivers) = fixture();
+        let (physical, mut receivers) = PhysicalDevice::new(
+            PhysicalDeviceDescription::new(
+                DeviceKey::new("xiaomi", "mixed"),
+                "Mixed",
+                vec![
+                    FunctionDescription {
+                        id: "outlet:2".into(),
+                        label: "Power".into(),
+                        kind: FunctionKind::Outlet,
+                    },
+                    FunctionDescription {
+                        id: "temperature:3:1001".into(),
+                        label: "Temperature".into(),
+                        kind: FunctionKind::Temperature(
+                            crate::device::MeasurementRange::new(-30.0, 100.0).unwrap(),
+                        ),
+                    },
+                ],
+            )
+            .unwrap(),
+        );
+        physical.set_availability(Availability::Available);
+        add_device(&store, &physical.description());
+        registry.insert(physical.clone());
+        for (line, expected) in [
+            ("on mixed", "Invalid command usage"),
+            ("on mixed missing", "Unknown function"),
+            ("on mixed temperature:3:1001", "does not support"),
+        ] {
+            let result = handle_line(&registry, &store.devices(), &status, line, 0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.contains(expected), "{line}: {result}");
+            assert!(poll_once(next_power(&mut receivers[0])).await.is_none());
+            for receiver in &mut existing_receivers {
+                assert!(poll_once(next_power(receiver)).await.is_none());
+            }
+        }
+        let (result, ()) = future::zip(
+            handle_line(&registry, &store.devices(), &status, "on mixed outlet:2", 0),
+            async {
+                let request = next_power(&mut receivers[0]).await.unwrap();
+                assert!(request.target);
+                request.accept().unwrap();
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap().unwrap(), "mixed/outlet:2: command accepted");
+    });
+}
+
+#[test]
 fn list_and_status_read_shared_power_and_persisted_names() {
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
@@ -134,13 +212,13 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         let (physical, _consumers) = PhysicalDevice::new(saved_description(&store, &key));
         registry.remove(&key);
         registry.insert(physical.clone());
-        physical.function("usb").unwrap().observe(true);
+        physical.function("outlet:9").unwrap().observe(true);
         let list = handle_line(&registry, &store.devices(), &status, "list", 0)
             .await
             .unwrap()
             .unwrap();
         assert!(list.contains("Saved Home name"));
-        assert!(list.contains("usb (usb): on"));
+        assert!(list.contains("outlet:9 (outlet:9): on"));
         assert!(list.contains("one (name one)"));
         physical.set_label("Live Home name".into());
         let selected = handle_line(&registry, &store.devices(), &status, "status multi", 0)
@@ -153,7 +231,7 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         assert!(selected.contains("Xiaomi: not signed in"));
         registry.remove(physical.key());
         assert!(
-            handle_line(&registry, &store.devices(), &status, "on multi usb", 0)
+            handle_line(&registry, &store.devices(), &status, "on multi outlet:9", 0)
                 .await
                 .unwrap()
                 .unwrap()
@@ -212,7 +290,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
             .unwrap()
             .unwrap();
         assert!(list.contains("rgb (Saved rgb 名称): available"), "{list}");
-        assert!(list.contains("main (Light): unknown"), "{list}");
+        assert!(list.contains("light:2 (Light): unknown"), "{list}");
         assert!(
             list.contains("Capabilities: on/off, brightness, temperature 2700–6500 K, RGB."),
             "{list}"
@@ -271,7 +349,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
             .unwrap()
             .unwrap();
         assert!(rgb.contains("Saved rgb 名称"));
-        assert!(rgb.contains("main (Light): on"));
+        assert!(rgb.contains("light:2 (Light): on"));
         assert!(
             rgb.contains("Brightness: 72.5%; temperature: 4000 K; RGB: #FF8040; mode: RGB."),
             "{rgb}"
@@ -282,7 +360,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
             .await
             .unwrap()
             .unwrap();
-        assert!(ct.contains("main (Light): on"));
+        assert!(ct.contains("light:2 (Light): on"));
         assert!(
             ct.contains("Capabilities: on/off, brightness, temperature 2700–6500 K."),
             "{ct}"
@@ -306,7 +384,7 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
                 DeviceKey::new("xiaomi", "light"),
                 "Original name",
                 vec![FunctionDescription {
-                    id: "main".into(),
+                    id: "light:2".into(),
                     label: "Saved function name".into(),
                     kind: FunctionKind::Light(LightProfile::ColorTemperature(
                         TemperatureInterval::new(2700, 6500).unwrap(),
@@ -325,7 +403,7 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
             .unwrap();
         add_device(&store, &physical.description());
         registry.insert(physical.clone());
-        for (line, target) in [("on light", true), ("off light main", false)] {
+        for (line, target) in [("on light light:2", true), ("off light light:2", false)] {
             let (result, ()) = future::zip(
                 handle_line(&registry, &store.devices(), &status, line, 0),
                 async {
@@ -369,7 +447,7 @@ fn input_recovers_and_returns_at_eof() {
                 &registry,
                 &store.devices(),
                 &status,
-                Cursor::new(b" \non one\nbad\nstatus\noff one"),
+                Cursor::new(b" \non one outlet:2\nbad\nstatus\noff one outlet:2"),
                 &mut output,
             ),
             async {
@@ -469,9 +547,9 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             .await
             .unwrap()
             .unwrap();
-        assert!(help.contains("channel"));
+        assert!(help.contains("FUNCTION"));
         assert!(help.contains("list"));
-        assert!(help.contains("required"));
+        assert!(help.contains("on DID FUNCTION"));
     })
 }
 

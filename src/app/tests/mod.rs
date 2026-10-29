@@ -15,7 +15,7 @@ fn outlet() -> PhysicalDeviceDescription {
         DeviceKey::new("xiaomi", "test-outlet"),
         "Test Outlet",
         vec![FunctionDescription {
-            id: "main".into(),
+            id: "outlet:2".into(),
             label: "Main power".into(),
             kind: FunctionKind::Outlet,
         }],

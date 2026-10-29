@@ -3,7 +3,7 @@ use super::{BatteryBinding, CapabilityError, MeasurementUnit, ParsedFunction, Pr
 use crate::device::{DeviceKey, FunctionKind, PhysicalDeviceDescription};
 
 /// A parsed device description with non-empty, uniquely keyed functions and
-/// uniquely owned real bindings. Lights use the single `main` function layout.
+/// uniquely owned real bindings and source-anchored identities.
 #[derive(Clone, Debug)]
 pub struct ParsedDevice {
     key: DeviceKey,
@@ -80,98 +80,35 @@ impl ParsedDevice {
                 return Err(CapabilityError::InvalidDescription("function bindings"));
             }
         }
-        let controls = functions
-            .iter()
-            .filter(|function| function.kind().is_control())
-            .collect::<Vec<_>>();
-        let measurements = functions
-            .iter()
-            .filter(|function| function.measurement().is_some())
-            .collect::<Vec<_>>();
-        for function in &measurements {
-            let measurement = function.measurement().unwrap();
-            if !matches!(
-                (function.id(), function.kind(), measurement.unit()),
-                (
-                    "temperature",
-                    FunctionKind::Temperature(_),
-                    MeasurementUnit::Celsius
-                ) | (
-                    "humidity",
-                    FunctionKind::Humidity(_),
-                    MeasurementUnit::Percentage
-                ) | ("co2", FunctionKind::CarbonDioxide(_), MeasurementUnit::Ppm)
-                    | (
-                        "illuminance",
-                        FunctionKind::Illuminance(_),
-                        MeasurementUnit::Lux
-                    )
-            ) {
+        for function in &functions {
+            if function.id() != function.source_id() {
+                return Err(CapabilityError::InvalidDescription(
+                    "function source identity",
+                ));
+            }
+            if let Some(measurement) = function.measurement()
+                && !matches!(
+                    (function.kind(), measurement.unit()),
+                    (FunctionKind::Temperature(_), MeasurementUnit::Celsius)
+                        | (FunctionKind::Humidity(_), MeasurementUnit::Percentage)
+                        | (FunctionKind::CarbonDioxide(_), MeasurementUnit::Ppm)
+                        | (FunctionKind::Illuminance(_), MeasurementUnit::Lux)
+                )
+            {
                 return Err(CapabilityError::InvalidDescription("sensor topology"));
             }
-        }
-        for function in functions
-            .iter()
-            .filter(|function| function.kind().is_state_sensor())
-        {
-            let valid = matches!(
-                (
-                    function.id(),
-                    function.kind(),
-                    function.state().unwrap().mapping(),
-                ),
-                (
-                    "contact",
-                    FunctionKind::Contact,
-                    StateMapping::ContactBoolean | StateMapping::Enumerated { .. }
-                ) | (
-                    "motion",
-                    FunctionKind::Motion,
-                    StateMapping::NoMotionDuration { .. }
-                ) | (
-                    "occupancy",
-                    FunctionKind::Occupancy,
-                    StateMapping::Enumerated { .. }
+            if let Some(state) = function.state()
+                && !matches!(
+                    (function.kind(), state.mapping()),
+                    (
+                        FunctionKind::Contact,
+                        StateMapping::ContactBoolean | StateMapping::Enumerated { .. }
+                    ) | (FunctionKind::Motion, StateMapping::NoMotionDuration { .. })
+                        | (FunctionKind::Occupancy, StateMapping::Enumerated { .. })
                 )
-            );
-            if !valid {
+            {
                 return Err(CapabilityError::InvalidDescription("state topology"));
             }
-        }
-        if functions
-            .iter()
-            .all(|function| function.kind().is_control())
-            && battery.is_some()
-        {
-            return Err(CapabilityError::InvalidDescription("battery topology"));
-        }
-        if controls.iter().any(|function| function.fan().is_some()) {
-            if controls.len() != 1 || controls[0].id() != "main" || refresh_trigger.is_some() {
-                return Err(CapabilityError::InvalidDescription("fan topology"));
-            }
-        } else if controls.iter().any(|function| function.curtain().is_some()) {
-            if controls.len() != 1 || controls[0].id() != "main" || refresh_trigger.is_some() {
-                return Err(CapabilityError::InvalidDescription("curtain topology"));
-            }
-        } else if controls
-            .iter()
-            .any(|function| function.lighting().is_some())
-        {
-            if controls.len() != 1 || controls[0].id() != "main" || refresh_trigger.is_some() {
-                return Err(CapabilityError::InvalidDescription("light topology"));
-            }
-        } else if !controls.is_empty() {
-            let ids = controls
-                .iter()
-                .map(|function| function.id())
-                .collect::<Vec<_>>();
-            let single_main = ids == ["main"] && refresh_trigger.is_none();
-            let cp7pd = ids == ["outlet_1", "outlet_2", "usb"] && refresh_trigger.is_some();
-            if !(single_main || cp7pd) {
-                return Err(CapabilityError::InvalidDescription("outlet topology"));
-            }
-        } else if refresh_trigger.is_some() {
-            return Err(CapabilityError::InvalidDescription("sensor topology"));
         }
         Ok(Self {
             key,
@@ -186,6 +123,15 @@ impl ParsedDevice {
     }
     pub fn functions(&self) -> &[ParsedFunction] {
         &self.functions
+    }
+    /// A group relation without a specific function can address only one light.
+    pub(crate) fn unique_light(&self) -> Option<&ParsedFunction> {
+        let mut lights = self
+            .functions
+            .iter()
+            .filter(|function| function.lighting().is_some());
+        let light = lights.next()?;
+        lights.next().is_none().then_some(light)
     }
     pub fn refresh_trigger(&self) -> Option<PropertyBinding> {
         self.refresh_trigger

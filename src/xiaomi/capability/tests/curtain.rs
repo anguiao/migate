@@ -24,7 +24,7 @@ fn curtain_public_description_creates_one_control_without_power() {
     let parsed = parse(&instance()).unwrap();
     assert_eq!(parsed.functions().len(), 1);
     let function = &parsed.functions()[0];
-    assert_eq!(function.id(), "main");
+    assert_eq!(function.id(), "curtain:2");
     assert!(function.kind().is_control());
     assert_eq!(function.kind(), FunctionKind::Curtain);
     assert_eq!(function.power(), None);

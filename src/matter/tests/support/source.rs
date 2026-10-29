@@ -25,6 +25,7 @@ use std::{future::Future, pin::Pin, rc::Rc};
 pub(crate) struct PublishedLightModel {
     handler: model::Model,
     store: Store,
+    children: std::collections::BTreeMap<u16, u16>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -37,9 +38,29 @@ pub(crate) struct LightAttributes {
 
 impl PublishedLightModel {
     pub(crate) fn new(app: &Rc<App>, store: &Store) -> Self {
+        let entries = app.frozen();
+        let children = entries
+            .iter()
+            .map(|entry| {
+                let children = entry
+                    .identity
+                    .functions
+                    .iter()
+                    .filter(|function| {
+                        entry
+                            .device
+                            .function(&function.id)
+                            .is_some_and(|device| device.description().kind.is_light())
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(children.len(), 1);
+                (entry.identity.endpoint, children[0].endpoint)
+            })
+            .collect();
         Self {
-            handler: model::handler_from(app.frozen(), rand::rng(), app.clone()),
+            handler: model::handler_from(entries, rand::rng(), app.clone()),
             store: store.clone(),
+            children,
         }
     }
 
@@ -59,6 +80,7 @@ impl PublishedLightModel {
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new(self.store.matter()));
         let im = InteractionModel::new(&matter, &crypto, &buffers, &self.handler, &kv, &state);
+        let child = self.children[&endpoint];
         let mut values = Vec::new();
         for (cluster, attribute) in [
             (0x300, ColorAttribute::ColorTempPhysicalMinMireds as u32),
@@ -68,7 +90,12 @@ impl PublishedLightModel {
             values.push(
                 read_bytes(
                     &self.handler,
-                    &Context::at(&im, endpoint, cluster, attribute),
+                    &Context::at(
+                        &im,
+                        if cluster == 0x39 { endpoint } else { child },
+                        cluster,
+                        attribute,
+                    ),
                 )
                 .await
                 .unwrap_or_else(|error| {
@@ -80,7 +107,7 @@ impl PublishedLightModel {
             &self.handler,
             &Context::at(
                 &im,
-                endpoint,
+                child,
                 0x300,
                 ColorAttribute::ColorTemperatureMireds as u32,
             ),

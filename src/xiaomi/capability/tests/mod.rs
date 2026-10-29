@@ -45,7 +45,7 @@ fn four_single_outlet_models_accept_their_public_instance_urns() {
         );
         let device = parse_device(key(), &model_description(model)).unwrap();
         assert_eq!(device.functions().len(), 1);
-        assert_eq!(device.functions()[0].id(), "main");
+        assert_eq!(device.functions()[0].id(), "outlet:2");
         assert_eq!(device.functions()[0].power(), outlet.functions()[0].power());
         assert_eq!(device.refresh_trigger(), None);
     }
@@ -64,9 +64,9 @@ fn cp7pd_exposes_three_independent_channels_and_observes_total_control_internall
             .map(|function| (function.id(), function.label(), function.power().unwrap()))
             .collect::<Vec<_>>(),
         [
-            ("outlet_1", "开关 1", PropertyBinding { siid: 3, piid: 1 }),
-            ("outlet_2", "开关 2", PropertyBinding { siid: 4, piid: 1 }),
-            ("usb", "USB", PropertyBinding { siid: 9, piid: 1 }),
+            ("outlet:3", "开关 1", PropertyBinding { siid: 3, piid: 1 }),
+            ("outlet:4", "开关 2", PropertyBinding { siid: 4, piid: 1 }),
+            ("outlet:9", "USB", PropertyBinding { siid: 9, piid: 1 }),
         ]
     );
     assert_eq!(

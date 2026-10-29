@@ -64,7 +64,7 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let light = function(&c.context.registry, "group-1", "main");
+        let light = function(&c.context.registry, "group-1", "light:2");
         c.cloud.lock().unwrap().property_code = -704_012_904;
         assert!(light.execute(Command::Off).await.is_err());
         assert!(matches!(

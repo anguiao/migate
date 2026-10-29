@@ -7,7 +7,7 @@ fn curtain_notification_recovery_settles_a_target_whose_movement_was_missed() {
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
             settled(&c).await;
-            let function = function(&c.context.registry, "one", "main");
+            let function = function(&c.context.registry, "one", "curtain:2");
             assert_eq!(function.matter_curtain().1, Some(25));
             c.clock
                 .automatic
@@ -15,10 +15,10 @@ fn curtain_notification_recovery_settles_a_target_whose_movement_was_missed() {
             cloud.send(Packet::Disconnect(Disconnect::new()));
             until(|| {
                 c.context.notifications.borrow().is_none()
-                    && work(&c).function_observer("main").is_none()
+                    && work(&c).function_observer("curtain:2").is_none()
                     && [STATUS, CURRENT, TARGET]
                         .iter()
-                        .all(|binding| !work(&c).refresh.borrow().contains("main", *binding))
+                        .all(|binding| !work(&c).refresh.borrow().contains("curtain:2", *binding))
             })
             .await;
             assert_eq!(function.snapshot().availability, Availability::Available);
@@ -56,10 +56,10 @@ fn curtain_notification_recovery_settles_a_target_whose_movement_was_missed() {
                 .await
                 .unwrap();
             let reads = c.cloud.lock().unwrap().property_reads.len();
-            work(&c).refresh_property("main", STATUS);
+            work(&c).refresh_property("curtain:2", STATUS);
             until(|| {
                 c.cloud.lock().unwrap().property_reads.len() > reads
-                    && !work(&c).refresh.borrow().contains("main", STATUS)
+                    && !work(&c).refresh.borrow().contains("curtain:2", STATUS)
             })
             .await;
             assert_eq!(function.matter_curtain().1, Some(90));
@@ -82,25 +82,25 @@ fn curtain_subscription_failure_recovers_without_losing_read_values() {
             until(|| {
                 curtain(control).target_position.value == Some(80)
                     && work(control)
-                        .function_subscription_problem("main")
+                        .function_subscription_problem("curtain:2")
                         .is_some()
             })
             .await;
-            assert!(work(control).function_observer("main").is_none());
-            let statuses = work(control).subscription_status("main");
+            assert!(work(control).function_observer("curtain:2").is_none());
+            let statuses = work(control).subscription_status("curtain:2");
             assert!(statuses.iter().any(|item| item.binding
                 == super::model::SubscriptionBinding::Property(CURRENT)
                 && item.source == PathKind::Local
                 && item.problem.is_some()));
             peer.state.borrow_mut().sub_reject.clear();
             peer.list_changed(&["one"]);
-            until(|| work(control).function_observer("main").is_some()).await;
+            until(|| work(control).function_observer("curtain:2").is_some()).await;
             peer.notify_value_at("one", CURRENT, json!(48), Some(600), false);
             until(|| curtain(control).current_position.source_time == Some(600)).await;
             assert_eq!(curtain(control).target_position.value, Some(80));
             assert!(
                 work(control)
-                    .subscription_status("main")
+                    .subscription_status("curtain:2")
                     .iter()
                     .any(|item| item.binding
                         == super::model::SubscriptionBinding::Property(CURRENT)
@@ -125,12 +125,12 @@ fn curtain_disconnect_and_retirement_keep_observations_and_recovery_reads_all_pr
         c.peer(peer(), |_peer| async move {
             settled(control).await;
             *result.borrow_mut() = Some(curtain(control));
-            *capture_source.borrow_mut() = work(control).function_observer("main");
+            *capture_source.borrow_mut() = work(control).function_observer("curtain:2");
         })
         .await;
         until(|| c.context.live.borrow().session.is_none()).await;
         assert_eq!(curtain(&c), saved.borrow().unwrap());
-        assert!(work(&c).function_observer("main").is_none());
+        assert!(work(&c).function_observer("curtain:2").is_none());
         let replacement = peer();
         replacement.value("one", STATUS, json!(2));
         replacement.value("one", CURRENT, json!(55));
@@ -146,7 +146,7 @@ fn curtain_disconnect_and_retirement_keep_observations_and_recovery_reads_all_pr
             settled(control).await;
             let observed = curtain(control);
             assert_eq!(
-                function(&control.context.registry, "one", "main")
+                function(&control.context.registry, "one", "curtain:2")
                     .matter_curtain()
                     .1,
                 Some(55)
@@ -188,12 +188,14 @@ fn curtain_notification_and_read_routes_switch_independently() {
             c.peer(peer, |peer| async move {
                 until(|| {
                     matches!(
-                        work(control).function_observer("main"),
+                        work(control).function_observer("curtain:2"),
                         Some(NotificationSource::Cloud(_))
-                    ) && [STATUS, CURRENT, TARGET]
-                        .iter()
-                        .all(|binding| !work(control).refresh.borrow().contains("main", *binding))
-                        && curtain(control).current_position.value == Some(37)
+                    ) && [STATUS, CURRENT, TARGET].iter().all(|binding| {
+                        !work(control)
+                            .refresh
+                            .borrow()
+                            .contains("curtain:2", *binding)
+                    }) && curtain(control).current_position.value == Some(37)
                 })
                 .await;
                 let diagnostics = control.context.diagnostics();
@@ -204,7 +206,7 @@ fn curtain_notification_and_read_routes_switch_independently() {
                     .borrow_mut()
                     .read_timeout
                     .insert(("one".into(), 2, 3));
-                work(control).refresh_property("main", CURRENT);
+                work(control).refresh_property("curtain:2", CURRENT);
                 until(|| {
                     peer.state.borrow().held.iter().any(|(publish, _)| {
                         let payload = decode_mips(&publish.payload).unwrap().payload;
@@ -221,7 +223,7 @@ fn curtain_notification_and_read_routes_switch_independently() {
                 until(|| curtain(control).status.value == Some(CurtainMotion::Closing)).await;
                 assert_eq!(curtain(control).current_position.value, Some(41));
                 assert_eq!(
-                    work(control).property_source("main", CURRENT),
+                    work(control).property_source("curtain:2", CURRENT),
                     Some(PathKind::Cloud)
                 );
 
@@ -237,7 +239,8 @@ fn curtain_notification_and_read_routes_switch_independently() {
                 until(|| {
                     control.cloud.lock().unwrap().property_reads.len() >= before + 3
                         && [STATUS, CURRENT, TARGET].iter().all(|binding| {
-                            work(control).property_source("main", *binding) == Some(PathKind::Cloud)
+                            work(control).property_source("curtain:2", *binding)
+                                == Some(PathKind::Cloud)
                         })
                 })
                 .await;

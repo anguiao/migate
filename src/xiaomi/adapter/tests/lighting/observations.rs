@@ -33,7 +33,7 @@ fn all_light_samples_read_and_subscribe_every_property() {
             }
             let control = &c;
             c.peer(peer, |peer| async move {
-                let light = function(&control.context.registry, "one", "main");
+                let light = function(&control.context.registry, "one", "light:2");
                 until(|| {
                     light.snapshot().lighting().unwrap().brightness_percent == Some(100.0)
                         && light
@@ -72,7 +72,7 @@ fn local_light_acceptance_keeps_actual_state_until_feedback() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-            let light = function(&control.context.registry, "one", "main");
+            let light = function(&control.context.registry, "one", "light:2");
             until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Temperature))
                 .await;
             let action = light
@@ -117,7 +117,7 @@ fn on_off_and_dimmable_source_io_use_only_real_bindings() {
                 c.peer(peer, |peer| async move {
                     until(|| control.context.active_notification("one") == Some(PathKind::Local))
                         .await;
-                    let light = function(&control.context.registry, "one", "main");
+                    let light = function(&control.context.registry, "one", "light:2");
                     until(|| {
                         light
                             .snapshot()
@@ -160,7 +160,7 @@ fn on_off_and_dimmable_source_io_use_only_real_bindings() {
                 c.peer(peer, |peer| async move {
                     until(|| control.context.active_notification("one") == Some(PathKind::Local))
                         .await;
-                    let light = function(&control.context.registry, "one", "main");
+                    let light = function(&control.context.registry, "one", "light:2");
                     until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0))
                         .await;
                     let work = control.context.live.borrow().devices["one"]
@@ -278,7 +278,7 @@ fn malformed_light_read_retries_its_property_without_changing_snapshot() {
         peer.value("one", BRIGHTNESS, json!(101));
         let control = &c;
         c.peer(peer, |peer| async move {
-            let light = function(&control.context.registry, "one", "main");
+            let light = function(&control.context.registry, "one", "light:2");
             until(|| {
                 light
                     .snapshot()
@@ -358,7 +358,7 @@ fn rgb_notification_source_requires_all_five_property_subscriptions() {
             until(|| work.test_local_exhausted()).await;
             assert!(!work.test_local_subscribed_pair(MODE.siid, MODE.piid));
             assert_eq!(control.context.active_notification("one"), None);
-            let light = function(&control.context.registry, "one", "main");
+            let light = function(&control.context.registry, "one", "light:2");
             assert_eq!(light.snapshot().availability, Availability::Available);
             light
                 .begin_light_action(brightness(60.0), true)
@@ -381,7 +381,7 @@ fn new_mode_only_refreshes_its_missing_color_without_retiring_brightness_read() 
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-            let light = function(&control.context.registry, "one", "main");
+            let light = function(&control.context.registry, "one", "light:2");
             let work = control.context.live.borrow().devices["one"]
                 .admitted
                 .clone()
@@ -398,7 +398,7 @@ fn new_mode_only_refreshes_its_missing_color_without_retiring_brightness_read() 
             })
             .await;
             peer.state.borrow_mut().hold_reads = true;
-            work.refresh_property("main", BRIGHTNESS);
+            work.refresh_property("light:2", BRIGHTNESS);
             until(|| {
                 peer.state
                     .borrow()
@@ -430,17 +430,17 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
             let control = &c;
             c.peer(peer, |peer| async move {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-                let light = function(&control.context.registry, "one", "main");
+                let light = function(&control.context.registry, "one", "light:2");
                 let work = control.context.live.borrow().devices["one"]
                     .admitted
                     .clone()
                     .unwrap();
-                let key = super::super::super::observations::key("main", active);
+                let key = super::super::super::observations::key("light:2", active);
                 until(|| work.refresh.borrow().snapshot().problems.contains_key(&key)).await;
                 peer.state.borrow_mut().hold_reads = true;
                 peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
                 until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
-                let stamp = work.observations.read_stamp("main", active);
+                let stamp = work.observations.read_stamp("light:2", active);
                 for _ in 0..3 {
                     peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
                 }
@@ -449,7 +449,7 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                 }
                 assert!(
                     work.observations
-                        .read_is_current(&work, "main", active, &stamp)
+                        .read_is_current(&work, "light:2", active, &stamp)
                 );
                 assert!(
                     !work
@@ -458,7 +458,7 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                         .snapshot()
                         .pending
                         .iter()
-                        .any(|read| read.id == "main" && read.binding == active)
+                        .any(|read| read.id == "light:2" && read.binding == active)
                 );
                 peer.release_property(
                     "one",
@@ -489,23 +489,23 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-            let light = function(&control.context.registry, "one", "main");
+            let light = function(&control.context.registry, "one", "light:2");
             let work = control.context.live.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
-            let key = super::super::super::observations::key("main", COLOR);
+            let key = super::super::super::observations::key("light:2", COLOR);
             until(|| work.refresh.borrow().snapshot().problems.contains_key(&key)).await;
             peer.state.borrow_mut().hold_reads = true;
-            work.refresh_property("main", COLOR);
+            work.refresh_property("light:2", COLOR);
             until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
-            let stamp = work.observations.read_stamp("main", COLOR);
+            let stamp = work.observations.read_stamp("light:2", COLOR);
             peer.notify_value("one", MODE, json!(1), false);
             until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Rgb)).await;
             assert!(
                 !work
                     .observations
-                    .read_is_current(&work, "main", COLOR, &stamp)
+                    .read_is_current(&work, "light:2", COLOR, &stamp)
             );
             peer.release_property("one", COLOR, json!({"value":0x456789}))
                 .await;
@@ -527,16 +527,16 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-            let light = function(&control.context.registry, "one", "main");
+            let light = function(&control.context.registry, "one", "light:2");
             let work = control.context.live.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
-            let key = super::super::super::observations::key("main", COLOR);
+            let key = super::super::super::observations::key("light:2", COLOR);
             until(|| work.refresh.borrow().snapshot().problems.contains_key(&key)).await;
             peer.state.borrow_mut().hold_reads = true;
-            work.refresh_property("main", COLOR);
-            work.refresh.borrow_mut().exhaust_pending("main", COLOR);
+            work.refresh_property("light:2", COLOR);
+            work.refresh.borrow_mut().exhaust_pending("light:2", COLOR);
             until(|| {
                 peer.state.borrow().held.iter().any(|(publish, _)| {
                     let payload = decode_mips(&publish.payload).unwrap().payload;
@@ -559,7 +559,7 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
                         .snapshot()
                         .pending
                         .iter()
-                        .any(|read| read.id == "main" && read.binding == COLOR)
+                        .any(|read| read.id == "light:2" && read.binding == COLOR)
             );
             peer.release_property("one", COLOR, json!({"value":0xabcdef}))
                 .await;
@@ -580,7 +580,7 @@ fn unknown_mode_color_values_update_only_cache_until_the_mode_changes() {
             let control = &c;
             c.peer(peer, |peer| async move {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-                let light = function(&control.context.registry, "one", "main");
+                let light = function(&control.context.registry, "one", "light:2");
                 let work = control.context.live.borrow().devices["one"]
                     .admitted
                     .clone()
@@ -590,7 +590,7 @@ fn unknown_mode_color_values_update_only_cache_until_the_mode_changes() {
                         .borrow()
                         .snapshot()
                         .problems
-                        .contains_key(&super::super::super::observations::key("main", MODE))
+                        .contains_key(&super::super::super::observations::key("light:2", MODE))
                 })
                 .await;
                 assert_eq!(light.snapshot().lighting().unwrap().mode, None);

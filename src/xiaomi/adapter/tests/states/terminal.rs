@@ -7,9 +7,9 @@ fn native_state_terminal_distinguishes_event_subscriptions_and_observation_metad
         c.announce();
         let control = &c;
         c.peer(motion_peer(), |peer| async move {
-            ready(control, "motion").await;
+            ready(control, "motion:2:1024").await;
             event(&peer, false, Some(201));
-            until(|| state(control, "motion").source_time == Some(201)).await;
+            until(|| state(control, "motion:2:1024").source_time == Some(201)).await;
             let status = crate::terminal::AuthStatus::new(
                 control.context.status.borrow().authentication.clone(),
                 "/bin/migate".into(),

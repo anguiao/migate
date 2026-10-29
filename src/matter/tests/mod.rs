@@ -42,7 +42,7 @@ fn topology_and_identity_are_fixed() {
             .iter()
             .map(|e| e.id)
             .collect::<Vec<_>>()),
-        [0, 1, 2]
+        [0, 1, 2, 3]
     );
 }
 
@@ -74,7 +74,10 @@ fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
         for id in 0x40..=0x42 {
             assert!(on_off.command(id).is_none());
         }
-        let bridged = endpoint
+        let parent = node.endpoint(3).unwrap();
+        assert!(parent.cluster(6).is_none());
+        assert!(endpoint.cluster(0x39).is_none());
+        let bridged = parent
             .clusters
             .iter()
             .find(|cluster| cluster.id == 0x39)

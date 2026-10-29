@@ -9,9 +9,9 @@ fn commands_are_concurrent_across_channels_and_fifo_with_execution_time_toggle()
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one", "multi"]).await;
             peer.state.borrow_mut().hold_writes = true;
-            let a = function(&control.context.registry, "one", "main");
-            let b = function(&control.context.registry, "multi", "outlet_1");
-            let d = function(&control.context.registry, "multi", "outlet_2");
+            let a = function(&control.context.registry, "one", "outlet:2");
+            let b = function(&control.context.registry, "multi", "outlet:3");
+            let d = function(&control.context.registry, "multi", "outlet:4");
             let mut first = Box::pin(a.execute(Command::On));
             let mut second = Box::pin(a.execute(Command::Toggle));
             let mut third = Box::pin(a.execute(Command::Off));
@@ -72,7 +72,7 @@ fn an_offline_event_before_an_active_success_reply_preserves_acceptance() {
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one", "two"]).await;
             peer.state.borrow_mut().hold_writes = true;
-            let one = function(&control.context.registry, "one", "main");
+            let one = function(&control.context.registry, "one", "outlet:2");
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
@@ -88,7 +88,7 @@ fn an_offline_event_before_an_active_success_reply_preserves_acceptance() {
                 Availability::Unavailable(_)
             ));
             assert_eq!(
-                function(&control.context.registry, "two", "main")
+                function(&control.context.registry, "two", "outlet:2")
                     .snapshot()
                     .availability,
                 Availability::Available
@@ -122,7 +122,7 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
             peer.state.borrow_mut().hold_writes = true;
-            let one = function(&control.context.registry, "one", "main");
+            let one = function(&control.context.registry, "one", "light:2");
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
@@ -166,7 +166,7 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 }
                 future::yield_now().await;
             };
-            let current = current_physical.function("main").unwrap();
+            let current = current_physical.function("light:2").unwrap();
             until(|| current.snapshot().power() == Some(Power::Off)).await;
             peer.release("one", 2, accepted("one", 2, 0)).await;
             // A sent light receipt keeps its ownership and settles the
@@ -240,7 +240,7 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
                 .map(|function| function.id().to_owned())
                 .collect::<Vec<_>>();
             assert_eq!(runtime_order, cached_order);
-            for (id, siid) in [("outlet_1", 3), ("outlet_2", 4), ("usb", 9)] {
+            for (id, siid) in [("outlet:3", 3), ("outlet:4", 4), ("outlet:9", 9)] {
                 physical
                     .function(id)
                     .unwrap()
@@ -263,7 +263,7 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
                 physical.same_instance(&current),
                 "an identical duplicate description keeps the serving instance"
             );
-            for (id, siid) in [("outlet_1", 3), ("outlet_2", 4), ("usb", 9)] {
+            for (id, siid) in [("outlet:3", 3), ("outlet:4", 4), ("outlet:9", 9)] {
                 physical
                     .function(id)
                     .unwrap()

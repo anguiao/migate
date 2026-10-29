@@ -6,10 +6,10 @@ use super::{AuthStatus, current_time, status::timestamp};
 use crate::{
     RuntimeError,
     configuration::GroupRelation,
-    device::{Availability, Capability, Command, CommandError, DeviceKey, LightMode, Power},
+    device::{Availability, Capability, Command, DeviceKey, LightMode, Power},
     storage::StorageError,
 };
-pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID [channel], off DID [channel], help\nUse list to find stable channel keys. A single-channel device may omit channel; channel is required for a multi-channel device.";
+pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, help\nUse list to find stable function keys.";
 fn invalid(view: &View, status: &AuthStatus, now: i64, reason: &str) -> String {
     format!(
         "{reason}\n{COMMAND_HELP}\n{}",
@@ -567,46 +567,14 @@ impl View {
                     )
                 }
             }
-            [verb @ ("on" | "off"), did, channel @ ..] if channel.len() <= 1 => {
+            [verb @ ("on" | "off"), did, id] => {
                 let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
                     return Ok(Some(invalid(registry, status, now, "Unknown device DID.")));
                 };
-                if physical
-                    .functions()
-                    .iter()
-                    .all(|function| function.description().is_read_only())
-                {
-                    log::info!("terminal {did} {verb}: unsupported read-only device");
-                    return Ok(Some(format!("{did}: {}", CommandError::Unsupported)));
-                }
-                let controls = physical
-                    .functions()
-                    .iter()
-                    .filter(|function| {
-                        !function.description().is_read_only()
-                            && !current_hidden_light(
-                                registry,
-                                physical.key(),
-                                function.description(),
-                            )
-                    })
-                    .collect::<Vec<_>>();
-                let function = if let Some(channel) = channel.first() {
-                    physical.function(channel).filter(|function| {
-                        !current_hidden_light(registry, physical.key(), function.description())
-                    })
-                } else if let [function] = controls.as_slice() {
-                    Some((*function).clone())
-                } else {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        now,
-                        "A channel is required for this device.",
-                    )));
-                };
-                let Some(function) = function else {
-                    return Ok(Some(invalid(registry, status, now, "Unknown channel.")));
+                let Some(function) = physical.function(id).filter(|function| {
+                    !current_hidden_light(registry, physical.key(), function.description())
+                }) else {
+                    return Ok(Some(invalid(registry, status, now, "Unknown function.")));
                 };
                 let target = if physical.functions().len() == 1 {
                     did.to_string()

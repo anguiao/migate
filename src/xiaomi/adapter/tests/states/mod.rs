@@ -101,7 +101,7 @@ fn reads(peer: &Peer, binding: PropertyBinding) -> usize {
         .count()
 }
 fn illumination(c: &Control) -> Option<f64> {
-    function(&c.context.registry, "one", "illuminance")
+    function(&c.context.registry, "one", "illuminance:2:1005")
         .snapshot()
         .measurement()
         .unwrap()
