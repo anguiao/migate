@@ -216,30 +216,15 @@ impl DeviceWork {
     }
     fn function_source_changed(&self, id: &str) {
         self.observations.function_source_changed(id);
-        if let Some(function) = self
-            .native
-            .device()
-            .functions()
-            .iter()
-            .find(|function| function.id() == id && function.curtain().is_some())
-        {
-            self.physical()
-                .function(id)
-                .unwrap()
-                .curtain_source_changed();
-            for binding in function.observation_bindings() {
-                self.refresh.borrow_mut().request_baseline(id, binding);
+        if let Some(function) = self.native.device().functions().iter().find(|function| {
+            function.id() == id && (function.curtain().is_some() || function.fan().is_some())
+        }) {
+            if function.curtain().is_some() {
+                self.physical()
+                    .function(id)
+                    .unwrap()
+                    .curtain_source_changed();
             }
-            self.refresh_changed.notify(usize::MAX);
-            return;
-        }
-        if let Some(function) = self
-            .native
-            .device()
-            .functions()
-            .iter()
-            .find(|function| function.id() == id && function.fan().is_some())
-        {
             for binding in function.observation_bindings() {
                 self.refresh.borrow_mut().request_baseline(id, binding);
             }

@@ -5,7 +5,10 @@ use super::{
     },
     routing::ControlPath,
     state::Context,
+    work::DeviceWork,
 };
+use crate::xiaomi::capability::PropertyBinding;
+
 fn path_kind(path: ControlPath) -> PathKind {
     match path {
         ControlPath::Local(_) => PathKind::Local,
@@ -169,62 +172,32 @@ impl Context {
                             Vec::new()
                         },
                         properties: if let Some(fan) = function.fan() {
-                            let subscriptions = work.subscription_status(function.id());
-                            [
-                                ("Power", Some(fan.power())),
-                                ("Native mode", Some(fan.mode().property())),
-                                ("Straight speed", Some(fan.speed().property())),
-                                ("Horizontal swing", fan.swing()),
-                            ]
-                            .into_iter()
-                            .filter_map(|(name, binding)| {
-                                binding.map(|binding| ObservedPropertyStatus {
-                                    name,
-                                    binding,
-                                    observation_source: work
-                                        .property_source(function.id(), binding),
-                                    read_problem: work
-                                        .refresh
-                                        .borrow()
-                                        .property_problem(function.id(), binding),
-                                    subscriptions: subscriptions
-                                        .iter()
-                                        .filter(|item| {
-                                            item.binding == SubscriptionBinding::Property(binding)
-                                        })
-                                        .cloned()
-                                        .collect(),
-                                })
-                            })
-                            .collect()
-                        } else {
-                            function.curtain().map_or_else(Vec::new, |curtain| {
-                                let subscriptions = work.subscription_status(function.id());
+                            property_statuses(
+                                &work,
+                                function.id(),
+                                [
+                                    ("Power", Some(fan.power())),
+                                    ("Native mode", Some(fan.mode().property())),
+                                    ("Straight speed", Some(fan.speed().property())),
+                                    ("Horizontal swing", fan.swing()),
+                                ]
+                                .into_iter()
+                                .filter_map(|(name, binding)| {
+                                    binding.map(|binding| (name, binding))
+                                }),
+                            )
+                        } else if let Some(curtain) = function.curtain() {
+                            property_statuses(
+                                &work,
+                                function.id(),
                                 [
                                     ("Current position", curtain.current().property()),
                                     ("Target position", curtain.target().property()),
                                     ("Status", curtain.status().property()),
-                                ]
-                                .into_iter()
-                                .map(|(name, binding)| ObservedPropertyStatus {
-                                    name,
-                                    binding,
-                                    observation_source: work
-                                        .property_source(function.id(), binding),
-                                    read_problem: work
-                                        .refresh
-                                        .borrow()
-                                        .property_problem(function.id(), binding),
-                                    subscriptions: subscriptions
-                                        .iter()
-                                        .filter(|item| {
-                                            item.binding == SubscriptionBinding::Property(binding)
-                                        })
-                                        .cloned()
-                                        .collect(),
-                                })
-                                .collect()
-                            })
+                                ],
+                            )
+                        } else {
+                            Vec::new()
                         },
                     }
                 })
@@ -359,4 +332,27 @@ impl Context {
         }
         self.status_changed.notify(usize::MAX);
     }
+}
+
+fn property_statuses(
+    work: &DeviceWork,
+    id: &str,
+    bindings: impl IntoIterator<Item = (&'static str, PropertyBinding)>,
+) -> Vec<ObservedPropertyStatus> {
+    let subscriptions = work.subscription_status(id);
+    let refresh = work.refresh.borrow();
+    bindings
+        .into_iter()
+        .map(|(name, binding)| ObservedPropertyStatus {
+            name,
+            binding,
+            observation_source: work.property_source(id, binding),
+            read_problem: refresh.property_problem(id, binding),
+            subscriptions: subscriptions
+                .iter()
+                .filter(|item| item.binding == SubscriptionBinding::Property(binding))
+                .cloned()
+                .collect(),
+        })
+        .collect()
 }

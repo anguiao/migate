@@ -151,12 +151,37 @@ fn unpublished_reason(relation: &GroupRelation) -> String {
     "waiting for a usable native description".into()
 }
 
-fn render(
-    view: &View,
-    did: Option<&str>,
+fn observed_function_lines(
     status: &AuthStatus,
-    show_curtain_commands: bool,
-) -> String {
+    did: &str,
+    function: &crate::device::Function,
+    entries: impl IntoIterator<Item = (&'static str, String, Option<i64>, Option<i64>)>,
+    show_commands: bool,
+) -> Vec<String> {
+    let id = &function.function_key().id;
+    let label = &function.description().label;
+    let properties = status.function_properties(did, id);
+    let mut lines = vec![format!("  {id} ({label}):")];
+    for (name, value, source_time, received_at) in entries {
+        let source_time = source_time.map_or_else(|| "unknown".into(), |time| time.to_string());
+        let received_at = received_at.map_or_else(|| "unknown".into(), timestamp);
+        let diagnostic = super::status::property_diagnostics(
+            properties.iter().find(|property| property.name == name),
+        );
+        lines.push(format!("    {name}: {value}; upstream time {source_time}; received at {received_at}; {diagnostic}."));
+    }
+    if show_commands {
+        lines.extend(
+            status
+                .function_commands(did, id)
+                .into_iter()
+                .map(|command| format!("    {command}")),
+        );
+    }
+    lines
+}
+
+fn render(view: &View, did: Option<&str>, status: &AuthStatus, show_commands: bool) -> String {
     let mut lines = Vec::new();
     for relation in view.current.derived.groups.values() {
         if did.is_some_and(|did| did != relation.group_did) {
@@ -207,8 +232,6 @@ fn render(
             let snapshot = function.snapshot();
             match snapshot.state {
                 crate::device::FunctionState::Fan { fan } => {
-                    lines.push(format!("  {id} ({label}):"));
-                    let properties = status.curtain_properties(&key.id, id);
                     let mut entries = vec![
                         (
                             "Power",
@@ -252,23 +275,13 @@ fn render(
                             fan.swing.received_at,
                         ));
                     }
-                    for (name, value, source_time, received_at) in entries {
-                        let source_time =
-                            source_time.map_or_else(|| "unknown".into(), |time| time.to_string());
-                        let received_at = received_at.map_or_else(|| "unknown".into(), timestamp);
-                        let diagnostic = super::status::property_diagnostics(
-                            properties.iter().find(|property| property.name == name),
-                        );
-                        lines.push(format!("    {name}: {value}; upstream time {source_time}; received at {received_at}; {diagnostic}."));
-                    }
-                    if show_curtain_commands {
-                        lines.extend(
-                            status
-                                .curtain_commands(&key.id, id)
-                                .into_iter()
-                                .map(|command| format!("    {command}")),
-                        );
-                    }
+                    lines.extend(observed_function_lines(
+                        status,
+                        &key.id,
+                        function,
+                        entries,
+                        show_commands,
+                    ));
                     let pending = function.pending_fan_commands();
                     if !pending.is_empty() {
                         let pending = pending
@@ -282,8 +295,6 @@ fn render(
                     }
                 }
                 crate::device::FunctionState::Curtain { curtain } => {
-                    lines.push(format!("  {id} ({label}):"));
-                    let properties = status.curtain_properties(&key.id, id);
                     let entries = [
                         (
                             "Current position",
@@ -316,23 +327,13 @@ fn render(
                             curtain.status.received_at,
                         ),
                     ];
-                    for (name, value, source_time, received_at) in entries {
-                        let source_time =
-                            source_time.map_or_else(|| "unknown".into(), |time| time.to_string());
-                        let received_at = received_at.map_or_else(|| "unknown".into(), timestamp);
-                        let diagnostic = super::status::property_diagnostics(
-                            properties.iter().find(|property| property.name == name),
-                        );
-                        lines.push(format!("    {name}: {value}; upstream time {source_time}; received at {received_at}; {diagnostic}."));
-                    }
-                    if show_curtain_commands {
-                        lines.extend(
-                            status
-                                .curtain_commands(&key.id, id)
-                                .into_iter()
-                                .map(|command| format!("    {command}")),
-                        );
-                    }
+                    lines.extend(observed_function_lines(
+                        status,
+                        &key.id,
+                        function,
+                        entries,
+                        show_commands,
+                    ));
                     let pending = function.pending_curtain_commands();
                     if !pending.is_empty() {
                         let pending = pending

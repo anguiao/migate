@@ -87,7 +87,7 @@ impl AuthStatus {
         }
     }
 
-    pub(super) fn curtain_properties(&self, did: &str, id: &str) -> Vec<ObservedPropertyStatus> {
+    pub(super) fn function_properties(&self, did: &str, id: &str) -> Vec<ObservedPropertyStatus> {
         self.adapter
             .borrow()
             .as_ref()
@@ -102,7 +102,7 @@ impl AuthStatus {
             .unwrap_or_default()
     }
 
-    pub(super) fn curtain_commands(&self, did: &str, id: &str) -> Vec<String> {
+    pub(super) fn function_commands(&self, did: &str, id: &str) -> Vec<String> {
         self.adapter
             .borrow()
             .as_ref()
