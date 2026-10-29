@@ -67,9 +67,11 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             let cloud_access = control.context.live.borrow().devices["one"]
                 .cloud_access
                 .clone();
+            let raw = control.context.live.borrow().devices["one"].raw.clone();
             control.context.remove("one").unwrap();
             let slot = super::super::super::state::DeviceSlot {
                 latest: Some(cached),
+                raw,
                 latest_name: None,
                 access,
                 cloud_access,

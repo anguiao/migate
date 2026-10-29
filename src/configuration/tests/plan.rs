@@ -158,8 +158,16 @@ fn source(id: &str, native: NativeDescription, name: Option<&str>) -> SourceDevi
 }
 
 fn facts(scope: Scope, devices: Vec<SourceDevice>, relations: Vec<GroupRelation>) -> SourceFacts {
+    let descriptions = devices
+        .iter()
+        .map(|device| SourceRaw {
+            description: crate::storage::tests::fixtures::raw_for(&device.native),
+            fresh: device.fresh,
+        })
+        .collect();
     SourceFacts {
         scope: Some(scope),
+        descriptions,
         devices,
         relations,
     }
@@ -289,6 +297,7 @@ fn group_member_resolution_preserves_other_controls_and_rejects_ambiguity() {
     let configuration = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 1,
+        descriptions: Vec::new(),
         devices: vec![
             committed_at("member", composite.clone(), "Member", 1, 2),
             committed_at("group", group.clone(), "Group", 1, 10),
@@ -352,6 +361,7 @@ fn native_rgb_stays_native_without_member_description() {
     let configuration = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 1,
+        descriptions: Vec::new(),
         devices: vec![committed("group", native, "Group", 1)],
         groups: vec![GroupRelation {
             group_did: "group".into(),
@@ -380,11 +390,23 @@ fn plan(
 }
 
 fn plan_with_revocations(
-    current: CommittedConfiguration,
+    mut current: CommittedConfiguration,
     facts: SourceFacts,
     new_identities: BTreeMap<DeviceKey, String>,
     revocations: Vec<Revocation>,
 ) -> Result<Plan, PlanError> {
+    if current.descriptions.is_empty() {
+        current.descriptions = current
+            .devices
+            .iter()
+            .filter_map(|device| {
+                device
+                    .native
+                    .as_ref()
+                    .map(crate::storage::tests::fixtures::raw_for)
+            })
+            .collect();
+    }
     let current_derived = current.derive();
     super::super::plan(
         PlanInput {
@@ -439,6 +461,7 @@ fn identical_facts_reuse_without_change() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: vec![crate::storage::tests::fixtures::raw_for(&native)],
         devices: vec![committed("outlet", native.clone(), "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -463,6 +486,7 @@ fn hidden_member_republishes_with_a_version_bump() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![
             committed("group-1", group_native, "Group", 1),
             committed_at("member", member_native.clone(), "Member", 1, 6),
@@ -508,6 +532,7 @@ fn urn_only_change_is_reused_without_rebuild_or_a_version_bump() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![committed("outlet", before, "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -542,6 +567,7 @@ fn native_control_change_replaces_and_rebuilds_without_a_version_bump() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![committed("outlet", before, "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -571,6 +597,7 @@ fn removed_device_unpublishes_and_bumps_its_version() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![committed("outlet", native, "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -597,6 +624,7 @@ fn scope_change_alone_does_not_bump_root_or_device_versions() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![committed("outlet", native.clone(), "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -622,6 +650,7 @@ fn endpoint_exhaustion_is_explicit() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 1,
+        descriptions: Vec::new(),
         devices: vec![historical("history", 65534)],
         groups: Vec::new(),
     };
@@ -649,6 +678,7 @@ fn version_overflow_is_explicit() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![device],
         groups: Vec::new(),
     };
@@ -665,6 +695,7 @@ fn empty_saved_label_survives_plan_and_validation() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: vec![crate::storage::tests::fixtures::raw_for(&native)],
         devices: vec![previous.clone()],
         groups: Vec::new(),
     };
@@ -693,6 +724,7 @@ fn revoked_startup_removal_bumps_versions_against_the_committed_graph() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![committed("outlet", native, "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -744,6 +776,7 @@ fn stale_revoked_member_cannot_affect_candidate_group_profile_or_shape() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![
             committed("group", group_native.clone(), "Saved group", 1),
             committed_at("member", member_native.clone(), "Member", 1, 6),
@@ -829,6 +862,7 @@ fn member_reordering_is_canonical_and_does_not_rebuild() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![
             committed("group-1", group_native.clone(), "Group", 1),
             committed_at("member-a", member_a.clone(), "A", 1, 6),
@@ -863,6 +897,7 @@ fn fresh_revocation_clear_replaces_the_native_instance() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![committed("outlet", native.clone(), "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -902,6 +937,7 @@ fn scope_change_replaces_the_native_instance_with_the_same_key() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![committed("outlet", native.clone(), "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -947,6 +983,7 @@ fn hidden_member_replacement_rebuilds_without_a_version_bump() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![
             committed("group-1", group_native.clone(), "Group", 1),
             committed_at("member", before, "Member", 1, 6),
@@ -1002,6 +1039,7 @@ fn group_directory_metadata_change_does_not_rebuild() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
+        descriptions: Vec::new(),
         devices: vec![
             committed("group-1", group_native.clone(), "Group", 1),
             committed_at("member", member_native.clone(), "Member", 1, 6),

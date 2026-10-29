@@ -1,4 +1,4 @@
-use crate::xiaomi::capability::NativeDescription;
+use crate::xiaomi::capability::{NativeDescription, RawDescription};
 use std::{error::Error, fmt};
 
 use crate::{
@@ -6,7 +6,7 @@ use crate::{
     device::DeviceKey,
     storage::XiaomiRecord,
     xiaomi::{
-        capability::{CapabilityError, parse_device_for_model},
+        capability::CapabilityError,
         cloud::{CloudClient, CloudError, OwnedHome},
         discovery::DiscoverySnapshot,
     },
@@ -84,7 +84,7 @@ pub(crate) async fn load_device(
     credentials: &XiaomiRecord,
     home: &OwnedHome,
     did: &str,
-) -> Result<(NativeDescription, Option<String>), CatalogError> {
+) -> Result<(RawDescription, Option<NativeDescription>, Option<String>), CatalogError> {
     if home.uid != credentials.uid {
         return Err(CatalogError::InvalidScope);
     }
@@ -100,11 +100,14 @@ pub(crate) async fn load_device(
         .get_instance(&details.instance_type)
         .await
         .map_err(CatalogError::Cloud)?;
-    let device = parse_device_for_model(DeviceKey::new("xiaomi", did), &details.model, &instance)
-        .map_err(CatalogError::Capability)?;
-    Ok((
-        NativeDescription::new(details.model, details.instance_type, device)
-            .map_err(CatalogError::Capability)?,
-        details.name,
-    ))
+    let raw = RawDescription::new(
+        DeviceKey::new("xiaomi", did),
+        details.model,
+        details.instance_type,
+        instance,
+        None,
+    )
+    .map_err(CatalogError::Capability)?;
+    let (raw, native) = raw.recognize(false).map_err(CatalogError::Capability)?;
+    Ok((raw, native, details.name))
 }

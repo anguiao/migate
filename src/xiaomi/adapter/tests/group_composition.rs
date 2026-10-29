@@ -53,6 +53,236 @@ fn group_rig(members: &[(&str, &str, Value)], physical: bool) -> Rig {
 }
 
 #[test]
+fn startup_rederives_group_from_current_member_recognition_and_preserves_identity() {
+    let instance = generic_rgb();
+    let rig = group_rig(&[("member-a", "example.rgb", instance.clone())], false);
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| c.context.group_repair("group-1").is_some()).await;
+        let key = DeviceKey::new("xiaomi", "member-a");
+        let group_key = DeviceKey::new("xiaomi", "group-1");
+        let mut saved = c.store.devices().load_configuration().unwrap();
+        let group_identity = saved.device(&group_key).unwrap().clone();
+        let member_identity = saved.device(&key).unwrap().clone();
+        let mut previous_input = instance.clone();
+        previous_input["services"][1]["properties"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|property| {
+                !property["type"]
+                    .as_str()
+                    .unwrap()
+                    .contains(":property:color:")
+            });
+        let previous = crate::xiaomi::capability::parse_device_for_model(
+            key.clone(),
+            "example.rgb",
+            &previous_input,
+        )
+        .unwrap();
+        saved
+            .devices
+            .iter_mut()
+            .find(|device| device.key == key)
+            .unwrap()
+            .native = Some(
+            crate::xiaomi::capability::NativeDescription::new(
+                "example.rgb".into(),
+                instance["type"].as_str().unwrap().into(),
+                previous,
+            )
+            .unwrap(),
+        );
+        assert!(saved.derive().served[&group_key].repair.is_none());
+        c.store.devices().commit_configuration(&saved, &[]).unwrap();
+        let reads = c.cloud.lock().unwrap().instance_reads.clone();
+        let (restored, _) = XiaomiAdapter::build(
+            c.store.clone(),
+            c.context.cloud.clone(),
+            c.discovery.clone(),
+            c.clock.clone(),
+        )
+        .unwrap();
+        let app = crate::app::App::open(restored.source_handle(), c.store.clone()).unwrap();
+        assert!(app.current().derived.served[&group_key].repair.is_none());
+        let plan = app.plan().unwrap().unwrap();
+        assert!(plan.derived.served[&group_key].repair.is_some());
+        app.apply(app.prepare(plan)).unwrap();
+        let after = c.store.devices().load_configuration().unwrap();
+        assert_eq!(
+            after.device(&key).unwrap().unique_id,
+            member_identity.unique_id
+        );
+        assert_eq!(
+            after.device(&key).unwrap().endpoint,
+            member_identity.endpoint
+        );
+        assert_eq!(
+            after.device(&key).unwrap().functions,
+            member_identity.functions
+        );
+        assert_eq!(
+            after.device(&group_key).unwrap().unique_id,
+            group_identity.unique_id
+        );
+        assert_eq!(
+            after.device(&group_key).unwrap().endpoint,
+            group_identity.endpoint
+        );
+        assert_eq!(
+            after.device(&group_key).unwrap().functions,
+            group_identity.functions
+        );
+        assert_eq!(
+            after
+                .descriptions
+                .iter()
+                .find(|raw| raw.key == key)
+                .unwrap()
+                .instance,
+            instance
+        );
+        assert_eq!(c.cloud.lock().unwrap().instance_reads, reads);
+        assert!(app.plan().unwrap().is_none());
+    }));
+}
+
+#[test]
+fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry() {
+    let instance = generic_rgb();
+    let rig = group_rig(
+        &[
+            ("member-a", "example.rgb", instance.clone()),
+            ("member-b", "example.rgb", instance.clone()),
+        ],
+        false,
+    );
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| c.context.group_repair("group-1").is_some()).await;
+        let before = c.store.devices().load_configuration().unwrap();
+        let rules = c.context.graph.borrow().rules.clone();
+        let old_member = c.context.live.borrow().devices["member-a"]
+            .admitted
+            .clone()
+            .unwrap();
+        let urn = "urn:miot-spec-v2:device:light:0000A001:example-extension:2";
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.instance_types.insert("member-a".into(), urn.into());
+            cloud
+                .catalog_instances
+                .insert(urn.into(), json!({"type": urn, "services": [{}]}));
+            cloud.catalog_groups = vec![group_record(
+                "group-record",
+                "group-1",
+                &["member-a"],
+                false,
+            )];
+        }
+        c.context.request_sync();
+        until(|| {
+            c.context.live.borrow().devices["member-a"]
+                .blocked
+                .is_some()
+        })
+        .await;
+        until(|| {
+            c.context.relations.borrow().snapshot().iter().any(|group| {
+                group.membership.group_did == "group-1" && group.membership.members == ["member-a"]
+            })
+        })
+        .await;
+        assert_eq!(c.store.devices().load_configuration().unwrap(), before);
+        assert_eq!(c.context.graph.borrow().rules, rules);
+        assert!(Rc::ptr_eq(
+            &old_member,
+            c.context.live.borrow().devices["member-a"]
+                .admitted
+                .as_ref()
+                .unwrap()
+        ));
+        let mut revised = instance;
+        revised["type"] = json!(urn);
+        c.cloud
+            .lock()
+            .unwrap()
+            .catalog_instances
+            .insert(urn.into(), revised.clone());
+        c.context.request_sync();
+        until(|| {
+            c.publication
+                .current()
+                .configuration
+                .descriptions
+                .iter()
+                .any(|raw| raw.key.id == "member-a" && raw.instance_type == urn)
+                && c.context.graph.borrow().rules["group-1"].members.len() == 1
+        })
+        .await;
+        let after = c.store.devices().load_configuration().unwrap();
+        assert_eq!(
+            after
+                .descriptions
+                .iter()
+                .find(|raw| raw.key.id == "member-a")
+                .unwrap()
+                .instance,
+            revised
+        );
+        assert_eq!(after.groups[0].members, ["member-a"]);
+        assert_eq!(
+            after
+                .device(&DeviceKey::new("xiaomi", "member-a"))
+                .unwrap()
+                .endpoint,
+            before
+                .device(&DeviceKey::new("xiaomi", "member-a"))
+                .unwrap()
+                .endpoint
+        );
+        assert!(c.context.status.borrow().pending.iter().all(|pending| {
+            pending.did != "member-a" || !pending.reason.contains("invalid MIoT description")
+        }));
+    }));
+}
+
+#[test]
+fn missing_group_instance_type_retains_the_committed_relation_until_restored() {
+    let instance = generic_rgb();
+    let rig = group_rig(
+        &[
+            ("member-a", "example.rgb", instance.clone()),
+            ("member-b", "example.rgb", instance),
+        ],
+        false,
+    );
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| c.context.group_repair("group-1").is_some()).await;
+        let before = c.store.devices().load_configuration().unwrap();
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            let mut relation = group_record("group-record", "group-1", &["member-a"], false);
+            relation["spec_type"] = Value::Null;
+            cloud.catalog_groups = vec![relation];
+        }
+        c.context.request_sync();
+        until(|| c.context.live.borrow().devices["group-1"].description_target_missing).await;
+        assert_eq!(c.store.devices().load_configuration().unwrap(), before);
+        assert_eq!(c.context.graph.borrow().rules["group-1"].members.len(), 2);
+        c.cloud.lock().unwrap().catalog_groups = vec![group_record(
+            "group-record",
+            "group-1",
+            &["member-a"],
+            false,
+        )];
+        c.context.request_sync();
+        until(|| c.context.graph.borrow().rules["group-1"].members.len() == 1).await;
+    }));
+}
+
+#[test]
 fn mixed_group_dispatches_each_adapted_policy_and_keeps_composite_fan_independent() {
     let mut patched = ls2307_instance();
     patched["services"]

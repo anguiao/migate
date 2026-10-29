@@ -36,11 +36,24 @@ pub async fn run_xiaomi_bridge(
             changed.await;
         }
         let app = Rc::new(App::open(handle, store)?);
-        // Startup recovery applies revocation overlays before any old endpoint
-        // can be served. Failure here leaves every control authority closed.
-        if let Some(plan) = app.plan()? {
-            let prepared = app.prepare(plan);
-            app.apply(prepared)?;
+        // The restored view already includes real revocation overlays. A failed
+        // recomputation keeps that view while the normal retry loop replans it.
+        match app.plan() {
+            Ok(Some(plan)) => {
+                let prepared = app.prepare(plan);
+                if let Err(error) = app.apply(prepared) {
+                    log::warn!(
+                        "Startup configuration apply failed; keeping committed configuration: {error}"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!(
+                    "Startup configuration prepare failed; keeping committed configuration: {error}"
+                );
+                app.fail(error.to_string());
+            }
         }
         Ok::<_, RuntimeError>(app)
     };
@@ -90,7 +103,9 @@ async fn run_lifecycle(
         log::info!("Terminal input ended; bridge is still running");
         future::pending::<Result<(), RuntimeError>>().await
     });
-    let mut retry_at = None;
+    let mut retry_at = app
+        .pending()
+        .then(|| Instant::now() + Duration::from_secs(1));
     let mut retry_delay = Duration::from_secs(1);
     // Keep unchanged mDNS registrations while replacing the protocol instance.
     // astro-dnssd unregisters asynchronously, so immediate re-registration of

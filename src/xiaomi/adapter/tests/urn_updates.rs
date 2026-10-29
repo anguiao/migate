@@ -277,6 +277,103 @@ fn ceil04_instance() -> Value {
     .unwrap()
 }
 
+#[test]
+fn compatible_new_model_and_urn_commit_complete_source_with_partial_support() {
+    let rig = light_rig();
+    block_on(rig.run(|c| async move {
+        ready(&c).await;
+        let key = DeviceKey::new("xiaomi", "one");
+        let before = c.publication.current().configuration.device(&key).unwrap().clone();
+        let urn = "urn:miot-spec-v2:device:light:0000A001:example-extension:2";
+        let mut instance = ceil04_instance();
+        instance["type"] = json!(urn);
+        instance["services"].as_array_mut().unwrap().extend([
+            json!({"iid": 80, "type": "urn:miot-spec-v2:service:fan:00007808:example:1", "properties": [
+                {"iid": 1, "type": "urn:miot-spec-v2:property:on:00000006:example:1", "format": "bool", "access": ["read", "write", "notify"]},
+                {"iid": 2, "type": "urn:miot-spec-v2:property:fan-level:00000016:example:1", "format": "uint8", "access": ["read", "write", "notify"], "value-range": [1, 3, 1]}
+            ]}),
+            json!({"iid": 81, "type": "urn:miot-spec-v2:service:light:00007802:example:1", "properties": [
+                {"iid": 1, "type": "urn:miot-spec-v2:property:on:00000006:example:1", "format": "bool", "access": ["read"]}
+            ]}),
+        ]);
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.models.insert("one".into(), "example.light.next".into());
+            cloud.instance_types.insert("one".into(), urn.into());
+            cloud.catalog_instances.insert(urn.into(), instance.clone());
+        }
+        c.context.request_sync();
+        until(|| c.publication.current().configuration.device(&key)
+            .and_then(|device| device.native.as_ref())
+            .is_some_and(|native| native.instance_type() == urn)).await;
+        let committed = c.store.devices().load_configuration().unwrap();
+        let after = committed.device(&key).unwrap();
+        assert_eq!(after.unique_id, before.unique_id);
+        assert_eq!(after.endpoint, before.endpoint);
+        assert_eq!(after.functions[0], before.functions[0]);
+        assert!(after.functions.iter().any(|function| function.id == "fan:80"));
+        let native = after.native.as_ref().unwrap();
+        assert_eq!(native.model(), "example.light.next");
+        assert!(native.device().recognition().unwrap().diagnostics().iter()
+            .any(|issue| issue.target() == "light:81"));
+        let raw = committed.descriptions.iter().find(|raw| raw.key == key).unwrap();
+        assert_eq!(raw.instance, instance);
+        assert_eq!(raw.model, "example.light.next");
+        assert_eq!(c.cloud.lock().unwrap().instance_reads[urn], 1);
+    }));
+}
+
+#[test]
+fn model_change_alone_fetches_and_commits_the_matching_description_once() {
+    let rig = light_rig();
+    block_on(rig.run(|c| async move {
+        ready(&c).await;
+        let key = DeviceKey::new("xiaomi", "one");
+        let before = c.publication.current();
+        let identity = before.configuration.device(&key).unwrap().clone();
+        let physical = c.context.registry.get(&key).unwrap();
+        let urn = identity.native.as_ref().unwrap().instance_type().to_owned();
+        c.cloud
+            .lock()
+            .unwrap()
+            .models
+            .insert("one".into(), "example.light.next".into());
+        c.context.request_sync();
+        until(|| {
+            c.publication
+                .current()
+                .configuration
+                .device(&key)
+                .unwrap()
+                .native
+                .as_ref()
+                .unwrap()
+                .model()
+                == "example.light.next"
+        })
+        .await;
+        let after = c.publication.current();
+        assert_eq!(
+            after.configuration.root_version,
+            before.configuration.root_version
+        );
+        assert_eq!(
+            after
+                .configuration
+                .device(&key)
+                .unwrap()
+                .configuration_version,
+            identity.configuration_version
+        );
+        assert!(physical.same_instance(&c.context.registry.get(&key).unwrap()));
+        assert_eq!(c.cloud.lock().unwrap().instance_reads[&urn], 1);
+        let catalogs = c.cloud.lock().unwrap().catalogs;
+        c.context.request_sync();
+        until(|| c.cloud.lock().unwrap().catalogs > catalogs).await;
+        assert_eq!(c.cloud.lock().unwrap().instance_reads[&urn], 1);
+    }));
+}
+
 fn set_temperature_range(instance: &mut Value, min: u64, max: u64) {
     let mut found = false;
     for service in instance["services"].as_array_mut().unwrap() {

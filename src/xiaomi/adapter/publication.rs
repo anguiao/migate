@@ -16,6 +16,7 @@ use crate::xiaomi::capability::NativeDescription;
 use crate::{
     configuration::{
         CommittedConfiguration, GroupRelation, OperationKind, Plan, SourceDevice, SourceFacts,
+        SourceRaw,
     },
     device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
 };
@@ -65,6 +66,55 @@ impl SourceHandle {
         }
     }
 
+    pub(crate) fn accessible_descriptions(&self) -> std::collections::BTreeSet<DeviceKey> {
+        let live = self.0.live.borrow();
+        live.devices
+            .values()
+            .filter_map(|slot| slot.committed_raw.as_ref().map(|raw| raw.key.clone()))
+            .collect()
+    }
+
+    pub(crate) fn committed_graph(&self) -> Rc<crate::configuration::DerivedConfiguration> {
+        self.0.graph.borrow().clone()
+    }
+
+    /// Retry only cached inputs whose startup recognition failed.
+    pub(crate) fn retry_recomputation(&self) -> Result<(), String> {
+        let recovered = {
+            let live = self.0.live.borrow();
+            live.devices
+                .iter()
+                .filter(|(_, slot)| slot.recompute_failed)
+                .map(|(did, slot)| {
+                    let raw = slot
+                        .raw
+                        .as_ref()
+                        .expect("a failed recomputation retains its source");
+                    raw.recognize(slot.group)
+                        .map(|result| (did.clone(), result))
+                        .map_err(|error| format!("{did}: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        {
+            let mut live = self.0.live.borrow_mut();
+            for (did, (raw, native)) in &recovered {
+                let slot = live
+                    .devices
+                    .get_mut(did)
+                    .expect("recomputed source retains its slot");
+                slot.raw = Some(raw.clone());
+                slot.latest = native.clone();
+                slot.blocked = None;
+                slot.recompute_failed = false;
+            }
+        }
+        for (did, _) in recovered {
+            self.0.clear_description_problem(&did);
+        }
+        Ok(())
+    }
+
     /// Collect the latest pure source facts and the serving entries. No
     /// running device is created here.
     pub(crate) fn snapshot(&self) -> SourceFacts {
@@ -74,9 +124,38 @@ impl SourceHandle {
         }
         let live = self.0.live.borrow();
         let scope = live.scope.clone();
+        // A directory target that has not produced its matching description
+        // cannot be combined with other new facts. Keep the committed graph
+        // until the complete input is available, while still honoring removed slots.
+        let waiting = live.devices.values().any(|slot| {
+            slot.committed_raw.is_some()
+                && (slot.description_target_missing
+                    || slot.cloud_access.as_ref().is_some_and(|access| {
+                        slot.raw.as_ref().is_none_or(|raw| {
+                            access.model != raw.model || access.instance_type != raw.instance_type
+                        })
+                    }))
+        });
         let mut devices = Vec::new();
+        let mut descriptions = Vec::new();
         for slot in live.devices.values() {
-            let Some(native) = slot.latest.clone() else {
+            let raw = if waiting {
+                slot.committed_raw.as_ref()
+            } else {
+                slot.raw.as_ref()
+            };
+            if let Some(raw) = raw {
+                descriptions.push(SourceRaw {
+                    description: raw.clone(),
+                    fresh: slot.confirmed,
+                });
+            }
+            let native = if waiting {
+                slot.committed_native.clone()
+            } else {
+                slot.latest.clone()
+            };
+            let Some(native) = native else {
                 continue;
             };
             devices.push(SourceDevice {
@@ -93,7 +172,7 @@ impl SourceHandle {
             .filter_map(|(did, slot)| slot.blocked.clone().map(|problem| (did.clone(), problem)))
             .collect::<BTreeMap<_, _>>();
         drop(live);
-        let relations = self
+        let mut relations: Vec<GroupRelation> = self
             .0
             .relations
             .borrow()
@@ -119,9 +198,23 @@ impl SourceHandle {
                 }
             })
             .collect();
+        if waiting {
+            let graph = self.0.graph.borrow();
+            relations = relations
+                .into_iter()
+                .filter_map(|relation| {
+                    if !relation.active {
+                        Some(relation)
+                    } else {
+                        graph.groups.get(&relation.group_did).cloned()
+                    }
+                })
+                .collect();
+        }
         SourceFacts {
             scope,
             devices,
+            descriptions,
             relations,
         }
     }
@@ -231,6 +324,9 @@ impl SourceHandle {
             || self.0.graph.borrow().rules != plan.derived.rules;
         for key in &prepared.removed {
             self.0.retire_work(&key.id);
+            if let Some(slot) = self.0.live.borrow_mut().devices.get_mut(&key.id) {
+                slot.committed_native = None;
+            }
         }
         let mut started = Vec::new();
         for source in prepared.installed {
@@ -287,9 +383,19 @@ impl SourceHandle {
                     .as_ref()
                     .and_then(|native| native.device().battery_issue()),
             );
-            slot.latest = device.native.clone();
-            slot.latest_name = None;
+            slot.committed_native = device.native.clone();
             slot.group = plan.derived.groups.contains_key(&operation.key.id);
+        }
+        for raw in &plan.configuration.descriptions {
+            let mut live = self.0.live.borrow_mut();
+            let slot = live
+                .devices
+                .get_mut(&raw.key.id)
+                .expect("committed source retains its slot");
+            slot.committed_raw = Some(raw.clone());
+            if slot.raw.as_ref() == Some(raw) {
+                slot.latest_name = None;
+            }
         }
         // Install every instance and the graph before starting consumers or
         // deriving group feedback. Each group is recomputed once per commit.
@@ -355,19 +461,20 @@ impl Context {
     /// Confirmed removal closes every retained authority before persistence.
     pub(super) fn revoke(&self, did: &str, reason: &str) -> Result<(), AdapterError> {
         let key = DeviceKey::new("xiaomi", did);
-        let admitted = self
+        let (admitted, cached) = self
             .live
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.admitted.clone());
+            .map(|slot| (slot.admitted.clone(), slot.raw.is_some()))
+            .unwrap_or_default();
         if let Some(work) = &admitted {
             let sink = work.current_sink();
             sink.physical
                 .set_availability(Availability::Unavailable(reason.into()));
             work.retire();
         }
-        if admitted.is_some() {
+        if admitted.is_some() || cached {
             self.store
                 .devices()
                 .record_revocations(&[crate::configuration::Revocation {

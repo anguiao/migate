@@ -151,7 +151,7 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
             .publication
             .prepare(c.publication.plan().unwrap().unwrap());
         assert!(c.publication.apply(prepared).is_err());
-        assert!(!c.store.matter().contains(subscription_key).unwrap());
+        assert!(c.store.matter().contains(subscription_key).unwrap());
         assert_eq!(
             c.store
                 .devices()

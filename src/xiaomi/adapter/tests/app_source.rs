@@ -43,6 +43,7 @@ impl AppSource {
                 let native = native_for(&description);
                 let native_description = native.physical_description(description.label());
                 let mut identity = fixtures::identity(&native_description, 2);
+                configuration.descriptions.push(fixtures::raw_for(&native));
                 identity.native = Some(native);
                 configuration.devices.push(identity);
             }
@@ -54,6 +55,16 @@ impl AppSource {
             XiaomiAdapter::new(store.clone(), CloudClient::new().unwrap(), discovery).unwrap();
         let derived = configuration.derive();
         let revocations = store.devices().load_revocations().unwrap();
+        let mut recovery = configuration.clone();
+        for device in &mut recovery.devices {
+            if revocations
+                .iter()
+                .any(|revocation| revocation.key == device.key)
+            {
+                device.native = None;
+            }
+        }
+        *adapter.context.graph.borrow_mut() = Rc::new(recovery.derive());
         let mut receivers = Vec::new();
         let mut physical = None;
         {
@@ -91,8 +102,14 @@ impl AppSource {
                     adapter.context.refresh_changed.clone(),
                     light_write,
                 ));
-                live.devices
-                    .insert(device.key.id, DeviceSlot::restored(work));
+                let mut slot = DeviceSlot::restored(work);
+                slot.raw = configuration
+                    .descriptions
+                    .iter()
+                    .find(|raw| raw.key == device.key)
+                    .cloned();
+                slot.committed_raw = slot.raw.clone();
+                live.devices.insert(device.key.id, slot);
                 physical = Some(instance);
             }
         }
@@ -111,7 +128,9 @@ impl AppSource {
             .devices
             .entry(description.key().id.clone())
             .or_default();
-        slot.latest = Some(native_for(&description));
+        let native = native_for(&description);
+        slot.raw = Some(fixtures::raw_for(&native));
+        slot.latest = Some(native);
         slot.latest_name = Some(description.label().to_owned());
         slot.confirmed = true;
     }

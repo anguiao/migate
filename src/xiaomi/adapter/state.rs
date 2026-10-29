@@ -5,7 +5,7 @@ use super::{
     tasks::TaskSet,
     work::DeviceWork,
 };
-use crate::xiaomi::capability::NativeDescription;
+use crate::xiaomi::capability::{NativeDescription, RawDescription};
 use crate::{
     configuration::{DerivedConfiguration, Scope},
     device::{DeviceRegistry, PhysicalDevice},
@@ -79,6 +79,14 @@ pub(super) struct DeviceSlot {
     /// the next plan can retry it. It is never replaced by the runtime's older
     /// committed metadata.
     pub(super) latest: Option<NativeDescription>,
+    /// Complete source input corresponding to `latest`, including unsupported devices.
+    pub(super) raw: Option<RawDescription>,
+    /// Last committed source, retained while a newer candidate is pending.
+    pub(super) committed_raw: Option<RawDescription>,
+    pub(super) committed_native: Option<NativeDescription>,
+    pub(super) recompute_failed: bool,
+    /// A confirmed group record lacked the target instance type.
+    pub(super) description_target_missing: bool,
     /// Directory name for `latest`; display/planning metadata only.
     pub(super) latest_name: Option<String>,
 
@@ -103,6 +111,7 @@ impl DeviceSlot {
     pub(super) fn restored(work: Rc<DeviceWork>) -> Self {
         Self {
             latest: Some(work.native.clone()),
+            committed_native: Some(work.native.clone()),
             admitted: Some(work),
             ..Self::default()
         }
@@ -147,11 +156,11 @@ impl DeviceSlot {
         if self.loading.is_some() {
             return false;
         }
-        let Some(latest) = &self.latest else {
+        let Some(raw) = &self.raw else {
             return true;
         };
         self.cloud_access.as_ref().is_some_and(|access| {
-            access.model != latest.model() || access.instance_type != latest.instance_type()
+            access.model != raw.model || access.instance_type != raw.instance_type
         })
     }
 }

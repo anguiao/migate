@@ -7,7 +7,7 @@
 
 use crate::{
     device::{DeviceKey, FunctionDescription, FunctionKey, PhysicalDeviceDescription},
-    xiaomi::capability::{NativeDescription, RepairPlan},
+    xiaomi::capability::{NativeDescription, RawDescription, RepairPlan},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -78,6 +78,7 @@ pub(crate) struct CommittedConfiguration {
     pub scope: Option<Scope>,
     pub root_version: u32,
     pub devices: Vec<CommittedDevice>,
+    pub descriptions: Vec<RawDescription>,
     pub groups: Vec<GroupRelation>,
 }
 
@@ -120,7 +121,14 @@ pub(crate) struct SourceDevice {
 pub(crate) struct SourceFacts {
     pub scope: Option<Scope>,
     pub devices: Vec<SourceDevice>,
+    pub descriptions: Vec<SourceRaw>,
     pub relations: Vec<GroupRelation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SourceRaw {
+    pub description: RawDescription,
+    pub fresh: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,6 +225,7 @@ impl CommittedConfiguration {
             scope: None,
             root_version: 1,
             devices: Vec::new(),
+            descriptions: Vec::new(),
             groups: Vec::new(),
         }
     }
@@ -251,6 +260,7 @@ impl CommittedConfiguration {
             validate_text(&scope.uid)?;
             validate_text(&scope.home_id)?;
         } else if self.devices.iter().any(|device| device.native.is_some())
+            || !self.descriptions.is_empty()
             || !self.groups.is_empty()
         {
             return Err("Committed configuration has facts without a home scope");
@@ -310,6 +320,29 @@ impl CommittedConfiguration {
                 }
             }
         }
+        let mut sources = BTreeSet::new();
+        for source in &self.descriptions {
+            if !sources.insert(source.key.clone()) {
+                return Err("Committed source description is duplicated");
+            }
+            let effective = self
+                .device(&source.key)
+                .and_then(|device| device.native.as_ref());
+            match (effective, &source.diagnostic) {
+                (Some(native), None)
+                    if native.model() == source.model
+                        && native.instance_type() == source.instance_type => {}
+                (None, Some(_)) => {}
+                _ => return Err("Committed source and effective description disagree"),
+            }
+        }
+        if self
+            .devices
+            .iter()
+            .any(|device| device.native.is_some() && !sources.contains(&device.key))
+        {
+            return Err("Committed source description is missing");
+        }
         let mut groups = BTreeSet::new();
         for group in &self.groups {
             validate_text(&group.group_did)?;
@@ -323,6 +356,22 @@ impl CommittedConfiguration {
             }
             if !groups.insert(group.group_did.as_str()) {
                 return Err("Committed group relation is duplicated");
+            }
+            if let Some(source) = self
+                .descriptions
+                .iter()
+                .find(|source| source.key.id == group.group_did)
+            {
+                if !source.is_group_instance() {
+                    return Err("Committed group source is invalid");
+                }
+                if self
+                    .device(&source.key)
+                    .and_then(|device| device.native.as_ref())
+                    .is_some_and(|native| native.device().unique_light().is_none())
+                {
+                    return Err("Committed group effective description is invalid");
+                }
             }
             let mut members = BTreeSet::new();
             for member in &group.members {

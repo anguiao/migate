@@ -20,6 +20,19 @@ fn configuration_lines(view: &View, did: &str) -> Vec<String> {
     let current = &view.current;
     let key = DeviceKey::new("xiaomi", did);
     let mut lines = Vec::new();
+    if view.accessible_descriptions.contains(&key)
+        && let Some(source) = current
+            .configuration
+            .descriptions
+            .iter()
+            .find(|source| source.key == key)
+        && let Some(diagnostic) = &source.diagnostic
+    {
+        lines.push(format!(
+            "  Source {} ({}): recognition issue: {diagnostic}.",
+            source.model, source.instance_type
+        ));
+    }
     if let Some(record) = current.configuration.device(&key) {
         lines.push(format!(
             "  Matter: {}; endpoint {}; configuration version {}.",
@@ -264,6 +277,19 @@ fn observed_function_lines(
 
 fn render(view: &View, did: Option<&str>, status: &AuthStatus, show_commands: bool) -> String {
     let mut lines = Vec::new();
+    for source in &view.current.configuration.descriptions {
+        if !view.accessible_descriptions.contains(&source.key)
+            || did.is_some_and(|did| did != source.key.id)
+        {
+            continue;
+        }
+        if let Some(diagnostic) = &source.diagnostic {
+            lines.push(format!(
+                "{} ({}): not published ({}).",
+                source.key.id, source.model, diagnostic
+            ));
+        }
+    }
     for relation in view.current.derived.groups.values() {
         if did.is_some_and(|did| did != relation.group_did) {
             continue;

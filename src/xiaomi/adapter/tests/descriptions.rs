@@ -6,6 +6,109 @@ const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
 const BRIGHTNESS: PropertyBinding = PropertyBinding { siid: 2, piid: 2 };
 const TEMPERATURE: PropertyBinding = PropertyBinding { siid: 2, piid: 3 };
 
+#[test]
+fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
+    let rig = Rig::new(false, &["one"]);
+    rig.cloud.lock().unwrap().unsupported.insert("one".into());
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| {
+            c.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .descriptions
+                .iter()
+                .any(|raw| raw.key.id == "one" && raw.diagnostic.is_some())
+        })
+        .await;
+        assert!(c.publication.frozen().is_empty());
+        assert!(c.context.registry.list().is_empty());
+        let saved = c.store.devices().load_configuration().unwrap();
+        let raw = &saved.descriptions[0];
+        assert!(
+            raw.diagnostic
+                .as_deref()
+                .unwrap()
+                .contains("no supported MIoT functions")
+        );
+        let urn = raw.instance_type.clone();
+        let reads = c.cloud.lock().unwrap().instance_reads[&urn];
+        c.context.request_sync();
+        let catalogs = c.cloud.lock().unwrap().catalogs;
+        until(|| c.cloud.lock().unwrap().catalogs > catalogs).await;
+        assert_eq!(c.cloud.lock().unwrap().instance_reads[&urn], reads);
+        let status = crate::terminal::AuthStatus::new(
+            c.context.status.borrow().authentication.clone(),
+            "/bin/migate".into(),
+            "/data".into(),
+        );
+        let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
+        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
+        assert!(
+            list.contains("one") && list.contains("no supported MIoT functions"),
+            "{list}"
+        );
+        let detail = terminal
+            .handle_line("status one", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(detail.contains("recognition issue"), "{detail}");
+        c.cloud.lock().unwrap().members.clear();
+        c.context.request_sync();
+        until(|| {
+            c.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .descriptions
+                .is_empty()
+        })
+        .await;
+        assert!(
+            c.store
+                .devices()
+                .load_revocations()
+                .unwrap()
+                .iter()
+                .any(|revocation| revocation.key.id == "one")
+        );
+        c.cloud.lock().unwrap().members.push("one".into());
+        c.context.request_sync();
+        until(|| {
+            !c.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .descriptions
+                .is_empty()
+                && c.store.devices().load_revocations().unwrap().is_empty()
+        })
+        .await;
+        let reads_before_restart = c.cloud.lock().unwrap().instance_reads.clone();
+        let (restored, _) = XiaomiAdapter::build(
+            c.store.clone(),
+            c.context.cloud.clone(),
+            c.discovery.clone(),
+            c.clock.clone(),
+        )
+        .unwrap();
+        assert!(
+            restored.context.live.borrow().devices["one"]
+                .raw
+                .as_ref()
+                .unwrap()
+                .diagnostic
+                .is_some()
+        );
+        assert!(restored.context.registry.list().is_empty());
+        let app = crate::app::App::open(restored.source_handle(), c.store.clone()).unwrap();
+        assert!(app.plan().unwrap().is_none());
+        assert_eq!(c.cloud.lock().unwrap().instance_reads, reads_before_restart);
+    }));
+}
+
 fn device_work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
     c.context.live.borrow().devices[did]
         .admitted

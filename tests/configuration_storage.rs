@@ -24,7 +24,7 @@ fn the_old_schema_is_rejected_without_modification() {
     let path = dir.join("state.db");
     let db = Connection::open(&path).unwrap();
     db.execute_batch(
-        "PRAGMA user_version = 8;
+        "PRAGMA user_version = 9;
          CREATE TABLE marker (value TEXT);
          INSERT INTO marker VALUES ('old');",
     )
@@ -47,14 +47,14 @@ fn the_old_schema_is_rejected_without_modification() {
 }
 
 #[test]
-fn schema9_is_one_private_singleton() {
+fn schema10_is_one_private_singleton() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let db = Connection::open(store.path()).unwrap();
     let version = db
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let rows = db
         .query_row("SELECT count(*) FROM bridge_configuration", [], |row| {
             row.get::<_, i64>(0)

@@ -2,6 +2,230 @@ use super::*;
 use crate::storage::tests::fixtures::identity;
 
 #[test]
+fn equivalent_startup_recomputation_keeps_versions_and_uses_no_network() {
+    let rig = Rig::new(true, &["one"]);
+    let before = rig.store.devices().load_configuration().unwrap();
+    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
+    assert!(app.plan().unwrap().is_none());
+    assert_eq!(app.current().configuration, before);
+    assert_eq!(rig.store.devices().load_configuration().unwrap(), before);
+    assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
+}
+
+#[test]
+fn previously_unsupported_cached_source_can_gain_its_first_function_on_startup() {
+    let rig = Rig::new(true, &["one"]);
+    let mut previous = rig.store.devices().load_configuration().unwrap();
+    previous.devices.clear();
+    previous.descriptions[0].diagnostic =
+        Some("previous rules did not recognize this source".into());
+    rig.store
+        .devices()
+        .commit_configuration(&previous, &[])
+        .unwrap();
+    let (restored, _) = XiaomiAdapter::build(
+        rig.store.clone(),
+        rig.source.cloud.clone(),
+        rig.discovery.clone(),
+        rig.clock.clone(),
+    )
+    .unwrap();
+    let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
+    assert!(app.frozen().is_empty());
+    let plan = app.plan().unwrap().unwrap();
+    app.apply(app.prepare(plan)).unwrap();
+    assert_eq!(app.frozen().len(), 1);
+    let saved = rig.store.devices().load_configuration().unwrap();
+    assert_eq!(
+        saved.descriptions[0].instance,
+        previous.descriptions[0].instance
+    );
+    assert!(saved.descriptions[0].diagnostic.is_none());
+    assert!(saved.devices[0].native.is_some());
+    assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
+    assert!(app.plan().unwrap().is_none());
+}
+
+#[test]
+fn failed_local_recomputation_is_reported_and_retried_without_changing_the_view() {
+    let rig = Rig::new(true, &["one"]);
+    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
+    let before = app.current().configuration.clone();
+    {
+        let mut live = rig.source.context.live.borrow_mut();
+        let slot = live.devices.get_mut("one").unwrap();
+        slot.group = true;
+        slot.recompute_failed = true;
+    }
+    let error = app.plan().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("recompute cached Xiaomi description")
+    );
+    app.fail(error.to_string());
+    assert_eq!(app.current().configuration, before);
+    assert_eq!(rig.store.devices().load_configuration().unwrap(), before);
+    rig.source
+        .context
+        .live
+        .borrow_mut()
+        .devices
+        .get_mut("one")
+        .unwrap()
+        .group = false;
+    assert!(app.plan().unwrap().is_none());
+    assert!(app.failure().is_none());
+    assert!(!rig.source.context.live.borrow().devices["one"].recompute_failed);
+}
+
+#[test]
+fn startup_reparses_cached_source_before_committing_new_capabilities() {
+    let rig = Rig::sensor_without_battery("sensor");
+    let key = DeviceKey::new("xiaomi", "sensor");
+    let mut before = rig.store.devices().load_configuration().unwrap();
+    before.descriptions[0].instance = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/miaomiaoce-t6.json"
+    ))
+    .unwrap();
+    rig.store
+        .devices()
+        .commit_configuration(&before, &[])
+        .unwrap();
+    let (restored, _) = XiaomiAdapter::build(
+        rig.store.clone(),
+        rig.source.cloud.clone(),
+        rig.discovery.clone(),
+        rig.clock.clone(),
+    )
+    .unwrap();
+    let identity = before.device(&key).unwrap();
+    assert!(
+        identity
+            .native
+            .as_ref()
+            .unwrap()
+            .device()
+            .battery()
+            .is_none()
+    );
+    let old_work = restored.context.live.borrow().devices["sensor"]
+        .admitted
+        .clone()
+        .unwrap();
+    let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
+    let plan = app
+        .plan()
+        .unwrap()
+        .expect("current rules add cached battery");
+    assert!(
+        plan.configuration
+            .device(&key)
+            .unwrap()
+            .native
+            .as_ref()
+            .unwrap()
+            .device()
+            .battery()
+            .is_some()
+    );
+    assert!(old_work.native.device().battery().is_none());
+    let prepared = app.prepare(plan);
+    app.apply(prepared).unwrap();
+    let after = rig.store.devices().load_configuration().unwrap();
+    let changed = after.device(&key).unwrap();
+    assert_eq!(changed.unique_id, identity.unique_id);
+    assert_eq!(changed.endpoint, identity.endpoint);
+    assert_eq!(changed.functions, identity.functions);
+    assert!(
+        changed
+            .native
+            .as_ref()
+            .unwrap()
+            .device()
+            .battery()
+            .is_some()
+    );
+    assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
+}
+
+#[test]
+fn failed_startup_recomputation_keeps_committed_bindings_and_revocation_overlay() {
+    let rig = Rig::sensors(&["sensor", "revoked"]);
+    let key = DeviceKey::new("xiaomi", "sensor");
+    let revoked = DeviceKey::new("xiaomi", "revoked");
+    let mut before = rig.store.devices().load_configuration().unwrap();
+    before
+        .devices
+        .iter_mut()
+        .find(|device| device.key == key)
+        .unwrap()
+        .native = Some(sensor_native_without_battery("sensor"));
+    rig.store
+        .devices()
+        .commit_configuration(&before, &[])
+        .unwrap();
+    rig.store
+        .devices()
+        .record_revocations(&[crate::configuration::Revocation {
+            key: revoked.clone(),
+            reason: "confirmed removal".into(),
+        }])
+        .unwrap();
+    let (restored, _) = XiaomiAdapter::build(
+        rig.store.clone(),
+        rig.source.cloud.clone(),
+        rig.discovery.clone(),
+        rig.clock.clone(),
+    )
+    .unwrap();
+    let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
+    assert_eq!(app.frozen().len(), 1);
+    assert!(!app.frozen()[0].device.description().has_battery());
+    let plan = app.plan().unwrap().unwrap();
+    assert!(
+        plan.configuration
+            .device(&key)
+            .unwrap()
+            .native
+            .as_ref()
+            .unwrap()
+            .device()
+            .battery()
+            .is_some()
+    );
+    assert!(
+        plan.configuration
+            .device(&revoked)
+            .unwrap()
+            .native
+            .is_none()
+    );
+    let db = rusqlite::Connection::open(rig.store.path()).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_startup BEFORE UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+    let prepared = app.prepare(plan);
+    assert!(app.apply(prepared).is_err());
+    assert_eq!(rig.store.devices().load_configuration().unwrap(), before);
+    assert_eq!(app.current().configuration, before);
+    assert_eq!(app.frozen().len(), 1);
+    assert!(!app.frozen()[0].device.description().has_battery());
+    assert!(app.failure().is_some());
+    assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
+    db.execute_batch("DROP TRIGGER fail_startup").unwrap();
+    let prepared = app.prepare(app.plan().unwrap().unwrap());
+    app.apply(prepared).unwrap();
+    assert!(app.frozen()[0].device.description().has_battery());
+    assert!(
+        app.current()
+            .configuration
+            .device(&revoked)
+            .unwrap()
+            .native
+            .is_none()
+    );
+}
+
+#[test]
 fn restored_topology_is_the_selected_scope_and_published_intersection() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
@@ -16,6 +240,9 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     let configuration = crate::configuration::CommittedConfiguration {
         scope: Some(scope(&tls.credentials.uid)),
         root_version: 1,
+        descriptions: vec![crate::storage::tests::fixtures::raw_for(
+            kept_record.native.as_ref().unwrap(),
+        )],
         devices: vec![
             kept_record,
             identity(&deleted.physical_description("deleted"), 6),
@@ -79,6 +306,9 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         .unwrap();
         let mut device = identity(&group.physical_description("Saved group"), endpoint);
         device.native = Some(group.clone());
+        state
+            .descriptions
+            .push(crate::storage::tests::fixtures::raw_for(&group));
         state.devices.push(device);
         groups.push(group);
     }

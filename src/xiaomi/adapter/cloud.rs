@@ -145,7 +145,7 @@ pub(super) async fn run(
             live.devices
                 .iter()
                 .filter(|(did, slot)| {
-                    home.dids.contains(did) && (slot.admitted.is_some() || slot.latest.is_some())
+                    home.dids.contains(did) && (slot.admitted.is_some() || slot.raw.is_some())
                 })
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
@@ -280,6 +280,7 @@ pub(super) async fn run(
             }
             let prepare = context.live.borrow().devices[&did].needs_description();
             if !prepare {
+                context.resolved_description_target(&did);
                 context.reconcile(&did)?;
                 continue;
             }
@@ -334,21 +335,29 @@ pub(super) async fn run(
                     slot.finish_loading(&life);
                 }
                 match result {
-                    Ok((native, name)) => {
+                    Ok((raw, native, name)) => {
                         let matches_target = target.as_ref().is_none_or(|(model, urn)| {
-                            *model == native.model() && *urn == native.instance_type()
+                            *model == raw.model && *urn == raw.instance_type
                         });
                         if matches_target {
                             if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
-                                slot.latest = Some(native);
+                                slot.latest = native;
+                                slot.raw = Some(raw);
                                 slot.latest_name = name;
                                 slot.blocked = None;
+                                slot.recompute_failed = false;
                             }
+                            current.clear_description_problem(&did);
                             current.stage();
                             // The new latest fact must enter the next
                             // directory pass so its access facts are read
                             // without another description load.
                             current.request_sync();
+                        } else {
+                            current.pending_description(
+                                &did,
+                                "device details no longer match the requested description".into(),
+                            );
                         }
                     }
                     Err(error) => {

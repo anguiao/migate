@@ -10,6 +10,7 @@ mod outlet;
 mod patch;
 mod repair;
 mod sensor;
+mod source;
 mod state_sensor;
 pub(crate) use group::parse_group;
 pub(crate) use ls2307::is_type as is_ls2307_type;
@@ -25,6 +26,7 @@ pub(crate) use native::NativeDescription;
 pub(crate) use repair::{
     RepairPlan, effective_temperature_range, narrowed_profile, plan_rgb_repair, repaired_profile,
 };
+pub(crate) use source::RawDescription;
 pub use state_sensor::{
     EventArgument, EventBinding, MotionBinding, StateBinding, StateMapping, StateValue,
 };

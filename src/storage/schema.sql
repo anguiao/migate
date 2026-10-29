@@ -43,6 +43,6 @@ CREATE TABLE publication_revocation (
 ) STRICT;
 
 INSERT INTO bridge_configuration (id, json)
-VALUES (1, '{"scope":null,"root_version":1,"devices":[],"groups":[]}');
+VALUES (1, '{"scope":null,"root_version":1,"devices":[],"descriptions":[],"groups":[]}');
 
-PRAGMA user_version = 9;
+PRAGMA user_version = 10;

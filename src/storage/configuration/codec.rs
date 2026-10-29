@@ -5,6 +5,7 @@ use crate::{
         CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation, Scope,
     },
     device::DeviceKey,
+    xiaomi::capability::RawDescription,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 mod native;
@@ -29,7 +30,20 @@ struct WireConfiguration {
     scope: Option<Option<WireScope>>,
     root_version: u32,
     devices: Vec<WireIdentity>,
+    descriptions: Vec<WireDescription>,
     groups: Vec<WireGroup>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireDescription {
+    source: String,
+    device_id: String,
+    model: String,
+    instance_type: String,
+    instance: serde_json::Value,
+    #[serde(default, deserialize_with = "present_option")]
+    diagnostic: Option<Option<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -96,6 +110,11 @@ impl WireConfiguration {
                 .iter()
                 .map(WireIdentity::from_committed)
                 .collect(),
+            descriptions: configuration
+                .descriptions
+                .iter()
+                .map(WireDescription::from_raw)
+                .collect(),
             groups: configuration
                 .groups
                 .iter()
@@ -120,6 +139,11 @@ impl WireConfiguration {
                 .into_iter()
                 .map(WireIdentity::into_committed)
                 .collect::<Result<Vec<_>, _>>()?,
+            descriptions: self
+                .descriptions
+                .into_iter()
+                .map(WireDescription::into_raw)
+                .collect::<Result<Vec<_>, _>>()?,
             groups: self
                 .groups
                 .into_iter()
@@ -128,6 +152,31 @@ impl WireConfiguration {
         };
         configuration.validate()?;
         Ok(configuration)
+    }
+}
+
+impl WireDescription {
+    fn from_raw(raw: &RawDescription) -> Self {
+        Self {
+            source: raw.key.source.clone(),
+            device_id: raw.key.id.clone(),
+            model: raw.model.clone(),
+            instance_type: raw.instance_type.clone(),
+            instance: raw.instance.clone(),
+            diagnostic: Some(raw.diagnostic.clone()),
+        }
+    }
+
+    fn into_raw(self) -> Result<RawDescription, &'static str> {
+        RawDescription::new(
+            DeviceKey::new(self.source, self.device_id),
+            self.model,
+            self.instance_type,
+            self.instance,
+            self.diagnostic
+                .ok_or("Stored recognition diagnostic is missing")?,
+        )
+        .map_err(|_| "Stored source description is invalid")
     }
 }
 

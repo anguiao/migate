@@ -15,7 +15,7 @@ pub(crate) mod units;
 pub(crate) use bridge::Advertisement;
 pub(crate) use bridge::{Bridge, LabelWriter};
 pub use pairing::PairingEvent;
-pub(crate) use storage::discard_subscriptions;
+pub(crate) use storage::subscription_keys;
 
 pub(crate) use model::{FrozenEntry, PublishedFunction, PublishedIdentity};
 pub(crate) use sensors::measurement_mapping_issue;

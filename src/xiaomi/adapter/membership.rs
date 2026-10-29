@@ -114,6 +114,34 @@ impl Context {
         self.problem(did, Some(reason));
         self.changed.notify(usize::MAX);
     }
+
+    pub(super) fn clear_description_problem(&self, did: &str) {
+        let work = self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.admitted.clone());
+        if let Some(work) = work {
+            work.report(self, did);
+        } else {
+            self.problem(did, None);
+        }
+    }
+
+    pub(super) fn resolved_description_target(&self, did: &str) {
+        let cleared = {
+            let mut live = self.live.borrow_mut();
+            let slot = live
+                .devices
+                .get_mut(did)
+                .expect("a confirmed source retains its slot");
+            slot.loading.is_none() && !slot.recompute_failed && slot.blocked.take().is_some()
+        };
+        if cleared {
+            self.clear_description_problem(did);
+        }
+    }
     /// Retire one native runtime and its current logical sink.
     pub(super) fn retire_work(&self, did: &str) {
         let work = self

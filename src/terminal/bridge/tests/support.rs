@@ -42,6 +42,9 @@ pub(super) fn add_device(store: &Store, description: &PhysicalDeviceDescription)
     let native = native_for(description);
     let native_description = native.physical_description(description.label());
     let mut device = crate::storage::tests::fixtures::identity(&native_description, endpoint);
+    configuration
+        .descriptions
+        .push(crate::storage::tests::fixtures::raw_for(&native));
     device.native = Some(native);
     configuration.devices.push(device);
     configuration.scope = Some(crate::storage::tests::fixtures::scope());
@@ -78,6 +81,11 @@ pub(super) fn saved_description(store: &Store, key: &DeviceKey) -> PhysicalDevic
 
 fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<View, StorageError> {
     let configuration = store.load_configuration()?;
+    let accessible_descriptions = configuration
+        .descriptions
+        .iter()
+        .map(|source| source.key.clone())
+        .collect();
     let derived = configuration.derive();
     let entries = registry
         .list()
@@ -101,6 +109,7 @@ fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<View, StorageE
         }),
         pending: false,
         failure: None,
+        accessible_descriptions,
     })
 }
 

@@ -157,11 +157,11 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
     let records = block_on(async {
         let mut records = Vec::new();
         for did in &selected.dids {
-            let (record, name) = load_device(&cloud, &credentials(), &selected, did)
+            let (_, record, name) = load_device(&cloud, &credentials(), &selected, did)
                 .await
                 .unwrap();
             assert_eq!(name, None);
-            records.push(record);
+            records.push(record.unwrap());
         }
         records
     });
@@ -235,7 +235,7 @@ fn fixed_home_load_reports_incompatible_capability() {
             &home("local", &["target"]),
             "target"
         )),
-        Err(CatalogError::Capability(_))
+        Ok((_, None, _))
     ));
     assert_eq!(requests.try_iter().count(), 2);
 }
@@ -371,7 +371,7 @@ fn missing_target_and_cloud_failure_are_returned_without_cache_fallback() {
 }
 
 #[test]
-fn unsupported_new_description_is_reported_as_capability_failure() {
+fn unsupported_new_description_is_cached_with_a_recognition_diagnostic() {
     let mut unsupported = instance();
     unsupported["services"][1]["properties"][0]["access"] = json!(["read", "notify"]);
     let (base, requests) = mock_server(vec![
@@ -379,16 +379,21 @@ fn unsupported_new_description_is_reported_as_capability_failure() {
         MockResponse::json(200, &unsupported.to_string()),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    assert!(matches!(
-        block_on(load_local(
-            &snapshot(),
-            &[home("local", &["target"])],
-            &credentials(),
-            &key(),
-            &cloud
-        )),
-        Err(CatalogError::Capability(_))
-    ));
+    let (raw, native, _) = block_on(load_device(
+        &cloud,
+        &credentials(),
+        &home("local", &["target"]),
+        "target",
+    ))
+    .unwrap();
+    assert!(native.is_none());
+    assert!(
+        raw.diagnostic
+            .as_deref()
+            .unwrap()
+            .contains("no supported MIoT functions")
+    );
+    assert_eq!(raw.instance, unsupported);
     assert_eq!(requests.try_iter().count(), 2);
 }
 
@@ -425,7 +430,13 @@ async fn load_local(
     cloud: &CloudClient,
 ) -> Result<(NativeDescription, Option<String>), CatalogError> {
     let home = select_local_home(snapshot, homes, &credentials.uid)?;
-    load_device(cloud, credentials, &home, &key.id).await
+    let (_, native, name) = load_device(cloud, credentials, &home, &key.id).await?;
+    Ok((
+        native.ok_or(CatalogError::Capability(
+            crate::xiaomi::capability::CapabilityError::UnsupportedDevice,
+        ))?,
+        name,
+    ))
 }
 
 #[test]
@@ -439,13 +450,14 @@ fn light_catalog_uses_cloud_model_for_the_exact_ls2307_color_adapter() {
         MockResponse::json(200, &instance.to_string()),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let (cached, name) = block_on(load_device(
+    let (_, cached, name) = block_on(load_device(
         &cloud,
         &credentials(),
         &home("local", &["target"]),
         "target",
     ))
     .unwrap();
+    let cached = cached.unwrap();
     assert_eq!(name.as_deref(), Some("Bedroom light"));
     assert_eq!(cached.device().functions().len(), 1);
     let lighting = cached.device().functions()[0].lighting().unwrap();
@@ -466,13 +478,14 @@ fn light_group_descriptors_load_for_confirmed_group_dids() {
         MockResponse::json(200, &instance.to_string()),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let (cached, name) = block_on(load_device(
+    let (_, cached, name) = block_on(load_device(
         &cloud,
         &credentials(),
         &home("local", &["group.42"]),
         "group.42",
     ))
     .unwrap();
+    let cached = cached.unwrap();
     assert_eq!(cached.device().key().id, "group.42");
     assert_eq!(cached.model(), "mijia.light.group3");
     assert_eq!(name.as_deref(), Some("Grouped lights"));

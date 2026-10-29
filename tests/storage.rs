@@ -15,7 +15,7 @@ fn initializes_and_restores_independent_identities() {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            9
+            10
         );
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
@@ -331,6 +331,6 @@ fn invalid_current_schema_reports_sql_errors_without_replacing_identity() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        9
+        10
     );
 }

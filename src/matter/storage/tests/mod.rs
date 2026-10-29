@@ -25,7 +25,8 @@ fn raw_blob_roundtrip_and_removal() {
 fn discarding_subscriptions_preserves_other_protocol_records() {
     use rs_matter::persist::{BASIC_INFO_KEY, BINDINGS_KEY, EVENT_EPOCH_KEY, FABRIC_KEYS_START};
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap().matter();
+    let database = Store::open(dir.path()).unwrap();
+    let store = database.matter();
     let retained = [
         FABRIC_KEYS_START + 1,
         BASIC_INFO_KEY,
@@ -40,7 +41,11 @@ fn discarding_subscriptions_preserves_other_protocol_records() {
             .put(PERSISTENT_SUBSCRIPTIONS_START + slot as u16, &[4, 5, 6])
             .unwrap();
     }
-    discard_subscriptions(&store).unwrap();
+    let configuration = database.devices().load_configuration().unwrap();
+    database
+        .devices()
+        .commit_configuration_with_reset(&configuration, &[], Some(subscription_keys()))
+        .unwrap();
     for slot in 0..DEFAULT_MAX_SUBSCRIPTIONS {
         assert!(
             !store

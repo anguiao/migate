@@ -524,13 +524,16 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
             ))
             .unwrap(),
         );
-        c.context
-            .live
-            .borrow_mut()
-            .devices
-            .get_mut("member-a")
-            .unwrap()
-            .latest = Some(downgraded.clone());
+        {
+            let mut live = c.context.live.borrow_mut();
+            let slot = live.devices.get_mut("member-a").unwrap();
+            slot.raw = Some(crate::storage::tests::fixtures::raw_for(&downgraded));
+            if let Some(access) = &mut slot.cloud_access {
+                access.model = downgraded.model().into();
+                access.instance_type = downgraded.instance_type().into();
+            }
+            slot.latest = Some(downgraded.clone());
+        }
 
         // A failed save keeps the committed repair plan.
         let db = rusqlite::Connection::open(c.store.path()).unwrap();
@@ -611,7 +614,11 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         {
             let mut live = c.context.live.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
-            slot.latest = Some(recovered.clone());
+            slot.raw = Some(crate::storage::tests::fixtures::raw_for(&recovered));
+            if let Some(access) = &mut slot.cloud_access {
+                access.model = recovered.model().into();
+                access.instance_type = recovered.instance_type().into();
+            }
             slot.latest = Some(recovered);
         }
         c.context.reconcile("member-a").unwrap();

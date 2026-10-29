@@ -151,6 +151,7 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
     let mut configuration = CommittedConfiguration {
         scope: Some(scope(uid)),
         root_version: 1,
+        descriptions: Vec::new(),
         devices: Vec::new(),
         groups: Vec::new(),
     };
@@ -176,6 +177,9 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
             functions,
             native: Some(native.clone()),
         });
+        configuration
+            .descriptions
+            .push(crate::storage::tests::fixtures::raw_for(native));
         endpoint += native.device().functions().len() as u16 + 1;
     }
     configuration.devices.sort_by(|a, b| a.key.cmp(&b.key));

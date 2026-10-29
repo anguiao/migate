@@ -165,8 +165,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
                 .any(|record| record.key == group && record.native.is_some())
         );
 
-        // A real startup while the save still fails must error before it ever
-        // binds or serves the revoked endpoint.
+        // A failed startup save serves the committed view with revocation applied.
         let identity = store.load_identity().unwrap();
         let report = crate::xiaomi::auth::AuthReport::for_test(
             crate::xiaomi::auth::AuthenticationState::NotSignedIn,
@@ -185,7 +184,14 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         .unwrap()
         .0;
         let failing_handle = crate::xiaomi::adapter::SourceHandle(failing.context.clone());
-        let error = crate::app::run_xiaomi_bridge(
+        let recovered_view = crate::app::App::open(failing_handle.clone(), store.clone()).unwrap();
+        assert!(recovered_view.current().published.get(&group).is_none());
+        assert!(recovered_view.current().published.get(&one).is_some());
+        assert!(!failing.context.graph.borrow().rules.contains_key("group-1"));
+        let started = Rc::new(event_listener::Event::new());
+        let listening = started.listen();
+        let ready_signal = started.clone();
+        crate::app::run_xiaomi_bridge(
             crate::app::BridgeOptions {
                 store: &store,
                 identity: &identity,
@@ -196,15 +202,17 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
             future::pending::<Result<(), crate::RuntimeError>>(),
             &b""[..],
             Vec::new(),
-            future::pending::<Result<(), crate::RuntimeError>>(),
-            |_| Ok(()),
+            async move {
+                listening.await;
+                Ok(())
+            },
+            move |_| {
+                ready_signal.notify(usize::MAX);
+                Ok(())
+            },
         )
         .await
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("commit bridge configuration"),
-            "{error}"
-        );
+        .unwrap();
         assert!(!runtime_socket_live(startup_port));
 
         // Once the save can succeed, a fresh restart applies the bootstrap

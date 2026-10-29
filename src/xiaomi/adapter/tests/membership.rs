@@ -127,21 +127,28 @@ fn supported_descriptions_and_selected_home_membership_remain_required() {
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one"]).await;
             until(|| {
-                control.context.live.borrow().devices["multi"]
-                    .blocked
-                    .is_some()
+                control
+                    .store
+                    .devices()
+                    .load_configuration()
+                    .unwrap()
+                    .descriptions
+                    .iter()
+                    .any(|raw| raw.key.id == "multi" && raw.diagnostic.is_some())
             })
             .await;
             control.context.reconcile("multi").unwrap();
             assert!(
                 control
-                    .context
-                    .status
-                    .borrow()
-                    .pending
+                    .store
+                    .devices()
+                    .load_configuration()
+                    .unwrap()
+                    .descriptions
                     .iter()
-                    .any(|pending| {
-                        pending.did == "multi" && pending.reason.contains("missing")
+                    .any(|raw| {
+                        raw.key.id == "multi"
+                            && raw.diagnostic.as_deref().unwrap().contains("missing")
                     })
             );
             assert_eq!(control.context.registry.list().len(), 1);
@@ -157,7 +164,19 @@ fn supported_descriptions_and_selected_home_membership_remain_required() {
                         .is_none()
                 );
             }
-            control.cloud.lock().unwrap().unsupported.clear();
+            let urn = "urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:2";
+            let mut instance: Value = serde_json::from_str(include_str!(
+                "../../../../tests/fixtures/miot/cuco-cp7pd.json"
+            ))
+            .unwrap();
+            instance["type"] = json!(urn);
+            {
+                let mut cloud = control.cloud.lock().unwrap();
+                cloud.unsupported.clear();
+                cloud.instance_types.insert("multi".into(), urn.into());
+                cloud.catalog_instances.insert(urn.into(), instance);
+            }
+            control.context.request_sync();
             peer.list_changed(&["multi"]);
             initialized(control, &peer, &["one", "multi"]).await;
             assert!(

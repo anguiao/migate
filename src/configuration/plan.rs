@@ -32,8 +32,14 @@ pub(crate) fn plan<Shape: PartialEq>(
     facts
         .devices
         .retain(|device| !revoked.contains(&device.key) || device.fresh);
+    facts
+        .descriptions
+        .retain(|source| !revoked.contains(&source.description.key) || source.fresh);
     // Equivalent directory reordering must not change the committed configuration.
     facts.devices.sort_by(|a, b| a.key.cmp(&b.key));
+    facts
+        .descriptions
+        .sort_by(|a, b| a.description.key.cmp(&b.description.key));
     facts
         .relations
         .sort_by(|a, b| a.group_did.cmp(&b.group_did));
@@ -55,16 +61,16 @@ pub(crate) fn plan<Shape: PartialEq>(
         }
     }
     let mut allocator = Allocator::new(reserved);
-    let mut clear_revocations = Vec::new();
+    let clear_revocations = facts
+        .descriptions
+        .iter()
+        .filter(|source| revoked.contains(&source.description.key) && source.fresh)
+        .map(|source| source.description.key.clone())
+        .collect::<Vec<_>>();
     let mut next_devices = Vec::new();
 
     for source in facts.devices {
         let key = source.key.clone();
-        // Filtering precedes candidate construction, so any revoked fact here
-        // is a genuine fresh re-admission.
-        if revoked.contains(&key) {
-            clear_revocations.push(key.clone());
-        }
         let device = match identities.remove(&key) {
             Some(previous) => {
                 let mut device = previous;
@@ -123,6 +129,11 @@ pub(crate) fn plan<Shape: PartialEq>(
         scope: Some(scope),
         root_version: current.root_version,
         devices: next_devices,
+        descriptions: facts
+            .descriptions
+            .into_iter()
+            .map(|source| source.description)
+            .collect(),
         groups: facts.relations,
     };
     let derived = configuration.derive();

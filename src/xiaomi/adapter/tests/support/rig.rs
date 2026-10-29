@@ -4,6 +4,7 @@ use super::*;
 pub(in super::super) struct CloudState {
     pub(in super::super) members: Vec<String>,
     pub(in super::super) names: BTreeMap<String, String>,
+    pub(in super::super) models: BTreeMap<String, String>,
     pub(in super::super) status: u16,
     pub(in super::super) home_delay: Duration,
     pub(in super::super) home_gate: Option<flume::Receiver<()>>,
@@ -262,6 +263,42 @@ impl Rig {
                 .cloned()
                 .collect::<Vec<_>>();
             commit_natives(&store, &uid, &natives);
+            let mut configuration = store.devices().load_configuration().unwrap();
+            for (did, model, instance) in lights {
+                let raw = configuration
+                    .descriptions
+                    .iter_mut()
+                    .find(|raw| raw.key.id == *did)
+                    .unwrap();
+                *raw = crate::xiaomi::capability::RawDescription::new(
+                    raw.key.clone(),
+                    (*model).into(),
+                    instance["type"].as_str().unwrap().into(),
+                    instance.clone(),
+                    None,
+                )
+                .unwrap();
+            }
+            if let (Some(model), Some(instance)) = (light, custom_text.as_deref()) {
+                let instance: Value = serde_json::from_str(instance).unwrap();
+                let raw = configuration
+                    .descriptions
+                    .iter_mut()
+                    .find(|raw| raw.key.id == "one")
+                    .unwrap();
+                *raw = crate::xiaomi::capability::RawDescription::new(
+                    raw.key.clone(),
+                    model.into(),
+                    instance["type"].as_str().unwrap().into(),
+                    instance,
+                    None,
+                )
+                .unwrap();
+            }
+            store
+                .devices()
+                .commit_configuration(&configuration, &[])
+                .unwrap();
         }
         let cloud = Arc::new(Mutex::new(CloudState {
             members: members.iter().map(|v| v.to_string()).collect(),
@@ -719,7 +756,7 @@ fn cloud_record(state: &CloudState, record: &NativeDescription) -> Value {
     json!({
         "did": did,
         "name": state.names.get(did).cloned().unwrap_or_else(|| format!("name {did}")),
-        "model": record.model(),
+        "model": state.models.get(did).map(String::as_str).unwrap_or(record.model()),
         "spec_type": state.instance_types.get(did).map(String::as_str).unwrap_or(record.instance_type()),
         "isOnline": state.online.contains(did),
     })

@@ -1,4 +1,4 @@
-//! Sensor capability persistence in the current schema-9 private codec.
+//! Sensor capability persistence in the current schema-10 private codec.
 
 use super::configuration::{corrupt, fixture, load, next, raw, save, scope, seed};
 use crate::{

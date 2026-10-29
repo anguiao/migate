@@ -442,6 +442,7 @@ fn in_memory_native_key_mismatch_is_rejected() {
     let configuration = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 1,
+        descriptions: Vec::new(),
         devices: vec![CommittedDevice {
             key: DeviceKey::new("xiaomi", "outlet"),
             unique_id: unique("outlet"),

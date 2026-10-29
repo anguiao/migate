@@ -345,7 +345,10 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 .unwrap();
             c.context.changed.notify(usize::MAX);
             async_io::Timer::after(Duration::from_millis(20)).await;
-            assert_eq!(observations.borrow().len(), snapshots);
+            assert!(
+                observations.borrow()[snapshots..].iter().all(|free| !free),
+                "state changes must not release the running Matter socket"
+            );
             assert_eq!(version(), root_settled);
             assert!(runtime_socket_live(port));
 

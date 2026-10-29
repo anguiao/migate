@@ -60,6 +60,7 @@ impl XiaomiAdapter {
         let revocations = store.devices().load_revocations()?;
         let registry = DeviceRegistry::new();
         let mut restored = Vec::new();
+        let mut staged = Vec::new();
         let mut restored_relations = Vec::new();
         let mut graph = DerivedConfiguration::default();
         if scope.is_some() {
@@ -86,6 +87,28 @@ impl XiaomiAdapter {
                 }
             }
             graph = recovery.derive();
+            for raw in &recovery.descriptions {
+                if revocations
+                    .iter()
+                    .any(|revocation| revocation.key == raw.key)
+                {
+                    continue;
+                }
+                let group = restored_relations
+                    .iter()
+                    .any(|relation| relation.group_did == raw.key.id);
+                match raw.recognize(group) {
+                    Ok((source, native)) => staged.push((source, native, group, None)),
+                    Err(error) => staged.push((
+                        raw.clone(),
+                        recovery
+                            .device(&raw.key)
+                            .and_then(|device| device.native.clone()),
+                        group,
+                        Some(error.to_string()),
+                    )),
+                }
+            }
             // Every current non-revoked native entity is restored, including
             // currently unpublishable native groups; publication is decided by
             // the derived graph, not by what was serving before the restart.
@@ -194,6 +217,22 @@ impl XiaomiAdapter {
             context.install_work(&did);
             context.add_consumers(work, sink, receivers);
         }
+        for (raw, native, group, failure) in staged {
+            let did = raw.key.id.clone();
+            {
+                let mut live = context.live.borrow_mut();
+                let slot = live.devices.entry(did.clone()).or_default();
+                slot.group = group;
+                slot.committed_raw = recovery_source(&stored, &raw.key);
+                slot.raw = Some(raw);
+                slot.latest = native;
+                slot.recompute_failed = failure.is_some();
+                slot.blocked = failure.clone();
+            }
+            if let Some(failure) = failure {
+                context.problem(&did, Some(failure));
+            }
+        }
         Ok((
             Self {
                 cloud,
@@ -208,4 +247,15 @@ impl XiaomiAdapter {
             TopologyReady(ready),
         ))
     }
+}
+
+fn recovery_source(
+    configuration: &crate::configuration::CommittedConfiguration,
+    key: &crate::device::DeviceKey,
+) -> Option<crate::xiaomi::capability::RawDescription> {
+    configuration
+        .descriptions
+        .iter()
+        .find(|source| &source.key == key)
+        .cloned()
 }

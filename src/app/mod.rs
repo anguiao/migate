@@ -70,12 +70,10 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn open(source: SourceHandle, store: Store) -> Result<Self, StorageError> {
         let configuration = store.devices().load_configuration()?;
-        // The committed derived graph is never overlaid with the recovery
-        // state: planning must still see revoked devices as previously
-        // published so they can be withdrawn with a real version bump. The
-        // initial serving view is the intersection with the restored entries;
-        // revocation and account switches legitimately lack old references.
-        let derived = Rc::new(configuration.derive());
+        // Serving starts from the committed graph with real revocations
+        // overlaid. Planning separately compares the unmodified committed graph
+        // so withdrawals still receive their version increments.
+        let derived = source.committed_graph();
         let entries = source.entries(&configuration);
         let published = serving_registry(&derived.published, &entries);
         Ok(Self {
@@ -102,6 +100,10 @@ impl App {
 
     pub(crate) fn pending(&self) -> bool {
         self.pending.get()
+    }
+
+    pub(crate) fn accessible_descriptions(&self) -> BTreeSet<DeviceKey> {
+        self.source.accessible_descriptions()
     }
 
     /// Record a non-fatal prepare/save failure for the terminal; the committed
@@ -173,12 +175,20 @@ impl App {
     /// Collect the latest effective input and produce a pure candidate plan.
     /// No activation resource is created here.
     pub(crate) fn plan(&self) -> Result<Option<Plan>, StorageError> {
+        self.source.retry_recomputation().map_err(|error| {
+            StorageError::new(
+                self.store.path(),
+                "recompute cached Xiaomi description",
+                error,
+            )
+        })?;
         let current = self.current();
         let snapshot = self.source.snapshot();
         if snapshot.scope.is_none() {
             return Ok(None);
         }
         let revocations = self.store.devices().load_revocations()?;
+        let committed_derived = current.configuration.derive();
         let mut new_identities = BTreeMap::new();
         for device in &snapshot.devices {
             if current.configuration.device(&device.key).is_none() {
@@ -191,7 +201,7 @@ impl App {
         let plan = match configuration::plan(
             PlanInput {
                 current: &current.configuration,
-                current_derived: &current.derived,
+                current_derived: &committed_derived,
                 facts: snapshot,
                 revocations,
                 new_identities,
@@ -234,15 +244,11 @@ impl App {
     /// instances and switch the effective view. The caller guarantees that no
     /// await happens between `prepare` and `apply`.
     pub(crate) fn apply(&self, prepared: Prepared) -> Result<(), StorageError> {
-        let result = (|| {
-            if prepared.plan.rebuild {
-                matter::discard_subscriptions(&self.store.matter())?;
-            }
-            self.store.devices().commit_configuration(
-                &prepared.plan.configuration,
-                &prepared.plan.clear_revocations,
-            )
-        })();
+        let result = self.store.devices().commit_configuration_with_reset(
+            &prepared.plan.configuration,
+            &prepared.plan.clear_revocations,
+            prepared.plan.rebuild.then(matter::subscription_keys),
+        );
         if let Err(error) = result {
             *self.failure.borrow_mut() = Some(error.to_string());
             return Err(error);

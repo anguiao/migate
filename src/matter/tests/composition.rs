@@ -39,6 +39,17 @@ fn plan(current: &CommittedConfiguration, value: Value) -> Plan {
     .unwrap();
     let derived = current.derive();
     let facts = SourceFacts {
+        descriptions: vec![crate::configuration::SourceRaw {
+            description: crate::xiaomi::capability::RawDescription::new(
+                key.clone(),
+                "example.composite".into(),
+                value["type"].as_str().unwrap().into(),
+                value.clone(),
+                None,
+            )
+            .unwrap(),
+            fresh: true,
+        }],
         scope: Some(Scope {
             uid: "account".into(),
             home_id: "home".into(),

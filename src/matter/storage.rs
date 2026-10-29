@@ -7,15 +7,10 @@ use rs_matter::{
 };
 use std::{cell::RefCell, rc::Rc};
 
-/// Forget the subscription slots used by InteractionModelState before
-/// committing a configuration that replaces the stopped Matter instance.
-/// Clearing first also prevents a process restart from resuming the old set
-/// against the new configuration. All other protocol records stay intact.
-pub(crate) fn discard_subscriptions(store: &MatterStore) -> Result<(), StorageError> {
-    for slot in 0..DEFAULT_MAX_SUBSCRIPTIONS {
-        store.delete(PERSISTENT_SUBSCRIPTIONS_START + slot as u16)?;
-    }
-    Ok(())
+/// Subscription slots that must be cleared in the configuration transaction.
+pub(crate) fn subscription_keys() -> std::ops::Range<u16> {
+    PERSISTENT_SUBSCRIPTIONS_START
+        ..PERSISTENT_SUBSCRIPTIONS_START + DEFAULT_MAX_SUBSCRIPTIONS as u16
 }
 
 /// Adapt protocol callbacks while preserving the first storage failure for the runtime.

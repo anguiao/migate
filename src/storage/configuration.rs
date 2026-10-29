@@ -1,4 +1,4 @@
-//! Private schema 9 codec and transactions for the singleton configuration.
+//! Private schema 10 codec and transactions for the singleton configuration.
 //!
 //! The stored JSON is a storage-private encoding: every layer is tagged and
 //! rejects unknown fields and missing required values, and decoded values are
@@ -43,6 +43,16 @@ impl DeviceStore {
         configuration: &CommittedConfiguration,
         clear_revocations: &[DeviceKey],
     ) -> Result<(), StorageError> {
+        self.commit_configuration_with_reset(configuration, clear_revocations, None)
+    }
+
+    /// Commit source and effective state with any protocol subscription reset.
+    pub(crate) fn commit_configuration_with_reset(
+        &self,
+        configuration: &CommittedConfiguration,
+        clear_revocations: &[DeviceKey],
+        subscription_keys: Option<std::ops::Range<u16>>,
+    ) -> Result<(), StorageError> {
         let operation = "commit bridge configuration";
         let json = encode(configuration).map_err(|error| self.invalid(operation, error))?;
         let transaction = self
@@ -50,6 +60,14 @@ impl DeviceStore {
             .connection()
             .unchecked_transaction()
             .map_err(|error| self.store.database_error(operation, error))?;
+        if let Some(keys) = subscription_keys {
+            transaction
+                .execute(
+                    "DELETE FROM blobs WHERE key >= ?1 AND key < ?2",
+                    params![keys.start, keys.end],
+                )
+                .map_err(|error| self.store.database_error(operation, error))?;
+        }
         let changed = transaction
             .execute(
                 "UPDATE bridge_configuration SET json=?1 WHERE id=1",

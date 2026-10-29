@@ -9,11 +9,8 @@
 use super::{model::AdapterError, relations::ConfirmedGroup, state::Context};
 use crate::{
     device::DeviceKey,
-    xiaomi::capability::NativeDescription,
-    xiaomi::{
-        capability::parse_group,
-        cloud::{CloudClient, CloudDeviceInfo},
-    },
+    xiaomi::capability::RawDescription,
+    xiaomi::cloud::{CloudClient, CloudDeviceInfo},
 };
 use futures_lite::future;
 use std::rc::Rc;
@@ -82,6 +79,9 @@ impl Context {
             } else {
                 None
             };
+            let recovered_target = existing
+                && self.live.borrow().devices[did].description_target_missing
+                && group.instance_type.is_some();
             let needs_local = {
                 let mut live = self.live.borrow_mut();
                 let slot = live.devices.entry(did.clone()).or_default();
@@ -91,6 +91,7 @@ impl Context {
                     slot.cloud_forbidden = false;
                 }
                 slot.group = true;
+                slot.description_target_missing = group.instance_type.is_none();
                 slot.cloud_access =
                     group
                         .instance_type
@@ -106,6 +107,21 @@ impl Context {
                         !physical || model != group.model || instance_type != group.instance_type
                     })
             };
+            {
+                let target = group
+                    .instance_type
+                    .as_ref()
+                    .map(|instance_type| (group.model.clone(), instance_type.clone()));
+                self.live
+                    .borrow_mut()
+                    .devices
+                    .get_mut(did)
+                    .unwrap()
+                    .retarget_loading(&target);
+            }
+            if recovered_target {
+                self.clear_description_problem(did);
+            }
             if needs_local {
                 let access = self
                     .live
@@ -124,15 +140,8 @@ impl Context {
                 );
                 continue;
             };
-            // Retire a load aimed at an older relation target.
-            {
-                let target = Some((group.model.clone(), instance_type.clone()));
-                let mut live = self.live.borrow_mut();
-                if let Some(slot) = live.devices.get_mut(did) {
-                    slot.retarget_loading(&target);
-                }
-            }
             if !self.live.borrow().devices[did].needs_description() {
+                self.resolved_description_target(did);
                 self.reconcile_group(did)?;
                 continue;
             }
@@ -196,21 +205,26 @@ impl Context {
                 }
                 match result {
                     Ok(instance) => {
-                        match parse_group(
+                        match RawDescription::new(
                             DeviceKey::new("xiaomi", group_did.clone()),
-                            &model,
-                            &instance,
+                            model,
+                            instance_type,
+                            instance,
+                            None,
                         )
-                        .and_then(|device| NativeDescription::new(model, instance_type, device))
+                        .and_then(|raw| raw.recognize(true))
                         {
-                            Ok(cached) => {
+                            Ok((raw, native)) => {
                                 if let Some(slot) =
                                     context.live.borrow_mut().devices.get_mut(&group_did)
                                 {
                                     slot.blocked = None;
-                                    slot.latest = Some(cached);
+                                    slot.recompute_failed = false;
+                                    slot.latest = native;
+                                    slot.raw = Some(raw);
                                     slot.latest_name = name;
                                 }
+                                context.clear_description_problem(&group_did);
                                 context.stage();
                             }
                             Err(error) => {
@@ -219,7 +233,7 @@ impl Context {
                         }
                     }
                     Err(error) => {
-                        context.problem(&group_did, Some(error.to_string()));
+                        context.pending_description(&group_did, error.to_string());
                         if error.is_unauthorized() {
                             context.cloud_error(&token, None, &error)?;
                         }

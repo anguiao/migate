@@ -54,12 +54,68 @@ pub(crate) fn identity(description: &PhysicalDeviceDescription, endpoint: u16) -
 }
 
 pub(crate) fn configuration(scope: Scope, devices: Vec<CommittedDevice>) -> CommittedConfiguration {
+    let descriptions = devices
+        .iter()
+        .filter_map(|device| device.native.as_ref().map(raw_for))
+        .collect();
     CommittedConfiguration {
         scope: Some(scope),
         root_version: 1,
+        descriptions,
         devices,
         groups: Vec::new(),
     }
+}
+
+/// Source fixtures for tests that start from a manually assembled effective model.
+pub(crate) fn raw_for(native: &NativeDescription) -> crate::xiaomi::capability::RawDescription {
+    let source = match native.model() {
+        "cuco.plug.cp7pd" => include_str!("../../../tests/fixtures/miot/cuco-cp7pd.json"),
+        "devcea.light.ls2307" => {
+            include_str!("../../../tests/fixtures/miot/devcea-light-ls2307.json")
+        }
+        "dmaker.fan.p5c" => include_str!("../../../tests/fixtures/miot/dmaker-p5c.json"),
+        "xiaomi.curtain.acn010" => include_str!("../../../tests/fixtures/miot/xiaomi-acn010.json"),
+        "miaomiaoce.sensor_ht.t6" => {
+            include_str!("../../../tests/fixtures/miot/miaomiaoce-t6.json")
+        }
+        "xiaomi.light.ceil04" => {
+            include_str!("../../../tests/fixtures/miot/xiaomi-light-ceil04.json")
+        }
+        "xiaomi.light.bar2" => include_str!("../../../tests/fixtures/miot/xiaomi-light-bar2.json"),
+        "yeelink.light.light3" => {
+            include_str!("../../../tests/fixtures/miot/yeelink-light-light3.json")
+        }
+        "yeelink.light.ml9" => include_str!("../../../tests/fixtures/miot/yeelink-light-ml9.json"),
+        "yeelink.light.spot2" => {
+            include_str!("../../../tests/fixtures/miot/yeelink-light-spot2.json")
+        }
+        "lemesh.light.wy0c15" => {
+            include_str!("../../../tests/fixtures/miot/lemesh-light-wy0c15.json")
+        }
+        _ => include_str!("../../../tests/fixtures/miot/outlet.json"),
+    };
+    let mut instance: serde_json::Value = serde_json::from_str(source).unwrap();
+    instance["type"] = native.instance_type().into();
+    if native.model() == "miaomiaoce.sensor_ht.t6" && native.device().battery().is_none() {
+        instance["services"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|service| {
+                !service["type"]
+                    .as_str()
+                    .unwrap()
+                    .contains(":service:battery:")
+            });
+    }
+    crate::xiaomi::capability::RawDescription::new(
+        native.device().key().clone(),
+        native.model().into(),
+        native.instance_type().into(),
+        instance,
+        None,
+    )
+    .unwrap()
 }
 
 pub(crate) fn relation(
@@ -108,6 +164,13 @@ pub(crate) fn planned_from(
 ) -> CommittedConfiguration {
     let facts = SourceFacts {
         scope: Some(scope()),
+        descriptions: natives
+            .iter()
+            .map(|native| crate::configuration::SourceRaw {
+                description: raw_for(native),
+                fresh: true,
+            })
+            .collect(),
         devices: natives
             .into_iter()
             .map(|native| SourceDevice {

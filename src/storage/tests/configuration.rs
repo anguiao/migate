@@ -20,6 +20,73 @@ const MULTI: &str = include_str!("../../../tests/fixtures/miot/cuco-cp7pd.json")
 const CEILING: &str = include_str!("../../../tests/fixtures/miot/xiaomi-light-ceil04.json");
 const LS2307: &str = include_str!("../../../tests/fixtures/miot/devcea-light-ls2307.json");
 
+#[test]
+fn persists_the_complete_original_miot_description() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let instance: Value = serde_json::from_str(LS2307).unwrap();
+    let mut source = instance.clone();
+    source["unrecognized-vendor-extension"] = json!({"preserve": [1, "untouched"]});
+    let expected = source.clone();
+    let mut configuration = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![native("did", "devcea.light.ls2307", source.clone())],
+    )
+    .configuration;
+    configuration.descriptions[0] = crate::xiaomi::capability::RawDescription::new(
+        DeviceKey::new("xiaomi", "did"),
+        "devcea.light.ls2307".into(),
+        source["type"].as_str().unwrap().into(),
+        source,
+        None,
+    )
+    .unwrap();
+    save(&store, &configuration);
+    let saved: Value = serde_json::from_str(&raw(&store)).unwrap();
+    assert_eq!(saved["descriptions"][0]["instance"], expected);
+    assert_eq!(load(&store).devices.len(), 1);
+}
+
+#[test]
+fn rejects_missing_or_mismatched_raw_source_without_modifying_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    seed(&store, vec![fixture("did", "cuco.plug.v3", OUTLET)]);
+    let valid: Value = serde_json::from_str(&raw(&store)).unwrap();
+    for changed in [
+        {
+            let mut value = valid.clone();
+            value["descriptions"] = json!([]);
+            value
+        },
+        {
+            let mut value = valid.clone();
+            value["descriptions"][0]["instance"]["type"] =
+                json!("urn:miot-spec-v2:device:outlet:0000A002:other:1");
+            value
+        },
+        {
+            let mut value = valid.clone();
+            value["descriptions"][0]["model"] = json!("other.model");
+            value
+        },
+        {
+            let mut value = valid.clone();
+            value["descriptions"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("diagnostic");
+            value
+        },
+    ] {
+        corrupt(&store, &changed);
+        let before = raw(&store);
+        assert!(store.devices().load_configuration().is_err());
+        assert_eq!(raw(&store), before);
+    }
+}
+
 pub(super) fn scope(uid: &str, home: &str) -> Scope {
     Scope {
         uid: uid.into(),
@@ -47,6 +114,13 @@ pub(super) fn next(
 ) -> Plan {
     let facts = SourceFacts {
         scope: Some(scope),
+        descriptions: natives
+            .iter()
+            .map(|native| crate::configuration::SourceRaw {
+                description: crate::storage::tests::fixtures::raw_for(native),
+                fresh: true,
+            })
+            .collect(),
         devices: natives
             .into_iter()
             .map(|native| SourceDevice {
@@ -429,6 +503,7 @@ fn ls2307_identity_does_not_discard_an_independent_outlet() {
     seed(&store, vec![fixture("wrong", "cuco.plug.v3", OUTLET)]);
     let mut encoded: Value = serde_json::from_str(&raw(&store)).unwrap();
     encoded["devices"][0]["native"]["model"] = json!("devcea.light.ls2307");
+    encoded["descriptions"][0]["model"] = json!("devcea.light.ls2307");
     corrupt(&store, &encoded);
     assert!(store.devices().load_configuration().is_ok());
 }
@@ -745,6 +820,134 @@ fn late_transaction_failure_rolls_back_the_whole_first_publication() {
     assert_eq!(restored, planned);
     assert_eq!(restored.devices[0].endpoint, 2);
     assert_eq!(restored.devices[0].functions[0].endpoint, 3);
+}
+
+#[test]
+fn failed_subscription_reset_and_reconfirmation_preserve_the_entire_committed_view() {
+    use rs_matter::persist::{BASIC_INFO_KEY, PERSISTENT_SUBSCRIPTIONS_START};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut before = seed(
+        &store,
+        vec![fixture("light", "xiaomi.light.ceil04", CEILING)],
+    );
+    before.groups.push(configuration::GroupRelation {
+        group_did: "group-one".into(),
+        record_did: "record-one".into(),
+        model: "xiaomi.group".into(),
+        instance_type: None,
+        is_physical: false,
+        active: true,
+        error: None,
+        members: vec!["light".into()],
+    });
+    save(&store, &before);
+
+    let mut instance: Value = serde_json::from_str(CEILING).unwrap();
+    let urn = "urn:miot-spec-v2:device:light:0000A001:xiaomi-ceil04:2:0000C802";
+    instance["type"] = json!(urn);
+    let temperature = instance["services"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .flat_map(|service| {
+            service
+                .get_mut("properties")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+        })
+        .find(|property| {
+            property["type"]
+                .as_str()
+                .is_some_and(|kind| kind.contains(":color-temperature:"))
+        })
+        .unwrap();
+    temperature["value-range"] = json!([2700, 6500, 1]);
+    let key = before.devices[0].key.clone();
+    let mut after = next(
+        &before,
+        scope("account", "home"),
+        vec![native("light", "xiaomi.light.ceil04", instance.clone())],
+    )
+    .configuration;
+    after.descriptions[0].instance = instance;
+    after.groups = before.groups.clone();
+    after.groups[0].members.push("other".into());
+    assert_ne!(after.descriptions, before.descriptions);
+    assert_ne!(after.devices[0].native, before.devices[0].native);
+    assert_ne!(after.groups, before.groups);
+
+    let revocation = Revocation {
+        key: key.clone(),
+        reason: "previous access withdrawn".into(),
+    };
+    store
+        .devices()
+        .record_revocations(std::slice::from_ref(&revocation))
+        .unwrap();
+    let subscription = [4, 5, 6];
+    let unrelated = [1, 2, 3];
+    store
+        .matter()
+        .put(PERSISTENT_SUBSCRIPTIONS_START, &subscription)
+        .unwrap();
+    store.matter().put(BASIC_INFO_KEY, &unrelated).unwrap();
+    let saved_json = raw(&store);
+    store
+        .connection()
+        .execute_batch(
+            "CREATE TRIGGER reject_reconfirmation AFTER DELETE ON publication_revocation
+         BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .devices()
+            .commit_configuration_with_reset(
+                &after,
+                std::slice::from_ref(&key),
+                Some(matter::subscription_keys()),
+            )
+            .is_err()
+    );
+    assert_eq!(load(&store), before);
+    assert_eq!(raw(&store), saved_json);
+    assert_eq!(store.devices().load_revocations().unwrap(), [revocation]);
+    assert_eq!(
+        store.matter().get(PERSISTENT_SUBSCRIPTIONS_START).unwrap(),
+        Some(subscription.to_vec())
+    );
+    assert_eq!(
+        store.matter().get(BASIC_INFO_KEY).unwrap(),
+        Some(unrelated.to_vec())
+    );
+
+    store
+        .connection()
+        .execute_batch("DROP TRIGGER reject_reconfirmation;")
+        .unwrap();
+    store
+        .devices()
+        .commit_configuration_with_reset(&after, &[key], Some(matter::subscription_keys()))
+        .unwrap();
+    drop(store);
+    let restored = Store::open(dir.path()).unwrap();
+    assert_eq!(load(&restored), after);
+    assert!(restored.devices().load_revocations().unwrap().is_empty());
+    assert_eq!(
+        restored
+            .matter()
+            .get(PERSISTENT_SUBSCRIPTIONS_START)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        restored.matter().get(BASIC_INFO_KEY).unwrap(),
+        Some(unrelated.to_vec())
+    );
 }
 
 #[test]
