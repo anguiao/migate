@@ -77,44 +77,6 @@ impl SourceHandle {
         self.0.graph.borrow().clone()
     }
 
-    /// Retry only cached inputs whose startup recognition failed.
-    pub(crate) fn retry_recomputation(&self) -> Result<(), String> {
-        let recovered = {
-            let live = self.0.live.borrow();
-            live.devices
-                .iter()
-                .filter(|(_, slot)| slot.recompute_failed)
-                .map(|(did, slot)| {
-                    let source = slot
-                        .candidate
-                        .as_ref()
-                        .expect("a failed recomputation retains its source");
-                    source
-                        .raw
-                        .recognize(slot.group)
-                        .map(|result| (did.clone(), result))
-                        .map_err(|error| format!("{did}: {error}"))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        {
-            let mut live = self.0.live.borrow_mut();
-            for (did, description) in &recovered {
-                let slot = live
-                    .devices
-                    .get_mut(did)
-                    .expect("recomputed source retains its slot");
-                slot.candidate = Some(description.clone());
-                slot.blocked = None;
-                slot.recompute_failed = false;
-            }
-        }
-        for (did, _) in recovered {
-            self.0.clear_description_problem(&did);
-        }
-        Ok(())
-    }
-
     /// Collect the latest pure source facts and the serving entries. No
     /// running device is created here.
     pub(crate) fn snapshot(&self) -> SourceFacts {
@@ -152,9 +114,12 @@ impl SourceHandle {
                 });
             }
         }
+        // A startup recognition error belongs to the source diagnostic, not
+        // the confirmed relation retained with its last valid description.
         let problems = live
             .devices
             .iter()
+            .filter(|(_, slot)| !slot.recompute_failed)
             .filter_map(|(did, slot)| slot.blocked.clone().map(|problem| (did.clone(), problem)))
             .collect::<BTreeMap<_, _>>();
         drop(live);

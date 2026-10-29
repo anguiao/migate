@@ -78,6 +78,8 @@ pub(super) struct DeviceSlot {
     pub(super) candidate: Option<SourceDescription>,
     /// Source fact paired with the installed configuration.
     pub(super) committed: Option<SourceDescription>,
+    /// Startup recognition failed; unchanged directory facts cannot clear its
+    /// diagnostic. Only a newly recognized description resolves it.
     pub(super) recompute_failed: bool,
     /// A confirmed group record lacked the target instance type.
     pub(super) description_target_missing: bool,

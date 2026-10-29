@@ -175,13 +175,6 @@ impl App {
     /// Collect the latest effective input and produce a pure candidate plan.
     /// No activation resource is created here.
     pub(crate) fn plan(&self) -> Result<Option<Plan>, StorageError> {
-        self.source.retry_recomputation().map_err(|error| {
-            StorageError::new(
-                self.store.path(),
-                "recompute cached Xiaomi description",
-                error,
-            )
-        })?;
         let current = self.current();
         let snapshot = self.source.snapshot();
         if snapshot.scope.is_none() {

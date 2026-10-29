@@ -46,37 +46,231 @@ fn previously_unsupported_cached_source_can_gain_its_first_function_on_startup()
     assert!(app.plan().unwrap().is_none());
 }
 
+const RECOGNITION_FAILURE: &str = "cached recognition failed under updated rules";
+
+fn failed_recognition(context: &super::super::state::Context, did: &str) {
+    // Inject the state of a parser regression after restoring valid stored facts.
+    // The original input and its committed result remain a complete pair.
+    {
+        let mut live = context.live.borrow_mut();
+        let slot = live.devices.get_mut(did).unwrap();
+        slot.candidate = slot.committed.clone();
+        slot.recompute_failed = true;
+        slot.blocked = Some(RECOGNITION_FAILURE.into());
+    }
+    context.problem(did, Some(RECOGNITION_FAILURE.into()));
+}
+
 #[test]
-fn failed_local_recomputation_is_reported_and_retried_without_changing_the_view() {
-    let rig = Rig::new(true, &["one"]);
+fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
+    let rig = Rig::new(true, &["one", "two"]);
+    let context = &rig.source.context;
     let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
     let before = app.current().configuration.clone();
-    {
-        let mut live = rig.source.context.live.borrow_mut();
-        let slot = live.devices.get_mut("one").unwrap();
-        slot.group = true;
-        slot.recompute_failed = true;
-    }
-    let error = app.plan().unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("recompute cached Xiaomi description")
-    );
-    app.fail(error.to_string());
-    assert_eq!(app.current().configuration, before);
-    assert_eq!(rig.store.devices().load_configuration().unwrap(), before);
-    rig.source
-        .context
+    let retained = context.live.borrow().devices["one"]
+        .committed
+        .clone()
+        .unwrap();
+    let work = context.live.borrow().devices["one"]
+        .admitted
+        .clone()
+        .unwrap();
+    failed_recognition(context, "one");
+    let mut changed = SourceFixture::committed(&before, "two");
+    let mut extra = changed.raw.instance["services"][1].clone();
+    extra["iid"] = json!(42);
+    changed.raw.instance["services"]
+        .as_array_mut()
+        .unwrap()
+        .push(extra);
+    let candidate = changed.raw.recognize(false).unwrap();
+    context
         .live
         .borrow_mut()
         .devices
-        .get_mut("one")
+        .get_mut("two")
         .unwrap()
-        .group = false;
+        .candidate = Some(candidate);
+
+    let plan = app.plan().unwrap().unwrap();
+    assert_eq!(
+        plan.configuration.device(&retained.raw.key),
+        before.device(&retained.raw.key)
+    );
+    assert_eq!(
+        plan.configuration
+            .device(&DeviceKey::new("xiaomi", "two"))
+            .unwrap()
+            .functions
+            .len(),
+        2
+    );
+    app.apply(app.prepare(plan)).unwrap();
+    let after = rig.store.devices().load_configuration().unwrap();
+    assert_eq!(
+        after.device(&retained.raw.key),
+        before.device(&retained.raw.key)
+    );
+    assert_eq!(
+        after
+            .descriptions
+            .iter()
+            .find(|raw| raw.key == retained.raw.key),
+        Some(&retained.raw)
+    );
+    assert!(Rc::ptr_eq(
+        &work,
+        context.live.borrow().devices["one"]
+            .admitted
+            .as_ref()
+            .unwrap()
+    ));
+
+    context.resolved_description_target("one");
     assert!(app.plan().unwrap().is_none());
+    assert!(!app.pending());
     assert!(app.failure().is_none());
-    assert!(!rig.source.context.live.borrow().devices["one"].recompute_failed);
+    assert!(context.live.borrow().devices["one"].recompute_failed);
+    assert_eq!(
+        context.live.borrow().devices["one"].candidate.as_ref(),
+        Some(&retained)
+    );
+    assert!(
+        context
+            .diagnostics()
+            .pending
+            .iter()
+            .any(|pending| pending.did == "one" && pending.reason == RECOGNITION_FAILURE)
+    );
+    assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
+
+    context.remove("one").unwrap();
+    let plan = app.plan().unwrap().unwrap();
+    app.apply(app.prepare(plan)).unwrap();
+    let removed = rig.store.devices().load_configuration().unwrap();
+    assert!(removed.device(&retained.raw.key).unwrap().native.is_none());
+    assert!(
+        !removed
+            .descriptions
+            .iter()
+            .any(|raw| raw.key == retained.raw.key)
+    );
+    assert!(
+        !context
+            .diagnostics()
+            .pending
+            .iter()
+            .any(|pending| pending.did == "one")
+    );
+}
+
+#[test]
+fn failed_group_recognition_keeps_its_source_while_member_composition_updates() {
+    let rig = repair_rig(0, true);
+    block_on(rig.run(|c| async move {
+        repair_ready(&c).await;
+        let before = c.store.devices().load_configuration().unwrap();
+        let key = DeviceKey::new("xiaomi", "group-1");
+        let retained = c.context.live.borrow().devices["group-1"]
+            .committed
+            .clone()
+            .unwrap();
+        failed_recognition(&c.context, "group-1");
+        let mut instance = ls2307_instance();
+        instance["services"][1]["properties"][2]["value-range"] = json!([3000, 6000, 1]);
+        let candidate = SourceFixture::new("member-b", "devcea.light.ls2307", instance);
+        c.context
+            .live
+            .borrow_mut()
+            .devices
+            .get_mut("member-b")
+            .unwrap()
+            .candidate = Some(candidate.into());
+
+        let plan = c.publication.plan().unwrap().unwrap();
+        assert_eq!(plan.configuration.groups, before.groups);
+        assert_eq!(
+            plan.configuration.device(&key).unwrap().native,
+            before.device(&key).unwrap().native
+        );
+        assert_eq!(
+            plan.derived.served[&key].description.functions()[0].temperature_interval(),
+            Some(crate::device::TemperatureInterval::new(3000, 6000).unwrap())
+        );
+        c.publication.apply(c.publication.prepare(plan)).unwrap();
+        assert_eq!(
+            c.context.live.borrow().devices["group-1"]
+                .committed
+                .as_ref(),
+            Some(&retained)
+        );
+        assert_eq!(
+            function(&c.context.registry, "group-1", "light:2")
+                .description()
+                .temperature_interval(),
+            Some(crate::device::TemperatureInterval::new(3000, 6000).unwrap())
+        );
+        assert!(
+            c.context
+                .diagnostics()
+                .pending
+                .iter()
+                .any(|pending| pending.did == "group-1" && pending.reason == RECOGNITION_FAILURE)
+        );
+        assert!(c.publication.plan().unwrap().is_none());
+    }));
+}
+
+#[test]
+fn a_new_description_resolves_the_retained_recognition_failure() {
+    let rig = Rig::new(true, &["one"]);
+    failed_recognition(&rig.source.context, "one");
+    block_on(rig.run(|c| async move {
+        until(|| {
+            c.context.live.borrow().devices["one"]
+                .cloud_access
+                .is_some()
+        })
+        .await;
+        assert!(c.context.live.borrow().devices["one"].recompute_failed);
+        assert_eq!(
+            c.context.live.borrow().devices["one"].blocked.as_deref(),
+            Some(RECOGNITION_FAILURE)
+        );
+        assert!(c.cloud.lock().unwrap().instance_reads.is_empty());
+        let committed = c.store.devices().load_configuration().unwrap();
+        let mut instance = committed.descriptions[0].instance.clone();
+        let urn = "urn:miot-spec-v2:device:outlet:0000A002:cuco-v3:3";
+        instance["type"] = json!(urn);
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.instance_types.insert("one".into(), urn.into());
+            cloud.catalog_instances.insert(urn.into(), instance);
+        }
+        c.context.request_sync();
+        until(|| {
+            let live = c.context.live.borrow();
+            let slot = &live.devices["one"];
+            !slot.recompute_failed
+                && slot.blocked.is_none()
+                && slot
+                    .committed
+                    .as_ref()
+                    .is_some_and(|description| description.raw.instance_type == urn)
+        })
+        .await;
+        assert!(
+            !c.context
+                .diagnostics()
+                .pending
+                .iter()
+                .any(|pending| pending.reason == RECOGNITION_FAILURE)
+        );
+        let current = c.store.devices().load_configuration().unwrap();
+        assert_eq!(current.devices[0].unique_id, committed.devices[0].unique_id);
+        assert_eq!(current.devices[0].functions, committed.devices[0].functions);
+        assert_eq!(c.cloud.lock().unwrap().instance_reads[urn], 1);
+    }));
 }
 
 #[test]

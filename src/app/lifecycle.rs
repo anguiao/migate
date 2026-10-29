@@ -36,8 +36,8 @@ pub async fn run_xiaomi_bridge(
             changed.await;
         }
         let app = Rc::new(App::open(handle, store)?);
-        // The restored view already includes real revocation overlays. A failed
-        // recomputation keeps that view while the normal retry loop replans it.
+        // Cached recognition failures retain their source's committed facts.
+        // Apply other valid changes before serving, including real revocations.
         match app.plan() {
             Ok(Some(plan)) => {
                 let prepared = app.prepare(plan);
