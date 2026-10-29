@@ -218,7 +218,7 @@ fn list_and_status_read_shared_power_and_persisted_names() {
             .unwrap()
             .unwrap();
         assert!(list.contains("Saved Home name"));
-        assert!(list.contains("outlet:9 (outlet:9): on"));
+        assert!(list.contains("outlet:9 (主电源): on"));
         assert!(list.contains("one (name one)"));
         physical.set_label("Live Home name".into());
         let selected = handle_line(&registry, &store.devices(), &status, "status multi", 0)

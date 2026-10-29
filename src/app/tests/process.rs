@@ -53,7 +53,7 @@ impl TestProcess {
         lookup.wait_for_output(Stream::Stdout, &format!(":{port} (interface"));
         process.send("status\n");
         process.wait_for_output(Stream::Stdout, "test-outlet (Test Outlet): initializing\n");
-        process.wait_for_output(Stream::Stdout, "  outlet:2 (Main power): unknown");
+        process.wait_for_output(Stream::Stdout, "  outlet:2 (主电源): unknown");
         fs::write(&gate, b"ready").unwrap();
         process.wait_for_output(
             Stream::Stderr,
@@ -104,12 +104,12 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
         assert!(output.contains("Manual pairing code: "), "{output}");
         assert!(
             output.contains(&format!(
-                "outlet:2 (Main power): {}",
+                "outlet:2 (主电源): {}",
                 if initial { "on" } else { "off" }
             )),
             "{output}"
         );
-        assert!(output.contains("outlet:2 (Main power): on"), "{output}");
+        assert!(output.contains("outlet:2 (主电源): on"), "{output}");
         assert!(errors.contains("Fake source stopped"), "{errors}");
         assert!(errors.contains(directory.path().to_str().unwrap()));
         let reopened = crate::storage::Store::open(directory.path()).unwrap();
@@ -130,7 +130,7 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
         }
     }
     peer.send("status\n");
-    peer.wait_for_output(Stream::Stdout, "outlet:2 (Main power): off\n");
+    peer.wait_for_output(Stream::Stdout, "outlet:2 (主电源): off\n");
     peer.interrupt();
 }
 

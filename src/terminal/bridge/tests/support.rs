@@ -42,10 +42,8 @@ pub(super) fn add_device(store: &Store, description: &PhysicalDeviceDescription)
     let native = native_for(description);
     let native_description = native.physical_description(description.label());
     let mut device = crate::storage::tests::fixtures::identity(&native_description, endpoint);
-    configuration
-        .descriptions
-        .push(crate::storage::tests::fixtures::raw_for(&native));
-    device.native = Some(native);
+    configuration.descriptions.push(native.raw.clone());
+    device.native = Some(native.native);
     configuration.devices.push(device);
     configuration.scope = Some(crate::storage::tests::fixtures::scope());
     store

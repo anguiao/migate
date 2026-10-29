@@ -1,343 +1,222 @@
-//! Valid native fixtures shared by module tests that construct logical devices.
+//! Synthetic source inputs for tests that start from logical device shapes.
 
-use crate::{
-    device::{FunctionKind, LightProfile},
-    xiaomi::capability::NativeDescription,
-    xiaomi::capability::{
-        BatteryBinding, BrightnessBinding, ColorBinding, EventBinding, LightBindings,
-        MeasurementBinding, MeasurementUnit, MotionBinding, NumericFormat, ParsedDevice,
-        ParsedFunction, PropertyBinding, StateBinding, StateMapping, StateValue,
-        TemperatureBinding,
-    },
-};
+use super::source::SourceFixture;
+use crate::device::{FunctionKind, LightProfile, PhysicalDeviceDescription};
+use serde_json::{Value, json};
 
-/// A real native description for a synthetic test device, built through the
-/// same source constructors used by the network boundary.
-pub(crate) fn native_for(
-    description: &crate::device::PhysicalDeviceDescription,
-) -> NativeDescription {
-    let controls = description
-        .functions()
-        .iter()
-        .filter(|function| !function.kind.is_read_only())
-        .count();
-    let multiple = controls > 1;
-    let sensor = description
-        .functions()
-        .iter()
-        .any(|function| function.kind.is_read_only());
-    let functions = description
-        .functions()
-        .iter()
-        .map(|function| {
-            let label = function.label.clone();
-            let id = match function.kind {
-                FunctionKind::Temperature(_) => "temperature:3:1001",
-                FunctionKind::Humidity(_) => "humidity:3:1008",
-                FunctionKind::CarbonDioxide(_) => "co2:8:1029",
-                FunctionKind::Illuminance(_) => "illuminance:42:1",
-                FunctionKind::Contact => "contact:50:1",
-                FunctionKind::Motion => "motion:51:1",
-                FunctionKind::Occupancy => "occupancy:52:1",
-                FunctionKind::Fan { .. } => "fan:2",
-                FunctionKind::Curtain => "curtain:2",
-                FunctionKind::Light(_) => "light:2",
-                FunctionKind::Outlet => match (multiple, function.id.as_str()) {
-                    (true, "outlet_1" | "outlet:3") => "outlet:3",
-                    (true, "outlet_2" | "outlet:4") => "outlet:4",
-                    (true, "usb" | "outlet:9") => "outlet:9",
-                    _ => "outlet:2",
-                },
+pub(crate) fn native_for(description: &PhysicalDeviceDescription) -> SourceFixture {
+    let mut services = std::collections::BTreeMap::<u32, Value>::new();
+    for function in description.functions() {
+        let (siid, name, kind, properties) = match function.kind {
+            FunctionKind::Outlet => {
+                let siid = match function.id.as_str() {
+                    "outlet_1" | "outlet:3" => 3,
+                    "outlet_2" | "outlet:4" => 4,
+                    "usb" | "outlet:9" => 9,
+                    _ => 2,
+                };
+                (siid, "switch", 0x780c, vec![power()])
             }
-            .to_owned();
-            match function.kind {
-                FunctionKind::Temperature(range) => ParsedFunction::temperature(
-                    id,
-                    label,
-                    MeasurementBinding::new(
-                        PropertyBinding {
-                            siid: 3,
-                            piid: 1001,
-                        },
-                        NumericFormat::Float,
-                        MeasurementUnit::Celsius,
-                        range,
-                    )
-                    .unwrap(),
-                ),
-                FunctionKind::Humidity(range) => ParsedFunction::humidity(
-                    id,
-                    label,
-                    MeasurementBinding::new(
-                        PropertyBinding {
-                            siid: 3,
-                            piid: 1008,
-                        },
-                        NumericFormat::Float,
-                        MeasurementUnit::Percentage,
-                        range,
-                    )
-                    .unwrap(),
-                ),
-                FunctionKind::CarbonDioxide(range) => ParsedFunction::co2(
-                    id,
-                    label,
-                    MeasurementBinding::new(
-                        PropertyBinding {
-                            siid: 8,
-                            piid: 1029,
-                        },
-                        NumericFormat::Float,
-                        MeasurementUnit::Ppm,
-                        range,
-                    )
-                    .unwrap(),
-                ),
-                FunctionKind::Illuminance(range) => ParsedFunction::illuminance(
-                    id,
-                    label,
-                    MeasurementBinding::new(
-                        PropertyBinding { siid: 42, piid: 1 },
-                        NumericFormat::Float,
-                        MeasurementUnit::Lux,
-                        range,
-                    )
-                    .unwrap(),
-                ),
-                FunctionKind::Contact => ParsedFunction::contact(
-                    id,
-                    label,
-                    StateBinding::new(
-                        PropertyBinding { siid: 50, piid: 1 },
-                        StateMapping::ContactBoolean,
-                    )
-                    .unwrap(),
-                ),
-                FunctionKind::Motion => ParsedFunction::motion_sensor(
-                    id,
-                    label,
-                    MotionBinding::new(
-                        StateBinding::new(
-                            PropertyBinding { siid: 51, piid: 1 },
-                            StateMapping::NoMotionDuration {
-                                format: NumericFormat::Uint16,
-                            },
-                        )
-                        .unwrap(),
-                        EventBinding { siid: 51, eiid: 1 },
-                        vec![],
-                    )
-                    .unwrap(),
-                ),
-                FunctionKind::Occupancy => ParsedFunction::occupancy(
-                    id,
-                    label,
-                    StateBinding::new(
-                        PropertyBinding { siid: 52, piid: 1 },
-                        StateMapping::Enumerated {
-                            format: NumericFormat::Uint8,
-                            values: vec![
-                                StateValue {
-                                    native: 0,
-                                    active: Some(false),
-                                },
-                                StateValue {
-                                    native: 1,
-                                    active: Some(true),
-                                },
-                                StateValue {
-                                    native: 2,
-                                    active: None,
-                                },
-                            ],
-                        },
-                    )
-                    .unwrap(),
-                ),
-                FunctionKind::Outlet => {
-                    let siid = match (multiple, id.as_str()) {
-                        (true, "outlet:3") => 3,
-                        (true, "outlet:4") => 4,
-                        (true, "outlet:9") => 9,
-                        _ => 2,
-                    };
-                    ParsedFunction::outlet(id, label, PropertyBinding { siid, piid: 1 })
+            FunctionKind::Light(profile) => {
+                let mut properties = vec![power()];
+                if profile != LightProfile::OnOff {
+                    properties.push(numeric(
+                        3,
+                        "brightness",
+                        0xd,
+                        "uint8",
+                        "percentage",
+                        json!([1, 100, 1]),
+                    ));
                 }
-                FunctionKind::Fan {
-                    horizontal_swing, ..
-                } => {
-                    let mut instance: serde_json::Value = serde_json::from_str(include_str!(
-                        "../../../../tests/fixtures/miot/dmaker-p5c.json"
-                    ))
-                    .unwrap();
-                    if !horizontal_swing {
-                        instance["services"][1]["properties"][3]["access"] =
-                            serde_json::json!(["read"]);
-                    }
-                    let parsed = crate::xiaomi::capability::parse_device_for_model(
-                        description.key().clone(),
-                        "dmaker.fan.p5c",
-                        &instance,
-                    )
-                    .unwrap();
-                    ParsedFunction::fan_control(
-                        id,
-                        label,
-                        parsed.functions()[0].fan().unwrap().clone(),
-                    )
+                if let LightProfile::ColorTemperature(interval)
+                | LightProfile::ExtendedColor(interval) = profile
+                {
+                    properties.push(numeric(
+                        4,
+                        "color-temperature",
+                        0xf,
+                        "uint16",
+                        "kelvin",
+                        json!([interval.min(), interval.max(), 1]),
+                    ));
                 }
-                FunctionKind::Curtain => {
-                    let instance = serde_json::from_str(include_str!(
-                        "../../../../tests/fixtures/miot/xiaomi-acn010.json"
-                    ))
-                    .unwrap();
-                    let parsed = crate::xiaomi::capability::parse_device_for_model(
-                        description.key().clone(),
-                        "xiaomi.curtain.acn010",
-                        &instance,
-                    )
-                    .unwrap();
-                    ParsedFunction::curtain_control(
-                        id,
-                        label,
-                        parsed.functions()[0].curtain().unwrap().clone(),
-                    )
+                if matches!(profile, LightProfile::ExtendedColor(_)) {
+                    properties.push(numeric(
+                        5,
+                        "color",
+                        0xe,
+                        "uint32",
+                        "rgb",
+                        json!([0, 16777215, 1]),
+                    ));
                 }
-                FunctionKind::Light(profile) => {
-                    let power = PropertyBinding { siid: 2, piid: 1 };
-                    let lighting = match profile {
-                        LightProfile::OnOff => LightBindings::OnOff,
-                        LightProfile::Dimmable => {
-                            LightBindings::new(Some(brightness_binding()), None, None, None)
-                                .unwrap()
-                        }
-                        LightProfile::ColorTemperature(interval) => LightBindings::new(
-                            Some(brightness_binding()),
-                            Some(temperature_binding(interval)),
-                            None,
-                            None,
-                        )
-                        .unwrap(),
-                        LightProfile::ExtendedColor(interval) => LightBindings::new(
-                            Some(brightness_binding()),
-                            Some(temperature_binding(interval)),
-                            Some(
-                                ColorBinding::new(
-                                    PropertyBinding { siid: 2, piid: 5 },
-                                    NumericFormat::Uint32,
-                                )
-                                .unwrap(),
-                            ),
-                            None,
-                        )
-                        .unwrap(),
-                    };
-                    ParsedFunction::light(id, label, power, lighting)
-                }
+                (2, "light", 0x7802, properties)
             }
-        })
-        .collect::<Vec<_>>();
-    let key = description.key().clone();
-    if sensor {
-        let battery = description.has_battery().then(|| {
-            BatteryBinding::new(
-                MeasurementBinding::new(
-                    PropertyBinding {
-                        siid: 2,
-                        piid: 1003,
-                    },
-                    NumericFormat::Uint8,
-                    MeasurementUnit::Percentage,
-                    crate::device::MeasurementRange::new(0.0, 100.0).unwrap(),
+            FunctionKind::Fan {
+                speed_count,
+                horizontal_swing: swing,
+            } => {
+                let mut properties = vec![
+                    power(),
+                    numeric(
+                        2,
+                        "fan-level",
+                        0x16,
+                        "uint8",
+                        "none",
+                        json!([1, speed_count, 1]),
+                    ),
+                ];
+                if swing {
+                    properties.push(property(3, "horizontal-swing", 0x17, "bool"));
+                }
+                (2, "fan", 0x7808, properties)
+            }
+            FunctionKind::Curtain => {
+                let input: Value = serde_json::from_str(include_str!(
+                    "../../../../tests/fixtures/miot/xiaomi-acn010.json"
+                ))
+                .unwrap();
+                let service = input["services"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|service| {
+                        service["type"]
+                            .as_str()
+                            .unwrap()
+                            .contains(":service:curtain:")
+                    })
+                    .unwrap()
+                    .clone();
+                services.insert(2, service);
+                continue;
+            }
+            FunctionKind::Temperature(range)
+            | FunctionKind::Humidity(range)
+            | FunctionKind::CarbonDioxide(range)
+            | FunctionKind::Illuminance(range) => {
+                let (siid, piid, name, id, unit) = match function.kind {
+                    FunctionKind::Temperature(_) => (3, 1001, "temperature", 0x20, "celsius"),
+                    FunctionKind::Humidity(_) => (3, 1008, "relative-humidity", 0xc, "percentage"),
+                    FunctionKind::CarbonDioxide(_) => (8, 1029, "co2-density", 0x4b, "ppm"),
+                    _ => (42, 1, "illumination", 0x4e, "lux"),
+                };
+                (
+                    siid,
+                    "environment",
+                    0x780a,
+                    vec![numeric(
+                        piid,
+                        name,
+                        id,
+                        "float",
+                        unit,
+                        json!([range.min(), range.max(), 1]),
+                    )],
                 )
-                .unwrap(),
-            )
-            .unwrap()
-        });
-        return NativeDescription::new(
-            "test.sensor".into(),
-            if description
-                .functions()
-                .iter()
-                .any(|function| function.kind == FunctionKind::Curtain)
-            {
-                "urn:miot-spec-v2:device:curtain:0000A00C:xiaomi-acn010:1:0000D031"
-            } else if description
-                .functions()
-                .iter()
-                .any(|function| function.kind.is_light())
-            {
-                "urn:miot-spec-v2:device:light:0000A001:test-v1:1"
-            } else if controls > 0 {
-                "urn:miot-spec-v2:device:outlet:0000A002:test-v1:1"
-            } else {
-                "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:test-v1:1"
             }
-            .into(),
-            ParsedDevice::new_with_battery(key, functions, None, battery).unwrap(),
-        )
-        .unwrap();
+            FunctionKind::Contact => (
+                50,
+                "magnet-sensor",
+                0x7827,
+                vec![property(1, "contact-state", 0x7c, "bool")],
+            ),
+            FunctionKind::Motion => {
+                let mut service = service(
+                    51,
+                    "motion-sensor",
+                    0x7825,
+                    vec![numeric(
+                        1,
+                        "no-motion-duration",
+                        0xcb,
+                        "uint16",
+                        "seconds",
+                        json!([0, 65535, 1]),
+                    )],
+                );
+                service["events"] = json!([{"iid": 1, "type": urn("event", "motion-detected", 0x5001), "arguments": []}]);
+                services.insert(51, service);
+                continue;
+            }
+            FunctionKind::Occupancy => {
+                let mut state = property(1, "occupancy-status", 0x166, "uint8");
+                state["value-list"] = json!([
+                    {"value": 0, "description": "No One"},
+                    {"value": 1, "description": "Has Someone"},
+                    {"value": 2, "description": "Unknown"}
+                ]);
+                (52, "occupancy-sensor", 0x78c0, vec![state])
+            }
+        };
+        services
+            .entry(siid)
+            .or_insert_with(|| service(siid, name, kind, vec![]))["properties"]
+            .as_array_mut()
+            .unwrap()
+            .extend(properties);
     }
-    if multiple {
-        return NativeDescription::new(
-            "cuco.plug.cp7pd".into(),
-            "urn:miot-spec-v2:device:outlet:0000A002:cuco-cp7pd:1".into(),
-            ParsedDevice::new(key, functions, Some(PropertyBinding { siid: 2, piid: 1 })).unwrap(),
-        )
-        .unwrap();
+    if description.has_battery() {
+        let siid = if services.contains_key(&2) { 99 } else { 2 };
+        services.insert(
+            siid,
+            service(
+                siid,
+                "battery",
+                0x7805,
+                vec![numeric(
+                    1003,
+                    "battery-level",
+                    0x14,
+                    "uint8",
+                    "percentage",
+                    json!([0, 100, 1]),
+                )],
+            ),
+        );
     }
-    let is_light = description
+    let (category, kind) = if description
         .functions()
         .iter()
-        .any(|function| function.kind.is_light());
-    let is_curtain = description
+        .any(|function| function.kind == FunctionKind::Outlet)
+    {
+        ("outlet", 0xa002)
+    } else if description
         .functions()
         .iter()
-        .any(|function| function.kind == FunctionKind::Curtain);
-    let is_fan = description
-        .functions()
-        .iter()
-        .any(|function| matches!(function.kind, FunctionKind::Fan { .. }));
-    NativeDescription::new(
-        if is_fan {
-            "dmaker.fan.p5c"
-        } else if is_curtain {
-            "xiaomi.curtain.acn010"
-        } else if is_light {
-            "test.light"
-        } else {
-            "test.outlet"
-        }
-        .into(),
-        if is_fan {
-            "urn:miot-spec-v2:device:fan:0000A005:dmaker-p5c:1"
-        } else if is_curtain {
-            "urn:miot-spec-v2:device:curtain:0000A00C:xiaomi-acn010:1:0000D031"
-        } else if is_light {
-            "urn:miot-spec-v2:device:light:0000A001:test-v1:1"
-        } else {
-            "urn:miot-spec-v2:device:outlet:0000A002:test-v1:1"
-        }
-        .into(),
-        ParsedDevice::new(key, functions, None).unwrap(),
+        .any(|function| function.kind.is_light())
+    {
+        ("light", 0xa001)
+    } else {
+        ("temperature-humidity-sensor", 0xa00a)
+    };
+    SourceFixture::new(
+        &description.key().id,
+        "test.composite",
+        json!({
+            "type": urn("device", category, kind),
+            "services": services.into_values().collect::<Vec<_>>()
+        }),
     )
-    .unwrap()
 }
 
-fn brightness_binding() -> BrightnessBinding {
-    BrightnessBinding::new(
-        PropertyBinding { siid: 2, piid: 3 },
-        NumericFormat::Uint8,
-        crate::device::NumericRange::new(1, 100, 1).unwrap(),
-    )
-    .unwrap()
+fn urn(entity: &str, name: &str, kind: u32) -> String {
+    format!("urn:miot-spec-v2:{entity}:{name}:{kind:08X}:test-v1:1")
 }
-
-fn temperature_binding(interval: crate::device::TemperatureInterval) -> TemperatureBinding {
-    TemperatureBinding::new(
-        PropertyBinding { siid: 2, piid: 4 },
-        NumericFormat::Uint16,
-        crate::device::NumericRange::new(interval.min(), interval.max(), 1).unwrap(),
-    )
-    .unwrap()
+fn property(iid: u32, name: &str, kind: u32, format: &str) -> Value {
+    json!({"iid": iid, "type": urn("property", name, kind), "format": format, "access": ["read", "write", "notify"]})
+}
+fn power() -> Value {
+    property(1, "on", 6, "bool")
+}
+fn numeric(iid: u32, name: &str, kind: u32, format: &str, unit: &str, range: Value) -> Value {
+    let mut property = property(iid, name, kind, format);
+    property["unit"] = unit.into();
+    property["value-range"] = range;
+    property
+}
+fn service(iid: u32, name: &str, kind: u32, properties: Vec<Value>) -> Value {
+    json!({"iid": iid, "type": urn("service", name, kind), "properties": properties})
 }

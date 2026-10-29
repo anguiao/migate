@@ -30,8 +30,8 @@ fn logical_only_group_change_reuses_the_native_runtime() {
         {
             let mut live = c.context.live.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
-            slot.latest = Some(confirmed.clone());
-            slot.latest = Some(confirmed);
+            slot.raw = Some(confirmed.raw);
+            slot.latest = Some(confirmed.native);
         }
         c.context.reconcile("member-a").unwrap();
         until(|| {
@@ -143,8 +143,8 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             {
                 let mut live = control.context.live.borrow_mut();
                 let slot = live.devices.get_mut("member-a").unwrap();
-                slot.latest = Some(confirmed.clone());
-                slot.latest = Some(confirmed);
+                slot.raw = Some(confirmed.raw);
+                slot.latest = Some(confirmed.native);
             }
             control.context.reconcile("member-a").unwrap();
             until(|| {

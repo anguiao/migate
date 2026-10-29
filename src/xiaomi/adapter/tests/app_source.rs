@@ -43,8 +43,8 @@ impl AppSource {
                 let native = native_for(&description);
                 let native_description = native.physical_description(description.label());
                 let mut identity = fixtures::identity(&native_description, 2);
-                configuration.descriptions.push(fixtures::raw_for(&native));
-                identity.native = Some(native);
+                configuration.descriptions.push(native.raw.clone());
+                identity.native = Some(native.native);
                 configuration.devices.push(identity);
             }
             fixtures::save(store, &configuration);
@@ -129,8 +129,8 @@ impl AppSource {
             .entry(description.key().id.clone())
             .or_default();
         let native = native_for(&description);
-        slot.raw = Some(fixtures::raw_for(&native));
-        slot.latest = Some(native);
+        slot.raw = Some(native.raw.clone());
+        slot.latest = Some(native.native);
         slot.latest_name = Some(description.label().to_owned());
         slot.confirmed = true;
     }

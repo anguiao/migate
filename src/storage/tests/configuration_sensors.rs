@@ -1,6 +1,7 @@
 //! Sensor capability persistence in the current schema-10 private codec.
 
 use super::configuration::{corrupt, fixture, load, next, raw, save, scope, seed};
+use crate::xiaomi::capability::tests::source::SourceFixture;
 use crate::{
     configuration::CommittedConfiguration,
     device::{DeviceKey, FunctionKind, MeasurementRange},
@@ -11,18 +12,24 @@ use serde_json::{Value, json};
 const SENSOR: &str = include_str!("../../../tests/fixtures/miot/miaomiaoce-t6.json");
 const OUTLET: &str = include_str!("../../../tests/fixtures/miot/outlet.json");
 
-fn sensor(id: &str) -> crate::xiaomi::capability::NativeDescription {
-    crate::xiaomi::capability::NativeDescription::new(
-        "miaomiaoce.sensor_ht.t6".into(),
-        "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:miaomiaoce-t6:1".into(),
-        parse_device_for_model(
-            DeviceKey::new("xiaomi", id),
-            "miaomiaoce.sensor_ht.t6",
-            &serde_json::from_str(SENSOR).unwrap(),
-        )
-        .unwrap(),
+fn sensor(id: &str) -> SourceFixture {
+    SourceFixture::new(
+        id,
+        "miaomiaoce.sensor_ht.t6",
+        serde_json::from_str(SENSOR).unwrap(),
     )
-    .unwrap()
+}
+fn without_battery(mut source: SourceFixture) -> SourceFixture {
+    source.raw.instance["services"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|service| {
+            !service["type"]
+                .as_str()
+                .unwrap()
+                .contains(":service:battery:")
+        });
+    SourceFixture::new(&source.raw.key.id, &source.raw.model, source.raw.instance)
 }
 
 #[test]
@@ -49,13 +56,7 @@ fn recognition_metadata_survives_storage_and_metadata_only_changes_reuse_runtime
     );
     let mut instance: Value = serde_json::from_str(SENSOR).unwrap();
     instance["type"] = json!("urn:miot-spec-v2:device:air-conditioner:0000A004:example:1");
-    let changed = crate::xiaomi::capability::NativeDescription::new(
-        original.model().into(),
-        instance["type"].as_str().unwrap().into(),
-        parse_device_for_model(original.device().key().clone(), original.model(), &instance)
-            .unwrap(),
-    )
-    .unwrap();
+    let changed = SourceFixture::new("sensor", original.model(), instance);
     let plan = next(&loaded, scope("account", "home"), vec![changed]);
     assert!(plan.changed);
     assert!(!plan.rebuild);
@@ -75,38 +76,27 @@ fn single_measurements_and_mixed_controls_round_trip_with_current_parent_layout(
         let directory = tempfile::tempdir().unwrap();
         let store = crate::storage::Store::open(directory.path()).unwrap();
         let original = sensor("sensor");
-        let functions = if wanted == "mixed" {
-            let mut functions = fixture("sensor", "cuco.plug.v3", OUTLET)
-                .device()
-                .functions()
-                .to_vec();
-            functions.extend_from_slice(original.device().functions());
-            functions
+        let mut instance = original.raw.instance;
+        if wanted == "mixed" {
+            instance["type"] = json!("urn:miot-spec-v2:device:outlet:0000A002:sample:1");
+            instance["services"][1]["iid"] = json!(40);
+            let outlet: Value = serde_json::from_str(OUTLET).unwrap();
+            instance["services"]
+                .as_array_mut()
+                .unwrap()
+                .push(outlet["services"][1].clone());
         } else {
-            original
-                .device()
-                .functions()
-                .iter()
-                .filter(|function| function.id() == wanted)
-                .cloned()
-                .collect()
-        };
-        let native = crate::xiaomi::capability::NativeDescription::new(
-            "sample".into(),
-            if wanted == "mixed" {
-                "urn:miot-spec-v2:device:outlet:0000A002:sample:1".into()
+            let piid = if wanted.starts_with("temperature") {
+                1001
             } else {
-                original.instance_type().into()
-            },
-            crate::xiaomi::capability::ParsedDevice::new_with_battery(
-                original.device().key().clone(),
-                functions,
-                None,
-                original.device().battery().cloned(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+                1008
+            };
+            instance["services"][2]["properties"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|property| property["iid"] == piid);
+        }
+        let native = SourceFixture::new("sensor", "sample", instance);
         let planned = next(
             &CommittedConfiguration::empty(),
             scope("account", "home"),
@@ -134,7 +124,10 @@ fn single_measurements_and_mixed_controls_round_trip_with_current_parent_layout(
         let unchanged = next(
             &restored,
             scope("account", "home"),
-            vec![restored.devices[0].native.clone().unwrap()],
+            vec![SourceFixture::committed(
+                &restored,
+                &restored.devices[0].key.id,
+            )],
         );
         assert!(!unchanged.changed);
         assert!(!unchanged.rebuild);
@@ -417,18 +410,7 @@ fn invalid_sensor_measurement_ranges_are_rejected_at_the_storage_boundary() {
 fn native_measurement_metadata_is_preserved_without_a_battery_field() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
-    let mut sensor = sensor("sensor");
-    sensor = crate::xiaomi::capability::NativeDescription::new(
-        sensor.model().into(),
-        sensor.instance_type().into(),
-        crate::xiaomi::capability::ParsedDevice::new(
-            sensor.device().key().clone(),
-            sensor.device().functions().to_vec(),
-            None,
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let sensor = without_battery(sensor("sensor"));
     let planned = next(
         &CommittedConfiguration::empty(),
         scope("account", "home"),
@@ -453,9 +435,6 @@ fn native_measurement_metadata_is_preserved_without_a_battery_field() {
 
 #[test]
 fn a_sensor_range_change_is_a_publish_shape_change_but_keeps_its_identity() {
-    use crate::device::MeasurementRange;
-    use crate::xiaomi::capability::{MeasurementBinding, ParsedDevice, ParsedFunction};
-
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
     let original = sensor("sensor");
@@ -471,30 +450,9 @@ fn a_sensor_range_change_is_a_publish_shape_change_but_keeps_its_identity() {
     // The first publication changes the empty root picture and bumps it once.
     assert_eq!(first.root_version, 2);
 
-    let functions = original.device().functions().to_vec();
-    let measurement = functions[0].measurement().unwrap();
-    let changed_binding = MeasurementBinding::new(
-        measurement.property(),
-        measurement.format(),
-        measurement.unit(),
-        MeasurementRange::new(-20.0, 80.0).unwrap(),
-    )
-    .unwrap();
-    let changed = crate::xiaomi::capability::NativeDescription::new(
-        original.model().into(),
-        original.instance_type().into(),
-        ParsedDevice::new_with_battery(
-            original.device().key().clone(),
-            vec![
-                ParsedFunction::temperature("temperature:3:1001", "Temperature", changed_binding),
-                functions[1].clone(),
-            ],
-            None,
-            original.device().battery().cloned(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let mut instance = original.raw.instance.clone();
+    instance["services"][2]["properties"][0]["value-range"] = json!([-20, 80, 0.1]);
+    let changed = SourceFixture::new("sensor", original.model(), instance);
     let plan = next(&first, scope("account", "home"), vec![changed]);
     assert!(plan.rebuild);
     assert_eq!(
@@ -526,7 +484,7 @@ fn a_sensor_range_change_is_a_publish_shape_change_but_keeps_its_identity() {
 }
 
 #[test]
-fn measurement_and_battery_step_changes_do_not_change_the_configuration() {
+fn measurement_and_battery_steps_update_the_source_without_replacing_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
     let original = sensor("sensor");
@@ -547,15 +505,10 @@ fn measurement_and_battery_step_changes_do_not_change_the_configuration() {
             }
         }
     }
-    let changed = crate::xiaomi::capability::NativeDescription::new(
-        original.model().into(),
-        original.instance_type().into(),
-        parse_device_for_model(original.device().key().clone(), original.model(), &instance)
-            .unwrap(),
-    )
-    .unwrap();
+    let changed = SourceFixture::new("sensor", original.model(), instance);
     let plan = next(&first, scope("account", "home"), vec![changed]);
-    assert!(!plan.changed);
+    assert!(plan.changed);
+    assert_eq!(plan.configuration.devices, first.devices);
     assert!(!plan.rebuild);
     assert_eq!(
         plan.operations[0].kind,
@@ -573,17 +526,7 @@ fn adding_battery_changes_the_published_shape_not_the_sensor_identity() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
     let with_battery = sensor("sensor");
-    let without_battery = crate::xiaomi::capability::NativeDescription::new(
-        with_battery.model().into(),
-        with_battery.instance_type().into(),
-        crate::xiaomi::capability::ParsedDevice::new(
-            with_battery.device().key().clone(),
-            with_battery.device().functions().to_vec(),
-            None,
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let without_battery = without_battery(with_battery.clone());
     let first = next(
         &CommittedConfiguration::empty(),
         scope("account", "home"),
@@ -611,23 +554,7 @@ fn adding_battery_changes_the_published_shape_not_the_sensor_identity() {
 fn specific_battery_parse_diagnostics_survive_save_and_load() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
-    let description =
-        crate::xiaomi::capability::tests::parse_device(DeviceKey::new("xiaomi", "sensor"), &{
-            let mut value: Value = serde_json::from_str(SENSOR).unwrap();
-            value["services"].as_array_mut().unwrap().retain(|service| {
-                !service["type"]
-                    .as_str()
-                    .is_some_and(|urn| urn.contains("service:battery:"))
-            });
-            value
-        })
-        .unwrap();
-    let native = crate::xiaomi::capability::NativeDescription::new(
-        "miaomiaoce.sensor_ht.t6".into(),
-        "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:miaomiaoce-t6:1".into(),
-        description,
-    )
-    .unwrap();
+    let native = without_battery(sensor("sensor"));
     let expected = native.device().battery_issue().unwrap().to_owned();
     let diagnostic_only = crate::xiaomi::capability::NativeDescription::new(
         native.model().into(),
@@ -642,6 +569,10 @@ fn specific_battery_parse_diagnostics_survive_save_and_load() {
         .unwrap(),
     )
     .unwrap();
+    let diagnostic_only = SourceFixture {
+        raw: native.raw.clone(),
+        native: diagnostic_only,
+    };
     let planned = next(
         &CommittedConfiguration::empty(),
         scope("account", "home"),
@@ -686,6 +617,10 @@ fn absent_optional_battery_diagnostic_remains_absent() {
         device,
     )
     .unwrap();
+    let native = SourceFixture {
+        raw: sensor("sensor").raw,
+        native,
+    };
     let planned = next(
         &CommittedConfiguration::empty(),
         scope("account", "home"),
@@ -713,24 +648,17 @@ fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readi
         "xiaomi.sensor_ht.new3pr",
         include_str!("../../../tests/fixtures/miot/xiaomi-new3pr.json"),
     );
-    let native = crate::xiaomi::capability::NativeDescription::new(
-        original.model().into(),
-        original.instance_type().into(),
-        crate::xiaomi::capability::ParsedDevice::new_with_battery(
-            original.device().key().clone(),
-            original
-                .device()
-                .functions()
-                .iter()
-                .filter(|function| function.id() == "co2:8:1029")
-                .cloned()
-                .collect(),
-            None,
-            original.device().battery().cloned(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let mut instance = original.raw.instance;
+    for service in instance["services"].as_array_mut().unwrap() {
+        service.as_object_mut().unwrap().remove("events");
+        if let Some(properties) = service["properties"].as_array_mut() {
+            properties.retain(|property| {
+                let urn = property["type"].as_str().unwrap();
+                urn.contains(":property:co2-density:") || urn.contains(":property:battery-level:")
+            });
+        }
+    }
+    let native = SourceFixture::new("co2", "xiaomi.sensor_ht.new3pr", instance);
     let store = crate::storage::Store::open(directory.path()).unwrap();
     let planned = next(
         &CommittedConfiguration::empty(),
@@ -787,7 +715,7 @@ fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readi
     let unchanged = next(
         &restored,
         scope("account", "home"),
-        vec![device.native.clone().unwrap()],
+        vec![SourceFixture::committed(&restored, &device.key.id)],
     );
     assert!(!unchanged.changed);
     assert!(!unchanged.rebuild);
@@ -860,7 +788,8 @@ fn illuminance_restores_current_identity_and_range_without_persisting_readings_o
         }
         let changed_step = super::configuration::native("illuminance", model, instance.clone());
         let unchanged = next(&restored, scope("account", "home"), vec![changed_step]);
-        assert!(!unchanged.changed);
+        assert!(unchanged.changed);
+        assert_eq!(unchanged.configuration.devices, restored.devices);
         assert!(!unchanged.rebuild);
         for service in instance["services"].as_array_mut().unwrap() {
             if let Some(properties) = service["properties"].as_array_mut() {

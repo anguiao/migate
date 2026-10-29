@@ -1,6 +1,7 @@
 use super::*;
 pub(super) use crate::device::{Command, DeviceRegistry};
 use crate::xiaomi::capability::NativeDescription;
+pub(super) use crate::xiaomi::capability::tests::source::SourceFixture;
 pub(super) use crate::xiaomi::{
     central::{decode_mips, encode_mips, test_support::Broker},
     discovery::SERVICE_TYPE,
@@ -10,7 +11,6 @@ pub(super) use crate::{
     device::{Availability, DeviceKey, Power},
     storage::Store,
     xiaomi::{
-        capability::tests::parse_device,
         central::test_support::TlsFixture,
         cloud::{CloudClient, group_id},
         discovery::Discovery,
@@ -77,66 +77,44 @@ pub(super) fn force_unavailable(context: &super::super::state::Context, did: &st
     context.problem(did, Some(reason));
 }
 
-pub(super) fn sensor_native(did: &str) -> NativeDescription {
-    let instance: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/miot/miaomiaoce-t6.json"
-    ))
-    .unwrap();
-    NativeDescription::new(
-        "miaomiaoce.sensor_ht.t6".into(),
-        instance["type"].as_str().unwrap().into(),
-        parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap(),
-    )
-    .unwrap()
-}
-
-/// A restored sensor shape without a declared battery capability. This is the
-/// persisted capability surface an old schema-8 record exposes.
-pub(super) fn sensor_native_without_battery(did: &str) -> NativeDescription {
-    let instance: Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/miot/miaomiaoce-t6.json"
-    ))
-    .unwrap();
-    let parsed = parse_device(DeviceKey::new("xiaomi", did), &instance).unwrap();
-    let device = crate::xiaomi::capability::ParsedDevice::new_with_battery_diagnostic(
-        parsed.key().clone(),
-        parsed.functions().to_vec(),
-        parsed.refresh_trigger(),
-        None,
-        Some("battery service is missing".into()),
-    )
-    .unwrap();
-    NativeDescription::new(
-        "miaomiaoce.sensor_ht.t6".into(),
-        instance["type"].as_str().unwrap().into(),
-        device,
-    )
-    .unwrap()
-}
-
-pub(super) fn cached(_uid: &str, did: &str, multi: bool) -> NativeDescription {
-    let instance: Value = serde_json::from_str(if multi {
-        include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
-    } else {
-        include_str!("../../../../../tests/fixtures/miot/outlet.json")
-    })
-    .unwrap();
-    let model = if multi {
-        "cuco.plug.cp7pd"
-    } else {
-        "cuco.plug.v3"
-    };
-    NativeDescription::new(
-        model.into(),
-        instance["type"].as_str().unwrap().into(),
-        crate::xiaomi::capability::parse_device_for_model(
-            DeviceKey::new("xiaomi", did),
-            model,
-            &instance,
-        )
+pub(super) fn sensor_native(did: &str) -> SourceFixture {
+    SourceFixture::new(
+        did,
+        "miaomiaoce.sensor_ht.t6",
+        serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/miot/miaomiaoce-t6.json"
+        ))
         .unwrap(),
     )
-    .unwrap()
+}
+
+pub(super) fn sensor_native_without_battery(did: &str) -> SourceFixture {
+    let mut instance = sensor_native(did).raw.instance;
+    instance["services"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|service| {
+            !service["type"]
+                .as_str()
+                .unwrap()
+                .contains(":service:battery:")
+        });
+    SourceFixture::new(did, "miaomiaoce.sensor_ht.t6", instance)
+}
+
+pub(super) fn cached(_uid: &str, did: &str, multi: bool) -> SourceFixture {
+    let (model, text) = if multi {
+        (
+            "cuco.plug.cp7pd",
+            include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json"),
+        )
+    } else {
+        (
+            "cuco.plug.v3",
+            include_str!("../../../../../tests/fixtures/miot/outlet.json"),
+        )
+    };
+    SourceFixture::new(did, model, serde_json::from_str(text).unwrap())
 }
 
 pub(super) fn scope(uid: &str) -> Scope {
@@ -146,7 +124,7 @@ pub(super) fn scope(uid: &str) -> Scope {
     }
 }
 /// Commit a current-store configuration with identities and native facts.
-pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescription]) {
+pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[SourceFixture]) {
     use crate::configuration::{CommittedConfiguration, CommittedDevice, CommittedFunction};
     let mut configuration = CommittedConfiguration {
         scope: Some(scope(uid)),
@@ -175,11 +153,9 @@ pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[NativeDescript
             label: format!("name {id}"),
             configuration_version: 1,
             functions,
-            native: Some(native.clone()),
+            native: Some(native.native.clone()),
         });
-        configuration
-            .descriptions
-            .push(crate::storage::tests::fixtures::raw_for(native));
+        configuration.descriptions.push(native.raw.clone());
         endpoint += native.device().functions().len() as u16 + 1;
     }
     configuration.devices.sort_by(|a, b| a.key.cmp(&b.key));

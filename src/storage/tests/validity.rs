@@ -427,7 +427,7 @@ fn in_memory_native_key_mismatch_is_rejected() {
         "cuco.plug.v3",
         serde_json::from_str(OUTLET).unwrap(),
     );
-    let mut other = native.clone();
+    let mut other = native.native.clone();
     other = crate::xiaomi::capability::NativeDescription::new(
         other.model().to_owned(),
         other.instance_type().to_owned(),

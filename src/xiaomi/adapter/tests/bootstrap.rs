@@ -160,7 +160,7 @@ fn failed_startup_recomputation_keeps_committed_bindings_and_revocation_overlay(
         .iter_mut()
         .find(|device| device.key == key)
         .unwrap()
-        .native = Some(sensor_native_without_battery("sensor"));
+        .native = Some(sensor_native_without_battery("sensor").native);
     rig.store
         .devices()
         .commit_configuration(&before, &[])
@@ -236,13 +236,11 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     let other = cached(&tls.credentials.uid, "other-home", false);
     let foreign = cached("foreign", "foreign", false);
     let mut kept_record = identity(&kept.physical_description("saved name"), 2);
-    kept_record.native = Some(kept);
+    kept_record.native = Some(kept.native);
     let configuration = crate::configuration::CommittedConfiguration {
         scope: Some(scope(&tls.credentials.uid)),
         root_version: 1,
-        descriptions: vec![crate::storage::tests::fixtures::raw_for(
-            kept_record.native.as_ref().unwrap(),
-        )],
+        descriptions: vec![kept.raw],
         devices: vec![
             kept_record,
             identity(&deleted.physical_description("deleted"), 6),
@@ -308,7 +306,7 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         device.native = Some(group.clone());
         state
             .descriptions
-            .push(crate::storage::tests::fixtures::raw_for(&group));
+            .push(SourceFixture::new(did, model, state.descriptions[0].instance.clone()).raw);
         state.devices.push(device);
         groups.push(group);
     }

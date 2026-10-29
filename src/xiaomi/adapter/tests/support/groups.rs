@@ -141,21 +141,10 @@ pub(in super::super) async fn repair_ready(c: &Control) {
 }
 
 pub(in super::super) fn confirmed_for(
-    c: &Control,
+    _c: &Control,
     did: &str,
     model: &str,
     instance: &Value,
-) -> NativeDescription {
-    let _ = c;
-    NativeDescription::new(
-        model.into(),
-        instance["type"].as_str().unwrap().into(),
-        crate::xiaomi::capability::parse_device_for_model(
-            DeviceKey::new("xiaomi", did),
-            model,
-            instance,
-        )
-        .unwrap(),
-    )
-    .unwrap()
+) -> SourceFixture {
+    SourceFixture::new(did, model, instance.clone())
 }

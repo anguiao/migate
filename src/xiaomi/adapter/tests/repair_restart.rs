@@ -147,13 +147,12 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
         {
             let mut live = c.context.live.borrow_mut();
             let member = live.devices.get_mut("member-a").unwrap();
-            member.raw = Some(crate::storage::tests::fixtures::raw_for(&native));
+            member.raw = Some(native.raw.clone());
             if let Some(access) = &mut member.cloud_access {
                 access.model = native.model().into();
                 access.instance_type = native.instance_type().into();
             }
-            member.latest = Some(native.clone());
-            member.latest = Some(native);
+            member.latest = Some(native.native);
         }
         c.context.reconcile("member-a").unwrap();
         c.context.stage();

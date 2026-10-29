@@ -190,9 +190,8 @@ impl Rig {
         light: Option<&str>,
         custom: Option<Value>,
         lights: &[(&str, &str, Value)],
-        natives: &[(&str, NativeDescription)],
+        natives: &[(&str, SourceFixture)],
     ) -> Self {
-        let custom_text = custom.as_ref().map(Value::to_string);
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let tls = TlsFixture::new(false);
@@ -213,41 +212,16 @@ impl Rig {
             }
         }
         if let Some(model) = light {
-            let instance: Value =
+            let instance =
                 custom.unwrap_or_else(|| serde_json::from_str(light_fixture(model)).unwrap());
-            data[0] = crate::xiaomi::capability::NativeDescription::new(
-                model.into(),
-                instance["type"].as_str().unwrap().into(),
-                crate::xiaomi::capability::parse_device_for_model(
-                    DeviceKey::new("xiaomi", "one"),
-                    model,
-                    &instance,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+            data[0] = SourceFixture::new("one", model, instance);
         }
-        let mut light_instances = Vec::new();
         for (did, model, instance) in lights {
             let record = data
                 .iter_mut()
                 .find(|record| record.device().key().id == *did)
-                .unwrap_or_else(|| panic!("missing light DID {did}"));
-            *record = crate::xiaomi::capability::NativeDescription::new(
-                (*model).into(),
-                instance["type"].as_str().unwrap().into(),
-                crate::xiaomi::capability::parse_device_for_model(
-                    DeviceKey::new("xiaomi", *did),
-                    model,
-                    instance,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-            light_instances.push((
-                instance["type"].as_str().unwrap().to_string(),
-                instance.clone(),
-            ));
+                .unwrap();
+            *record = SourceFixture::new(did, model, instance.clone());
         }
         for (did, native) in natives {
             let record = data
@@ -263,43 +237,20 @@ impl Rig {
                 .cloned()
                 .collect::<Vec<_>>();
             commit_natives(&store, &uid, &natives);
-            let mut configuration = store.devices().load_configuration().unwrap();
-            for (did, model, instance) in lights {
-                let raw = configuration
-                    .descriptions
-                    .iter_mut()
-                    .find(|raw| raw.key.id == *did)
-                    .unwrap();
-                *raw = crate::xiaomi::capability::RawDescription::new(
-                    raw.key.clone(),
-                    (*model).into(),
-                    instance["type"].as_str().unwrap().into(),
-                    instance.clone(),
-                    None,
-                )
-                .unwrap();
-            }
-            if let (Some(model), Some(instance)) = (light, custom_text.as_deref()) {
-                let instance: Value = serde_json::from_str(instance).unwrap();
-                let raw = configuration
-                    .descriptions
-                    .iter_mut()
-                    .find(|raw| raw.key.id == "one")
-                    .unwrap();
-                *raw = crate::xiaomi::capability::RawDescription::new(
-                    raw.key.clone(),
-                    model.into(),
-                    instance["type"].as_str().unwrap().into(),
-                    instance,
-                    None,
-                )
-                .unwrap();
-            }
-            store
-                .devices()
-                .commit_configuration(&configuration, &[])
-                .unwrap();
         }
+        let instances = data
+            .iter()
+            .map(|source| {
+                (
+                    source.raw.instance_type.clone(),
+                    source.raw.instance.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let data = data
+            .into_iter()
+            .map(|source| source.native)
+            .collect::<Vec<_>>();
         let cloud = Arc::new(Mutex::new(CloudState {
             members: members.iter().map(|v| v.to_string()).collect(),
             status: 200,
@@ -314,7 +265,7 @@ impl Rig {
             catalog_status: 200,
             ..Default::default()
         }));
-        for (urn, instance) in light_instances {
+        for (urn, instance) in instances {
             cloud
                 .lock()
                 .unwrap()
@@ -505,34 +456,20 @@ impl Rig {
                     .as_ref()
                     .and_then(|urn| state.catalog_instances.get(urn))
                 {
+                    let mut instance = instance.clone();
+                    if records.iter().any(|record| {
+                        requested_type.as_deref() == Some(record.instance_type())
+                            && state.unsupported.contains(&record.device().key().id)
+                    }) {
+                        instance["services"] = json!([]);
+                    }
                     let response = MockResponse::json(200, &instance.to_string());
                     return match state.instance_gates.get(requested_type.as_ref().unwrap()) {
                         Some(gate) => response.gated(gate.clone()),
                         None => response,
                     };
                 }
-                let multi = request.target.contains("cuco-cp7pd");
-                let mut value: Value = serde_json::from_str(
-                    if let Some(instance) = &custom_text
-                        && !multi
-                    {
-                        instance.as_str()
-                    } else if records[0].device().functions()[0].lighting().is_some() && !multi {
-                        light_fixture(records[0].model())
-                    } else if multi {
-                        include_str!("../../../../../tests/fixtures/miot/cuco-cp7pd.json")
-                    } else {
-                        include_str!("../../../../../tests/fixtures/miot/outlet.json")
-                    },
-                )
-                .unwrap();
-                if state
-                    .unsupported
-                    .contains(if multi { "multi" } else { "one" })
-                {
-                    value["services"] = json!([]);
-                }
-                value
+                return MockResponse::json(404, "{}");
             } else {
                 return MockResponse::json(503, "{}");
             };

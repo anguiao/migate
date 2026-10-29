@@ -1,10 +1,11 @@
 //! Current state bindings persist atomically, independently of live observations.
 use super::configuration::{fixture, load, next, raw, save, scope};
+use crate::xiaomi::capability::tests::source::SourceFixture;
 use crate::{
     configuration::CommittedConfiguration,
     device::{DeviceKey, PhysicalDevice, StateInput},
-    xiaomi::capability::{NativeDescription, ParsedDevice},
 };
+use serde_json::json;
 
 #[test]
 fn state_bindings_restore_without_runtime_observations_or_endpoint_changes() {
@@ -79,7 +80,7 @@ fn state_bindings_restore_without_runtime_observations_or_endpoint_changes() {
         let unchanged = next(
             &restored,
             scope("account", "home"),
-            vec![entry.native.clone().unwrap()],
+            vec![SourceFixture::committed(&restored, &entry.key.id)],
         );
         assert!(!unchanged.changed);
         assert!(!unchanged.rebuild);
@@ -112,31 +113,16 @@ fn adding_state_preserves_existing_child_endpoints() {
     let old = &initial.devices[0];
     assert_ne!(old.functions[0].endpoint, old.endpoint);
     let mixed = |extra: bool| {
-        let mut functions = outlet.device().functions().to_vec();
-        functions.extend_from_slice(contact.device().functions());
+        let mut instance = outlet.raw.instance.clone();
+        let mut contact = contact.raw.instance["services"][1].clone();
+        contact["iid"] = json!(49);
+        instance["services"].as_array_mut().unwrap().push(contact);
         if extra {
-            let original = occupancy
-                .device()
-                .functions()
-                .iter()
-                .find(|function| function.id() == "occupancy:2:1")
-                .unwrap();
-            functions.push(crate::xiaomi::capability::ParsedFunction::occupancy(
-                "occupancy:50:1",
-                "Occupancy",
-                crate::xiaomi::capability::StateBinding::new(
-                    crate::xiaomi::capability::PropertyBinding { siid: 50, piid: 1 },
-                    original.state().unwrap().mapping().clone(),
-                )
-                .unwrap(),
-            ));
+            let mut occupancy = occupancy.raw.instance["services"][1].clone();
+            occupancy["iid"] = json!(50);
+            instance["services"].as_array_mut().unwrap().push(occupancy);
         }
-        NativeDescription::new(
-            outlet.model().into(),
-            outlet.instance_type().into(),
-            ParsedDevice::new(outlet.device().key().clone(), functions, None).unwrap(),
-        )
-        .unwrap()
+        SourceFixture::new("mixed", outlet.model(), instance)
     };
     let plan = next(&initial, scope("account", "home"), vec![mixed(false)]);
     assert!(plan.rebuild);

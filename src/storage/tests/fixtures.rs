@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use crate::xiaomi::capability::NativeDescription;
+use crate::xiaomi::capability::tests::source::SourceFixture;
 
 use crate::{
     configuration::{
@@ -13,7 +13,6 @@ use crate::{
     device::{DeviceKey, PhysicalDeviceDescription},
     matter,
     storage::Store,
-    xiaomi::capability::parse_device_for_model,
 };
 
 pub(crate) fn scope() -> Scope {
@@ -53,71 +52,6 @@ pub(crate) fn identity(description: &PhysicalDeviceDescription, endpoint: u16) -
     }
 }
 
-pub(crate) fn configuration(scope: Scope, devices: Vec<CommittedDevice>) -> CommittedConfiguration {
-    let descriptions = devices
-        .iter()
-        .filter_map(|device| device.native.as_ref().map(raw_for))
-        .collect();
-    CommittedConfiguration {
-        scope: Some(scope),
-        root_version: 1,
-        descriptions,
-        devices,
-        groups: Vec::new(),
-    }
-}
-
-/// Source fixtures for tests that start from a manually assembled effective model.
-pub(crate) fn raw_for(native: &NativeDescription) -> crate::xiaomi::capability::RawDescription {
-    let source = match native.model() {
-        "cuco.plug.cp7pd" => include_str!("../../../tests/fixtures/miot/cuco-cp7pd.json"),
-        "devcea.light.ls2307" => {
-            include_str!("../../../tests/fixtures/miot/devcea-light-ls2307.json")
-        }
-        "dmaker.fan.p5c" => include_str!("../../../tests/fixtures/miot/dmaker-p5c.json"),
-        "xiaomi.curtain.acn010" => include_str!("../../../tests/fixtures/miot/xiaomi-acn010.json"),
-        "miaomiaoce.sensor_ht.t6" => {
-            include_str!("../../../tests/fixtures/miot/miaomiaoce-t6.json")
-        }
-        "xiaomi.light.ceil04" => {
-            include_str!("../../../tests/fixtures/miot/xiaomi-light-ceil04.json")
-        }
-        "xiaomi.light.bar2" => include_str!("../../../tests/fixtures/miot/xiaomi-light-bar2.json"),
-        "yeelink.light.light3" => {
-            include_str!("../../../tests/fixtures/miot/yeelink-light-light3.json")
-        }
-        "yeelink.light.ml9" => include_str!("../../../tests/fixtures/miot/yeelink-light-ml9.json"),
-        "yeelink.light.spot2" => {
-            include_str!("../../../tests/fixtures/miot/yeelink-light-spot2.json")
-        }
-        "lemesh.light.wy0c15" => {
-            include_str!("../../../tests/fixtures/miot/lemesh-light-wy0c15.json")
-        }
-        _ => include_str!("../../../tests/fixtures/miot/outlet.json"),
-    };
-    let mut instance: serde_json::Value = serde_json::from_str(source).unwrap();
-    instance["type"] = native.instance_type().into();
-    if native.model() == "miaomiaoce.sensor_ht.t6" && native.device().battery().is_none() {
-        instance["services"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|service| {
-                !service["type"]
-                    .as_str()
-                    .unwrap()
-                    .contains(":service:battery:")
-            });
-    }
-    crate::xiaomi::capability::RawDescription::new(
-        native.device().key().clone(),
-        native.model().into(),
-        native.instance_type().into(),
-        instance,
-        None,
-    )
-    .unwrap()
-}
-
 pub(crate) fn relation(
     group_did: &str,
     members: &[&str],
@@ -143,31 +77,26 @@ pub(crate) fn save(store: &Store, configuration: &CommittedConfiguration) {
         .unwrap();
 }
 
-pub(crate) fn native(id: &str, model: &str, instance: serde_json::Value) -> NativeDescription {
-    NativeDescription::new(
-        model.into(),
-        instance["type"].as_str().unwrap().into(),
-        parse_device_for_model(DeviceKey::new("xiaomi", id), model, &instance).unwrap(),
-    )
-    .unwrap()
+pub(crate) fn native(id: &str, model: &str, instance: serde_json::Value) -> SourceFixture {
+    SourceFixture::new(id, model, instance)
 }
 
 /// Plan and commit an empty-to-one configuration for real native facts.
-pub(crate) fn planned(store: &Store, natives: Vec<NativeDescription>) -> CommittedConfiguration {
+pub(crate) fn planned(store: &Store, natives: Vec<SourceFixture>) -> CommittedConfiguration {
     planned_from(store, CommittedConfiguration::empty(), natives)
 }
 
 pub(crate) fn planned_from(
     store: &Store,
     current: CommittedConfiguration,
-    natives: Vec<NativeDescription>,
+    natives: Vec<SourceFixture>,
 ) -> CommittedConfiguration {
     let facts = SourceFacts {
         scope: Some(scope()),
         descriptions: natives
             .iter()
             .map(|native| crate::configuration::SourceRaw {
-                description: raw_for(native),
+                description: native.raw.clone(),
                 fresh: true,
             })
             .collect(),
@@ -176,7 +105,7 @@ pub(crate) fn planned_from(
             .map(|native| SourceDevice {
                 key: native.device().key().clone(),
                 name: Some(native.model().to_owned()),
-                native,
+                native: native.native,
                 fresh: true,
             })
             .collect(),

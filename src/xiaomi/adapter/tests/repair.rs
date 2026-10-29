@@ -527,12 +527,12 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         {
             let mut live = c.context.live.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
-            slot.raw = Some(crate::storage::tests::fixtures::raw_for(&downgraded));
+            slot.raw = Some(downgraded.raw.clone());
             if let Some(access) = &mut slot.cloud_access {
                 access.model = downgraded.model().into();
                 access.instance_type = downgraded.instance_type().into();
             }
-            slot.latest = Some(downgraded.clone());
+            slot.latest = Some(downgraded.native.clone());
         }
 
         // A failed save keeps the committed repair plan.
@@ -614,12 +614,12 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         {
             let mut live = c.context.live.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
-            slot.raw = Some(crate::storage::tests::fixtures::raw_for(&recovered));
+            slot.raw = Some(recovered.raw.clone());
             if let Some(access) = &mut slot.cloud_access {
                 access.model = recovered.model().into();
                 access.instance_type = recovered.instance_type().into();
             }
-            slot.latest = Some(recovered);
+            slot.latest = Some(recovered.native);
         }
         c.context.reconcile("member-a").unwrap();
         wait_for(

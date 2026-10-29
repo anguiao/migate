@@ -2,14 +2,9 @@
 //! updates, rebuild causes and exhaustion boundaries.
 
 use super::super::*;
-use crate::{
-    device::{DeviceKey, NumericRange},
-    matter,
-    xiaomi::capability::{
-        BrightnessBinding, LightBindings, NumericFormat, ParsedDevice, ParsedFunction,
-        PropertyBinding, TemperatureBinding,
-    },
-};
+use crate::xiaomi::capability::tests::source::SourceFixture;
+use crate::{device::DeviceKey, matter};
+use serde_json::json;
 
 const OUTLET_TYPE: &str = "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1";
 const LIGHT_TYPE: &str = "urn:miot-spec-v2:device:light:0000A001:vendor-v1:1";
@@ -39,66 +34,39 @@ fn unique(id: &str) -> String {
     format!("{value:0>32x}")
 }
 
-fn native(
-    id: &str,
-    model: &str,
-    instance_type: &str,
-    functions: Vec<ParsedFunction>,
-    refresh_trigger: Option<PropertyBinding>,
-) -> NativeDescription {
-    let device = ParsedDevice::new(key(id), functions, refresh_trigger).expect("valid native");
-    NativeDescription::new(model.into(), instance_type.into(), device).unwrap()
-}
-
-fn outlet_native(id: &str, siid: u32) -> NativeDescription {
+fn outlet_native(id: &str, siid: u32) -> SourceFixture {
     outlet_native_with_piid(id, siid, 1)
 }
-
-fn outlet_native_with_piid(id: &str, siid: u32, piid: u32) -> NativeDescription {
-    native(
+fn outlet_native_with_piid(id: &str, siid: u32, piid: u32) -> SourceFixture {
+    SourceFixture::new(
         id,
         "vendor.plug",
-        OUTLET_TYPE,
-        vec![ParsedFunction::outlet(
-            format!("outlet:{siid}"),
-            "Main power",
-            PropertyBinding { siid, piid },
-        )],
-        None,
+        json!({"type": OUTLET_TYPE, "services": [{
+            "iid": siid, "type": "urn:miot-spec-v2:service:switch:0000780C:vendor-v1:1",
+            "properties": [{"iid": piid, "type": "urn:miot-spec-v2:property:on:00000006:vendor-v1:1", "format": "bool", "access": ["read", "write", "notify"]}]
+        }]}),
     )
 }
-
-fn ct_light_native(id: &str, min: u32, max: u32) -> NativeDescription {
+fn ct_light_native(id: &str, min: u32, max: u32) -> SourceFixture {
     ct_light_native_with_power(id, min, max, 1)
 }
-
-fn ct_light_native_with_power(id: &str, min: u32, max: u32, piid: u32) -> NativeDescription {
-    let power = PropertyBinding { siid: 2, piid };
-    let brightness = BrightnessBinding::new(
-        PropertyBinding { siid: 2, piid: 3 },
-        NumericFormat::Uint8,
-        NumericRange::new(1, 100, 1).unwrap(),
-    )
-    .unwrap();
-    let temperature = TemperatureBinding::new(
-        PropertyBinding { siid: 2, piid: 4 },
-        NumericFormat::Uint16,
-        NumericRange::new(min, max, 1).unwrap(),
-    )
-    .unwrap();
-    let lighting = LightBindings::new(Some(brightness), Some(temperature), None, None).unwrap();
-    native(
+fn ct_light_native_with_power(id: &str, min: u32, max: u32, piid: u32) -> SourceFixture {
+    SourceFixture::new(
         id,
         "vendor.light",
-        LIGHT_TYPE,
-        vec![ParsedFunction::light("light:2", "Light", power, lighting)],
-        None,
+        json!({"type": LIGHT_TYPE, "services": [{
+            "iid": 2, "type": "urn:miot-spec-v2:service:light:00007802:vendor-v1:1", "properties": [
+                {"iid": piid, "type": "urn:miot-spec-v2:property:on:00000006:vendor-v1:1", "format": "bool", "access": ["read", "write", "notify"]},
+                {"iid": 3, "type": "urn:miot-spec-v2:property:brightness:0000000D:vendor-v1:1", "format": "uint8", "unit": "percentage", "value-range": [1, 100, 1], "access": ["read", "write", "notify"]},
+                {"iid": 4, "type": "urn:miot-spec-v2:property:color-temperature:0000000F:vendor-v1:1", "format": "uint16", "unit": "kelvin", "value-range": [min, max, 1], "access": ["read", "write", "notify"]}
+            ]
+        }]}),
     )
 }
 
 fn committed(
     id: &str,
-    native: NativeDescription,
+    native: SourceFixture,
     label: &str,
     configuration_version: u32,
 ) -> CommittedDevice {
@@ -107,7 +75,7 @@ fn committed(
 
 fn committed_at(
     id: &str,
-    native: NativeDescription,
+    native: SourceFixture,
     label: &str,
     configuration_version: u32,
     endpoint: u16,
@@ -129,7 +97,7 @@ fn committed_at(
         label: label.into(),
         configuration_version,
         functions,
-        native: Some(native),
+        native: Some(native.native),
     }
 }
 
@@ -148,27 +116,39 @@ fn historical(id: &str, endpoint: u16) -> CommittedDevice {
     }
 }
 
-fn source(id: &str, native: NativeDescription, name: Option<&str>) -> SourceDevice {
-    SourceDevice {
-        key: key(id),
-        native,
+#[derive(Clone)]
+struct TestSource {
+    fixture: SourceFixture,
+    name: Option<String>,
+    fresh: bool,
+}
+fn source(id: &str, fixture: SourceFixture, name: Option<&str>) -> TestSource {
+    assert_eq!(fixture.raw.key, key(id));
+    TestSource {
+        fixture,
         name: name.map(str::to_owned),
         fresh: true,
     }
 }
-
-fn facts(scope: Scope, devices: Vec<SourceDevice>, relations: Vec<GroupRelation>) -> SourceFacts {
-    let descriptions = devices
-        .iter()
-        .map(|device| SourceRaw {
-            description: crate::storage::tests::fixtures::raw_for(&device.native),
-            fresh: device.fresh,
-        })
-        .collect();
+fn facts(scope: Scope, devices: Vec<TestSource>, relations: Vec<GroupRelation>) -> SourceFacts {
     SourceFacts {
         scope: Some(scope),
-        descriptions,
-        devices,
+        descriptions: devices
+            .iter()
+            .map(|source| SourceRaw {
+                description: source.fixture.raw.clone(),
+                fresh: source.fresh,
+            })
+            .collect(),
+        devices: devices
+            .into_iter()
+            .map(|source| SourceDevice {
+                key: source.fixture.raw.key.clone(),
+                native: source.fixture.native,
+                name: source.name,
+                fresh: source.fresh,
+            })
+            .collect(),
         relations,
     }
 }
@@ -180,24 +160,26 @@ fn grouping_a_mixed_light_hides_only_control_and_preserves_sensors_and_battery()
         "../../../tests/fixtures/miot/miaomiaoce-t6.json"
     ))
     .unwrap();
-    let sensor =
-        crate::xiaomi::capability::parse_device_for_model(key("member"), "sample", &sensor)
-            .unwrap();
-    let mut functions = light.device().functions().to_vec();
-    functions.extend_from_slice(sensor.functions());
+    let mut instance = light.raw.instance;
+    instance["services"].as_array_mut().unwrap().extend(
+        sensor["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|service| [3, 4].contains(&service["iid"].as_u64().unwrap()))
+            .cloned(),
+    );
     let contact: serde_json::Value =
         serde_json::from_str(include_str!("../../../tests/fixtures/miot/isa-dw2hl.json")).unwrap();
-    let contact =
-        crate::xiaomi::capability::parse_device_for_model(key("member"), "sample", &contact)
-            .unwrap();
-    functions.extend_from_slice(contact.functions());
-    let mixed = NativeDescription::new(
-        "vendor.light".into(),
-        LIGHT_TYPE.into(),
-        ParsedDevice::new_with_battery(key("member"), functions, None, sensor.battery().cloned())
-            .unwrap(),
-    )
-    .unwrap();
+    let mut contact = contact["services"][1].clone();
+    contact["iid"] = json!(50);
+    instance["services"].as_array_mut().unwrap().push(contact);
+    let mixed = SourceFixture::new("member", "vendor.light", instance);
+    let mut battery = sensor["services"][1].clone();
+    battery["iid"] = json!(40);
+    let mut instance = mixed.raw.instance;
+    instance["services"].as_array_mut().unwrap().push(battery);
+    let mixed = SourceFixture::new("member", "vendor.light", instance);
     let source_devices = vec![
         source("member", mixed, None),
         source("group", ct_light_native("group", 2700, 6500), None),
@@ -243,7 +225,7 @@ fn grouping_a_mixed_light_hides_only_control_and_preserves_sensors_and_battery()
             .iter()
             .map(|function| function.id.as_str())
             .collect::<Vec<_>>(),
-        ["temperature:3:1001", "humidity:3:1008", "contact:2:2"]
+        ["temperature:3:1001", "humidity:3:1008", "contact:50:2"]
     );
     assert_eq!(
         grouped.derived.served[&key("member")]
@@ -274,15 +256,12 @@ fn group_member_resolution_preserves_other_controls_and_rejects_ambiguity() {
             ]
         }]
     });
-    let fan = crate::xiaomi::capability::parse_device_for_model(
-        key("member"),
-        "example.fan",
-        &fan_source,
-    )
-    .unwrap();
-    let mut functions = member.device().functions().to_vec();
-    functions.extend_from_slice(fan.functions());
-    let composite = native("member", "vendor.light", LIGHT_TYPE, functions, None);
+    let mut instance = member.raw.instance;
+    instance["services"]
+        .as_array_mut()
+        .unwrap()
+        .extend(fan_source["services"].as_array().unwrap().iter().cloned());
+    let composite = SourceFixture::new("member", "vendor.light", instance);
     let group = ct_light_native("group", 2700, 6500);
     let relation = GroupRelation {
         group_did: "group".into(),
@@ -297,7 +276,7 @@ fn group_member_resolution_preserves_other_controls_and_rejects_ambiguity() {
     let configuration = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 1,
-        descriptions: Vec::new(),
+        descriptions: vec![composite.raw.clone(), group.raw.clone()],
         devices: vec![
             committed_at("member", composite.clone(), "Member", 1, 2),
             committed_at("group", group.clone(), "Group", 1, 10),
@@ -315,14 +294,11 @@ fn group_member_resolution_preserves_other_controls_and_rejects_ambiguity() {
         ["fan:3"]
     );
 
-    let mut functions = composite.device().functions().to_vec();
-    functions.push(ParsedFunction::light(
-        "light:9",
-        "Second",
-        PropertyBinding { siid: 9, piid: 1 },
-        LightBindings::OnOff,
-    ));
-    let ambiguous = native("member", "vendor.light", LIGHT_TYPE, functions, None);
+    let mut instance = composite.raw.instance;
+    let mut second = instance["services"][0].clone();
+    second["iid"] = json!(9);
+    instance["services"].as_array_mut().unwrap().push(second);
+    let ambiguous = SourceFixture::new("member", "vendor.light", instance);
     let configuration = CommittedConfiguration {
         devices: vec![
             committed_at("member", ambiguous, "Member", 1, 2),
@@ -349,19 +325,11 @@ fn native_rgb_stays_native_without_member_description() {
         "../../../tests/fixtures/miot/devcea-light-ls2307.json"
     ))
     .unwrap();
-    let parsed =
-        crate::xiaomi::capability::parse_group(key("group"), "devcea.light.ls2307", &instance)
-            .unwrap();
-    let native = NativeDescription::new(
-        "devcea.light.ls2307".into(),
-        instance["type"].as_str().unwrap().into(),
-        parsed,
-    )
-    .unwrap();
+    let native = SourceFixture::new("group", "devcea.light.ls2307", instance);
     let configuration = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 1,
-        descriptions: Vec::new(),
+        descriptions: vec![native.raw.clone()],
         devices: vec![committed("group", native, "Group", 1)],
         groups: vec![GroupRelation {
             group_did: "group".into(),
@@ -390,23 +358,11 @@ fn plan(
 }
 
 fn plan_with_revocations(
-    mut current: CommittedConfiguration,
+    current: CommittedConfiguration,
     facts: SourceFacts,
     new_identities: BTreeMap<DeviceKey, String>,
     revocations: Vec<Revocation>,
 ) -> Result<Plan, PlanError> {
-    if current.descriptions.is_empty() {
-        current.descriptions = current
-            .devices
-            .iter()
-            .filter_map(|device| {
-                device
-                    .native
-                    .as_ref()
-                    .map(crate::storage::tests::fixtures::raw_for)
-            })
-            .collect();
-    }
     let current_derived = current.derive();
     super::super::plan(
         PlanInput {
@@ -461,7 +417,7 @@ fn identical_facts_reuse_without_change() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: vec![crate::storage::tests::fixtures::raw_for(&native)],
+        descriptions: vec![native.raw.clone()],
         devices: vec![committed("outlet", native.clone(), "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -486,7 +442,7 @@ fn hidden_member_republishes_with_a_version_bump() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![group_native.raw.clone(), member_native.raw.clone()],
         devices: vec![
             committed("group-1", group_native, "Group", 1),
             committed_at("member", member_native.clone(), "Member", 1, 6),
@@ -522,17 +478,13 @@ fn hidden_member_republishes_with_a_version_bump() {
 #[test]
 fn urn_only_change_is_reused_without_rebuild_or_a_version_bump() {
     let before = outlet_native("outlet", 2);
-    let mut metadata_only = before.clone();
-    metadata_only = crate::xiaomi::capability::NativeDescription::new(
-        metadata_only.model().to_owned(),
-        "urn:miot-spec-v2:device:outlet:0000A002:vendor-v2:2".into(),
-        metadata_only.device().clone(),
-    )
-    .unwrap();
+    let mut instance = before.raw.instance.clone();
+    instance["type"] = "urn:miot-spec-v2:device:outlet:0000A002:vendor-v2:2".into();
+    let metadata_only = SourceFixture::new("outlet", "vendor.plug", instance);
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![before.raw.clone()],
         devices: vec![committed("outlet", before, "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -567,7 +519,7 @@ fn native_control_change_replaces_and_rebuilds_without_a_version_bump() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![before.raw.clone()],
         devices: vec![committed("outlet", before, "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -597,7 +549,7 @@ fn removed_device_unpublishes_and_bumps_its_version() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![native.raw.clone()],
         devices: vec![committed("outlet", native, "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -624,7 +576,7 @@ fn scope_change_alone_does_not_bump_root_or_device_versions() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![native.raw.clone()],
         devices: vec![committed("outlet", native.clone(), "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -695,7 +647,7 @@ fn empty_saved_label_survives_plan_and_validation() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: vec![crate::storage::tests::fixtures::raw_for(&native)],
+        descriptions: vec![native.raw.clone()],
         devices: vec![previous.clone()],
         groups: Vec::new(),
     };
@@ -724,7 +676,7 @@ fn revoked_startup_removal_bumps_versions_against_the_committed_graph() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![native.raw.clone()],
         devices: vec![committed("outlet", native, "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -776,7 +728,7 @@ fn stale_revoked_member_cannot_affect_candidate_group_profile_or_shape() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![group_native.raw.clone(), member_native.raw.clone()],
         devices: vec![
             committed("group", group_native.clone(), "Saved group", 1),
             committed_at("member", member_native.clone(), "Member", 1, 6),
@@ -862,7 +814,11 @@ fn member_reordering_is_canonical_and_does_not_rebuild() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![
+            group_native.raw.clone(),
+            member_a.raw.clone(),
+            member_b.raw.clone(),
+        ],
         devices: vec![
             committed("group-1", group_native.clone(), "Group", 1),
             committed_at("member-a", member_a.clone(), "A", 1, 6),
@@ -897,7 +853,7 @@ fn fresh_revocation_clear_replaces_the_native_instance() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![native.raw.clone()],
         devices: vec![committed("outlet", native.clone(), "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -937,7 +893,7 @@ fn scope_change_replaces_the_native_instance_with_the_same_key() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![native.raw.clone()],
         devices: vec![committed("outlet", native.clone(), "Kitchen", 1)],
         groups: Vec::new(),
     };
@@ -983,7 +939,7 @@ fn hidden_member_replacement_rebuilds_without_a_version_bump() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![group_native.raw.clone(), before.raw.clone()],
         devices: vec![
             committed("group-1", group_native.clone(), "Group", 1),
             committed_at("member", before, "Member", 1, 6),
@@ -1039,7 +995,7 @@ fn group_directory_metadata_change_does_not_rebuild() {
     let current = CommittedConfiguration {
         scope: Some(scope()),
         root_version: 2,
-        descriptions: Vec::new(),
+        descriptions: vec![group_native.raw.clone(), member_native.raw.clone()],
         devices: vec![
             committed("group-1", group_native.clone(), "Group", 1),
             committed_at("member", member_native.clone(), "Member", 1, 6),
@@ -1066,16 +1022,11 @@ fn group_directory_metadata_change_does_not_rebuild() {
     assert_eq!(plan.configuration.groups, [renamed]);
 }
 
-fn state_native_from_instance(model: &str, instance: &serde_json::Value) -> NativeDescription {
-    NativeDescription::new(
-        model.into(),
-        instance["type"].as_str().unwrap().into(),
-        crate::xiaomi::capability::parse_device_for_model(key("state"), model, instance).unwrap(),
-    )
-    .unwrap()
+fn state_native_from_instance(model: &str, instance: &serde_json::Value) -> SourceFixture {
+    SourceFixture::new("state", model, instance.clone())
 }
 
-fn assert_state_semantics_replaced(before: NativeDescription, after: NativeDescription) {
+fn assert_state_semantics_replaced(before: SourceFixture, after: SourceFixture) {
     let initial = plan(
         CommittedConfiguration::empty(),
         facts(
@@ -1115,7 +1066,7 @@ fn assert_state_semantics_replaced(before: NativeDescription, after: NativeDescr
     assert_eq!(new.endpoint, old.endpoint);
     assert_eq!(new.functions, old.functions);
     assert_eq!(new.configuration_version, old.configuration_version);
-    assert_eq!(new.native.as_ref(), Some(&after));
+    assert_eq!(new.native.as_ref(), Some(&after.native));
     updated.configuration.validate().unwrap();
 }
 

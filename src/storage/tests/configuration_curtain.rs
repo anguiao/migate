@@ -1,4 +1,5 @@
 use super::configuration::{corrupt, fixture, load, native, next, raw, save, scope};
+use crate::xiaomi::capability::tests::source::SourceFixture;
 use crate::{
     configuration::CommittedConfiguration,
     device::{DeviceKey, PhysicalDevice},
@@ -34,7 +35,7 @@ fn curtain_configuration_reloads_with_stable_identity_and_endpoint() {
     let unchanged = next(
         &restored,
         scope("account", "home"),
-        vec![entry.native.clone().unwrap()],
+        vec![SourceFixture::committed(&restored, &entry.key.id)],
     );
     assert!(!unchanged.changed);
     assert!(!unchanged.rebuild);

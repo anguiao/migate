@@ -1,7 +1,7 @@
 //! Configuration persistence through the private codec and real transaction.
 //! Historical endpoint reservations are independent from current native facts.
 
-use crate::xiaomi::capability::NativeDescription;
+use crate::xiaomi::capability::tests::source::SourceFixture;
 use crate::{
     configuration::{
         self, CommittedConfiguration, Plan, PlanInput, Revocation, Scope, SourceDevice, SourceFacts,
@@ -28,20 +28,12 @@ fn persists_the_complete_original_miot_description() {
     let mut source = instance.clone();
     source["unrecognized-vendor-extension"] = json!({"preserve": [1, "untouched"]});
     let expected = source.clone();
-    let mut configuration = next(
+    let configuration = next(
         &CommittedConfiguration::empty(),
         scope("account", "home"),
         vec![native("did", "devcea.light.ls2307", source.clone())],
     )
     .configuration;
-    configuration.descriptions[0] = crate::xiaomi::capability::RawDescription::new(
-        DeviceKey::new("xiaomi", "did"),
-        "devcea.light.ls2307".into(),
-        source["type"].as_str().unwrap().into(),
-        source,
-        None,
-    )
-    .unwrap();
     save(&store, &configuration);
     let saved: Value = serde_json::from_str(&raw(&store)).unwrap();
     assert_eq!(saved["descriptions"][0]["instance"], expected);
@@ -94,30 +86,25 @@ pub(super) fn scope(uid: &str, home: &str) -> Scope {
     }
 }
 
-pub(super) fn native(id: &str, model: &str, instance: Value) -> NativeDescription {
-    NativeDescription::new(
-        model.into(),
-        instance["type"].as_str().unwrap().into(),
-        parse_device_for_model(DeviceKey::new("xiaomi", id), model, &instance).unwrap(),
-    )
-    .unwrap()
+pub(super) fn native(id: &str, model: &str, instance: Value) -> SourceFixture {
+    SourceFixture::new(id, model, instance)
 }
 
-pub(super) fn fixture(id: &str, model: &str, data: &str) -> NativeDescription {
+pub(super) fn fixture(id: &str, model: &str, data: &str) -> SourceFixture {
     native(id, model, serde_json::from_str(data).unwrap())
 }
 
 pub(super) fn next(
     current: &CommittedConfiguration,
     scope: Scope,
-    natives: Vec<NativeDescription>,
+    natives: Vec<SourceFixture>,
 ) -> Plan {
     let facts = SourceFacts {
         scope: Some(scope),
         descriptions: natives
             .iter()
             .map(|native| crate::configuration::SourceRaw {
-                description: crate::storage::tests::fixtures::raw_for(native),
+                description: native.raw.clone(),
                 fresh: true,
             })
             .collect(),
@@ -126,7 +113,7 @@ pub(super) fn next(
             .map(|native| SourceDevice {
                 key: native.device().key().clone(),
                 name: Some(native.model().to_owned()),
-                native,
+                native: native.native,
                 fresh: true,
             })
             .collect(),
@@ -186,7 +173,7 @@ pub(super) fn corrupt(store: &Store, value: &Value) {
         .unwrap();
 }
 
-pub(super) fn seed(store: &Store, devices: Vec<NativeDescription>) -> CommittedConfiguration {
+pub(super) fn seed(store: &Store, devices: Vec<SourceFixture>) -> CommittedConfiguration {
     let config = next(
         &CommittedConfiguration::empty(),
         scope("account", "home"),
@@ -980,7 +967,10 @@ fn adding_light_capabilities_keeps_its_function_and_endpoint_after_restart() {
     let unchanged = next(
         &restored,
         scope("account", "home"),
-        vec![restored.devices[0].native.clone().unwrap()],
+        vec![SourceFixture::committed(
+            &restored,
+            &restored.devices[0].key.id,
+        )],
     );
     assert!(!unchanged.changed);
 }
