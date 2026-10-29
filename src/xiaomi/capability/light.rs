@@ -1,18 +1,14 @@
-use super::ls2307;
 use super::{
-    BrightnessBinding, CapabilityError, ColorBinding, LightBindings, ModeBinding, NumericFormat,
-    ParsedFunction, PropertyBinding, TemperatureBinding,
-    description::{Description, Property, Service, array, string},
+    BrightnessBinding, CapabilityError, ColorBinding, LightBindings, NumericFormat, ParsedFunction,
+    PropertyBinding, TemperatureBinding,
+    description::{Property, Service, array, string},
     outlet::power_binding,
 };
 use crate::device::NumericRange;
 
 pub(super) fn parse_light_service(
-    model: &str,
-    instance: &Description<'_>,
     service: &Service<'_>,
     diagnostics: &mut Vec<super::RecognitionDiagnostic>,
-    patches: &mut Vec<super::AppliedPatch>,
 ) -> Result<ParsedFunction, CapabilityError> {
     let power = match optional_standard_property(service, "on", 6)? {
         Some(property) => power_binding(service.iid, property)?,
@@ -56,41 +52,7 @@ pub(super) fn parse_light_service(
             reason: "RGB requires brightness and color temperature".into(),
         });
     }
-    let mut mode = None;
-    if super::patch::ls2307_target(model, service.iid) {
-        let patched = match (brightness, temperature) {
-            (Some(brightness), Some(temperature)) => {
-                parse_ls2307(instance, service, power, brightness, temperature)
-            }
-            _ => Err(CapabilityError::IncompatibleModel(ls2307::MODEL)),
-        };
-        match patched {
-            Ok((patched_color, patched_mode)) => {
-                color = patched_color;
-                mode = patched_mode;
-                patches.push(super::patch::LS2307_RGB.applied(target.clone()));
-            }
-            Err(error) => {
-                diagnostics.push(super::patch::LS2307_RGB.failed(target.clone(), error));
-                // On this confirmed model, the native temperature can be a
-                // remembered value while the lamp is in RGB mode. A plain
-                // temperature profile would incorrectly infer white mode.
-                if instance.urn.standard("device", "light", 0xa001)
-                    && ls2307::matches_vendor(&instance.urn)
-                {
-                    if temperature.take().is_some() {
-                        diagnostics.push(super::RecognitionDiagnostic {
-                            target: target.clone(),
-                            reason: "color temperature feedback requires confirmed color mode"
-                                .into(),
-                        });
-                    }
-                    color = None;
-                }
-            }
-        }
-    }
-    let lighting = LightBindings::new(brightness, temperature, color, mode)?;
+    let lighting = LightBindings::new(brightness, temperature, color, None)?;
     Ok(ParsedFunction::light(
         format!("light:{}", service.iid),
         "Light",
@@ -132,7 +94,7 @@ fn optional_standard_property<'a>(
     }
     Ok(first)
 }
-fn standard_property<'a>(
+pub(super) fn standard_property<'a>(
     service: &'a Service<'a>,
     name: &str,
     type_id: u32,
@@ -149,7 +111,7 @@ fn standard_property<'a>(
         )),
     }
 }
-fn format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
+pub(super) fn format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
     match string(property.value, "format")? {
         "uint8" => Ok(NumericFormat::Uint8),
         "uint16" => Ok(NumericFormat::Uint16),
@@ -160,7 +122,7 @@ fn format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
         _ => Err(CapabilityError::InvalidLight("unsupported numeric format")),
     }
 }
-fn access(property: &Property<'_>) -> Result<(), CapabilityError> {
+pub(super) fn access(property: &Property<'_>) -> Result<(), CapabilityError> {
     let access = array(property.value, "access")?;
     for permission in ["read", "write", "notify"] {
         if !access
@@ -225,7 +187,10 @@ fn temperature_binding(
         numeric_range(property)?,
     )
 }
-fn color_binding(siid: u32, property: &Property<'_>) -> Result<ColorBinding, CapabilityError> {
+pub(super) fn color_binding(
+    siid: u32,
+    property: &Property<'_>,
+) -> Result<ColorBinding, CapabilityError> {
     access(property)?;
     if string(property.value, "unit")? != "rgb" {
         return Err(CapabilityError::InvalidLight("unit"));
@@ -241,66 +206,4 @@ fn color_binding(siid: u32, property: &Property<'_>) -> Result<ColorBinding, Cap
         },
         format(property)?,
     )
-}
-fn parse_ls2307(
-    instance: &Description<'_>,
-    main: &Service<'_>,
-    power: PropertyBinding,
-    brightness: BrightnessBinding,
-    temperature: TemperatureBinding,
-) -> Result<(Option<ColorBinding>, Option<ModeBinding>), CapabilityError> {
-    let incompatible = || CapabilityError::IncompatibleModel(ls2307::MODEL);
-    let matches_vendor = ls2307::matches_vendor;
-    if !instance.urn.standard("device", "light", 0x0000a001)
-        || !matches_vendor(&instance.urn)
-        || main.iid != ls2307::POWER.siid
-        || !matches_vendor(&main.urn)
-        || !ls2307::main_bindings(power, &brightness, &temperature)
-    {
-        return Err(incompatible());
-    }
-    let ambient = instance
-        .services
-        .iter()
-        .find(|service| service.iid == ls2307::COLOR_PROPERTY.siid)
-        .ok_or_else(incompatible)?;
-    if !ambient.urn.standard("service", "ambient-light", 0x0000789d)
-        || !matches_vendor(&ambient.urn)
-    {
-        return Err(incompatible());
-    }
-    let color_property = standard_property(ambient, "color", 0x0e)?;
-    let mode_property = standard_property(ambient, "mode", 8)?;
-    if color_property.iid != ls2307::COLOR_PROPERTY.piid
-        || mode_property.iid != ls2307::MODE_PROPERTY.piid
-        || !matches_vendor(&color_property.urn)
-        || !matches_vendor(&mode_property.urn)
-    {
-        return Err(incompatible());
-    }
-    let color = color_binding(ls2307::COLOR_PROPERTY.siid, color_property)?;
-    if !ls2307::is_color(&color) {
-        return Err(incompatible());
-    }
-    access(mode_property)?;
-    if format(mode_property)? != ls2307::MODE_FORMAT {
-        return Err(incompatible());
-    }
-    let values = array(mode_property.value, "value-list")?;
-    if !values
-        .iter()
-        .any(|value| value["value"].as_u64() == Some(ls2307::MODE_TEMPERATURE_VALUE as u64))
-        || !values
-            .iter()
-            .any(|value| value["value"].as_u64() == Some(ls2307::MODE_RGB_VALUE as u64))
-    {
-        return Err(incompatible());
-    }
-    let mode = ModeBinding::new(
-        ls2307::MODE_PROPERTY,
-        ls2307::MODE_FORMAT,
-        ls2307::MODE_TEMPERATURE_VALUE,
-        ls2307::MODE_RGB_VALUE,
-    )?;
-    Ok((Some(color), Some(mode)))
 }

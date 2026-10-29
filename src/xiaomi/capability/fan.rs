@@ -1,18 +1,43 @@
+use super::patch::dmaker;
 use super::{
-    CapabilityError, FanBindings, FanModeBinding, FanSpeedBinding, FanSpeedEncoding, NumericFormat,
-    PropertyBinding,
+    CapabilityError, FanBindings, FanSpeedBinding, FanSpeedEncoding, NumericFormat,
+    PropertyBinding, RecognitionDiagnostic,
     description::{Description, Property, Service, array, string},
 };
 
-/// Parse one standard fan service; the caller determines the function identity.
 pub(super) fn parse_fan_service(
     model: &str,
     instance: &Description<'_>,
     service: &Service<'_>,
-    diagnostics: &mut Vec<super::RecognitionDiagnostic>,
+    diagnostics: &mut Vec<RecognitionDiagnostic>,
+    patches: &mut Vec<super::AppliedPatch>,
+) -> Result<FanBindings, RecognitionDiagnostic> {
+    let matched = dmaker::match_service(model, instance, service);
+    let target = format!("fan:{}", service.iid);
+    match parse_bindings(instance, service, matched, diagnostics) {
+        Ok(fan) => {
+            if matched == dmaker::Match::Confirmed {
+                patches.push(dmaker::PATCH.applied(target));
+            }
+            Ok(fan)
+        }
+        Err(error) => Err(if matched == dmaker::Match::Confirmed {
+            dmaker::PATCH.failed(target, error)
+        } else {
+            RecognitionDiagnostic {
+                target,
+                reason: error.to_string(),
+            }
+        }),
+    }
+}
+
+fn parse_bindings(
+    instance: &Description<'_>,
+    service: &Service<'_>,
+    matched: dmaker::Match,
+    diagnostics: &mut Vec<RecognitionDiagnostic>,
 ) -> Result<FanBindings, CapabilityError> {
-    let is_dmaker = model.starts_with("dmaker.");
-    let is_dmaker_instance = instance.urn.vendor.starts_with("dmaker-");
     let power = required(service, |p| p.urn.standard("property", "on", 6), "on")?;
     boolean(power)?;
     let swings = service
@@ -40,17 +65,17 @@ pub(super) fn parse_fan_service(
             None
         }
     };
-    let dmaker_semantics = dmaker_semantics(instance, service);
-    if is_dmaker_instance && !is_dmaker && dmaker_semantics {
-        return Err(CapabilityError::InvalidDescription(
-            "fan mode semantics are unconfirmed",
-        ));
-    }
-    let (mode, speed) = if is_dmaker && is_dmaker_instance && dmaker_semantics {
-        let (mode, speed) = dmaker_bindings(instance, service)?;
-        (Some(mode), speed)
-    } else {
-        (None, generic_speed(service, diagnostics)?)
+    let (mode, speed) = match matched {
+        dmaker::Match::Confirmed => {
+            let (mode, speed) = dmaker::bindings(instance, service)?;
+            (Some(mode), speed)
+        }
+        dmaker::Match::Unconfirmed => {
+            return Err(CapabilityError::InvalidDescription(
+                "fan mode semantics are unconfirmed",
+            ));
+        }
+        dmaker::Match::Unrelated => (None, generic_speed(service, diagnostics)?),
     };
     Ok(FanBindings::new(
         binding(service, power),
@@ -58,112 +83,6 @@ pub(super) fn parse_fan_service(
         speed,
         swing,
     ))
-}
-
-/// Match only the confirmed wind-mode semantics, not the vendor name alone.
-pub(super) fn dmaker_semantics(instance: &Description<'_>, service: &Service<'_>) -> bool {
-    service
-        .properties
-        .iter()
-        .filter(|p| p.urn.standard("property", "mode", 8))
-        .any(|mode| {
-            let values = mode
-                .value
-                .get("value-list")
-                .and_then(serde_json::Value::as_array);
-            match values {
-                Some(values)
-                    if !values.is_empty()
-                        && values.iter().all(|item| {
-                            item.get("description")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some()
-                        }) =>
-                {
-                    values.iter().any(|item| {
-                        let name = item["description"].as_str().unwrap();
-                        name.eq_ignore_ascii_case("Straight Wind")
-                            || name.eq_ignore_ascii_case("Natural Wind")
-                    })
-                }
-                _ => instance.services.iter().any(|s| {
-                    s.urn
-                        .matches("dmaker-spec", "service", "dm-service", 0x7802)
-                        && s.urn.vendor == instance.urn.vendor
-                }),
-            }
-        })
-}
-
-fn dmaker_bindings(
-    instance: &Description<'_>,
-    service: &Service<'_>,
-) -> Result<(FanModeBinding, FanSpeedBinding), CapabilityError> {
-    let mode = required(service, |p| p.urn.standard("property", "mode", 8), "mode")?;
-    access(mode)?;
-    let mode_format = format(mode)?;
-    let values = array(mode.value, "value-list")?;
-    let mut straight = None;
-    let mut native_values = Vec::new();
-    for item in values {
-        let value = item
-            .get("value")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or(CapabilityError::InvalidDescription("fan mode enumeration"))?;
-        let name = string(item, "description")?;
-        if name.eq_ignore_ascii_case("Straight Wind") && straight.replace(value).is_some() {
-            return Err(CapabilityError::InvalidDescription("fan mode enumeration"));
-        }
-        native_values.push(value);
-    }
-    let mode = FanModeBinding::new(
-        binding(service, mode),
-        mode_format,
-        straight.ok_or(CapabilityError::InvalidDescription("fan straight mode"))?,
-        native_values,
-    )?;
-    let services = instance
-        .services
-        .iter()
-        .filter(|s| {
-            s.urn
-                .matches("dmaker-spec", "service", "dm-service", 0x7802)
-                && s.urn.vendor == instance.urn.vendor
-        })
-        .collect::<Vec<_>>();
-    let [vendor] = services.as_slice() else {
-        return Err(CapabilityError::MissingFunction("dm-service"));
-    };
-    let speed = required(
-        vendor,
-        |p| {
-            p.urn.matches("dmaker-spec", "property", "speed-level", 1)
-                && p.urn.vendor == instance.urn.vendor
-        },
-        "speed-level",
-    )?;
-    access(speed)?;
-    let range = array(speed.value, "value-range")?;
-    if range
-        != [
-            serde_json::json!(1),
-            serde_json::json!(100),
-            serde_json::json!(1),
-        ]
-    {
-        return Err(CapabilityError::InvalidDescription("fan speed range"));
-    }
-    let speed = FanSpeedBinding::new(
-        binding(vendor, speed),
-        format(speed)?,
-        FanSpeedEncoding::Range {
-            min: 1,
-            max: 100,
-            step: 1,
-        },
-    )?;
-    Ok((mode, speed))
 }
 
 fn generic_speed(
@@ -290,7 +209,7 @@ fn level_order(description: &str) -> Option<(u8, u32)> {
     (order > 0).then_some((1, order))
 }
 
-fn required<'a>(
+pub(super) fn required<'a>(
     service: &'a Service<'a>,
     matches: impl Fn(&Property<'_>) -> bool,
     name: &'static str,
@@ -308,7 +227,7 @@ fn required<'a>(
         )),
     }
 }
-fn binding(service: &Service<'_>, property: &Property<'_>) -> PropertyBinding {
+pub(super) fn binding(service: &Service<'_>, property: &Property<'_>) -> PropertyBinding {
     PropertyBinding {
         siid: service.iid,
         piid: property.iid,
@@ -321,7 +240,7 @@ fn boolean(property: &Property<'_>) -> Result<(), CapabilityError> {
     }
     Ok(())
 }
-fn access(property: &Property<'_>) -> Result<(), CapabilityError> {
+pub(super) fn access(property: &Property<'_>) -> Result<(), CapabilityError> {
     let access = array(property.value, "access")?;
     if access.iter().any(|item| item.as_str().is_none()) {
         return Err(CapabilityError::InvalidDescription("access"));
@@ -333,7 +252,7 @@ fn access(property: &Property<'_>) -> Result<(), CapabilityError> {
     }
     Ok(())
 }
-fn format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
+pub(super) fn format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
     match string(property.value, "format")? {
         "uint8" => Ok(NumericFormat::Uint8),
         "uint16" => Ok(NumericFormat::Uint16),

@@ -3,7 +3,6 @@ mod description;
 mod fan;
 mod group;
 mod light;
-pub(crate) mod ls2307;
 mod model;
 mod native;
 mod outlet;
@@ -13,7 +12,6 @@ mod sensor;
 mod source;
 mod state_sensor;
 pub(crate) use group::parse_group;
-pub(crate) use ls2307::is_type as is_ls2307_type;
 pub(crate) use model::FanSpeedEncoding;
 pub use model::{
     AppliedPatch, BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding,
@@ -47,70 +45,50 @@ pub fn parse_device_for_model(
     let (mut functions, refresh_trigger) =
         outlet::candidates(model, &description, &mut diagnostics, &mut patches);
     for service in &description.services {
-        let (kind, candidate) = if service.urn.standard("service", "light", 0x7802) {
-            (
-                "light",
-                Some(light::parse_light_service(
+        let diagnostic = |kind: &str, error: CapabilityError| RecognitionDiagnostic {
+            target: format!("{kind}:{}", service.iid),
+            reason: error.to_string(),
+        };
+        let candidate = if service.urn.standard("service", "light", 0x7802) {
+            Some(
+                light::parse_light_service(service, &mut diagnostics)
+                    .map_err(|error| diagnostic("light", error)),
+            )
+        } else if service.urn.standard("service", "fan", 0x7808) {
+            Some(
+                fan::parse_fan_service(
                     model,
                     &description,
                     service,
                     &mut diagnostics,
                     &mut patches,
-                )),
-            )
-        } else if service.urn.standard("service", "fan", 0x7808) {
-            (
-                "fan",
-                Some(
-                    fan::parse_fan_service(model, &description, service, &mut diagnostics).map(
-                        |fan| {
-                            ParsedFunction::fan_control(format!("fan:{}", service.iid), "风扇", fan)
-                        },
-                    ),
-                ),
+                )
+                .map(|fan| {
+                    ParsedFunction::fan_control(format!("fan:{}", service.iid), "风扇", fan)
+                }),
             )
         } else if service.urn.standard("service", "curtain", 0x7816) {
-            ("curtain", Some(curtain::parse_curtain_service(service)))
+            Some(
+                curtain::parse_curtain_service(service)
+                    .map_err(|error| diagnostic("curtain", error)),
+            )
         } else {
-            ("", None)
+            None
         };
         if let Some(candidate) = candidate {
             match candidate {
-                Ok(function) => {
-                    if function.fan().is_some_and(|fan| fan.mode().is_some()) {
-                        patches.push(patch::DMAKER_STRAIGHT.applied(function.id()));
-                    }
-                    functions.push(function)
-                }
-                Err(error) => {
-                    let target = format!("{kind}:{}", service.iid);
-                    diagnostics.push(
-                        if kind == "fan"
-                            && patch::dmaker_identity(model, &description.urn)
-                            && fan::dmaker_semantics(&description, service)
-                        {
-                            patch::DMAKER_STRAIGHT.failed(target, &error)
-                        } else {
-                            RecognitionDiagnostic {
-                                target,
-                                reason: error.to_string(),
-                            }
-                        },
-                    );
-                }
+                Ok(function) => functions.push(function),
+                Err(diagnostic) => diagnostics.push(diagnostic),
             }
         }
     }
-    if model == ls2307::MODEL
-        && !patches.iter().any(|patch| patch.id == patch::LS2307_RGB.id)
-        && !diagnostics
-            .iter()
-            .any(|issue| issue.reason.contains(patch::LS2307_RGB.id))
-    {
-        diagnostics.push(
-            patch::LS2307_RGB.failed("light:2", "required light binding is missing or invalid"),
-        );
-    }
+    patch::ls2307::apply(
+        model,
+        &description,
+        &mut functions,
+        &mut diagnostics,
+        &mut patches,
+    );
     functions.extend(sensor::measurements(&description, &mut diagnostics));
     functions.extend(state_sensor::functions(&description, &mut diagnostics));
     let mut owners = std::collections::BTreeMap::<PropertyBinding, Vec<usize>>::new();
