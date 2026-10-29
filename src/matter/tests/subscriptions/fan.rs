@@ -187,7 +187,7 @@ fn fan_live_subscription_reports_only_changed_projections() {
 }
 
 #[test]
-fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
+fn locked_stack_fan_write_report_preserves_observations_and_concurrent_feedback() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -317,16 +317,16 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                         else {
                             panic!("expected fan request")
                         };
-                        assert_eq!(request.command, FanCommand::Speed(70));
+                        assert_eq!(request.command, FanCommand::Speed(100));
                         assert!(!request.needs_power_on());
                         request.mark_sent(FanStep::Mode).unwrap();
                         request.step_accepted().unwrap();
-                        request.mark_sent(FanStep::Speed(70)).unwrap();
+                        request.mark_sent(FanStep::Speed(100)).unwrap();
                         request.step_accepted().unwrap();
                         request.accept().unwrap();
                     };
                     let (status, ()) = futures_lite::future::zip(
-                        write_status(&client, 0x202, 2, &[0x04, 70]),
+                        write_status(&client, 0x202, 2, &[0x04, 100]),
                         accept,
                     )
                     .await;
@@ -343,7 +343,33 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                     let version_before_feedback = report_dataver(&before_feedback);
                     assert_eq!(function.snapshot().fan().unwrap(), observed);
 
-                    function.observe_fan(FanValue::Speed(70), Some(3), 3);
+                    let mut pending = Exchange::accept(&client).await.unwrap();
+                    pending.recv_fetch().await.unwrap();
+                    {
+                        let rx = pending.rx().unwrap();
+                        assert_eq!(rx.meta().proto_opcode, OpCode::ReportData as u8);
+                        let report =
+                            ReportDataResp::from_tlv(&TLVElement::new(rx.payload())).unwrap();
+                        assert_eq!(report.subscription_id, Some(id));
+                        assert!(!report.more_chunks.unwrap_or(false));
+                        let mut retained = Observed::default();
+                        retained.add(&report);
+                        assert_eq!(retained.fan[&2], (version_before_feedback, 40));
+                    }
+
+                    // Publish new feedback while the retained report still awaits
+                    // its status response. Committing it must not consume this change.
+                    function.observe_fan(FanValue::Speed(100), Some(3), 3);
+                    futures_lite::future::yield_now().await;
+                    pending
+                        .send_with(|_, buffer| {
+                            StatusResp::write(buffer, IMStatusCode::Success)?;
+                            Ok(Some(OpCode::StatusResponse.into()))
+                        })
+                        .await
+                        .unwrap();
+                    pending.acknowledge().await.unwrap();
+                    drop(pending);
                     loop {
                         let report = receive_observed(&client, id).await.unwrap();
                         assert!(
@@ -355,7 +381,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                             assert_eq!(*swing, 1);
                         }
                         if let Some((version, speed)) = report.fan.get(&2) {
-                            if *speed == 70 {
+                            if *speed == 100 {
                                 assert_ne!(*version, version_before_feedback);
                                 break;
                             }
@@ -363,7 +389,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
                         }
                     }
                     let actual_observed = function.snapshot().fan().unwrap();
-                    assert_eq!(actual_observed.speed.value, Some(70));
+                    assert_eq!(actual_observed.speed.value, Some(100));
                     assert_eq!(actual_observed.power, observed.power);
                     assert_eq!(actual_observed.mode, observed.mode);
                     assert_eq!(actual_observed.swing, observed.swing);
