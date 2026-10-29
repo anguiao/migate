@@ -12,6 +12,8 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
 };
 
+mod fan;
+
 #[derive(Default)]
 struct Wire {
     budget: Cell<usize>,

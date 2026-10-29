@@ -64,7 +64,7 @@ pub(super) struct Batch<'a> {
     pub(super) mark: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
     /// Ownership and the exact error once the request is superseded.
     pub(super) current: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
-    /// Single-light frames withdraw when their re-encode no longer matches.
+    /// An unsent property plan withdraws when its re-encode no longer matches.
     pub(super) frame_current: Option<&'a Rc<dyn Fn() -> bool>>,
 }
 
@@ -96,6 +96,9 @@ pub(super) async fn submit_properties(
     }
     if !alive(work, sink) {
         return settled(Err(CommandError::Cancelled));
+    }
+    if frame_current.is_some_and(|frame| !frame()) {
+        return BatchAttempt::Withdrawn;
     }
     let Some(path) = context.control_path(&did) else {
         return settled(Err(CommandError::Unavailable(
@@ -232,6 +235,9 @@ pub(super) async fn submit_properties(
             }
         }
         ControlPath::Cloud(credentials) => {
+            if frame_current.is_some_and(|frame| !frame()) {
+                return BatchAttempt::Withdrawn;
+            }
             if let Err(error) = mark() {
                 return settled(Err(error));
             }

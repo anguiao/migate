@@ -269,6 +269,17 @@ fn render(
                                 .map(|command| format!("    {command}")),
                         );
                     }
+                    let pending = function.pending_fan_commands();
+                    if !pending.is_empty() {
+                        let pending = pending
+                            .into_iter()
+                            .map(|command| {
+                                crate::xiaomi::adapter::CommandTarget::Fan(command).to_string()
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        lines.push(format!("    queued fan commands: {pending}."));
+                    }
                 }
                 crate::device::FunctionState::Curtain { curtain } => {
                     lines.push(format!("  {id} ({label}):"));

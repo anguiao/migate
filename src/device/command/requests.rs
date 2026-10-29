@@ -10,7 +10,7 @@ impl Function {
             self.description().kind,
             super::super::FunctionKind::Fan { .. }
         ) {
-            return Err(CommandError::Unsupported);
+            return self.execute_fan_power(command).await;
         }
         let completion = Arc::new(Completion::default());
         let light = self.description().kind.is_light();
@@ -263,6 +263,7 @@ pub enum DeviceRequest {
     Power(CommandRequest),
     Light(LightRequest),
     Curtain(super::super::CurtainRequest),
+    Fan(super::super::FanRequest),
 }
 impl DeviceRequest {
     pub(crate) fn queued_at(&self) -> Instant {
@@ -270,6 +271,7 @@ impl DeviceRequest {
             Self::Power(request) => request.queued_at(),
             Self::Light(request) => request.queued_at,
             Self::Curtain(request) => request.queued_at(),
+            Self::Fan(request) => request.queued_at(),
         }
     }
 }
@@ -278,6 +280,12 @@ impl CommandReceiver {
     pub async fn next_operation(&mut self) -> Option<DeviceRequest> {
         if self.function.description().kind == super::super::FunctionKind::Curtain {
             return self.next_curtain_operation().await;
+        }
+        if matches!(
+            self.function.description().kind,
+            super::super::FunctionKind::Fan { .. }
+        ) {
+            return self.next_fan_operation().await;
         }
         self.wait_active().await;
         loop {

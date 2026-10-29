@@ -307,7 +307,8 @@ impl Rig {
                     || records.iter().any(|record| {
                         record.device().key().id == did
                             && (record.device().functions()[0].lighting().is_some()
-                                || record.device().functions()[0].curtain().is_some())
+                                || record.device().functions()[0].curtain().is_some()
+                                || record.device().functions()[0].fan().is_some())
                     });
                 if light {
                     state

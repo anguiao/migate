@@ -135,6 +135,7 @@ pub enum CommandTarget {
     Power(bool),
     Light(crate::device::LightTarget),
     Curtain(crate::device::CurtainCommand),
+    Fan(crate::device::FanCommand),
 }
 impl fmt::Display for CommandTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -142,6 +143,13 @@ impl fmt::Display for CommandTarget {
             Self::Power(value) => f.write_str(if *value { "on" } else { "off" }),
             Self::Curtain(crate::device::CurtainCommand::Target(value)) => write!(f, "{value}%"),
             Self::Curtain(crate::device::CurtainCommand::Stop) => f.write_str("stop"),
+            Self::Fan(crate::device::FanCommand::Power(value)) => {
+                write!(f, "power {}", if *value { "on" } else { "off" })
+            }
+            Self::Fan(crate::device::FanCommand::Speed(value)) => write!(f, "speed {value}%"),
+            Self::Fan(crate::device::FanCommand::Swing(value)) => {
+                write!(f, "swing {}", if *value { "on" } else { "off" })
+            }
             Self::Light(target) => {
                 use crate::device::LightColorTarget;
                 let mut fields = Vec::new();
@@ -171,6 +179,8 @@ pub struct CommandStatus {
     pub binding: PropertyBinding,
     pub target: CommandTarget,
     pub properties: Vec<(PropertyBinding, serde_json::Value)>,
+    /// Paths of the individual fan writes, in the same order as properties.
+    pub fan_paths: Vec<PathKind>,
     pub actual_path: Option<PathKind>,
     pub result: Option<Result<(), CommandError>>,
 }
@@ -182,6 +192,17 @@ impl CommandStatus {
         if matches!(self.target, CommandTarget::Power(_)) {
             let binding = self.properties[0].0;
             return format!("{}.{}", binding.siid, binding.piid);
+        }
+        if matches!(self.target, CommandTarget::Fan(_)) {
+            return self
+                .properties
+                .iter()
+                .zip(&self.fan_paths)
+                .map(|((binding, value), path)| {
+                    format!("{}.{}={value} ({path})", binding.siid, binding.piid)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
         }
         self.properties
             .iter()

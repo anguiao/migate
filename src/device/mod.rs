@@ -1,6 +1,7 @@
 mod command;
 mod curtain_command;
 mod curtain_projection;
+mod fan_command;
 mod light_command;
 mod light_observation;
 mod model;
@@ -12,6 +13,8 @@ pub use command::{
     LightActionDiagnostics, LightDimension, LightRequest,
 };
 pub use curtain_command::{CurtainAction, CurtainCommand, CurtainRequest};
+pub(crate) use fan_command::FanStep;
+pub use fan_command::{FanAction, FanCommand, FanRequest};
 pub use light_command::{LightColorTarget, LightTarget};
 pub(crate) use model::mired_span;
 pub use model::{

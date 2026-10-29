@@ -23,6 +23,7 @@ use std::{
 };
 
 mod curtain;
+mod fan;
 mod feedback;
 mod properties;
 use feedback::LightFeedback;
@@ -176,6 +177,7 @@ impl Commands {
             binding,
             target,
             properties,
+            fan_paths: Vec::new(),
             actual_path: None,
             result: None,
         };
@@ -198,6 +200,7 @@ impl Commands {
             status: RefCell::new(status),
             queued_at,
             sent_at: Cell::new(None),
+            fan_step: RefCell::new(None),
         }))
     }
     pub(super) fn snapshot(
@@ -234,8 +237,12 @@ struct CommandOperation {
     status: RefCell<CommandStatus>,
     queued_at: Instant,
     sent_at: Cell<Option<Instant>>,
+    fan_step: RefCell<Option<(PropertyBinding, serde_json::Value)>>,
 }
 impl CommandOperation {
+    fn fan_step(&self, property: (PropertyBinding, serde_json::Value)) {
+        *self.fan_step.borrow_mut() = Some(property);
+    }
     fn properties(&self, properties: Vec<(PropertyBinding, serde_json::Value)>) {
         let mut status = self.status.borrow_mut();
         if status.actual_path.is_some() {
@@ -259,13 +266,22 @@ impl CommandOperation {
     fn submitted(&self, path: PathKind) {
         let status = {
             let mut status = self.status.borrow_mut();
-            if status.result.is_some() || status.actual_path.is_some() {
+            if status.result.is_some() {
+                return;
+            }
+            if let Some(property) = self.fan_step.borrow_mut().take() {
+                status.binding = property.0;
+                status.properties.push(property);
+                status.fan_paths.push(path);
+            } else if status.actual_path.is_some() {
                 return;
             }
             status.actual_path = Some(path);
             status.clone()
         };
-        self.sent_at.set(Some(Instant::now()));
+        if self.sent_at.get().is_none() {
+            self.sent_at.set(Some(Instant::now()));
+        }
         if let Some(entry) = self
             .commands
             .records
@@ -497,11 +513,12 @@ async fn send_owned(
         .unwrap()
         .lighting()
         .is_some();
-    let gate = (light || matches!(&request, DeviceRequest::Curtain(_))).then(|| {
-        context
-            .write_gates
-            .for_device(&work.key.id, context.clock.clone())
-    });
+    let gate = (light || matches!(&request, DeviceRequest::Curtain(_) | DeviceRequest::Fan(_)))
+        .then(|| {
+            context
+                .write_gates
+                .for_device(&work.key.id, context.clock.clone())
+        });
     let completion = Rc::new((Cell::new(false), Event::new()));
     let done = completion.clone();
     let owner = context.clone();
@@ -512,6 +529,9 @@ async fn send_owned(
             match request {
                 DeviceRequest::Curtain(request) => {
                     curtain::send(request, owner, work, sink, &id, gate).await
+                }
+                DeviceRequest::Fan(request) => {
+                    fan::send(request, owner, work, sink, &id, gate).await
                 }
                 request => lighting::send(request, owner, work, sink, &id, gate).await,
             }

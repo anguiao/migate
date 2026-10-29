@@ -10,14 +10,18 @@ use std::sync::{Arc, Mutex};
 enum RuntimeValue {
     Control(Box<ControlRuntime>),
     Curtain(Box<CurtainRuntime>),
+    Fan(Box<FanRuntime>),
     Measurement(MeasurementSnapshot),
     StateSensor(super::StateSnapshot),
 }
 struct ControlRuntime {
     power: Power,
     lighting: Option<super::LightSnapshot>,
-    fan: Option<super::FanSnapshot>,
     commands: CommandCoordinator,
+}
+struct FanRuntime {
+    snapshot: super::FanSnapshot,
+    commands: super::fan_command::FanCoordinator,
 }
 struct CurtainRuntime {
     snapshot: super::CurtainSnapshot,
@@ -55,13 +59,21 @@ impl RuntimeState {
             revision: 0,
         }
     }
-    fn control(lighting: Option<super::LightSnapshot>, fan: Option<super::FanSnapshot>) -> Self {
+    fn control(lighting: Option<super::LightSnapshot>) -> Self {
         Self {
             value: RuntimeValue::Control(Box::new(ControlRuntime {
                 power: Power::Unknown,
                 lighting,
-                fan,
                 commands: CommandCoordinator::new(),
+            })),
+            revision: 0,
+        }
+    }
+    fn fan() -> Self {
+        Self {
+            value: RuntimeValue::Fan(Box::new(FanRuntime {
+                snapshot: super::FanSnapshot::default(),
+                commands: super::fan_command::FanCoordinator::default(),
             })),
             revision: 0,
         }
@@ -90,8 +102,26 @@ impl RuntimeState {
     fn has_control_state(&self) -> bool {
         matches!(
             self.value,
-            RuntimeValue::Control(_) | RuntimeValue::Curtain(_)
+            RuntimeValue::Control(_) | RuntimeValue::Curtain(_) | RuntimeValue::Fan(_)
         )
+    }
+    pub(super) fn fan_commands(&self) -> Option<&super::fan_command::FanCoordinator> {
+        match &self.value {
+            RuntimeValue::Fan(fan) => Some(&fan.commands),
+            _ => None,
+        }
+    }
+    pub(super) fn fan_commands_mut(&mut self) -> Option<&mut super::fan_command::FanCoordinator> {
+        match &mut self.value {
+            RuntimeValue::Fan(fan) => Some(&mut fan.commands),
+            _ => None,
+        }
+    }
+    pub(super) fn fan_power(&self) -> Option<bool> {
+        match &self.value {
+            RuntimeValue::Fan(fan) => fan.snapshot.power.value,
+            _ => None,
+        }
     }
     pub(super) fn curtain_commands(&self) -> Option<&super::curtain_command::CurtainCoordinator> {
         match &self.value {
@@ -126,6 +156,7 @@ impl RuntimeState {
         match &self.value {
             RuntimeValue::Control(control) => Some(&control.commands),
             RuntimeValue::Curtain(_)
+            | RuntimeValue::Fan(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -134,6 +165,7 @@ impl RuntimeState {
         match &mut self.value {
             RuntimeValue::Control(control) => Some(&mut control.commands),
             RuntimeValue::Curtain(_)
+            | RuntimeValue::Fan(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -142,6 +174,7 @@ impl RuntimeState {
         match &self.value {
             RuntimeValue::Control(control) => Some(control.power),
             RuntimeValue::Curtain(_)
+            | RuntimeValue::Fan(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -155,6 +188,7 @@ impl RuntimeState {
         match &self.value {
             RuntimeValue::Control(control) => Some((control.power, control.lighting)),
             RuntimeValue::Curtain(_)
+            | RuntimeValue::Fan(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -169,6 +203,7 @@ impl RuntimeState {
         match &mut self.value {
             RuntimeValue::Control(control) => control.lighting.as_mut(),
             RuntimeValue::Curtain(_)
+            | RuntimeValue::Fan(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -176,9 +211,10 @@ impl RuntimeState {
     fn measurement_mut(&mut self) -> Option<&mut MeasurementSnapshot> {
         match &mut self.value {
             RuntimeValue::Measurement(measurement) => Some(measurement),
-            RuntimeValue::Control(_) | RuntimeValue::Curtain(_) | RuntimeValue::StateSensor(_) => {
-                None
-            }
+            RuntimeValue::Control(_)
+            | RuntimeValue::Curtain(_)
+            | RuntimeValue::Fan(_)
+            | RuntimeValue::StateSensor(_) => None,
         }
     }
 }
@@ -367,6 +403,9 @@ impl PhysicalDevice {
                         let changed = state.update_curtain_projection(|p| p.clear_pending_target());
                         function.notify_curtain_projection(changed);
                     }
+                    if let Some(commands) = state.fan_commands_mut() {
+                        commands.unavailable(error.clone());
+                    }
                     if light {
                         function.notify_light_actions();
                     }
@@ -412,6 +451,9 @@ impl PhysicalDevice {
                 let changed = state.update_curtain_projection(|p| p.clear_pending_target());
                 function.notify_curtain_projection(changed);
             }
+            if let Some(commands) = state.fan_commands_mut() {
+                commands.unavailable(super::CommandError::Cancelled);
+            }
         }
     }
 
@@ -436,16 +478,14 @@ impl Function {
         });
         let state = if description.kind == super::FunctionKind::Curtain {
             RuntimeState::curtain()
+        } else if matches!(description.kind, super::FunctionKind::Fan { .. }) {
+            RuntimeState::fan()
         } else if description.kind.is_measurement() {
             RuntimeState::measurement_state()
         } else if description.kind.is_state_sensor() {
             RuntimeState::state_sensor()
         } else {
-            RuntimeState::control(
-                lighting,
-                matches!(description.kind, super::FunctionKind::Fan { .. })
-                    .then(super::FanSnapshot::default),
-            )
+            RuntimeState::control(lighting)
         };
         let controllable = state.has_control_state();
         let function = Self(Arc::new(Inner {
@@ -492,10 +532,8 @@ impl Function {
                     lighting: control.lighting.expect("light has lighting state"),
                 }
             }
-            (super::FunctionKind::Fan { .. }, RuntimeValue::Control(control)) => {
-                FunctionState::Fan {
-                    fan: control.fan.expect("fan has fan state"),
-                }
+            (super::FunctionKind::Fan { .. }, RuntimeValue::Fan(fan)) => {
+                FunctionState::Fan { fan: fan.snapshot }
             }
             (super::FunctionKind::Curtain, RuntimeValue::Curtain(curtain)) => {
                 FunctionState::Curtain {
@@ -673,6 +711,23 @@ impl Function {
         source_time: Option<i64>,
         received_at: i64,
     ) {
+        self.apply_fan_observation(value, source_time, received_at, true);
+    }
+    pub(crate) fn observe_cached_fan(
+        &self,
+        value: super::FanValue,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) {
+        self.apply_fan_observation(value, source_time, received_at, false);
+    }
+    fn apply_fan_observation(
+        &self,
+        value: super::FanValue,
+        source_time: Option<i64>,
+        received_at: i64,
+        fresh: bool,
+    ) {
         fn update<T: Copy + PartialEq>(
             current: &mut super::FanObservation<T>,
             value: T,
@@ -688,21 +743,22 @@ impl Function {
             changed
         }
         let mut state = self.0.state.lock().unwrap();
-        let RuntimeValue::Control(control) = &mut state.value else {
-            unreachable!("fan function has control state")
+        let RuntimeValue::Fan(fan) = &mut state.value else {
+            unreachable!("fan function has fan state")
         };
-        let fan = control.fan.as_mut().expect("fan has fan state");
         let changed = match value {
             super::FanValue::Power(value) => {
-                control.power = value.into();
-                update(&mut fan.power, value, source_time, received_at)
+                fan.commands.observe_power(value, fresh);
+                update(&mut fan.snapshot.power, value, source_time, received_at)
             }
-            super::FanValue::Mode(value) => update(&mut fan.mode, value, source_time, received_at),
+            super::FanValue::Mode(value) => {
+                update(&mut fan.snapshot.mode, value, source_time, received_at)
+            }
             super::FanValue::Speed(value) => {
-                update(&mut fan.speed, value, source_time, received_at)
+                update(&mut fan.snapshot.speed, value, source_time, received_at)
             }
             super::FanValue::Swing(value) => {
-                update(&mut fan.swing, value, source_time, received_at)
+                update(&mut fan.snapshot.swing, value, source_time, received_at)
             }
         };
         if changed {
@@ -823,6 +879,9 @@ impl Function {
             commands.close(light, super::CommandError::Cancelled);
         }
         if let Some(commands) = state.curtain_commands_mut() {
+            commands.close(super::CommandError::Cancelled);
+        }
+        if let Some(commands) = state.fan_commands_mut() {
             commands.close(super::CommandError::Cancelled);
         }
         if light {

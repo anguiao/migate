@@ -275,11 +275,12 @@ impl DeviceWork {
         if !matches!(origin, Origin::Read) {
             self.refresh.borrow_mut().satisfy_baseline(id, binding);
         }
-        self.physical().function(id).unwrap().observe_fan(
-            value,
-            observation.source_time,
-            observation.received_at,
-        );
+        let function = self.physical().function(id).unwrap();
+        if matches!(origin, Origin::Cache) {
+            function.observe_cached_fan(value, observation.source_time, observation.received_at);
+        } else {
+            function.observe_fan(value, observation.source_time, observation.received_at);
+        }
         self.property_sources.borrow_mut().insert(
             super::super::observations::key(id, binding),
             observation.source,

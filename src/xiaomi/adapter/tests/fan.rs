@@ -37,6 +37,37 @@ fn peer() -> Rc<Peer> {
     }
     peer
 }
+mod commands;
+mod failures;
+mod freshness;
+mod lifecycle;
+
+fn cloud_rig() -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
+    use crate::xiaomi::adapter::notifications::NotificationConnector;
+    let rig = rig();
+    let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
+    rig.source
+        .context
+        .notification_connector
+        .set(NotificationConnector::Plaintext(
+            listener.get_ref().local_addr().unwrap(),
+        ));
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.online.insert("one".into());
+        for (binding, value) in [
+            (POWER, json!(false)),
+            (MODE, json!(1)),
+            (SPEED, json!(40)),
+            (SWING, json!(false)),
+        ] {
+            cloud
+                .raw_values
+                .insert(("one".into(), binding.siid, binding.piid), value);
+        }
+    }
+    (rig, listener, Rc::new(CloudPeer::default()))
+}
 #[test]
 fn fan_reads_and_subscribes_each_independent_native_property() {
     block_on(rig().run(|c| async move {
