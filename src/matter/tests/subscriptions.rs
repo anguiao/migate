@@ -21,14 +21,14 @@ use rs_matter::{
     error::Error,
     fabric::GroupKeyMapping,
     im::{
-        AttrPath, AttrResp, CmdDataTag, CmdResp, EventPath, EventResp, GenericPath, IMStatusCode,
-        InteractionModel, InteractionModelState, OpCode, StatusResp,
+        AttrDataTag, AttrPath, AttrResp, CmdDataTag, CmdResp, EventPath, EventResp, GenericPath,
+        IMStatusCode, InteractionModel, InteractionModelState, OpCode, StatusResp,
         client::{ImClient, SubscribeOutcome, TxOutcome},
         encoding::ReportDataResp,
     },
     persist::PERSISTENT_SUBSCRIPTIONS_START,
     respond::DefaultResponder,
-    tlv::{FromTLV, TLVElement, TLVTag, TLVWrite},
+    tlv::{FromTLV, TLVElement, TLVTag, TLVWrite, ToTLV},
     transport::{
         exchange::{Exchange, MatterBuffers},
         network::{Address, NetworkReceive, NetworkSend, NoNetwork},
@@ -227,6 +227,56 @@ async fn wait_committed(state: &InteractionModelState) {
     {
         futures_lite::future::yield_now().await;
     }
+}
+
+async fn write_status(
+    client: &Matter<'_>,
+    cluster: u32,
+    attribute: u32,
+    bytes: &[u8],
+) -> IMStatusCode {
+    let exchange = Exchange::initiate(
+        client,
+        test_only_crypto(),
+        NonZeroU8::new(1).unwrap(),
+        SERVER_ID,
+    )
+    .await
+    .unwrap();
+    let mut sender = exchange.write_sender(None).await.unwrap();
+    let response = loop {
+        match sender.tx().await.unwrap() {
+            TxOutcome::BuildRequest(builder) => {
+                let value = TLVElement::new(bytes);
+                sender = builder
+                    .write_requests()
+                    .unwrap()
+                    .push()
+                    .unwrap()
+                    .path(2, cluster, attribute)
+                    .unwrap()
+                    .data(|writer| value.to_tlv(&TLVTag::Context(AttrDataTag::Data as u8), writer))
+                    .unwrap()
+                    .end()
+                    .unwrap()
+                    .end()
+                    .unwrap()
+                    .end()
+                    .unwrap();
+            }
+            TxOutcome::GotResponse(response) => break response,
+        }
+    };
+    response
+        .response()
+        .unwrap()
+        .write_responses
+        .iter()
+        .next()
+        .unwrap()
+        .unwrap()
+        .status
+        .status
 }
 
 async fn invoke_status(client: &Matter<'_>, command: u32, valid: bool, expected: IMStatusCode) {

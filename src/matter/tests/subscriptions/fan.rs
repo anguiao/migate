@@ -1,54 +1,9 @@
+use super::super::support::{Context, read_bytes, report_dataver, report_value};
 use super::*;
 use crate::device::{
     DeviceKey, DeviceRequest, FanCommand, FanStep, FanValue, FunctionDescription, FunctionKind,
     PhysicalDevice, PhysicalDeviceDescription,
 };
-use rs_matter::{im::AttrDataTag, tlv::ToTLV};
-
-async fn write_status(client: &Matter<'_>, attribute: u32, bytes: &[u8]) -> IMStatusCode {
-    let exchange = Exchange::initiate(
-        client,
-        test_only_crypto(),
-        NonZeroU8::new(1).unwrap(),
-        SERVER_ID,
-    )
-    .await
-    .unwrap();
-    let mut sender = exchange.write_sender(None).await.unwrap();
-    let response = loop {
-        match sender.tx().await.unwrap() {
-            TxOutcome::BuildRequest(builder) => {
-                let value = TLVElement::new(bytes);
-                sender = builder
-                    .write_requests()
-                    .unwrap()
-                    .push()
-                    .unwrap()
-                    .path(2, 0x202, attribute)
-                    .unwrap()
-                    .data(|writer| value.to_tlv(&TLVTag::Context(AttrDataTag::Data as u8), writer))
-                    .unwrap()
-                    .end()
-                    .unwrap()
-                    .end()
-                    .unwrap()
-                    .end()
-                    .unwrap();
-            }
-            TxOutcome::GotResponse(response) => break response,
-        }
-    };
-    let status = response
-        .response()
-        .unwrap()
-        .write_responses
-        .iter()
-        .next()
-        .unwrap()
-        .unwrap();
-    status.status.status
-}
-
 async fn no_report(client: &Matter<'_>, id: u32) {
     or(
         async {
@@ -178,7 +133,10 @@ fn fan_live_subscription_reports_only_changed_projections() {
                         (5, &[0x04, 101][..], IMStatusCode::ConstraintError),
                         (8, &[0x04, 0x80][..], IMStatusCode::ConstraintError),
                     ] {
-                        assert_eq!(write_status(&client, attribute, bytes).await, expected);
+                        assert_eq!(
+                            write_status(&client, 0x202, attribute, bytes).await,
+                            expected
+                        );
                         assert!(
                             futures_lite::future::poll_once(receivers[0].next_operation())
                                 .await
@@ -246,7 +204,7 @@ fn fan_live_subscription_reports_only_changed_projections() {
 }
 
 #[test]
-fn successful_matter_write_may_report_retained_value_before_feedback() {
+fn locked_stack_fan_write_report_preserves_observations_and_feedback() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -279,7 +237,11 @@ fn successful_matter_write_may_report_retained_value_before_feedback() {
                 .unwrap(),
             );
             device.set_availability(Availability::Available);
-            device.functions()[0].observe_fan(FanValue::Swing(false), Some(1), 1);
+            let function = &device.functions()[0];
+            function.observe_fan(FanValue::Power(true), Some(1), 1);
+            function.observe_fan(FanValue::Speed(40), Some(1), 1);
+            function.observe_fan(FanValue::Mode(1), Some(1), 1);
+            function.observe_fan(FanValue::Swing(false), Some(1), 1);
             let handler = model_handler(vec![single_entry(&device)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
@@ -310,13 +272,13 @@ fn successful_matter_write_may_report_retained_value_before_feedback() {
                     panic!("fan write services exited");
                 };
                 let controller = async {
-                    let paths = [AttrPath::from_gp(&GenericPath::new(
-                        Some(2),
-                        Some(0x202),
-                        Some(8),
-                    ))];
+                    let paths = [2, 8].map(|attribute| {
+                        AttrPath::from_gp(&GenericPath::new(Some(2), Some(0x202), Some(attribute)))
+                    });
                     let (id, initial) = subscribe_paths(&client, &paths).await.unwrap();
                     wait_committed(&state).await;
+                    assert_eq!(values(&initial), [(2, 40), (8, 0)]);
+                    let observed = function.snapshot().fan().unwrap();
                     let accept = async {
                         let DeviceRequest::Fan(request) =
                             receivers[0].next_operation().await.unwrap()
@@ -328,21 +290,118 @@ fn successful_matter_write_may_report_retained_value_before_feedback() {
                         request.step_accepted().unwrap();
                         request.accept().unwrap();
                     };
-                    let (status, ()) =
-                        futures_lite::future::zip(write_status(&client, 8, &[0x04, 1]), accept)
-                            .await;
+                    let (status, ()) = futures_lite::future::zip(
+                        write_status(&client, 0x202, 8, &[0x04, 1]),
+                        accept,
+                    )
+                    .await;
                     assert_eq!(status, IMStatusCode::Success);
+                    assert_eq!(function.snapshot().fan().unwrap(), observed);
+                    assert!(
+                        futures_lite::future::poll_once(receivers[0].next_operation())
+                            .await
+                            .is_none()
+                    );
+
+                    // Exercise the retained-value report generated by the locked
+                    // stack; individual writes are not required to produce one.
                     let retained = receive_observed(&client, id).await.unwrap();
-                    assert_eq!(retained.fan[&8], initial.fan[&8]);
-                    assert_eq!(
-                        device.functions()[0].snapshot().fan().unwrap().swing.value,
-                        Some(false)
+                    assert_eq!(retained.fan[&8].1, 0);
+                    assert_eq!(function.snapshot().fan().unwrap(), observed);
+                    assert!(
+                        futures_lite::future::poll_once(receivers[0].next_operation())
+                            .await
+                            .is_none()
                     );
                     wait_committed(&state).await;
-                    device.functions()[0].observe_fan(FanValue::Swing(true), Some(2), 2);
-                    let actual = receive_observed(&client, id).await.unwrap();
-                    assert_eq!(actual.fan[&8].1, 1);
-                    assert_ne!(actual.fan[&8].0, retained.fan[&8].0);
+                    function.observe_fan(FanValue::Swing(true), Some(2), 2);
+                    loop {
+                        let report = receive_observed(&client, id).await.unwrap();
+                        assert!(
+                            futures_lite::future::poll_once(receivers[0].next_operation())
+                                .await
+                                .is_none()
+                        );
+                        if let Some((_, speed)) = report.fan.get(&2) {
+                            assert_eq!(*speed, 40);
+                        }
+                        if let Some((version, swing)) = report.fan.get(&8) {
+                            if *swing == 1 {
+                                assert_ne!(*version, retained.fan[&8].0);
+                                break;
+                            }
+                            assert_eq!(*swing, 0);
+                        }
+                    }
+                    let actual_observed = function.snapshot().fan().unwrap();
+                    assert_eq!(actual_observed.swing.value, Some(true));
+                    assert_eq!(actual_observed.power, observed.power);
+                    assert_eq!(actual_observed.mode, observed.mode);
+                    assert_eq!(actual_observed.speed, observed.speed);
+                    assert!(
+                        futures_lite::future::poll_once(receivers[0].next_operation())
+                            .await
+                            .is_none()
+                    );
+                    wait_committed(&state).await;
+
+                    let observed = function.snapshot().fan().unwrap();
+                    let accept = async {
+                        let DeviceRequest::Fan(request) =
+                            receivers[0].next_operation().await.unwrap()
+                        else {
+                            panic!("expected fan request")
+                        };
+                        assert_eq!(request.command, FanCommand::Speed(70));
+                        assert!(!request.needs_power_on());
+                        request.mark_sent(FanStep::Mode).unwrap();
+                        request.step_accepted().unwrap();
+                        request.mark_sent(FanStep::Speed(70)).unwrap();
+                        request.step_accepted().unwrap();
+                        request.accept().unwrap();
+                    };
+                    let (status, ()) = futures_lite::future::zip(
+                        write_status(&client, 0x202, 2, &[0x04, 70]),
+                        accept,
+                    )
+                    .await;
+                    assert_eq!(status, IMStatusCode::Success);
+                    assert_eq!(function.snapshot().fan().unwrap(), observed);
+                    assert!(
+                        futures_lite::future::poll_once(receivers[0].next_operation())
+                            .await
+                            .is_none()
+                    );
+                    let read = Context::new(&im, 0x202, 2);
+                    let before_feedback = read_bytes(&handler, &read).await.unwrap();
+                    assert_eq!(report_value(&before_feedback).u8().unwrap(), 40);
+                    let version_before_feedback = report_dataver(&before_feedback);
+                    assert_eq!(function.snapshot().fan().unwrap(), observed);
+
+                    function.observe_fan(FanValue::Speed(70), Some(3), 3);
+                    loop {
+                        let report = receive_observed(&client, id).await.unwrap();
+                        assert!(
+                            futures_lite::future::poll_once(receivers[0].next_operation())
+                                .await
+                                .is_none()
+                        );
+                        if let Some((_, swing)) = report.fan.get(&8) {
+                            assert_eq!(*swing, 1);
+                        }
+                        if let Some((version, speed)) = report.fan.get(&2) {
+                            if *speed == 70 {
+                                assert_ne!(*version, version_before_feedback);
+                                break;
+                            }
+                            assert_eq!(*speed, 40);
+                        }
+                    }
+                    let actual_observed = function.snapshot().fan().unwrap();
+                    assert_eq!(actual_observed.speed.value, Some(70));
+                    assert_eq!(actual_observed.power, observed.power);
+                    assert_eq!(actual_observed.mode, observed.mode);
+                    assert_eq!(actual_observed.swing, observed.swing);
                 };
                 or(
                     services,
