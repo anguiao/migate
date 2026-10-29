@@ -1,9 +1,9 @@
+use super::{compose_group_light, effective_temperature_range, narrowed_profile};
 use crate::device::{
     DeviceKey, FunctionKey, LightProfile, LightProfileKind, NumericRange, TemperatureInterval,
 };
 use crate::xiaomi::capability::{
-    NativeDescription, ParsedDevice, effective_temperature_range, parse_device_for_model,
-    parse_group, repaired_profile,
+    NativeDescription, ParsedDevice, parse_device_for_model, parse_group,
 };
 use serde_json::{Value, json};
 
@@ -62,10 +62,15 @@ fn test_plan<'a>(
             function,
         ));
     }
-    super::super::plan_rgb_repair(
-        group,
-        resolved.iter().map(|(key, function)| (key, *function)),
-    )
+    let members = resolved
+        .iter()
+        .map(|(key, function)| (key, *function))
+        .collect::<Vec<_>>();
+    let composed = compose_group_light(group.unique_light().unwrap(), &members, None);
+    match composed.reason {
+        Some(reason) => Err(reason),
+        None => Ok(composed.repair),
+    }
 }
 
 fn member_temperature(device: &ParsedDevice) -> TemperatureInterval {
@@ -100,7 +105,17 @@ fn ls2307_members_extend_group_profile_and_narrow_temperature() {
         ],
     );
     assert_eq!(logical, TemperatureInterval::new(2700, 6500).unwrap());
-    let profile = repaired_profile(logical);
+    let a_key = FunctionKey::new(a.device().key().clone(), "light:2");
+    let b_key = FunctionKey::new(b.device().key().clone(), "light:2");
+    let profile = compose_group_light(
+        group.unique_light().unwrap(),
+        &[
+            (&a_key, a.device().unique_light().unwrap()),
+            (&b_key, b.device().unique_light().unwrap()),
+        ],
+        None,
+    )
+    .profile;
     assert!(profile.has_rgb());
     assert_eq!(profile.temperature_interval(), Some(logical));
     assert_eq!(profile.kind(), LightProfileKind::ExtendedColor);
@@ -226,10 +241,7 @@ fn effective_range_falls_back_and_keeps_the_genuine_native_grid() {
 #[test]
 fn narrowed_profile_preserves_native_rgb_but_replaces_only_the_interval() {
     let native = LightProfile::ExtendedColor(TemperatureInterval::new(2700, 6500).unwrap());
-    let narrowed = crate::xiaomi::capability::narrowed_profile(
-        native,
-        TemperatureInterval::new(3000, 6000).unwrap(),
-    );
+    let narrowed = narrowed_profile(native, TemperatureInterval::new(3000, 6000).unwrap());
     assert_eq!(
         narrowed,
         LightProfile::ExtendedColor(TemperatureInterval::new(3000, 6000).unwrap())

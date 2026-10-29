@@ -3,9 +3,9 @@
 //! Native group bindings remain unchanged; member RGB uses the same normalized
 //! function contracts and execution policies as independent lights.
 
-use super::{ParsedDevice, ParsedFunction};
+use super::ParsedFunction;
 
-use crate::device::{FunctionKey, FunctionKind, LightProfile, TemperatureInterval};
+use crate::device::{FunctionKey, LightProfile, TemperatureInterval};
 
 /// The committed RGB repair inputs for one native group.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,7 +20,7 @@ pub(crate) struct RepairPlan {
 /// declaration when that is a valid strict narrowing; otherwise the native
 /// declared interval. The logical interval is independent of the genuine
 /// native quantization grid.
-pub(crate) fn effective_temperature_range(
+fn effective_temperature_range(
     native: TemperatureInterval,
     members: &[TemperatureInterval],
 ) -> TemperatureInterval {
@@ -36,29 +36,78 @@ pub(crate) fn effective_temperature_range(
     if min >= max || (min == native.min() && max == native.max()) {
         return native;
     }
-    TemperatureInterval::new(min, max).unwrap_or(native)
+    TemperatureInterval::new(min, max).expect("intersected valid temperature intervals")
 }
 
-/// Plan RGB enhancement using resolved, adapted member functions.
-/// `Ok(None)` means that the native group already provides RGB.
-pub(crate) fn plan_rgb_repair<'a>(
-    group: &ParsedDevice,
-    members: impl IntoIterator<Item = (&'a FunctionKey, &'a ParsedFunction)>,
-) -> Result<Option<RepairPlan>, String> {
-    let function = group
-        .unique_light()
-        .ok_or_else(|| "native group light is missing or ambiguous".to_string())?;
-    let light = function.lighting().expect("group light has bindings");
-    if light.color().is_some() {
-        return Ok(None);
+/// One source-owned composition result for a resolved native group light.
+#[derive(Debug)]
+pub(crate) struct GroupLight {
+    pub(crate) profile: LightProfile,
+    pub(crate) repair: Option<RepairPlan>,
+    pub(crate) reason: Option<String>,
+}
+
+pub(crate) fn compose_group_light(
+    group: &ParsedFunction,
+    members: &[(&FunctionKey, &ParsedFunction)],
+    unresolved: Option<&str>,
+) -> GroupLight {
+    let light = group
+        .lighting()
+        .expect("a native group has a light function");
+    let native = light.profile();
+    let profile = match native.temperature_interval() {
+        Some(interval) if unresolved.is_none() => {
+            let intervals = members
+                .iter()
+                .map(|(_, member)| {
+                    member
+                        .lighting()
+                        .expect("a resolved member is a light")
+                        .temperature()
+                        .map(|temperature| temperature.interval())
+                })
+                .collect::<Option<Vec<_>>>();
+            let interval = intervals.as_ref().map_or(interval, |members| {
+                effective_temperature_range(interval, members)
+            });
+            narrowed_profile(native, interval)
+        }
+        _ => native,
+    };
+    let plan = if light.color().is_some() {
+        Ok(None)
+    } else if !matches!(profile, LightProfile::ColorTemperature(_)) {
+        Err("native group cannot be extended with RGB".into())
+    } else if let Some(reason) = unresolved {
+        Err(reason.to_owned())
+    } else {
+        rgb_members(members).map(Some)
+    };
+    match plan {
+        Ok(Some(repair)) => GroupLight {
+            profile: LightProfile::ExtendedColor(profile.temperature_interval().unwrap()),
+            repair: Some(repair),
+            reason: None,
+        },
+        Ok(None) => GroupLight {
+            profile,
+            repair: None,
+            reason: None,
+        },
+        Err(reason) => GroupLight {
+            profile,
+            repair: None,
+            reason: Some(reason),
+        },
     }
-    if !matches!(
-        function.kind(),
-        FunctionKind::Light(LightProfile::ColorTemperature(_))
-    ) {
-        return Err("native group cannot be extended with RGB".into());
+}
+
+fn rgb_members(members: &[(&FunctionKey, &ParsedFunction)]) -> Result<RepairPlan, String> {
+    if members.is_empty() {
+        return Err("native group has no effective members".into());
     }
-    let mut keys = Vec::new();
+    let mut keys = Vec::with_capacity(members.len());
     for (key, function) in members {
         if function
             .lighting()
@@ -71,29 +120,21 @@ pub(crate) fn plan_rgb_repair<'a>(
                 key.device.id, key.id
             ));
         }
-        keys.push(key.clone());
+        keys.push((*key).clone());
     }
-    if keys.is_empty() {
-        return Err("native group has no effective members".into());
-    }
-    Ok(Some(RepairPlan { members: keys }))
-}
-
-/// The published profile after repair: native on/off, brightness and color
-/// temperature with the logical interval, plus RGB.
-pub(crate) fn repaired_profile(temperature: TemperatureInterval) -> LightProfile {
-    LightProfile::ExtendedColor(temperature)
+    Ok(RepairPlan { members: keys })
 }
 
 /// Replace only the color-temperature interval of a native-only profile with
 /// the narrowed logical interval.
-pub(crate) fn narrowed_profile(
-    native: LightProfile,
-    temperature: TemperatureInterval,
-) -> LightProfile {
+fn narrowed_profile(native: LightProfile, temperature: TemperatureInterval) -> LightProfile {
     match native {
         LightProfile::ColorTemperature(_) => LightProfile::ColorTemperature(temperature),
         LightProfile::ExtendedColor(_) => LightProfile::ExtendedColor(temperature),
         other => other,
     }
 }
+
+#[cfg(test)]
+#[path = "tests/repair.rs"]
+mod tests;

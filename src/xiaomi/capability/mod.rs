@@ -23,9 +23,7 @@ pub use model::{
     RecognitionDiagnostic, RecognitionMetadata, TemperatureBinding,
 };
 pub(crate) use native::NativeDescription;
-pub(crate) use repair::{
-    RepairPlan, effective_temperature_range, narrowed_profile, plan_rgb_repair, repaired_profile,
-};
+pub(crate) use repair::{RepairPlan, compose_group_light};
 pub(crate) use source::RawDescription;
 pub use state_sensor::{
     EventArgument, EventBinding, MotionBinding, StateBinding, StateMapping, StateValue,

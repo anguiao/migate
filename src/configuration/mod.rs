@@ -555,26 +555,10 @@ fn derive_served(
             repair_reason: None,
         };
     };
-    let Some(function) = native.device().unique_light() else {
-        return ServedDevice {
-            description,
-            repair: None,
-            repair_reason: Some("native group light is missing or ambiguous".into()),
-        };
-    };
-    let light = function.lighting().expect("group light has bindings");
-    let native_profile = light.profile();
-    let native_rgb = light.color().is_some();
-    let Some(native_interval) = light
-        .temperature()
-        .map(|temperature| temperature.interval())
-    else {
-        return ServedDevice {
-            description,
-            repair: None,
-            repair_reason: (!native_rgb).then(|| "native group cannot be extended with RGB".into()),
-        };
-    };
+    let function = native
+        .device()
+        .unique_light()
+        .expect("a confirmed native group has one light");
     let members = resolved
         .members
         .iter()
@@ -588,51 +572,15 @@ fn derive_served(
             (key, function)
         })
         .collect::<Vec<_>>();
-    let logical = if resolved.issues.is_empty() {
-        members
-            .iter()
-            .map(|(_, function)| {
-                function
-                    .lighting()
-                    .and_then(|light| light.temperature())
-                    .map(|temperature| temperature.interval())
-            })
-            .collect::<Option<Vec<_>>>()
-            .map(|intervals| {
-                crate::xiaomi::capability::effective_temperature_range(native_interval, &intervals)
-            })
-            .unwrap_or(native_interval)
-    } else {
-        native_interval
-    };
-    let plan = if native_rgb {
-        Ok(None)
-    } else if let Some(issue) = resolved.issues.first() {
-        Err(issue.clone())
-    } else {
-        crate::xiaomi::capability::plan_rgb_repair(native.device(), members)
-    };
-    let (repair, repair_reason, profile) = match plan {
-        Ok(Some(plan)) => (
-            Some(plan),
-            None,
-            crate::xiaomi::capability::repaired_profile(logical),
-        ),
-        Ok(None) => (
-            None,
-            None,
-            crate::xiaomi::capability::narrowed_profile(native_profile, logical),
-        ),
-        Err(reason) => (
-            None,
-            Some(reason),
-            crate::xiaomi::capability::narrowed_profile(native_profile, logical),
-        ),
-    };
+    let composed = crate::xiaomi::capability::compose_group_light(
+        function,
+        &members,
+        resolved.issues.first().map(String::as_str),
+    );
     ServedDevice {
-        description: description.with_light_profile(function.id(), profile),
-        repair,
-        repair_reason,
+        description: description.with_light_profile(function.id(), composed.profile),
+        repair: composed.repair,
+        repair_reason: composed.reason,
     }
 }
 
