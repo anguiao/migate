@@ -149,13 +149,21 @@ impl Context {
                 .functions()
                 .iter()
                 .map(|function| {
-                    let notification_source = work
-                        .function_observer(function.id())
-                        .filter(|source| self.source_valid_for(&did, function.id(), source))
-                        .map(|source| match source {
-                            super::notifications::NotificationSource::Local(_) => PathKind::Local,
-                            super::notifications::NotificationSource::Cloud(_) => PathKind::Cloud,
-                        });
+                    let notification_source =
+                        if self.is_virtual_group(&did) && function.lighting().is_some() {
+                            notification
+                        } else {
+                            work.function_observer(function.id())
+                                .filter(|source| self.source_valid_for(&did, function.id(), source))
+                                .map(|source| match source {
+                                    super::notifications::NotificationSource::Local(_) => {
+                                        PathKind::Local
+                                    }
+                                    super::notifications::NotificationSource::Cloud(_) => {
+                                        PathKind::Cloud
+                                    }
+                                })
+                        };
                     FunctionStatus {
                         function: function.id().to_owned(),
                         selected_read: self.read_path_for(&did, function.id()).map(path_kind),

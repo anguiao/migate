@@ -99,6 +99,68 @@ fn diagnostics_keep_current_control_and_valid_notification_conditions_separate()
 }
 
 #[test]
+fn virtual_group_notification_diagnostics_follow_member_subscription_readiness() {
+    let (rig, listener, cloud) = with_cloud_rig(repair_rig(0, true));
+    let held = "device/member-b/up/properties_changed/4/1";
+    cloud.state.borrow_mut().hold.insert(held.into());
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            repair_ready(&c).await;
+            until(|| {
+                cloud_active(&c, "member-a")
+                    && cloud
+                        .state
+                        .borrow()
+                        .held
+                        .iter()
+                        .any(|subscription| subscription.filters[0].path == held)
+            })
+            .await;
+            let check = |expected| {
+                let status = c.context.diagnostics();
+                let group = status
+                    .devices
+                    .iter()
+                    .find(|device| device.did == "group-1")
+                    .unwrap();
+                let light = group
+                    .functions
+                    .iter()
+                    .find(|function| function.function == "light:2")
+                    .unwrap();
+                assert_eq!(group.notification_source, expected);
+                assert_eq!(light.notification_source, expected);
+                assert_eq!(group.sync_limited_reason.is_some(), expected.is_none());
+                assert_eq!(light.sync_limited_reason.is_some(), expected.is_none());
+            };
+            check(None);
+
+            cloud.state.borrow_mut().hold.remove(held);
+            cloud.release(held);
+            until(|| c.context.active_notification("group-1") == Some(PathKind::Cloud)).await;
+            check(Some(PathKind::Cloud));
+            cloud.property("member-a", 2, false);
+            cloud.property("member-b", 2, false);
+            until(|| {
+                function(&c.context.registry, "group-1", "light:2")
+                    .snapshot()
+                    .power()
+                    == Some(Power::Off)
+            })
+            .await;
+
+            cloud.online("member-b", false);
+            until(|| c.context.active_notification("group-1").is_none()).await;
+            check(None);
+            cloud.online("member-b", true);
+            until(|| c.context.active_notification("group-1") == Some(PathKind::Cloud)).await;
+            check(Some(PathKind::Cloud));
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn cloud_control_without_ready_notifications_is_sync_limited() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
