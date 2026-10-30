@@ -228,13 +228,22 @@ impl DeviceWork {
     fn function_source_changed(&self, id: &str) {
         self.observations.function_source_changed(id);
         if let Some(function) = self.native.device().functions().iter().find(|function| {
-            function.id() == id && (function.curtain().is_some() || function.fan().is_some())
+            function.id() == id
+                && (function.curtain().is_some()
+                    || function.fan().is_some()
+                    || function.air_conditioner().is_some())
         }) {
             if function.curtain().is_some() {
                 self.physical()
                     .function(id)
                     .unwrap()
                     .curtain_source_changed();
+            }
+            if function.air_conditioner().is_some() {
+                self.physical()
+                    .function(id)
+                    .unwrap()
+                    .air_conditioner_source_changed();
             }
             for binding in function.observation_bindings() {
                 self.refresh.borrow_mut().request_baseline(id, binding);
@@ -291,12 +300,11 @@ impl DeviceWork {
         let local = self.local.borrow_mut().connection.take();
         if let Some(local) = local {
             if self.is_light()
-                || self
-                    .native
-                    .device()
-                    .functions()
-                    .iter()
-                    .any(|function| function.curtain().is_some() || function.fan().is_some())
+                || self.native.device().functions().iter().any(|function| {
+                    function.curtain().is_some()
+                        || function.fan().is_some()
+                        || function.air_conditioner().is_some()
+                })
             {
                 drop(local.unsubscribe_properties(&self.key.id));
                 drop(local.unsubscribe_events(&self.key.id));
@@ -328,6 +336,7 @@ impl DeviceWork {
                 || function.state().is_none()
                     && function.curtain().is_none()
                     && function.fan().is_none()
+                    && function.air_conditioner().is_none()
         }) {
             for binding in function.observation_bindings() {
                 self.refresh_property(function.id(), binding);

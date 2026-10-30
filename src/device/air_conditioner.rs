@@ -1,7 +1,7 @@
 //! Validated air-conditioner values and source-independent control constraints.
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum AirConditionerMode {
+pub enum AirConditionerMode {
     Cool,
     Heat,
     Auto,
@@ -23,11 +23,19 @@ impl AirConditionerMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum AirConditionerFanSpeed {
+pub enum AirConditionerFanSpeed {
     Auto,
     Low,
     Medium,
     High,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AirConditionerTarget {
+    pub mode: Option<AirConditionerMode>,
+    pub temperature: Option<i16>,
+    pub speed: Option<AirConditionerFanSpeed>,
+    pub swing: Option<bool>,
 }
 impl AirConditionerFanSpeed {
     pub(crate) const ALL: [Self; 4] = [Self::Auto, Self::Low, Self::Medium, Self::High];
@@ -44,12 +52,12 @@ impl AirConditionerFanSpeed {
 
 /// Independent source observations; command intent never updates these fields.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct AirConditionerSnapshot {
-    pub(crate) power: super::model::PropertyObservation<bool>,
-    pub(crate) mode: super::model::PropertyObservation<AirConditionerMode>,
-    pub(crate) temperature: super::model::PropertyObservation<i16>,
-    pub(crate) speed: super::model::PropertyObservation<AirConditionerFanSpeed>,
-    pub(crate) swing: super::model::PropertyObservation<bool>,
+pub struct AirConditionerSnapshot {
+    pub power: super::model::PropertyObservation<bool>,
+    pub mode: super::model::PropertyObservation<AirConditionerMode>,
+    pub temperature: super::model::PropertyObservation<i16>,
+    pub speed: super::model::PropertyObservation<AirConditionerFanSpeed>,
+    pub swing: super::model::PropertyObservation<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,13 +90,13 @@ impl AirConditionerSnapshot {
 
 /// A native grid in whole degrees Celsius, representable in Matter centidegrees.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TemperatureGrid {
+pub struct TemperatureGrid {
     min: i16,
     max: i16,
     step: i16,
 }
 impl TemperatureGrid {
-    pub(crate) fn new(min: i16, max: i16, step: i16) -> Result<Self, &'static str> {
+    pub fn new(min: i16, max: i16, step: i16) -> Result<Self, &'static str> {
         if min < -273 || max > 327 || min > max || step <= 0 {
             return Err("invalid air-conditioner temperature grid");
         }
@@ -188,14 +196,17 @@ impl AirConditionerConstraints {
     }
 
     pub(crate) fn standard(grid: TemperatureGrid) -> Self {
-        let mode = ModeConstraints {
-            temperatures: grid.values().collect(),
-            speeds: AirConditionerFanSpeed::ALL.to_vec(),
-        };
-        Self {
+        Self::new(
             grid,
-            modes: std::array::from_fn(|_| Some(mode.clone())),
-        }
+            AirConditionerMode::ALL.map(|mode| {
+                (
+                    mode,
+                    grid.values().collect(),
+                    AirConditionerFanSpeed::ALL.to_vec(),
+                )
+            }),
+        )
+        .expect("standard constraints use the validated native grid")
     }
 
     pub(crate) fn grid(&self) -> TemperatureGrid {

@@ -6,13 +6,13 @@ use rs_matter::{
 };
 
 /// The shared Function is the only power state and command boundary.
-pub(super) struct OnOffHandler {
+pub(super) struct OnOffHandler<const DEAD_FRONT: bool = false> {
     function: Function,
     endpoint: u16,
     dataver: Dataver,
     reported: std::cell::Cell<Option<bool>>,
 }
-impl OnOffHandler {
+impl<const DEAD_FRONT: bool> OnOffHandler<DEAD_FRONT> {
     pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Self {
         let reported = std::cell::Cell::new(function.snapshot().power().and_then(Power::value));
         Self {
@@ -47,9 +47,13 @@ impl OnOffHandler {
         Ok(())
     }
 }
-impl on_off::ClusterAsyncHandler for OnOffHandler {
+impl<const DEAD_FRONT: bool> on_off::ClusterAsyncHandler for OnOffHandler<DEAD_FRONT> {
     const CLUSTER: Cluster<'static> = on_off::FULL_CLUSTER
-        .with_features(0)
+        .with_features(if DEAD_FRONT {
+            on_off::Feature::DEAD_FRONT_BEHAVIOR.bits()
+        } else {
+            0
+        })
         .with_attrs(with!(required))
         .with_cmds(with!(
             on_off::CommandId::Off | on_off::CommandId::On | on_off::CommandId::Toggle

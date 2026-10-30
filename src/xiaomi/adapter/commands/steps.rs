@@ -25,7 +25,12 @@ pub(super) trait StepRequest: Sized + 'static {
     type Step: Copy + 'static;
 
     fn steps(&self) -> Result<VecDeque<(Self::Step, Property)>, CommandError>;
+    /// Check operation ownership, including cancellation after a step was sent.
     fn current_result(&self) -> Result<(), CommandError>;
+    /// Check whether this step may be sent now, without changing receipt settlement.
+    fn send_result(&self, _step: Self::Step) -> Result<(), CommandError> {
+        self.current_result()
+    }
     fn first_step_current(&self, _step: Self::Step) -> bool {
         true
     }
@@ -75,13 +80,13 @@ pub(super) async fn send<R: StepRequest>(
         }
     };
     let pending = Rc::new(RefCell::new(Some(request)));
-    let current: Rc<dyn Fn() -> Result<(), CommandError>> = {
-        let pending = pending.clone();
-        Rc::new(move || pending.borrow().as_ref().unwrap().current_result())
-    };
     let mut first_step = true;
     while let Some((step, property)) = steps.pop_front() {
         operation.0.pending_step(property.clone());
+        let current: Rc<dyn Fn() -> Result<(), CommandError>> = {
+            let pending = pending.clone();
+            Rc::new(move || pending.borrow().as_ref().unwrap().send_result(step))
+        };
         let mark: Rc<dyn Fn() -> Result<(), CommandError>> = {
             let pending = pending.clone();
             let binding = property.0;

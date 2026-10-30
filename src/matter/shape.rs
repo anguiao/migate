@@ -33,6 +33,10 @@ enum FixedKind {
         horizontal_swing: bool,
         speed_count: u8,
     },
+    AirConditioner {
+        temperature: (i16, i16),
+        vertical_swing: bool,
+    },
     Contact,
     Motion,
     Occupancy,
@@ -74,6 +78,13 @@ pub(crate) fn fixed_shape_with_battery<'a>(
                     } => FixedKind::Fan {
                         horizontal_swing,
                         speed_count,
+                    },
+                    FunctionKind::AirConditioner {
+                        temperature,
+                        vertical_swing,
+                    } => FixedKind::AirConditioner {
+                        temperature: (temperature.min(), temperature.effective_max()),
+                        vertical_swing,
                     },
                     FunctionKind::Contact => FixedKind::Contact,
                     FunctionKind::Motion => FixedKind::Motion,

@@ -1,5 +1,8 @@
 use super::super::{MotionBinding, StateBinding};
-use super::{CurtainBindings, FanBindings, LightBindings, MeasurementBinding, PropertyBinding};
+use super::{
+    AirConditionerBindings, CurtainBindings, FanBindings, LightBindings, MeasurementBinding,
+    PropertyBinding,
+};
 use crate::device::{FunctionDescription, FunctionKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,6 +25,9 @@ enum FunctionBindings {
     },
     Fan {
         fan: FanBindings,
+    },
+    AirConditioner {
+        air_conditioner: AirConditionerBindings,
     },
     Temperature {
         measurement: MeasurementBinding,
@@ -46,6 +52,22 @@ enum FunctionBindings {
     },
 }
 impl ParsedFunction {
+    pub(crate) fn air_conditioner_control(
+        label: impl Into<String>,
+        air_conditioner: AirConditionerBindings,
+    ) -> Self {
+        Self {
+            id: air_conditioner.function_id(),
+            label: label.into(),
+            bindings: FunctionBindings::AirConditioner { air_conditioner },
+        }
+    }
+    pub(crate) fn air_conditioner(&self) -> Option<&AirConditionerBindings> {
+        match &self.bindings {
+            FunctionBindings::AirConditioner { air_conditioner } => Some(air_conditioner),
+            _ => None,
+        }
+    }
     pub(crate) fn fan_control(
         id: impl Into<String>,
         label: impl Into<String>,
@@ -202,6 +224,7 @@ impl ParsedFunction {
             FunctionBindings::Outlet { power } => format!("outlet:{}", power.siid),
             FunctionBindings::Light { power, .. } => format!("light:{}", power.siid),
             FunctionBindings::Fan { fan } => format!("fan:{}", fan.power().siid),
+            FunctionBindings::AirConditioner { air_conditioner } => air_conditioner.function_id(),
             FunctionBindings::Curtain { curtain } => {
                 format!("curtain:{}", curtain.motor().property().siid)
             }
@@ -234,6 +257,7 @@ impl ParsedFunction {
                 Some(*power)
             }
             FunctionBindings::Fan { fan } => Some(fan.power()),
+            FunctionBindings::AirConditioner { air_conditioner } => Some(air_conditioner.power()),
             FunctionBindings::Temperature { .. }
             | FunctionBindings::Curtain { .. }
             | FunctionBindings::Humidity { .. }
@@ -248,6 +272,7 @@ impl ParsedFunction {
         match &self.bindings {
             FunctionBindings::Outlet { .. }
             | FunctionBindings::Fan { .. }
+            | FunctionBindings::AirConditioner { .. }
             | FunctionBindings::Curtain { .. }
             | FunctionBindings::Temperature { .. }
             | FunctionBindings::Humidity { .. }
@@ -268,6 +293,7 @@ impl ParsedFunction {
             FunctionBindings::Outlet { .. }
             | FunctionBindings::Light { .. }
             | FunctionBindings::Fan { .. }
+            | FunctionBindings::AirConditioner { .. }
             | FunctionBindings::Curtain { .. }
             | FunctionBindings::Contact { .. }
             | FunctionBindings::Motion { .. }
@@ -284,6 +310,10 @@ impl ParsedFunction {
             FunctionBindings::Fan { fan } => FunctionKind::Fan {
                 horizontal_swing: fan.swing().is_some(),
                 speed_count: fan.speed().count(),
+            },
+            FunctionBindings::AirConditioner { air_conditioner } => FunctionKind::AirConditioner {
+                temperature: air_conditioner.temperature().grid(),
+                vertical_swing: air_conditioner.swing().is_some(),
             },
             FunctionBindings::Light { lighting, .. } => FunctionKind::Light(lighting.profile()),
             FunctionBindings::Temperature { measurement } => {
@@ -310,6 +340,9 @@ impl ParsedFunction {
     }
     /// Every native binding this function really reads or writes.
     pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {
+        if let Some(air_conditioner) = self.air_conditioner() {
+            return air_conditioner.bindings();
+        }
         if let Some(fan) = self.fan() {
             return fan.bindings();
         }

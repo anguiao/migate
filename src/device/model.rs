@@ -28,6 +28,7 @@ pub enum Capability {
     OnOff,
     Curtain,
     Fan,
+    AirConditioner,
     Brightness,
     ColorTemperature(TemperatureInterval),
     ColorRgb,
@@ -99,6 +100,10 @@ pub enum FunctionKind {
         horizontal_swing: bool,
         speed_count: u8,
     },
+    AirConditioner {
+        temperature: super::TemperatureGrid,
+        vertical_swing: bool,
+    },
     Temperature(MeasurementRange),
     Humidity(MeasurementRange),
     CarbonDioxide(MeasurementRange),
@@ -111,7 +116,11 @@ impl FunctionKind {
     pub fn is_control(self) -> bool {
         matches!(
             self,
-            Self::Outlet | Self::Light(_) | Self::Curtain | Self::Fan { .. }
+            Self::Outlet
+                | Self::Light(_)
+                | Self::Curtain
+                | Self::Fan { .. }
+                | Self::AirConditioner { .. }
         )
     }
     pub fn is_state_sensor(self) -> bool {
@@ -129,6 +138,7 @@ impl FunctionKind {
             Self::Outlet
             | Self::Curtain
             | Self::Fan { .. }
+            | Self::AirConditioner { .. }
             | Self::Temperature(_)
             | Self::Humidity(_)
             | Self::CarbonDioxide(_)
@@ -160,6 +170,7 @@ impl FunctionKind {
             Self::Outlet => vec![Capability::OnOff],
             Self::Curtain => vec![Capability::Curtain],
             Self::Fan { .. } => vec![Capability::OnOff, Capability::Fan],
+            Self::AirConditioner { .. } => vec![Capability::OnOff, Capability::AirConditioner],
             Self::Light(profile) => {
                 let mut capabilities = vec![Capability::OnOff];
                 if profile.has_brightness() {
@@ -485,6 +496,9 @@ pub enum FunctionState {
     Fan {
         fan: FanSnapshot,
     },
+    AirConditioner {
+        air_conditioner: super::AirConditionerSnapshot,
+    },
     Temperature {
         measurement: MeasurementSnapshot,
     },
@@ -508,6 +522,12 @@ pub enum FunctionState {
     },
 }
 impl FunctionSnapshot {
+    pub fn air_conditioner(&self) -> Option<super::AirConditionerSnapshot> {
+        match self.state {
+            FunctionState::AirConditioner { air_conditioner } => Some(air_conditioner),
+            _ => None,
+        }
+    }
     pub fn fan(&self) -> Option<FanSnapshot> {
         match self.state {
             FunctionState::Fan { fan } => Some(fan),
@@ -529,6 +549,13 @@ impl FunctionSnapshot {
             FunctionState::Fan { fan } => {
                 Some(fan.power.value.map(Power::from).unwrap_or(Power::Unknown))
             }
+            FunctionState::AirConditioner { air_conditioner } => Some(
+                air_conditioner
+                    .power
+                    .value
+                    .map(Power::from)
+                    .unwrap_or(Power::Unknown),
+            ),
             FunctionState::Temperature { .. }
             | FunctionState::Curtain { .. }
             | FunctionState::Humidity { .. }
@@ -545,6 +572,7 @@ impl FunctionSnapshot {
             FunctionState::Outlet { .. }
             | FunctionState::Curtain { .. }
             | FunctionState::Fan { .. }
+            | FunctionState::AirConditioner { .. }
             | FunctionState::Temperature { .. }
             | FunctionState::Humidity { .. }
             | FunctionState::CarbonDioxide { .. }
@@ -564,6 +592,7 @@ impl FunctionSnapshot {
             | FunctionState::Light { .. }
             | FunctionState::Curtain { .. }
             | FunctionState::Fan { .. }
+            | FunctionState::AirConditioner { .. }
             | FunctionState::Contact { .. }
             | FunctionState::Motion { .. }
             | FunctionState::Occupancy { .. } => None,
@@ -576,6 +605,8 @@ pub enum CommandError {
     Unsupported,
     Unavailable(String),
     UnknownState,
+    Constraint,
+    InvalidInState,
     Timeout,
     Rejected(String),
     SendFailed(String),
@@ -590,6 +621,10 @@ impl fmt::Display for CommandError {
             Self::Unsupported => formatter.write_str("device does not support this command"),
             Self::Unavailable(reason) => write!(formatter, "device unavailable: {reason}"),
             Self::UnknownState => formatter.write_str("required device state is unknown"),
+            Self::Constraint => formatter.write_str("value is outside the supported constraint"),
+            Self::InvalidInState => {
+                formatter.write_str("value is not allowed in the current state")
+            }
             Self::Timeout => formatter.write_str("command acceptance timed out"),
             Self::Rejected(reason) => write!(formatter, "command rejected: {reason}"),
             Self::SendFailed(reason) => write!(formatter, "command send failed: {reason}"),

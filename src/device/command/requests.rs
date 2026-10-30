@@ -8,6 +8,12 @@ impl Function {
     pub async fn execute(&self, command: Command) -> Result<FunctionSnapshot, CommandError> {
         if matches!(
             self.description().kind,
+            super::super::FunctionKind::AirConditioner { .. }
+        ) {
+            return self.execute_air_conditioner_power(command).await;
+        }
+        if matches!(
+            self.description().kind,
             super::super::FunctionKind::Fan { .. }
         ) {
             return self.execute_fan_power(command).await;
@@ -264,6 +270,7 @@ pub enum DeviceRequest {
     Light(LightRequest),
     Curtain(super::super::CurtainRequest),
     Fan(super::super::FanRequest),
+    AirConditioner(super::super::AirConditionerRequest),
 }
 impl DeviceRequest {
     pub(crate) fn queued_at(&self) -> Instant {
@@ -272,12 +279,19 @@ impl DeviceRequest {
             Self::Light(request) => request.queued_at,
             Self::Curtain(request) => request.queued_at(),
             Self::Fan(request) => request.queued_at(),
+            Self::AirConditioner(request) => request.queued_at(),
         }
     }
 }
 impl CommandReceiver {
     /// One gate serializes power and both lighting dimensions for this function.
     pub async fn next_operation(&mut self) -> Option<DeviceRequest> {
+        if matches!(
+            self.function.description().kind,
+            super::super::FunctionKind::AirConditioner { .. }
+        ) {
+            return self.next_air_conditioner_operation().await;
+        }
         if self.function.description().kind == super::super::FunctionKind::Curtain {
             return self.next_curtain_operation().await;
         }

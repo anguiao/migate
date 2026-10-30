@@ -215,6 +215,7 @@ fn capabilities(description: &crate::device::FunctionDescription) -> String {
             Capability::OnOff => "on/off".into(),
             Capability::Curtain => "curtain".into(),
             Capability::Fan => "fan".into(),
+            Capability::AirConditioner => "air conditioner".into(),
             Capability::Brightness => "brightness".into(),
             Capability::ColorTemperature(interval) => {
                 format!("temperature {}–{} K", interval.min(), interval.max())
@@ -335,6 +336,90 @@ fn render(view: &View, did: Option<&str>, status: &AuthStatus, show_commands: bo
             let label = &function.description().label;
             let snapshot = function.snapshot();
             match snapshot.state {
+                crate::device::FunctionState::AirConditioner {
+                    air_conditioner: ac,
+                } => {
+                    let text = |value: Option<bool>| {
+                        value.map_or_else(
+                            || "unknown".into(),
+                            |value| if value { "on" } else { "off" }.into(),
+                        )
+                    };
+                    let mut entries = vec![
+                        (
+                            "Power",
+                            text(ac.power.value),
+                            ac.power.source_time,
+                            ac.power.received_at,
+                        ),
+                        (
+                            "Mode",
+                            ac.mode
+                                .value
+                                .map_or_else(|| "unknown".into(), |value| format!("{value:?}")),
+                            ac.mode.source_time,
+                            ac.mode.received_at,
+                        ),
+                        (
+                            "Temperature",
+                            ac.temperature
+                                .value
+                                .map_or_else(|| "unknown".into(), |value| format!("{value} °C")),
+                            ac.temperature.source_time,
+                            ac.temperature.received_at,
+                        ),
+                        (
+                            "Speed",
+                            ac.speed
+                                .value
+                                .map_or_else(|| "unknown".into(), |value| format!("{value:?}")),
+                            ac.speed.source_time,
+                            ac.speed.received_at,
+                        ),
+                    ];
+                    if matches!(
+                        function.description().kind,
+                        crate::device::FunctionKind::AirConditioner {
+                            vertical_swing: true,
+                            ..
+                        }
+                    ) {
+                        entries.push((
+                            "Vertical swing",
+                            text(ac.swing.value),
+                            ac.swing.source_time,
+                            ac.swing.received_at,
+                        ));
+                    }
+                    lines.extend(observed_function_lines(
+                        status,
+                        &key.id,
+                        function,
+                        entries,
+                        show_commands,
+                    ));
+                    if ac.power.value == Some(true)
+                        && ac.speed.value == Some(crate::device::AirConditionerFanSpeed::Auto)
+                    {
+                        lines.push("    Current fan level: unknown (automatic speed).".into());
+                    }
+                    if let Some(constraints) = function.air_conditioner_constraints() {
+                        for mode in crate::device::air_conditioner::AirConditionerMode::ALL {
+                            if let Some(temperatures) = constraints.temperatures(mode) {
+                                lines.push(format!(
+                                    "    {mode:?}: temperatures {temperatures:?} °C; speeds {:?}.",
+                                    constraints.speeds(mode).unwrap()
+                                ));
+                            }
+                        }
+                    } else {
+                        lines.push("    Control range: unknown.".into());
+                    }
+                    let pending = function.pending_air_conditioner_commands();
+                    if !pending.is_empty() {
+                        lines.push(format!("    queued air-conditioner commands: {pending:?}."));
+                    }
+                }
                 crate::device::FunctionState::Fan { fan } => {
                     let mut entries = vec![
                         (

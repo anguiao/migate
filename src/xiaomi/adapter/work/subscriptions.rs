@@ -16,6 +16,7 @@ impl DeviceWork {
         if function.kind().is_read_only()
             || function.curtain().is_some()
             || function.fan().is_some()
+            || function.air_conditioner().is_some()
         {
             return function.observation_bindings();
         }

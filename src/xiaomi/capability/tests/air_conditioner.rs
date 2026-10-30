@@ -14,6 +14,28 @@ fn instance() -> Value {
     .unwrap()
 }
 
+#[test]
+fn compliant_standard_services_are_admitted_without_a_model_whitelist() {
+    let parsed = super::super::parse_device_for_model(
+        crate::device::DeviceKey::new("xiaomi", "generic-ac"),
+        "other.vendor.air-conditioner",
+        &instance(),
+    )
+    .unwrap();
+    let function = parsed
+        .functions()
+        .iter()
+        .find(|function| function.id() == "air-conditioner:3")
+        .unwrap();
+    assert!(function.air_conditioner().is_some());
+    assert!(
+        !parsed
+            .functions()
+            .iter()
+            .any(|function| function.fan().is_some())
+    );
+}
+
 fn parse(value: &Value) -> super::super::model::AirConditionerBindings {
     let description = Description::parse(value).unwrap();
     parse_air_conditioner(&description, &mut Vec::new()).unwrap()

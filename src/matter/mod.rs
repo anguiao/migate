@@ -1,3 +1,4 @@
+mod air_conditioner;
 mod bridge;
 mod bridged_info;
 mod curtain;

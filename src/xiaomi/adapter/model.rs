@@ -136,6 +136,7 @@ pub enum CommandTarget {
     Light(crate::device::LightTarget),
     Curtain(crate::device::CurtainCommand),
     Fan(crate::device::FanCommand),
+    AirConditioner(crate::device::AirConditionerCommand),
 }
 impl fmt::Display for CommandTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -150,6 +151,7 @@ impl fmt::Display for CommandTarget {
             Self::Fan(crate::device::FanCommand::Swing(value)) => {
                 write!(f, "swing {}", if *value { "on" } else { "off" })
             }
+            Self::AirConditioner(command) => write!(f, "{command:?}"),
             Self::Light(target) => {
                 use crate::device::LightColorTarget;
                 let mut fields = Vec::new();
@@ -213,7 +215,10 @@ impl CommandStatus {
             .map(|property| {
                 let binding = property.binding;
                 let value = &property.value;
-                if matches!(self.target, CommandTarget::Fan(_)) {
+                if matches!(
+                    self.target,
+                    CommandTarget::Fan(_) | CommandTarget::AirConditioner(_)
+                ) {
                     let path = property.path.expect("fan records contain submitted steps");
                     format!("{}.{}={value} ({path})", binding.siid, binding.piid)
                 } else {

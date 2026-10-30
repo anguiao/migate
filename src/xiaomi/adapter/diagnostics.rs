@@ -179,7 +179,23 @@ impl Context {
                         } else {
                             Vec::new()
                         },
-                        properties: if let Some(fan) = function.fan() {
+                        properties: if let Some(ac) = function.air_conditioner() {
+                            property_statuses(
+                                &work,
+                                function.id(),
+                                [
+                                    ("Power", Some(ac.power())),
+                                    ("Mode", Some(ac.mode().property())),
+                                    ("Temperature", Some(ac.temperature().property())),
+                                    ("Speed", Some(ac.speed().property())),
+                                    ("Vertical swing", ac.swing()),
+                                ]
+                                .into_iter()
+                                .filter_map(|(name, binding)| {
+                                    binding.map(|binding| (name, binding))
+                                }),
+                            )
+                        } else if let Some(fan) = function.fan() {
                             property_statuses(
                                 &work,
                                 function.id(),

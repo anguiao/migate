@@ -20,7 +20,7 @@ fn current_result(request: &DeviceRequest) -> Result<(), CommandError> {
     match request {
         DeviceRequest::Power(request) => request.current_result(),
         DeviceRequest::Light(request) => request.current_result(),
-        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) => {
+        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_) => {
             unreachable!("non-light requests use their own sender")
         }
     }
@@ -29,7 +29,7 @@ fn mark_sent(request: &DeviceRequest) -> Result<(), CommandError> {
     match request {
         DeviceRequest::Power(request) => request.mark_sent(),
         DeviceRequest::Light(request) => request.mark_sent(),
-        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) => {
+        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_) => {
             unreachable!("non-light requests use their own sender")
         }
     }
@@ -38,7 +38,7 @@ fn reject(request: DeviceRequest, error: CommandError) {
     match request {
         DeviceRequest::Power(request) => request.reject(error),
         DeviceRequest::Light(request) => request.reject(error),
-        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) => {
+        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_) => {
             unreachable!("non-light requests use their own sender")
         }
     }
@@ -47,7 +47,7 @@ fn accept(request: DeviceRequest) -> Result<(), CommandError> {
     match request {
         DeviceRequest::Power(request) => request.accept().map(|_| ()),
         DeviceRequest::Light(request) => request.accept().map(|_| ()),
-        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) => {
+        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_) => {
             unreachable!("non-light requests use their own sender")
         }
     }
@@ -56,7 +56,7 @@ fn skip(request: DeviceRequest) -> Result<(), CommandError> {
     match request {
         DeviceRequest::Power(request) => request.accept().map(|_| ()),
         DeviceRequest::Light(request) => request.accept_unchanged().map(|_| ()),
-        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) => {
+        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_) => {
             unreachable!("non-light requests use their own sender")
         }
     }
@@ -200,14 +200,14 @@ pub(super) async fn send(
     let light_target = match &request {
         DeviceRequest::Power(_) => None,
         DeviceRequest::Light(request) => Some(request.target),
-        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) => {
+        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_) => {
             unreachable!("non-light requests use their own sender")
         }
     };
     let power = match &request {
         DeviceRequest::Power(request) => Some(request.target),
         DeviceRequest::Light(request) => request.target.power(),
-        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) => {
+        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_) => {
             unreachable!("non-light requests use their own sender")
         }
     };
@@ -241,7 +241,7 @@ pub(super) async fn send(
         DeviceRequest::Light(_) => {
             CommandTarget::Light(light_target.expect("light requests carry a target"))
         }
-        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) => {
+        DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_) => {
             unreachable!("non-light requests use their own sender")
         }
     };

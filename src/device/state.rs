@@ -11,6 +11,7 @@ enum RuntimeValue {
     Control(Box<ControlRuntime>),
     Curtain(Box<CurtainRuntime>),
     Fan(Box<FanRuntime>),
+    AirConditioner(Box<AirConditionerRuntime>),
     Measurement(MeasurementSnapshot),
     StateSensor(super::StateSnapshot),
 }
@@ -22,6 +23,14 @@ struct ControlRuntime {
 struct FanRuntime {
     snapshot: super::FanSnapshot,
     commands: super::fan_command::FanCoordinator,
+}
+pub(super) struct AirConditionerRuntime {
+    pub(super) snapshot: super::AirConditionerSnapshot,
+    pub(super) commands: super::air_conditioner_command::AirConditionerCoordinator,
+    pub(super) constraints: Option<super::air_conditioner::AirConditionerConstraints>,
+    pub(super) planning_mode: Option<super::AirConditionerMode>,
+    pub(super) observed_mode: Option<super::AirConditionerMode>,
+    pub(super) mode_revision: u64,
 }
 struct CurtainRuntime {
     snapshot: super::CurtainSnapshot,
@@ -62,6 +71,19 @@ impl RuntimeState {
             revision: 0,
         }
     }
+    fn new_air_conditioner() -> Self {
+        Self {
+            value: RuntimeValue::AirConditioner(Box::new(AirConditionerRuntime {
+                snapshot: super::AirConditionerSnapshot::default(),
+                commands: super::air_conditioner_command::AirConditionerCoordinator::default(),
+                constraints: None,
+                planning_mode: None,
+                observed_mode: None,
+                mode_revision: 0,
+            })),
+            revision: 0,
+        }
+    }
     fn measurement_state() -> Self {
         Self {
             value: RuntimeValue::Measurement(MeasurementSnapshot {
@@ -86,7 +108,10 @@ impl RuntimeState {
     fn has_control_state(&self) -> bool {
         matches!(
             self.value,
-            RuntimeValue::Control(_) | RuntimeValue::Curtain(_) | RuntimeValue::Fan(_)
+            RuntimeValue::Control(_)
+                | RuntimeValue::Curtain(_)
+                | RuntimeValue::Fan(_)
+                | RuntimeValue::AirConditioner(_)
         )
     }
     pub(super) fn fan_commands(&self) -> Option<&super::fan_command::FanCoordinator> {
@@ -104,6 +129,18 @@ impl RuntimeState {
     pub(super) fn fan_power(&self) -> Option<bool> {
         match &self.value {
             RuntimeValue::Fan(fan) => fan.snapshot.power.value,
+            _ => None,
+        }
+    }
+    pub(super) fn air_conditioner(&self) -> Option<&AirConditionerRuntime> {
+        match &self.value {
+            RuntimeValue::AirConditioner(air_conditioner) => Some(air_conditioner),
+            _ => None,
+        }
+    }
+    pub(super) fn air_conditioner_mut(&mut self) -> Option<&mut AirConditionerRuntime> {
+        match &mut self.value {
+            RuntimeValue::AirConditioner(air_conditioner) => Some(air_conditioner),
             _ => None,
         }
     }
@@ -141,6 +178,7 @@ impl RuntimeState {
             RuntimeValue::Control(control) => Some(&control.commands),
             RuntimeValue::Curtain(_)
             | RuntimeValue::Fan(_)
+            | RuntimeValue::AirConditioner(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -150,6 +188,7 @@ impl RuntimeState {
             RuntimeValue::Control(control) => Some(&mut control.commands),
             RuntimeValue::Curtain(_)
             | RuntimeValue::Fan(_)
+            | RuntimeValue::AirConditioner(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -159,6 +198,7 @@ impl RuntimeState {
             RuntimeValue::Control(control) => Some(control.power),
             RuntimeValue::Curtain(_)
             | RuntimeValue::Fan(_)
+            | RuntimeValue::AirConditioner(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -173,6 +213,7 @@ impl RuntimeState {
             RuntimeValue::Control(control) => Some((control.power, control.lighting)),
             RuntimeValue::Curtain(_)
             | RuntimeValue::Fan(_)
+            | RuntimeValue::AirConditioner(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -188,6 +229,7 @@ impl RuntimeState {
             RuntimeValue::Control(control) => control.lighting.as_mut(),
             RuntimeValue::Curtain(_)
             | RuntimeValue::Fan(_)
+            | RuntimeValue::AirConditioner(_)
             | RuntimeValue::Measurement(_)
             | RuntimeValue::StateSensor(_) => None,
         }
@@ -198,6 +240,7 @@ impl RuntimeState {
             RuntimeValue::Control(_)
             | RuntimeValue::Curtain(_)
             | RuntimeValue::Fan(_)
+            | RuntimeValue::AirConditioner(_)
             | RuntimeValue::StateSensor(_) => None,
         }
     }
@@ -390,6 +433,11 @@ impl PhysicalDevice {
                     if let Some(commands) = state.fan_commands_mut() {
                         commands.unavailable(error.clone());
                     }
+                    if let Some(runtime) = state.air_conditioner_mut() {
+                        runtime.planning_mode = None;
+                        runtime.observed_mode = None;
+                        runtime.commands.unavailable(error.clone());
+                    }
                     if light {
                         function.notify_light_actions();
                     }
@@ -438,6 +486,11 @@ impl PhysicalDevice {
             if let Some(commands) = state.fan_commands_mut() {
                 commands.unavailable(super::CommandError::Cancelled);
             }
+            if let Some(runtime) = state.air_conditioner_mut() {
+                runtime.planning_mode = None;
+                runtime.observed_mode = None;
+                runtime.commands.unavailable(super::CommandError::Cancelled);
+            }
         }
     }
 
@@ -464,6 +517,8 @@ impl Function {
             RuntimeState::curtain()
         } else if matches!(description.kind, super::FunctionKind::Fan { .. }) {
             RuntimeState::fan()
+        } else if matches!(description.kind, super::FunctionKind::AirConditioner { .. }) {
+            RuntimeState::new_air_conditioner()
         } else if description.kind.is_measurement() {
             RuntimeState::measurement_state()
         } else if description.kind.is_state_sensor() {
@@ -481,6 +536,12 @@ impl Function {
             submitted: Event::new(),
             light_changed: Event::new(),
         }));
+        if let super::FunctionKind::AirConditioner { temperature, .. } = function.description().kind
+        {
+            function.set_air_conditioner_constraints(Some(
+                super::air_conditioner::AirConditionerConstraints::standard(temperature),
+            ));
+        }
         let receiver = controllable.then(|| CommandReceiver {
             function: function.clone(),
         });
@@ -518,6 +579,11 @@ impl Function {
             }
             (super::FunctionKind::Fan { .. }, RuntimeValue::Fan(fan)) => {
                 FunctionState::Fan { fan: fan.snapshot }
+            }
+            (super::FunctionKind::AirConditioner { .. }, RuntimeValue::AirConditioner(runtime)) => {
+                FunctionState::AirConditioner {
+                    air_conditioner: runtime.snapshot,
+                }
             }
             (super::FunctionKind::Curtain, RuntimeValue::Curtain(curtain)) => {
                 FunctionState::Curtain {
@@ -679,6 +745,58 @@ impl Function {
     ) {
         self.apply_fan_observation(value, source_time, received_at, true);
     }
+    pub(crate) fn observe_air_conditioner(
+        &self,
+        value: super::AirConditionerValue,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) {
+        self.apply_air_conditioner_observation(value, source_time, received_at, true);
+    }
+    pub(crate) fn air_conditioner_source_changed(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        let runtime = state
+            .air_conditioner_mut()
+            .expect("air-conditioner function");
+        runtime.planning_mode = None;
+        runtime.observed_mode = None;
+        runtime.mode_revision = runtime.mode_revision.wrapping_add(1);
+        runtime.commands.power_off_sent();
+    }
+    pub(crate) fn observe_cached_air_conditioner(
+        &self,
+        value: super::AirConditionerValue,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) {
+        self.apply_air_conditioner_observation(value, source_time, received_at, false);
+    }
+    fn apply_air_conditioner_observation(
+        &self,
+        value: super::AirConditionerValue,
+        source_time: Option<i64>,
+        received_at: i64,
+        fresh: bool,
+    ) {
+        let mut state = self.0.state.lock().unwrap();
+        let runtime = state
+            .air_conditioner_mut()
+            .expect("air-conditioner function");
+        if let super::AirConditionerValue::Power(power) = value {
+            runtime.commands.observe_power(power, fresh);
+        }
+        if let super::AirConditionerValue::Mode(mode) = value
+            && fresh
+        {
+            runtime.mode_revision = runtime.mode_revision.wrapping_add(1);
+            runtime.planning_mode = None;
+            runtime.observed_mode = Some(mode);
+        }
+        if runtime.snapshot.update(value, source_time, received_at) {
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+    }
     pub(crate) fn observe_cached_fan(
         &self,
         value: super::FanValue,
@@ -832,6 +950,11 @@ impl Function {
         }
         if let Some(commands) = state.fan_commands_mut() {
             commands.close(super::CommandError::Cancelled);
+        }
+        if let Some(runtime) = state.air_conditioner_mut() {
+            runtime.planning_mode = None;
+            runtime.observed_mode = None;
+            runtime.commands.close(super::CommandError::Cancelled);
         }
         if light {
             self.notify_light_actions();

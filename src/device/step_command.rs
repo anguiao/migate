@@ -49,6 +49,10 @@ impl<C> StepEntry<C> {
         self.queued_at
     }
 
+    pub(super) fn started(&self) -> bool {
+        self.started.load(Ordering::Relaxed)
+    }
+
     pub(super) fn current_result(&self) -> Result<(), CommandError> {
         match self.completion.result() {
             Some(Err(error)) => Err(error),

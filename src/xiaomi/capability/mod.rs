@@ -14,6 +14,10 @@ mod source;
 mod state_sensor;
 pub(crate) use group::parse_group;
 pub(crate) use model::FanSpeedEncoding;
+pub(crate) use model::{
+    AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
+    AirConditionerTemperatureBinding,
+};
 pub use model::{
     AppliedPatch, BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding,
     CurtainBindings, CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding,
@@ -50,7 +54,13 @@ pub fn parse_device_for_model(
             target: format!("{kind}:{}", service.iid),
             reason: error.to_string(),
         };
-        let candidate = if service.urn.standard("service", "light", 0x7802) {
+        let candidate = if service.urn.standard("service", "air-conditioner", 0x780f) {
+            Some(
+                air_conditioner::parse_air_conditioner(&description, &mut diagnostics)
+                    .map(|bindings| ParsedFunction::air_conditioner_control("空调", bindings))
+                    .map_err(|error| diagnostic("air-conditioner", error)),
+            )
+        } else if service.urn.standard("service", "light", 0x7802) {
             Some(
                 light::parse_light_service(service, &mut diagnostics)
                     .map_err(|error| diagnostic("light", error)),
@@ -179,6 +189,9 @@ fn is_core(urn: &description::Urn<'_>, function: &ParsedFunction) -> bool {
             urn.standard("device", "light", 0xa001) || urn.standard("device", "night-light", 0xa0ab)
         }
         FunctionKind::Fan { .. } => urn.standard("device", "fan", 0xa005),
+        FunctionKind::AirConditioner { .. } => {
+            urn.standard("device", "air-condition-outlet", 0xa045)
+        }
         FunctionKind::Curtain => urn.standard("device", "curtain", 0xa00c),
         FunctionKind::Outlet => urn.standard("device", "outlet", 0xa002),
         FunctionKind::Temperature(_) | FunctionKind::Humidity(_) => {

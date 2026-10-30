@@ -516,6 +516,7 @@ struct Observed {
     lighting: std::collections::BTreeMap<(u16, u32, u32), (u32, u16)>,
     curtain: std::collections::BTreeMap<u32, (u32, Option<u16>)>,
     fan: std::collections::BTreeMap<u32, (u32, u8)>,
+    thermostat: std::collections::BTreeMap<u32, (u32, i16)>,
 }
 impl Observed {
     fn add(&mut self, report: &ReportDataResp<'_>) {
@@ -569,6 +570,15 @@ impl Observed {
                                     attribute,
                                     (data.data_ver.unwrap(), data.data.u8().unwrap()),
                                 );
+                            }
+                            (Some(0x201), Some(attribute)) => {
+                                let value = if attribute == 28 {
+                                    i16::from(data.data.u8().unwrap())
+                                } else {
+                                    data.data.i16().unwrap()
+                                };
+                                self.thermostat
+                                    .insert(attribute, (data.data_ver.unwrap(), value));
                             }
                             (Some(cluster @ (8 | 0x300)), Some(attribute)) => {
                                 self.lighting.insert(
@@ -684,6 +694,7 @@ async fn receive_observed(client: &Matter<'_>, id: u32) -> Result<Observed, Erro
     Ok(observed)
 }
 
+mod air_conditioner;
 mod curtain;
 mod fan;
 mod lighting;

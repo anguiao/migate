@@ -1,4 +1,5 @@
 mod configuration;
+mod configuration_air_conditioner;
 mod configuration_curtain;
 mod configuration_fan;
 mod configuration_sensors;

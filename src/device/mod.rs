@@ -1,4 +1,5 @@
 pub(crate) mod air_conditioner;
+mod air_conditioner_command;
 mod command;
 mod curtain_command;
 mod curtain_projection;
@@ -10,6 +11,15 @@ mod registry;
 mod state;
 mod step_command;
 
+pub(crate) use air_conditioner::AirConditionerValue;
+pub use air_conditioner::{
+    AirConditionerFanSpeed, AirConditionerMode, AirConditionerSnapshot, AirConditionerTarget,
+    TemperatureGrid,
+};
+pub(crate) use air_conditioner_command::AirConditionerStep;
+pub use air_conditioner_command::{
+    AirConditionerAction, AirConditionerCommand, AirConditionerRequest,
+};
 pub use command::{
     ActionToken, CommandReceiver, CommandRequest, DeviceRequest, LightAction,
     LightActionDiagnostics, LightDimension, LightRequest,

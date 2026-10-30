@@ -2,14 +2,15 @@
 
 use crate::xiaomi::capability::NativeDescription;
 use crate::{
-    device::{DeviceKey, MeasurementRange, NumericRange},
+    device::{DeviceKey, MeasurementRange, NumericRange, TemperatureGrid},
     xiaomi::capability::{
-        BatteryBinding, BrightnessBinding, ColorBinding, CurtainBindings, CurtainMotorBinding,
-        CurtainPositionBinding, CurtainStatusBinding, EventArgument, EventBinding, FanBindings,
-        FanModeBinding, FanSpeedBinding, FanSpeedEncoding, LightBindings, MeasurementBinding,
-        MeasurementUnit, ModeBinding, MotionBinding, NumericFormat, ParsedDevice, ParsedFunction,
-        PropertyBinding, RecognitionMetadata, StateBinding, StateMapping, StateValue,
-        TemperatureBinding,
+        AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
+        AirConditionerTemperatureBinding, BatteryBinding, BrightnessBinding, ColorBinding,
+        CurtainBindings, CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding,
+        EventArgument, EventBinding, FanBindings, FanModeBinding, FanSpeedBinding,
+        FanSpeedEncoding, LightBindings, MeasurementBinding, MeasurementUnit, ModeBinding,
+        MotionBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+        RecognitionMetadata, StateBinding, StateMapping, StateValue, TemperatureBinding,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,15 @@ enum WireFunction {
         power: WireBinding,
         mode: Option<WireFanMode>,
         speed: WireFanSpeed,
+        swing: Option<WireBinding>,
+    },
+    AirConditioner {
+        id: String,
+        label: String,
+        power: WireBinding,
+        mode: WireAirConditionerEnum<5>,
+        temperature: WireAirConditionerTemperature,
+        speed: WireAirConditionerEnum<4>,
         swing: Option<WireBinding>,
     },
     Curtain {
@@ -97,6 +107,43 @@ enum WireFunction {
         label: String,
         state: WireState,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireAirConditionerEnum<const N: usize> {
+    property: WireBinding,
+    format: NumericFormat,
+    #[serde(with = "crate::storage::configuration::codec::native::array_codes")]
+    codes: [i64; N],
+}
+
+mod array_codes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub(super) fn serialize<S: Serializer, const N: usize>(
+        value: &[i64; N],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_slice().serialize(serializer)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        deserializer: D,
+    ) -> Result<[i64; N], D::Error> {
+        let values = Vec::<i64>::deserialize(deserializer)?;
+        values
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("invalid enum code count"))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireAirConditionerTemperature {
+    property: WireBinding,
+    format: NumericFormat,
+    min: i16,
+    max: i16,
+    step: i16,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -344,6 +391,32 @@ impl WireNative {
 
 impl WireFunction {
     fn from_parsed(function: &ParsedFunction) -> Self {
+        if let Some(ac) = function.air_conditioner() {
+            let grid = ac.temperature().grid();
+            return Self::AirConditioner {
+                id: function.id().into(),
+                label: function.label().into(),
+                power: ac.power().into(),
+                mode: WireAirConditionerEnum {
+                    property: ac.mode().property().into(),
+                    format: ac.mode().format(),
+                    codes: ac.mode().codes(),
+                },
+                temperature: WireAirConditionerTemperature {
+                    property: ac.temperature().property().into(),
+                    format: ac.temperature().format(),
+                    min: grid.min(),
+                    max: grid.max(),
+                    step: grid.step(),
+                },
+                speed: WireAirConditionerEnum {
+                    property: ac.speed().property().into(),
+                    format: ac.speed().format(),
+                    codes: ac.speed().codes(),
+                },
+                swing: ac.swing().map(Into::into),
+            };
+        }
         if let Some(fan) = function.fan() {
             return Self::Fan {
                 id: function.id().to_owned(),
@@ -495,6 +568,45 @@ impl WireFunction {
 
     fn into_parsed(self) -> Result<ParsedFunction, &'static str> {
         match self {
+            Self::AirConditioner {
+                id,
+                label,
+                power,
+                mode,
+                temperature,
+                speed,
+                swing,
+            } => {
+                let grid = TemperatureGrid::new(temperature.min, temperature.max, temperature.step)
+                    .map_err(|_| "Stored air-conditioner binding is invalid")?;
+                let mode =
+                    AirConditionerModeBinding::new(mode.property.into(), mode.format, mode.codes)
+                        .map_err(|_| "Stored air-conditioner binding is invalid")?;
+                let temperature = AirConditionerTemperatureBinding::new(
+                    temperature.property.into(),
+                    temperature.format,
+                    grid,
+                )
+                .map_err(|_| "Stored air-conditioner binding is invalid")?;
+                let speed = AirConditionerSpeedBinding::new(
+                    speed.property.into(),
+                    speed.format,
+                    speed.codes,
+                )
+                .map_err(|_| "Stored air-conditioner binding is invalid")?;
+                let bindings = AirConditionerBindings::new(
+                    power.into(),
+                    mode,
+                    temperature,
+                    speed,
+                    swing.map(Into::into),
+                )
+                .map_err(|_| "Stored air-conditioner binding is invalid")?;
+                if bindings.function_id() != id {
+                    return Err("Stored air-conditioner identity is invalid");
+                }
+                Ok(ParsedFunction::air_conditioner_control(label, bindings))
+            }
             Self::Fan {
                 id,
                 label,

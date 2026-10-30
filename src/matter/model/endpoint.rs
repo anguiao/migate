@@ -19,18 +19,38 @@ const FAN: DeviceType = DeviceType {
     dtype: 0x002b,
     drev: 4,
 };
+const ROOM_AIR_CONDITIONER: DeviceType = DeviceType {
+    dtype: 0x0072,
+    drev: 3,
+};
+const AIR_CONDITIONER_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    <OnOffHandler<true> as on_off::ClusterAsyncHandler>::CLUSTER,
+    <air_conditioner::Thermostat as thermostat::ClusterAsyncHandler>::CLUSTER,
+    <air_conditioner::AirConditionerFan<false> as fan_control::ClusterAsyncHandler>::CLUSTER
+);
+const AIR_CONDITIONER_ROCKING_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    <OnOffHandler<true> as on_off::ClusterAsyncHandler>::CLUSTER,
+    <air_conditioner::Thermostat as thermostat::ClusterAsyncHandler>::CLUSTER,
+    <air_conditioner::AirConditionerFan<true> as fan_control::ClusterAsyncHandler>::CLUSTER
+);
 const FAN_CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
     identify::IdentifyHandler::<()>::CLUSTER,
-    OnOffHandler::CLUSTER,
+    OnOffHandler::<false>::CLUSTER,
     <fan::FanControl<false> as fan_control::ClusterAsyncHandler>::CLUSTER
 );
 const FAN_ROCKING_CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
     identify::IdentifyHandler::<()>::CLUSTER,
-    OnOffHandler::CLUSTER,
+    OnOffHandler::<false>::CLUSTER,
     <fan::FanControl<true> as fan_control::ClusterAsyncHandler>::CLUSTER
 );
 const CT_LIGHT: DeviceType = DeviceType {
@@ -85,7 +105,7 @@ const CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
     identify::IdentifyHandler::<()>::CLUSTER,
-    OnOffHandler::CLUSTER
+    OnOffHandler::<false>::CLUSTER
 );
 const TEMPERATURE_SENSOR: DeviceType = DeviceType {
     dtype: 0x0302,
@@ -234,6 +254,18 @@ impl Entry {
                 }
             }
             Role::Child { function, .. } => match &function.kind {
+                FunctionHandlerKind::AirConditioner(_) => Endpoint::new(
+                    self.endpoint,
+                    devices!(ROOM_AIR_CONDITIONER),
+                    AIR_CONDITIONER_CLUSTERS,
+                )
+                .with_tags(tags),
+                FunctionHandlerKind::AirConditionerSwing(_) => Endpoint::new(
+                    self.endpoint,
+                    devices!(ROOM_AIR_CONDITIONER),
+                    AIR_CONDITIONER_ROCKING_CLUSTERS,
+                )
+                .with_tags(tags),
                 FunctionHandlerKind::Fan(_) => {
                     Endpoint::new(self.endpoint, devices!(FAN), FAN_CHILD_CLUSTERS).with_tags(tags)
                 }

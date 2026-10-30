@@ -73,6 +73,41 @@ pub(crate) fn native_for(description: &PhysicalDeviceDescription) -> SourceFixtu
                 }
                 (2, "fan", 0x7808, properties)
             }
+            FunctionKind::AirConditioner {
+                temperature,
+                vertical_swing,
+            } => {
+                let input: Value = serde_json::from_str(include_str!(
+                    "../../../../tests/fixtures/miot/lumi-mcn04.json"
+                ))
+                .unwrap();
+                for siid in [3, 4] {
+                    let mut service = input["services"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|service| service["iid"] == siid)
+                        .unwrap()
+                        .clone();
+                    if siid == 3 {
+                        let target = service["properties"]
+                            .as_array_mut()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|property| property["iid"] == 4)
+                            .unwrap();
+                        target["value-range"] =
+                            json!([temperature.min(), temperature.max(), temperature.step()]);
+                    } else if !vertical_swing {
+                        service["properties"]
+                            .as_array_mut()
+                            .unwrap()
+                            .retain(|property| property["iid"] != 4);
+                    }
+                    services.insert(siid, service);
+                }
+                continue;
+            }
             FunctionKind::Curtain => {
                 let input: Value = serde_json::from_str(include_str!(
                     "../../../../tests/fixtures/miot/xiaomi-acn010.json"

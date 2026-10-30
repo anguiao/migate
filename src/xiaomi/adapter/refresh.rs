@@ -467,7 +467,8 @@ fn read_one(
                     && (function.lighting().is_some()
                         || function.kind().is_read_only()
                         || function.curtain().is_some()
-                        || function.fan().is_some())
+                        || function.fan().is_some()
+                        || function.air_conditioner().is_some())
             });
         let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
         let reading = async {

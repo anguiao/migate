@@ -1,3 +1,4 @@
+mod air_conditioner;
 mod composition;
 mod handlers;
 mod lighting_handlers;

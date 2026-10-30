@@ -603,6 +603,7 @@ pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescript
                     && left.lighting() == right.lighting()
                     && left.curtain() == right.curtain()
                     && left.fan() == right.fan()
+                    && left.air_conditioner() == right.air_conditioner()
                     && left.measurement() == right.measurement()
                     && left.state() == right.state()
                     && left.motion() == right.motion()

@@ -12,6 +12,7 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
 };
 
+mod air_conditioner;
 mod fan;
 
 #[derive(Default)]

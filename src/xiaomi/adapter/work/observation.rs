@@ -8,7 +8,10 @@ use super::*;
 impl DeviceWork {
     pub(in crate::xiaomi::adapter) fn reconcile_state_reads(&self, context: &Context) {
         for function in self.native.device().functions().iter().filter(|function| {
-            function.state().is_some() || function.curtain().is_some() || function.fan().is_some()
+            function.state().is_some()
+                || function.curtain().is_some()
+                || function.fan().is_some()
+                || function.air_conditioner().is_some()
         }) {
             let id = function.id();
             let path = context.read_path_for(&self.key.id, id);
@@ -152,6 +155,7 @@ impl DeviceWork {
         let Some(function) = self.native.device().functions().iter().find(|function| {
             function.curtain().is_none()
                 && function.fan().is_none()
+                && function.air_conditioner().is_none()
                 && function.observation_bindings().contains(&binding)
         }) else {
             return false;
@@ -225,7 +229,10 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
-        if function.fan().is_some() {
+        if function.air_conditioner().is_some() {
+            let decoded = Self::decode_air_conditioner(function, binding, value)?;
+            self.observe_air_conditioner(function, binding, decoded, observation, Origin::Read);
+        } else if function.fan().is_some() {
             let decoded = Self::decode_fan(function, binding, value)?;
             self.observe_fan(function, binding, decoded, observation, Origin::Read);
         } else if function.curtain().is_some() {
@@ -264,6 +271,70 @@ impl DeviceWork {
         Ok(())
     }
 
+    pub(in crate::xiaomi::adapter) fn observe_air_conditioner(
+        &self,
+        function: &ParsedFunction,
+        binding: PropertyBinding,
+        value: crate::device::AirConditionerValue,
+        observation: Observation,
+        origin: Origin,
+    ) {
+        if self.life.is_closed() {
+            return;
+        }
+        let id = function.id();
+        self.observations.observed(self, id, binding, origin);
+        if !matches!(origin, Origin::Read) {
+            self.refresh.borrow_mut().satisfy_baseline(id, binding);
+        }
+        let function = self.physical().function(id).unwrap();
+        if matches!(origin, Origin::Cache) {
+            function.observe_cached_air_conditioner(
+                value,
+                observation.source_time,
+                observation.received_at,
+            );
+        } else {
+            function.observe_air_conditioner(
+                value,
+                observation.source_time,
+                observation.received_at,
+            );
+        }
+        self.property_sources.borrow_mut().insert(
+            super::super::observations::key(id, binding),
+            observation.source,
+        );
+    }
+    pub(in crate::xiaomi::adapter) fn decode_air_conditioner(
+        function: &ParsedFunction,
+        binding: PropertyBinding,
+        value: &serde_json::Value,
+    ) -> Result<crate::device::AirConditionerValue, crate::xiaomi::capability::CapabilityError>
+    {
+        use crate::{device::AirConditionerValue, xiaomi::capability::CapabilityError};
+        let ac = function
+            .air_conditioner()
+            .expect("air-conditioner function");
+        if binding == ac.power() {
+            Ok(AirConditionerValue::Power(value.as_bool().ok_or(
+                CapabilityError::InvalidValue("air-conditioner power"),
+            )?))
+        } else if binding == ac.mode().property() {
+            Ok(AirConditionerValue::Mode(ac.mode().read_value(value)?))
+        } else if binding == ac.temperature().property() {
+            Ok(AirConditionerValue::Temperature(
+                ac.temperature().read_value(value)?,
+            ))
+        } else if binding == ac.speed().property() {
+            Ok(AirConditionerValue::Speed(ac.speed().read_value(value)?))
+        } else {
+            debug_assert_eq!(Some(binding), ac.swing());
+            Ok(AirConditionerValue::Swing(value.as_bool().ok_or(
+                CapabilityError::InvalidValue("air-conditioner swing"),
+            )?))
+        }
+    }
     pub(in crate::xiaomi::adapter) fn observe_fan(
         &self,
         function: &ParsedFunction,

@@ -24,6 +24,7 @@ use std::{
     time::Instant,
 };
 
+mod air_conditioner;
 mod curtain;
 mod fan;
 mod feedback;
@@ -519,12 +520,16 @@ async fn send_owned(
         .unwrap()
         .lighting()
         .is_some();
-    let gate = (light || matches!(&request, DeviceRequest::Curtain(_) | DeviceRequest::Fan(_)))
-        .then(|| {
-            context
-                .write_gates
-                .for_device(&work.key.id, context.clock.clone())
-        });
+    let gate = (light
+        || matches!(
+            &request,
+            DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_)
+        ))
+    .then(|| {
+        context
+            .write_gates
+            .for_device(&work.key.id, context.clock.clone())
+    });
     let completion = Rc::new((Cell::new(false), Event::new()));
     let done = completion.clone();
     let owner = context.clone();
@@ -538,6 +543,9 @@ async fn send_owned(
                 }
                 DeviceRequest::Fan(request) => {
                     fan::send(request, owner, work, sink, &id, gate).await
+                }
+                DeviceRequest::AirConditioner(request) => {
+                    air_conditioner::send(request, owner, work, sink, &id, gate).await
                 }
                 request => lighting::send(request, owner, work, sink, &id, gate).await,
             }

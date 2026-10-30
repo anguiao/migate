@@ -1,5 +1,6 @@
 use super::{
-    bridged_info::BridgedHandler, curtain, fan, lighting, on_off::OnOffHandler, sensors, states,
+    air_conditioner, bridged_info::BridgedHandler, curtain, fan, lighting, on_off::OnOffHandler,
+    sensors, states,
 };
 use crate::device::{Function, FunctionKind, LightProfileKind, PhysicalDevice};
 use crate::storage::Identity;
@@ -19,7 +20,8 @@ use rs_matter::{
                 bridged_device_basic_information::{self as bridged, ClusterHandler as _},
                 carbon_dioxide_concentration_measurement, color_control, fan_control,
                 illuminance_measurement, level_control, occupancy_sensing, power_source,
-                relative_humidity_measurement, temperature_measurement, window_covering,
+                relative_humidity_measurement, temperature_measurement, thermostat,
+                window_covering,
             },
             desc::{self, ClusterHandler as _},
             groups::{self, ClusterHandler as _},
@@ -76,6 +78,7 @@ struct Versions {
     state: u32,
     curtain: u32,
     fan: u32,
+    thermostat: u32,
 }
 impl Versions {
     /// Each new instance seeds independent random per-cluster DataVersions so
@@ -99,6 +102,7 @@ impl Versions {
             state: random.random(),
             curtain: random.random(),
             fan: random.random(),
+            thermostat: random.random(),
         }
     }
 }

@@ -1,3 +1,4 @@
+mod air_conditioner;
 pub(crate) mod app_source;
 mod bootstrap;
 mod cloud_refresh;

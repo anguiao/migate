@@ -163,3 +163,27 @@ fn fan_shape_tracks_optional_horizontal_swing() {
     );
     assert_ne!(fixed_shape(&[fan]), fixed_shape(&[outlet]));
 }
+
+#[test]
+fn air_conditioner_shape_compares_only_published_temperature_bounds_and_swing() {
+    let ac = |max, step, swing| FunctionDescription {
+        id: "air-conditioner:3".into(),
+        label: "Air conditioner".into(),
+        kind: FunctionKind::AirConditioner {
+            temperature: crate::device::TemperatureGrid::new(16, max, step).unwrap(),
+            vertical_swing: swing,
+        },
+    };
+    assert_eq!(
+        fixed_shape(&[ac(30, 1, true)]),
+        fixed_shape(&[ac(31, 2, true)])
+    );
+    assert_ne!(
+        fixed_shape(&[ac(30, 1, true)]),
+        fixed_shape(&[ac(30, 1, false)])
+    );
+    assert_ne!(
+        fixed_shape(&[ac(30, 1, true)]),
+        fixed_shape(&[ac(28, 1, true)])
+    );
+}
