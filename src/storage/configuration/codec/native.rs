@@ -119,30 +119,17 @@ struct WireMcn04 {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(
+    deny_unknown_fields,
+    bound(
+        serialize = "[i64; N]: Serialize",
+        deserialize = "[i64; N]: Deserialize<'de>"
+    )
+)]
 struct WireAirConditionerEnum<const N: usize> {
     property: WireBinding,
     format: NumericFormat,
-    #[serde(with = "crate::storage::configuration::codec::native::array_codes")]
     codes: [i64; N],
-}
-
-mod array_codes {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    pub(super) fn serialize<S: Serializer, const N: usize>(
-        value: &[i64; N],
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        value.as_slice().serialize(serializer)
-    }
-    pub(super) fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
-        deserializer: D,
-    ) -> Result<[i64; N], D::Error> {
-        let values = Vec::<i64>::deserialize(deserializer)?;
-        values
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("invalid enum code count"))
-    }
 }
 
 #[derive(Serialize, Deserialize)]
