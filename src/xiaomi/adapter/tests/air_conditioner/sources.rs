@@ -26,6 +26,7 @@ fn cloud_reads_writes_and_notifications_use_the_same_standard_bindings() {
                     && ac.mode.value == Some(Mode::Cool)
                     && ac.temperature.value == Some(24)
                     && ac.speed.value == Some(Speed::Auto)
+                    && ac.swing.value == Some(false)
                     && work(&c).function_observer(ID).is_some()
             })
             .await;
