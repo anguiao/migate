@@ -351,7 +351,6 @@ impl std::fmt::Debug for Entry {
             .finish()
     }
 }
-impl DynBase for Entry {}
 impl desc::PartsMatcher for Entry {
     fn matches(&self, _our_endpoint: u16, endpoint: u16) -> bool {
         match &self.role {

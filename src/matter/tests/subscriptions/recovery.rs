@@ -70,9 +70,10 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
         };
         let controller = async {
             if previous_subscription.is_some() {
+                let mdns = matter.transport().mdns_responder();
                 // Wait until the restored report is resolving the peer
                 // before the new inbound CASE session arrives.
-                let service = matter.transport().wait_mdns_resolve_request().await;
+                let service = mdns.wait_resolve_request().await;
                 assert!(matches!(
                     service,
                     rs_matter::transport::network::MatterRemoteService::Operational {

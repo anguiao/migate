@@ -28,7 +28,7 @@ mdns-sd = "0.21.6"
 bytes = "1"
 async-io = "2"
 rand = "0.10"
-rs-matter = { git = "https://github.com/project-chip/rs-matter.git", rev = "319c791044d9aac352ac5afbbe31c3aa623842be", features = ["astro-dnssd", "groups", "persistent-subscriptions"] }
+rs-matter = { git = "https://github.com/project-chip/rs-matter.git", rev = "14baec0955483b794680bb0c56bb7f4faa2741dc", features = ["astro-dnssd", "groups", "persistent-subscriptions"] }
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 log = "0.4"
 blocking = "1"

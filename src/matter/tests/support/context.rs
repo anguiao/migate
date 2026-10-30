@@ -15,7 +15,7 @@ use rs_matter::{
     persist::KvBlobStoreAccess,
     tlv::TLVElement,
     transport::exchange::Exchange,
-    utils::storage::pooled::Buffers,
+    utils::{storage::pooled::Buffers, sync::blocking::Mutex},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -193,6 +193,6 @@ pub(in crate::matter::tests) fn attr(cluster_id: u32, attr_id: u32) -> AttrDetai
         dataver: None,
         wildcard: false,
         array: false,
-        cluster_status: Cell::new(None),
+        cluster_status: Mutex::new(Cell::new(None)),
     }
 }

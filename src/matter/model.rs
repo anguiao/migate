@@ -35,7 +35,6 @@ use rs_matter::{
     error::{Error, ErrorCode},
     persist::{self, KvBlobStoreAccess},
     root_endpoint,
-    utils::sync::DynBase,
 };
 use std::rc::Rc;
 
