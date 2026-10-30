@@ -83,6 +83,95 @@ fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes(
 }
 
 #[test]
+fn integer_brightness_targets_match_native_values_and_reported_levels() {
+    let instance = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/xiaomi-light-bar2.json"
+    ))
+    .unwrap();
+    let parsed = crate::xiaomi::capability::tests::parse_device(
+        crate::device::DeviceKey::new("xiaomi", "integer-brightness"),
+        &instance,
+    )
+    .unwrap();
+    let binding = parsed.functions()[0].lighting().cloned().unwrap();
+    let (device, mut receivers) =
+        crate::device::PhysicalDevice::new(parsed.physical_description("Integer brightness"));
+    setup_light!(@source (device,receivers.remove(0)),device,receiver,handler,ctx);
+    let function = device.functions()[0].clone();
+    device.set_availability(Availability::Available);
+    function.observe(true);
+    block_on(async {
+        for (percent, level) in [
+            (1, 4),
+            (11, 29),
+            (26, 67),
+            (44, 112),
+            (50, 128),
+            (51, 130),
+            (75, 191),
+            (80, 203),
+            (100, 254),
+        ] {
+            function
+                .observe_light(LightPatch {
+                    brightness_percent: Some(percent as f64),
+                    ..Default::default()
+                })
+                .unwrap();
+            ctx.attribute = attr(8, 0);
+            assert_eq!(
+                report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                    .u8()
+                    .unwrap(),
+                level
+            );
+            let data = [
+                0x15, 0x24, 0, level, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+            ];
+            let mut command = Context::new(ctx.base, 8, 0);
+            command.command.cmd_id = 4;
+            command.data = TLVElement::new(&data);
+            let mut output = [0; 128];
+            let mut invoke = pin!(handler.invoke(
+                &command,
+                InvokeReplyInstance::new(&command.command, WriteBuf::new(&mut output))
+            ));
+            assert!(poll_once(invoke.as_mut()).await.is_none());
+            let DeviceRequest::Light(request) = receiver.next_operation().await.unwrap() else {
+                panic!("missing brightness request")
+            };
+            let raw = binding
+                .brightness()
+                .unwrap()
+                .brightness_to_raw(request.target.brightness_percent().unwrap());
+            assert_eq!(raw, percent);
+            assert_eq!(request.target.power(), Some(true));
+            request.mark_sent().unwrap();
+            function
+                .observe_light(LightPatch {
+                    brightness_percent: Some(
+                        binding
+                            .brightness()
+                            .unwrap()
+                            .brightness_from_raw(&serde_json::json!(raw))
+                            .unwrap(),
+                    ),
+                    ..Default::default()
+                })
+                .unwrap();
+            request.accept().unwrap();
+            invoke.await.unwrap();
+            assert_eq!(
+                report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                    .u8()
+                    .unwrap(),
+                level
+            );
+        }
+    });
+}
+
+#[test]
 fn real_handler_level_percent_raw_chain_keeps_high_resolution_and_actual_temperature_range() {
     for fixture in [
         include_str!("../../../../tests/fixtures/miot/yeelink-light-light3.json"),

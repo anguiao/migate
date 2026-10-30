@@ -306,7 +306,7 @@ fn light_unfiltered_reads_use_new_versions_and_encoded_equal_values_keep_version
             .unwrap();
         let after = read_bytes(&handler, &ctx).await.unwrap();
         assert_ne!(report_dataver(&after), report_dataver(&before));
-        assert_eq!(report_value(&after).u8().unwrap(), 190);
+        assert_eq!(report_value(&after).u8().unwrap(), 191);
         assert!(poll_once(receiver.next_operation()).await.is_none());
     });
 }
@@ -338,7 +338,7 @@ fn light_unknown_projection_edges_invalidate_filters_before_run() {
         ctx.attribute.dataver = Some(level_before);
         let level = read_bytes(&handler, &ctx).await.unwrap();
         assert!(!level.is_empty());
-        assert_eq!(report_value(&level).u8().unwrap(), 62);
+        assert_eq!(report_value(&level).u8().unwrap(), 64);
         ctx.attribute = attr(0x300, 7);
         ctx.attribute.dataver = Some(color_before);
         let color = read_bytes(&handler, &ctx).await.unwrap();

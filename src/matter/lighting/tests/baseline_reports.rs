@@ -47,7 +47,11 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
         assert_eq!(request.target.brightness_percent(), Some(1.0));
         accept(&function, request);
         action.accepted().await.unwrap();
+        // Levels 2 and 3 still use the logical command minimum of 1%.
         clock.set(1000);
+        light.advance();
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+        clock.set(3000);
         light.advance();
         let request = frame(&mut receiver).await;
         assert!(request.target.brightness_percent().unwrap() > 1.0);

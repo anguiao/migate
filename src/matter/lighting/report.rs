@@ -152,9 +152,7 @@ impl Report {
             power: snapshot.power().and_then(crate::device::Power::value),
             // Observed zero is a known physical value; Matter's nonzero minimum
             // projects it to MinLevel without inferring the independent power state.
-            level: lighting
-                .brightness_percent
-                .map(|value| level_from_brightness(value.max(1.0))),
+            level: lighting.brightness_percent.map(level_from_brightness),
             xy,
             temperature,
             mode: lighting.mode,

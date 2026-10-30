@@ -5,12 +5,37 @@ use crate::matter::units::{
 };
 
 #[test]
-fn valid_brightness_levels_round_trip_without_losing_precision() {
-    for level in 1..=254 {
+fn brightness_conversion_preserves_precision_above_the_logical_minimum() {
+    for level in 4..=254 {
         assert_eq!(level_from_brightness(brightness_from_level(level)), level);
     }
-    assert_eq!(brightness_from_level(1), 1.0);
+    for level in 1..=3 {
+        assert_eq!(brightness_from_level(level), 1.0);
+    }
+    assert_eq!(level_from_brightness(0.0), 1);
+    assert_eq!(level_from_brightness(1.0), 4);
     assert_eq!(brightness_from_level(254), 100.0);
+}
+
+#[test]
+fn integer_brightness_matches_client_percentages_and_native_rounding() {
+    for (percent, level) in [
+        (11, 29),
+        (26, 67),
+        (44, 112),
+        (50, 128),
+        (51, 130),
+        (75, 191),
+        (80, 203),
+    ] {
+        assert_eq!(level_from_brightness(percent as f64), level);
+    }
+    for percent in 1..=100 {
+        let level = level_from_brightness(percent as f64);
+        let client_percent = ((level as f64 - 1.0) * 100.0 / 253.0).round();
+        assert_eq!(client_percent, percent as f64);
+        assert_eq!(brightness_from_level(level).round(), percent as f64);
+    }
 }
 
 #[test]

@@ -9,14 +9,15 @@
 
 use crate::device::{MeasurementRange, TemperatureInterval, mired_span};
 
-/// Project an already accepted nonzero Matter level to brightness percent.
+/// Normalize an accepted Matter level to percent, respecting the logical
+/// command minimum of 1% for the lowest wire levels.
 pub(crate) fn brightness_from_level(level: u8) -> f64 {
-    1.0 + (level as f64 - 1.0) * 99.0 / 253.0
+    ((level as f64 - 1.0) * 100.0 / 253.0).max(1.0)
 }
 
-/// Project valid nonzero brightness to the Matter level scale.
+/// Normalize valid observed brightness (0..100%) to Matter's MinLevel..MaxLevel.
 pub(crate) fn level_from_brightness(percent: f64) -> u8 {
-    (1.0 + (percent - 1.0) * 253.0 / 99.0).round() as u8
+    (1.0 + percent * 253.0 / 100.0).round() as u8
 }
 
 /// The Matter mired span of a valid logical interval. `TemperatureInterval`
