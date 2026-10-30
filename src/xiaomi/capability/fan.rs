@@ -1,8 +1,9 @@
 use super::patch::dmaker;
 use super::{
-    CapabilityError, FanBindings, FanSpeedBinding, FanSpeedEncoding, NumericFormat,
-    PropertyBinding, RecognitionDiagnostic,
-    description::{Description, Property, Service, array, string},
+    CapabilityError, FanBindings, FanSpeedBinding, FanSpeedEncoding, RecognitionDiagnostic,
+    description::{
+        Description, Property, Service, array, binding, control_access, integer_format, string,
+    },
 };
 
 pub(super) fn parse_fan_service(
@@ -131,8 +132,8 @@ fn parse_speed(
     service: &Service<'_>,
     property: &Property<'_>,
 ) -> Result<FanSpeedBinding, CapabilityError> {
-    access(property)?;
-    let format = format(property)?;
+    control_access(property)?;
+    let format = integer_format(property)?;
     let encoding = match (
         property.value.get("value-range"),
         property.value.get("value-list"),
@@ -227,39 +228,10 @@ pub(super) fn required<'a>(
         )),
     }
 }
-pub(super) fn binding(service: &Service<'_>, property: &Property<'_>) -> PropertyBinding {
-    PropertyBinding {
-        siid: service.iid,
-        piid: property.iid,
-    }
-}
 fn boolean(property: &Property<'_>) -> Result<(), CapabilityError> {
-    access(property)?;
+    control_access(property)?;
     if string(property.value, "format")? != "bool" {
         return Err(CapabilityError::InvalidDescription("fan boolean format"));
     }
     Ok(())
-}
-pub(super) fn access(property: &Property<'_>) -> Result<(), CapabilityError> {
-    let access = array(property.value, "access")?;
-    if access.iter().any(|item| item.as_str().is_none()) {
-        return Err(CapabilityError::InvalidDescription("access"));
-    }
-    for permission in ["read", "write", "notify"] {
-        if !access.iter().any(|item| item.as_str() == Some(permission)) {
-            return Err(CapabilityError::MissingAccess(permission));
-        }
-    }
-    Ok(())
-}
-pub(super) fn format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
-    match string(property.value, "format")? {
-        "uint8" => Ok(NumericFormat::Uint8),
-        "uint16" => Ok(NumericFormat::Uint16),
-        "uint32" => Ok(NumericFormat::Uint32),
-        "int8" => Ok(NumericFormat::Int8),
-        "int16" => Ok(NumericFormat::Int16),
-        "int32" => Ok(NumericFormat::Int32),
-        _ => Err(CapabilityError::InvalidDescription("fan integer format")),
-    }
 }

@@ -1,8 +1,7 @@
 use super::{
     super::{
         AirConditionerBindings, CapabilityError, ParsedDevice, ParsedFunction,
-        description::{Description, Property, Urn, string},
-        fan,
+        description::{Description, Property, Urn, binding, string},
     },
     BuiltinPatch,
 };
@@ -74,7 +73,7 @@ pub(in crate::xiaomi::capability) fn parse(
     };
     let state = property("ac-state", 7)?;
     let range = property("ac-ctrl-range", 6)?;
-    bindings.with_mcn04(fan::binding(service, state), fan::binding(service, range))
+    bindings.with_mcn04(binding(service, state), binding(service, range))
 }
 
 pub(super) fn validate_applied(

@@ -1,8 +1,10 @@
 use super::super::{
     CapabilityError, FanModeBinding, FanSpeedBinding, FanSpeedEncoding, ParsedDevice,
     ParsedFunction,
-    description::{Description, Service, Urn, array, string},
-    fan::{access, binding, format, required},
+    description::{
+        Description, Service, Urn, array, binding, control_access, integer_format, string,
+    },
+    fan::required,
 };
 use super::BuiltinPatch;
 
@@ -114,8 +116,8 @@ pub(in crate::xiaomi::capability) fn bindings(
     service: &Service<'_>,
 ) -> Result<(FanModeBinding, FanSpeedBinding), CapabilityError> {
     let mode = required(service, |p| p.urn.standard("property", "mode", 8), "mode")?;
-    access(mode)?;
-    let mode_format = format(mode)?;
+    control_access(mode)?;
+    let mode_format = integer_format(mode)?;
     let values = array(mode.value, "value-list")?;
     let mut straight = None;
     let mut native_values = Vec::new();
@@ -157,7 +159,7 @@ pub(in crate::xiaomi::capability) fn bindings(
         },
         "speed-level",
     )?;
-    access(speed)?;
+    control_access(speed)?;
     let range = array(speed.value, "value-range")?;
     if range
         != [
@@ -170,7 +172,7 @@ pub(in crate::xiaomi::capability) fn bindings(
     }
     let speed = FanSpeedBinding::new(
         binding(vendor, speed),
-        format(speed)?,
+        integer_format(speed)?,
         FanSpeedEncoding::Range {
             min: 1,
             max: 100,

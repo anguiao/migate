@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::CapabilityError;
+use super::{CapabilityError, NumericFormat, PropertyBinding};
 
 #[derive(Clone, Copy)]
 pub(super) struct Urn<'a> {
@@ -204,6 +204,40 @@ pub(super) fn array<'a>(
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .ok_or(CapabilityError::InvalidDescription(field))
+}
+
+pub(super) fn binding(service: &Service<'_>, property: &Property<'_>) -> PropertyBinding {
+    PropertyBinding {
+        siid: service.iid,
+        piid: property.iid,
+    }
+}
+
+pub(super) fn control_access(property: &Property<'_>) -> Result<(), CapabilityError> {
+    let access = array(property.value, "access")?;
+    if access.iter().any(|item| item.as_str().is_none()) {
+        return Err(CapabilityError::InvalidDescription("access"));
+    }
+    for permission in ["read", "write", "notify"] {
+        if !access.iter().any(|item| item.as_str() == Some(permission)) {
+            return Err(CapabilityError::MissingAccess(permission));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn integer_format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
+    match string(property.value, "format")? {
+        "uint8" => Ok(NumericFormat::Uint8),
+        "uint16" => Ok(NumericFormat::Uint16),
+        "uint32" => Ok(NumericFormat::Uint32),
+        "int8" => Ok(NumericFormat::Int8),
+        "int16" => Ok(NumericFormat::Int16),
+        "int32" => Ok(NumericFormat::Int32),
+        _ => Err(CapabilityError::InvalidDescription(
+            "integer property format",
+        )),
+    }
 }
 
 fn instance_id(value: &Value) -> Result<u32, CapabilityError> {

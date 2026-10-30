@@ -1,7 +1,8 @@
 use super::{
     CapabilityError, NumericFormat, RecognitionDiagnostic,
-    description::{Description, Property, Service, array, string},
-    fan,
+    description::{
+        Description, Property, Service, array, binding, control_access, integer_format, string,
+    },
     model::{
         AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
         AirConditionerTemperatureBinding,
@@ -19,14 +20,14 @@ pub(super) fn parse_air_conditioner(
     let power = required(service, "on", 0x06)?;
     boolean(power)?;
     let mode = required(service, "mode", 0x08)?;
-    fan::access(mode)?;
+    control_access(mode)?;
     let mode = AirConditionerModeBinding::new(
-        fan::binding(service, mode),
+        binding(service, mode),
         numeric_format(mode)?,
         codes(mode, &["cool", "heat", "auto", "fan", "dry"])?,
     )?;
     let temperature = required(service, "target-temperature", 0x21)?;
-    fan::access(temperature)?;
+    control_access(temperature)?;
     if string(temperature.value, "unit")? != "celsius" {
         return Err(CapabilityError::InvalidDescription(
             "air-conditioner temperature unit",
@@ -45,14 +46,14 @@ pub(super) fn parse_air_conditioner(
     let grid = TemperatureGrid::new(integer(min)?, integer(max)?, integer(step)?)
         .map_err(|_| CapabilityError::InvalidDescription("air-conditioner temperature range"))?;
     let temperature = AirConditionerTemperatureBinding::new(
-        fan::binding(service, temperature),
+        binding(service, temperature),
         numeric_format(temperature)?,
         grid,
     )?;
     let speed = required(fan_service, "fan-level", 0x16)?;
-    fan::access(speed)?;
+    control_access(speed)?;
     let speed = AirConditionerSpeedBinding::new(
-        fan::binding(fan_service, speed),
+        binding(fan_service, speed),
         numeric_format(speed)?,
         codes(speed, &["auto", "low", "medium", "high"])?,
     )?;
@@ -63,7 +64,7 @@ pub(super) fn parse_air_conditioner(
         .collect::<Vec<_>>();
     let swing = match swing_candidates.as_slice() {
         [] => None,
-        [property] if boolean(property).is_ok() => Some(fan::binding(fan_service, property)),
+        [property] if boolean(property).is_ok() => Some(binding(fan_service, property)),
         _ => {
             diagnostics.push(RecognitionDiagnostic {
                 target: format!("air-conditioner:{}", service.iid),
@@ -72,13 +73,7 @@ pub(super) fn parse_air_conditioner(
             None
         }
     };
-    AirConditionerBindings::new(
-        fan::binding(service, power),
-        mode,
-        temperature,
-        speed,
-        swing,
-    )
+    AirConditionerBindings::new(binding(service, power), mode, temperature, speed, swing)
 }
 
 fn unique_service<'a>(
@@ -118,7 +113,7 @@ fn required<'a>(
     }
 }
 fn boolean(property: &Property<'_>) -> Result<(), CapabilityError> {
-    fan::access(property)?;
+    control_access(property)?;
     if string(property.value, "format")? != "bool" {
         return Err(CapabilityError::InvalidDescription(
             "air-conditioner boolean format",
@@ -130,7 +125,7 @@ fn numeric_format(property: &Property<'_>) -> Result<NumericFormat, CapabilityEr
     if string(property.value, "format")? == "float" {
         Ok(NumericFormat::Float)
     } else {
-        fan::format(property)
+        integer_format(property)
     }
 }
 fn integer(value: &serde_json::Value) -> Result<i16, CapabilityError> {
