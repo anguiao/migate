@@ -326,7 +326,7 @@ impl DeviceWork {
         } else {
             debug_assert_eq!(binding, patch.range);
             super::super::mcn04::range(ac, value).map(|constraints| {
-                physical.set_air_conditioner_constraints(Some(constraints));
+                physical.set_air_conditioner_constraints(constraints);
                 self.mcn04_ranges
                     .borrow_mut()
                     .insert(id.to_owned(), value.as_str().unwrap().to_owned());

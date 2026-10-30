@@ -101,7 +101,7 @@ fn sent_temperature_settles_after_feedback_change(change_mode: bool) {
             })
             .await;
             let function = function(&control.context.registry, "one", ID);
-            function.set_air_conditioner_constraints(Some(restrictions(vec![24, 26])));
+            function.set_air_conditioner_constraints(restrictions(vec![24, 26]));
             peer.state.borrow_mut().hold_writes = true;
             let action = function
                 .begin_air_conditioner(Command::Temperature(26))
@@ -112,7 +112,7 @@ fn sent_temperature_settles_after_feedback_change(change_mode: bool) {
                 peer.notify_value_at("one", MODE, json!(2), Some(901), false);
                 until(|| snapshot(control).mode.value == Some(Mode::Auto)).await;
             } else {
-                function.set_air_conditioner_constraints(Some(restrictions(vec![24])));
+                function.set_air_conditioner_constraints(restrictions(vec![24]));
             }
             accept(&peer, TEMP).await;
             action.accepted().await.unwrap();
@@ -148,7 +148,7 @@ fn feedback_before_mode_receipt_restricts_the_unsent_combination_step() {
             })
             .await;
             let function = function(&control.context.registry, "one", ID);
-            function.set_air_conditioner_constraints(Some(restrictions(vec![24, 26])));
+            function.set_air_conditioner_constraints(restrictions(vec![24, 26]));
             peer.state.borrow_mut().hold_writes = true;
             let action = function
                 .begin_air_conditioner(Command::Combined(AirConditionerTarget {

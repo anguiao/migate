@@ -545,9 +545,9 @@ impl Function {
         }));
         if let super::FunctionKind::AirConditioner { temperature, .. } = function.description().kind
         {
-            function.set_air_conditioner_constraints(Some(
+            function.set_air_conditioner_constraints(
                 super::air_conditioner::AirConditionerConstraints::standard(temperature),
-            ));
+            );
         }
         let receiver = controllable.then(|| CommandReceiver {
             function: function.clone(),

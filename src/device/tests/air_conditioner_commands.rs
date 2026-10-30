@@ -163,7 +163,7 @@ fn runtime_range_and_source_lifecycle_control_each_execution() {
         let function = &device.functions()[0];
         function.observe_air_conditioner(AirConditionerValue::Power(true), Some(1), 1);
         function.observe_air_conditioner(AirConditionerValue::Mode(Mode::Auto), Some(1), 1);
-        function.set_air_conditioner_constraints(Some(
+        function.set_air_conditioner_constraints(
             AirConditionerConstraints::new(
                 TemperatureGrid::new(16, 30, 1).unwrap(),
                 [
@@ -172,7 +172,7 @@ fn runtime_range_and_source_lifecycle_control_each_execution() {
                 ],
             )
             .unwrap(),
-        ));
+        );
         let action = function
             .begin_air_conditioner(AirConditionerCommand::Temperature(24))
             .unwrap();
@@ -211,13 +211,13 @@ fn restrictions_are_checked_again_at_the_actual_send_boundary() {
             .unwrap();
         let request = next_air_conditioner(&mut receiver).await;
         assert_eq!(request.plan().unwrap(), [Step::Speed(Speed::High)]);
-        function.set_air_conditioner_constraints(Some(
+        function.set_air_conditioner_constraints(
             AirConditionerConstraints::new(
                 TemperatureGrid::new(16, 30, 1).unwrap(),
                 [(Mode::Cool, vec![24], vec![Speed::Low])],
             )
             .unwrap(),
-        ));
+        );
         assert_eq!(
             request.mark_sent(Step::Speed(Speed::High)),
             Err(CommandError::InvalidInState)
@@ -237,7 +237,7 @@ fn new_mode_feedback_before_or_after_acceptance_controls_later_steps() {
                 let function = &device.functions()[0];
                 function.observe_air_conditioner(AirConditionerValue::Power(true), Some(1), 1);
                 function.observe_air_conditioner(AirConditionerValue::Mode(Mode::Cool), Some(1), 1);
-                function.set_air_conditioner_constraints(Some(
+                function.set_air_conditioner_constraints(
                     AirConditionerConstraints::new(
                         TemperatureGrid::new(16, 30, 1).unwrap(),
                         [
@@ -247,7 +247,7 @@ fn new_mode_feedback_before_or_after_acceptance_controls_later_steps() {
                         ],
                     )
                     .unwrap(),
-                ));
+                );
                 let action = function
                     .begin_air_conditioner(AirConditionerCommand::Combined(AirConditionerTarget {
                         mode: Some(Mode::Heat),
@@ -313,7 +313,7 @@ fn later_steps_validate_only_their_own_remaining_parameters() {
             )
             .unwrap()
         };
-        function.set_air_conditioner_constraints(Some(constraints(vec![24])));
+        function.set_air_conditioner_constraints(constraints(vec![24]));
         let action = function
             .begin_air_conditioner(AirConditionerCommand::Combined(AirConditionerTarget {
                 mode: Some(Mode::Heat),
@@ -332,7 +332,7 @@ fn later_steps_validate_only_their_own_remaining_parameters() {
             function.snapshot().air_conditioner().unwrap().mode.value,
             Some(Mode::Cool)
         );
-        function.set_air_conditioner_constraints(Some(constraints(vec![])));
+        function.set_air_conditioner_constraints(constraints(vec![]));
         request.mark_sent(Step::Speed(Speed::High)).unwrap();
         request.step_accepted(Step::Speed(Speed::High)).unwrap();
         request.accept().unwrap();

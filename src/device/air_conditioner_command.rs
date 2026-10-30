@@ -7,9 +7,11 @@ use std::{
 };
 
 use super::{
-    AirConditionerFanSpeed, AirConditionerMode, AirConditionerTarget, Command, CommandError,
-    CommandReceiver, DeviceRequest, Function, FunctionKind, FunctionSnapshot,
+    AirConditionerFanSpeed, AirConditionerMode, AirConditionerSnapshot, AirConditionerTarget,
+    Command, CommandError, CommandReceiver, DeviceRequest, Function, FunctionKind,
+    FunctionSnapshot,
     air_conditioner::{AirConditionerConstraints, ConstraintViolation},
+    state::AirConditionerRuntime,
     step_command::{StepCommand, StepCoordinator, StepEntry},
 };
 
@@ -68,12 +70,20 @@ impl Function {
         {
             return Err(CommandError::Unsupported);
         }
+        self.submit_air_conditioner(|_| Ok(command))
+    }
+
+    fn submit_air_conditioner(
+        &self,
+        resolve: impl FnOnce(AirConditionerSnapshot) -> Result<AirConditionerCommand, CommandError>,
+    ) -> Result<AirConditionerAction, CommandError> {
         let mut state = self.0.state.lock().unwrap();
         let runtime = state.air_conditioner().unwrap();
         if runtime.commands.is_closed() {
             return Err(CommandError::Cancelled);
         }
         self.snapshot_locked(&state).availability.command_result()?;
+        let command = resolve(runtime.snapshot)?;
         let action = AirConditionerAction(
             state
                 .air_conditioner_mut()
@@ -89,32 +99,13 @@ impl Function {
         &self,
         command: Command,
     ) -> Result<FunctionSnapshot, CommandError> {
-        let action = match command {
-            Command::On => self.begin_air_conditioner(AirConditionerCommand::Power(true))?,
-            Command::Off => self.begin_air_conditioner(AirConditionerCommand::Power(false))?,
-            Command::Toggle => {
-                let mut state = self.0.state.lock().unwrap();
-                let runtime = state.air_conditioner().unwrap();
-                if runtime.commands.is_closed() {
-                    return Err(CommandError::Cancelled);
-                }
-                self.snapshot_locked(&state).availability.command_result()?;
-                let value = !runtime
-                    .snapshot
-                    .power
-                    .value
-                    .ok_or(CommandError::UnknownState)?;
-                let action = AirConditionerAction(
-                    state
-                        .air_conditioner_mut()
-                        .unwrap()
-                        .commands
-                        .submit(AirConditionerCommand::Power(value)),
-                );
-                self.0.submitted.notify(usize::MAX);
-                action
-            }
-        };
+        let action = self.submit_air_conditioner(|snapshot| {
+            Ok(AirConditionerCommand::Power(match command {
+                Command::On => true,
+                Command::Off => false,
+                Command::Toggle => !snapshot.power.value.ok_or(CommandError::UnknownState)?,
+            }))
+        })?;
         let _submission = PowerSubmission {
             function: self.clone(),
             entry: action.0.clone(),
@@ -122,20 +113,15 @@ impl Function {
         action.accepted().await
     }
 
-    pub(crate) fn set_air_conditioner_constraints(
-        &self,
-        constraints: Option<AirConditionerConstraints>,
-    ) {
+    pub(crate) fn set_air_conditioner_constraints(&self, constraints: AirConditionerConstraints) {
         let mut state = self.0.state.lock().unwrap();
         let runtime = state.air_conditioner_mut().unwrap();
-        if let Some(constraints) = &constraints {
-            let FunctionKind::AirConditioner { temperature, .. } = self.description().kind else {
-                unreachable!()
-            };
-            assert_eq!(constraints.grid(), temperature);
-        }
-        runtime.constraints_current = constraints.is_some();
-        runtime.constraints = constraints;
+        let FunctionKind::AirConditioner { temperature, .. } = self.description().kind else {
+            unreachable!()
+        };
+        assert_eq!(constraints.grid(), temperature);
+        runtime.constraints_current = true;
+        runtime.constraints = Some(constraints);
     }
     pub(crate) fn require_air_conditioner_source_constraints(&self) {
         let mut state = self.0.state.lock().unwrap();
@@ -252,7 +238,7 @@ impl AirConditionerRequest {
     }
     fn plan_with_runtime(
         &self,
-        runtime: &super::state::AirConditionerRuntime,
+        runtime: &AirConditionerRuntime,
     ) -> Result<Vec<AirConditionerStep>, CommandError> {
         let target = match self.command {
             AirConditionerCommand::Power(value) => {
@@ -281,38 +267,7 @@ impl AirConditionerRequest {
                 .map(|swing| vec![AirConditionerStep::Swing(swing)])
                 .ok_or(CommandError::Unsupported);
         }
-        let constraints = runtime
-            .constraints
-            .as_ref()
-            .filter(|_| runtime.constraints_current)
-            .ok_or(CommandError::UnknownState)?;
-        let map = |violation| match violation {
-            ConstraintViolation::Constraint => CommandError::Constraint,
-            ConstraintViolation::InvalidInState => CommandError::InvalidInState,
-        };
-        if target
-            .temperature
-            .is_some_and(|value| !constraints.grid().contains(value))
-        {
-            return Err(CommandError::Constraint);
-        }
-        let mode = target
-            .mode
-            .or(runtime.planning_mode)
-            .or(runtime.observed_mode);
-        if let Some(mode) = target.mode {
-            constraints.validate_mode(mode).map_err(map)?;
-        }
-        if let Some(temperature) = target.temperature {
-            constraints
-                .validate_temperature(mode.ok_or(CommandError::UnknownState)?, temperature)
-                .map_err(map)?;
-        }
-        if let Some(speed) = target.speed {
-            constraints
-                .validate_speed(mode.ok_or(CommandError::UnknownState)?, speed)
-                .map_err(map)?;
-        }
+        validate_target(runtime, target)?;
         let mut steps = Vec::new();
         if (target.mode.is_some() || target.speed.is_some()) && runtime.commands.needs_power_on() {
             steps.push(AirConditionerStep::Power(true));
@@ -329,9 +284,6 @@ impl AirConditionerRequest {
         if let Some(swing) = target.swing {
             steps.push(AirConditionerStep::Swing(swing));
         }
-        if steps.is_empty() {
-            return Err(CommandError::Unsupported);
-        }
         Ok(steps)
     }
     pub(crate) fn current_result(&self) -> Result<(), CommandError> {
@@ -339,51 +291,29 @@ impl AirConditionerRequest {
     }
     fn validate_step(
         &self,
-        runtime: &super::state::AirConditionerRuntime,
+        runtime: &AirConditionerRuntime,
         step: AirConditionerStep,
     ) -> Result<(), CommandError> {
         if !self.entry.started() {
             self.plan_with_runtime(runtime)?;
             return Ok(());
         }
-        if matches!(
-            step,
-            AirConditionerStep::Power(_) | AirConditionerStep::Swing(_)
-        ) {
-            return Ok(());
-        }
-        let constraints = runtime
-            .constraints
-            .as_ref()
-            .filter(|_| runtime.constraints_current)
-            .ok_or(CommandError::UnknownState)?;
-        let map = |violation| match violation {
-            ConstraintViolation::Constraint => CommandError::Constraint,
-            ConstraintViolation::InvalidInState => CommandError::InvalidInState,
+        let target = match step {
+            AirConditionerStep::Mode(mode) => AirConditionerTarget {
+                mode: Some(mode),
+                ..Default::default()
+            },
+            AirConditionerStep::Temperature(temperature) => AirConditionerTarget {
+                temperature: Some(temperature),
+                ..Default::default()
+            },
+            AirConditionerStep::Speed(speed) => AirConditionerTarget {
+                speed: Some(speed),
+                ..Default::default()
+            },
+            AirConditionerStep::Power(_) | AirConditionerStep::Swing(_) => return Ok(()),
         };
-        match step {
-            AirConditionerStep::Mode(mode) => constraints.validate_mode(mode).map_err(map),
-            AirConditionerStep::Temperature(temperature) => {
-                if !constraints.grid().contains(temperature) {
-                    return Err(CommandError::Constraint);
-                }
-                let mode = runtime
-                    .planning_mode
-                    .or(runtime.observed_mode)
-                    .ok_or(CommandError::UnknownState)?;
-                constraints
-                    .validate_temperature(mode, temperature)
-                    .map_err(map)
-            }
-            AirConditionerStep::Speed(speed) => {
-                let mode = runtime
-                    .planning_mode
-                    .or(runtime.observed_mode)
-                    .ok_or(CommandError::UnknownState)?;
-                constraints.validate_speed(mode, speed).map_err(map)
-            }
-            AirConditionerStep::Power(_) | AirConditionerStep::Swing(_) => unreachable!(),
-        }
+        validate_target(runtime, target)
     }
     pub(crate) fn send_result(&self, step: AirConditionerStep) -> Result<(), CommandError> {
         let state = self.function.0.state.lock().unwrap();
@@ -432,6 +362,45 @@ impl AirConditionerRequest {
         }
         self.entry.reject(error);
     }
+}
+
+fn validate_target(
+    runtime: &AirConditionerRuntime,
+    target: AirConditionerTarget,
+) -> Result<(), CommandError> {
+    let constraints = runtime
+        .constraints
+        .as_ref()
+        .filter(|_| runtime.constraints_current)
+        .ok_or(CommandError::UnknownState)?;
+    let map = |violation| match violation {
+        ConstraintViolation::Constraint => CommandError::Constraint,
+        ConstraintViolation::InvalidInState => CommandError::InvalidInState,
+    };
+    if target
+        .temperature
+        .is_some_and(|value| !constraints.grid().contains(value))
+    {
+        return Err(CommandError::Constraint);
+    }
+    let mode = target
+        .mode
+        .or(runtime.planning_mode)
+        .or(runtime.observed_mode);
+    if let Some(mode) = target.mode {
+        constraints.validate_mode(mode).map_err(map)?;
+    }
+    if let Some(temperature) = target.temperature {
+        constraints
+            .validate_temperature(mode.ok_or(CommandError::UnknownState)?, temperature)
+            .map_err(map)?;
+    }
+    if let Some(speed) = target.speed {
+        constraints
+            .validate_speed(mode.ok_or(CommandError::UnknownState)?, speed)
+            .map_err(map)?;
+    }
+    Ok(())
 }
 impl Drop for AirConditionerRequest {
     fn drop(&mut self) {

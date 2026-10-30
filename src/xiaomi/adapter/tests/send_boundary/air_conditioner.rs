@@ -31,13 +31,13 @@ fn unsent_step_is_revalidated_after_a_range_change_at_the_transport_boundary() {
                     .begin_air_conditioner(Command::Temperature(26))
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
-                function.set_air_conditioner_constraints(Some(
+                function.set_air_conditioner_constraints(
                     AirConditionerConstraints::new(
                         TemperatureGrid::new(16, 30, 1).unwrap(),
                         [(Mode::Cool, vec![24], vec![Speed::Low])],
                     )
                     .unwrap(),
-                ));
+                );
                 wire.allow(usize::MAX);
                 assert_eq!(action.accepted().await, Err(CommandError::InvalidInState));
                 assert!(wire.written.borrow().is_empty());
@@ -56,7 +56,7 @@ fn feedback_after_mode_receipt_restricts_the_next_unsent_step() {
         let function = function(&c.context.registry, "one", "air-conditioner:3");
         function.observe_air_conditioner(AirConditionerValue::Power(true), Some(1), 1);
         function.observe_air_conditioner(AirConditionerValue::Mode(Mode::Cool), Some(1), 1);
-        function.set_air_conditioner_constraints(Some(
+        function.set_air_conditioner_constraints(
             AirConditionerConstraints::new(
                 TemperatureGrid::new(16, 30, 1).unwrap(),
                 [
@@ -66,7 +66,7 @@ fn feedback_after_mode_receipt_restricts_the_next_unsent_step() {
                 ],
             )
             .unwrap(),
-        ));
+        );
         future::or(
             async {
                 driver.run(|_| {}).await.unwrap();
