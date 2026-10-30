@@ -331,9 +331,6 @@ fn render(view: &View, did: Option<&str>, status: &AuthStatus, show_commands: bo
             ));
         }
         for function in physical.functions() {
-            if current_hidden_light(view, physical.key(), function.description()) {
-                continue;
-            }
             let id = &function.function_key().id;
             let label = &function.description().label;
             let snapshot = function.snapshot();
@@ -566,17 +563,6 @@ fn render(view: &View, did: Option<&str>, status: &AuthStatus, show_commands: bo
     }
 }
 
-fn current_hidden_light(
-    view: &View,
-    key: &DeviceKey,
-    function: &crate::device::FunctionDescription,
-) -> bool {
-    view.current
-        .derived
-        .memberships
-        .contains_key(&crate::device::FunctionKey::new(key.clone(), &function.id))
-}
-
 fn power_text(power: Power) -> &'static str {
     match power {
         Power::Unknown => "unknown",
@@ -681,9 +667,7 @@ impl View {
                 let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
                     return Ok(Some(invalid(registry, status, now, "Unknown device DID.")));
                 };
-                let Some(function) = physical.function(id).filter(|function| {
-                    !current_hidden_light(registry, physical.key(), function.description())
-                }) else {
+                let Some(function) = physical.function(id) else {
                     return Ok(Some(invalid(registry, status, now, "Unknown function.")));
                 };
                 let target = if physical.functions().len() == 1 {
