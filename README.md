@@ -2,11 +2,13 @@
 
 MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（Xiaomi/MIoT）设备映射为标准 Matter 设备，接入 Apple Home 等生态。
 
-当前在 macOS / Apple Silicon 本机前台运行，首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持的插座、灯光、米家原生灯组、窗帘、风扇、环境测量与状态功能，并按本地优先选择控制与通知路径。通用能力按实际服务和属性分别识别，不需要型号白名单；同一设备可有多个控制功能、多个同类功能实例，以及测量、门窗或运动等组合。人体存在只接入整机状态，`xiaomi.sensor_occupy.p1` 不展开分区。功能组合使用合成描述验证，实际型号的功能仍按设备描述判定。
+当前在 macOS / Apple Silicon 本机前台运行，首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持的插座、灯光、米家原生灯组、窗帘、风扇、空调、环境测量与状态功能，并按本地优先选择控制与通知路径。通用能力按实际服务和属性分别识别，不需要型号白名单；同一设备可有多个控制功能、多个同类功能实例，以及测量、门窗或运动等组合。人体存在只接入整机状态，`xiaomi.sensor_occupy.p1` 不展开分区。功能组合使用合成描述验证，实际型号的功能仍按设备描述判定。
 
-能力描述样本包括插座 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3`，灯具 `devcea.light.ls2307`、`yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`lemesh.light.wy0c15`，窗帘 `xiaomi.curtain.acn010`，风扇 `dmaker.fan.p5c`，以及温湿度传感器 `miaomiaoce.sensor_ht.t6`、`xiaomi.sensor_ht.new3pr` 和门窗、运动、存在等设备的公开描述。内置补丁处理已确认的差异：`ls2307` 的跨服务 RGB 和颜色模式、`cuco.plug.cp7pd` 的开关 1、开关 2、USB 三个独立通道与总控刷新，以及已支持 `dmaker` 风扇的直吹模式与风速行为。
+能力描述样本包括插座 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3`，灯具 `devcea.light.ls2307`、`yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`lemesh.light.wy0c15`，窗帘 `xiaomi.curtain.acn010`，风扇 `dmaker.fan.p5c`，空调伴侣 `lumi.acpartner.mcn04`，以及温湿度传感器 `miaomiaoce.sensor_ht.t6`、`xiaomi.sensor_ht.new3pr` 和门窗、运动、存在等设备的公开描述。内置补丁处理已确认的差异：`ls2307` 的跨服务 RGB 和颜色模式、`cuco.plug.cp7pd` 的开关 1、开关 2、USB 三个独立通道与总控刷新，已支持 `dmaker` 风扇的直吹模式与风速行为，以及 `lumi.acpartner.mcn04` 的空调状态与控制范围。
 
-提供基础开关、灯具亮度与色温、设备支持的 RGB、软件渐变与连续控制、窗帘位置与停止、风扇调速与摇头、只读测量与状态、可选整机电量、主动通知、断线恢复及持久化身份、名称和配对。风扇普通风速可使用有效范围、步长或有序离散挡位，Matter 百分比映射到实际可达挡位，不代表原生连续调速。`dmaker` 的既有策略在自然风下显示记忆的直吹设定，非零调速会切回直吹；一般风扇不要求直吹模式。更多能力边界见[已知限制](docs/known-limitations.md)。
+提供基础开关、灯具亮度与色温、设备支持的 RGB、软件渐变与连续控制、窗帘位置与停止、风扇调速与摇头、空调模式与温度及风速控制、只读测量与状态、可选整机电量、主动通知、断线恢复及持久化身份、名称和配对。风扇普通风速可使用有效范围、步长或有序离散挡位，Matter 百分比映射到实际可达挡位，不代表原生连续调速。`dmaker` 的既有策略在自然风下显示记忆的直吹设定，非零调速会切回直吹；一般风扇不要求直吹模式。更多能力边界见[已知限制](docs/known-limitations.md)。
+
+空调按完整能力契约识别，不使用型号白名单：需要制冷、制热、自动、送风和除湿五种模式、唯一整度目标温度，以及自动／低／中／高风速；上下摆风在有效绑定成立时提供。实际可用的模式及温度、风速取值受设备当前控制范围约束。`lumi.acpartner.mcn04` 使用内置补丁解释伴侣整包状态和配码控制范围；其他符合契约的设备可按标准属性反馈接入。
 
 有效原生灯组在 Apple Home 中显示为一盏灯。组成员能唯一定位到灯光功能时，仅隐藏该灯光入口，同机其他控制、测量和状态仍可发布；多个灯光无法确定归属时不任意选择或隐藏，可独立成立的原生组功能仍可用。原生能力优先使用组接口；缺少 RGB 时，原生组需已具备开关、亮度和色温，且已确认成员均具备适配后的 RGB 契约，才能从成员功能派生 RGB 并构成扩展彩灯，不要求成员型号相同。派生 RGB 只向发送时已确认开启的成员调色，被跳过的成员不会在开灯后补发；一个成员受理不保证其他成员完成，状态以实际反馈为准。
 
@@ -16,7 +18,7 @@ MiGate 在数据目录保存型号、实例 URN 与完整原始 MIoT 描述，�
 
 运行时米家目录中的型号或实例 URN 变化后，MiGate 获取匹配的完整描述并重新识别；新版描述按兼容扩展处理，假设已有功能、属性及其标识保持稳定。描述获取失败或无效、配置保存失败时保留上次完整的配置、绑定、策略、组关系和订阅，显示原因并继续重试。已确认的设备移除与访问撤销仍生效，不会因缓存恢复；同一型号与 URN 下的静默修改不会主动检查，固件号变化本身也不触发获取。
 
-每个可发布物理设备使用一个父端点和各可见功能的独立子端点，单功能设备也采用相同布局；有效电量由父端点共享。新增功能只分配新端点，已有功能的身份和端点保持不变。插座映射为 On/Off Plug-in Unit（`0x010A`，revision 3），窗帘映射为 Window Covering（`0x0202`，revision 6），风扇映射为 Fan（`0x002B`，revision 4）；灯光按能力采用 On/Off Light（`0x0100`）、Dimmable Light（`0x0101`）、Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`），彩灯提供 CT + XY + HS（色相／饱和度）。测量和状态分别映射为 Temperature Sensor（`0x0302`）、Humidity Sensor（`0x0307`）、Air Quality Sensor（`0x002C`，提供 ppm 浓度，空气质量等级保持 Unknown）、Light Sensor（`0x0106`）、Contact Sensor（`0x0015`）或 Occupancy Sensor（`0x0107`）；共享电量使用 Power Source（`0x0011`）。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的实际呈现、固件模式联动及基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
+每个可发布物理设备使用一个父端点和各可见功能的独立子端点，单功能设备也采用相同布局；有效电量由父端点共享。新增功能只分配新端点，已有功能的身份和端点保持不变。插座映射为 On/Off Plug-in Unit（`0x010A`，revision 3），窗帘映射为 Window Covering（`0x0202`，revision 6），风扇映射为 Fan（`0x002B`，revision 4），空调映射为 Room Air Conditioner（`0x0072`，revision 3），在同一子端点提供 Thermostat 与 Fan Control，不另发布风扇；灯光按能力采用 On/Off Light（`0x0100`）、Dimmable Light（`0x0101`）、Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`），彩灯提供 CT + XY + HS（色相／饱和度）。测量和状态分别映射为 Temperature Sensor（`0x0302`）、Humidity Sensor（`0x0307`）、Air Quality Sensor（`0x002C`，提供 ppm 浓度，空气质量等级保持 Unknown）、Light Sensor（`0x0106`）、Contact Sensor（`0x0015`）或 Occupancy Sensor（`0x0107`）；共享电量使用 Power Source（`0x0011`）。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的实际呈现、固件模式联动及基础兼容性在 `review` 阶段真机验收，不声称已通过 Matter 认证。
 
 ```sh
 cargo run --locked -- auth login
@@ -42,10 +44,11 @@ cargo run --locked
 - [窗帘控制与状态同步方案](docs/specs/2026-10-28-curtain-control/spec.md)
 - [风扇控制与状态同步方案](docs/specs/2026-10-29-fan-control/spec.md)
 - [设备功能组合与内置适配补丁方案](docs/specs/2026-10-29-device-capability-composition/spec.md)
+- [空调控制与状态同步方案](docs/specs/2026-10-30-air-conditioner-control/spec.md)
 
 米家认证协议参考[小米官方 Home Assistant 集成](https://github.com/XiaoMi/ha_xiaomi_home)，使用该集成的 OAuth 应用配置。MiGate 是个人爱好项目，该授权归属于 HA 应用，不代表小米为 MiGate 提供独立授权或官方支持。参考来源与使用前提见[米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md#认证方案与云端依赖)；注明来源不会扩大[上游许可证](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/LICENSE.md)的授权范围。
 
-后续继续覆盖开关、插座、其他传感器类别和空调，仅暴露可自然映射为标准 Matter 能力的功能。
+后续继续覆盖开关、插座和其他传感器类别，仅暴露可自然映射为标准 Matter 能力的功能。
 
 ## 代码组织
 
