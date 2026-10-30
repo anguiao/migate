@@ -28,6 +28,8 @@ pub(super) struct AirConditionerRuntime {
     pub(super) snapshot: super::AirConditionerSnapshot,
     pub(super) commands: super::air_conditioner_command::AirConditionerCoordinator,
     pub(super) constraints: Option<super::air_conditioner::AirConditionerConstraints>,
+    pub(super) dynamic_constraints: bool,
+    pub(super) constraints_current: bool,
     pub(super) planning_mode: Option<super::AirConditionerMode>,
     pub(super) observed_mode: Option<super::AirConditionerMode>,
     pub(super) mode_revision: u64,
@@ -77,6 +79,8 @@ impl RuntimeState {
                 snapshot: super::AirConditionerSnapshot::default(),
                 commands: super::air_conditioner_command::AirConditionerCoordinator::default(),
                 constraints: None,
+                dynamic_constraints: false,
+                constraints_current: false,
                 planning_mode: None,
                 observed_mode: None,
                 mode_revision: 0,
@@ -436,6 +440,9 @@ impl PhysicalDevice {
                     if let Some(runtime) = state.air_conditioner_mut() {
                         runtime.planning_mode = None;
                         runtime.observed_mode = None;
+                        if runtime.dynamic_constraints {
+                            runtime.constraints_current = false;
+                        }
                         runtime.commands.unavailable(error.clone());
                     }
                     if light {
@@ -751,7 +758,15 @@ impl Function {
         source_time: Option<i64>,
         received_at: i64,
     ) {
-        self.apply_air_conditioner_observation(value, source_time, received_at, true);
+        self.apply_air_conditioner_observations(&[value], source_time, received_at, true);
+    }
+    pub(crate) fn observe_air_conditioner_report(
+        &self,
+        values: &[super::AirConditionerValue],
+        source_time: Option<i64>,
+        received_at: i64,
+    ) {
+        self.apply_air_conditioner_observations(values, source_time, received_at, true);
     }
     pub(crate) fn air_conditioner_source_changed(&self) {
         let mut state = self.0.state.lock().unwrap();
@@ -760,6 +775,9 @@ impl Function {
             .expect("air-conditioner function");
         runtime.planning_mode = None;
         runtime.observed_mode = None;
+        if runtime.dynamic_constraints {
+            runtime.constraints_current = false;
+        }
         runtime.mode_revision = runtime.mode_revision.wrapping_add(1);
         runtime.commands.power_off_sent();
     }
@@ -769,11 +787,11 @@ impl Function {
         source_time: Option<i64>,
         received_at: i64,
     ) {
-        self.apply_air_conditioner_observation(value, source_time, received_at, false);
+        self.apply_air_conditioner_observations(&[value], source_time, received_at, false);
     }
-    fn apply_air_conditioner_observation(
+    fn apply_air_conditioner_observations(
         &self,
-        value: super::AirConditionerValue,
+        values: &[super::AirConditionerValue],
         source_time: Option<i64>,
         received_at: i64,
         fresh: bool,
@@ -782,17 +800,21 @@ impl Function {
         let runtime = state
             .air_conditioner_mut()
             .expect("air-conditioner function");
-        if let super::AirConditionerValue::Power(power) = value {
-            runtime.commands.observe_power(power, fresh);
+        let mut changed = false;
+        for &value in values {
+            if let super::AirConditionerValue::Power(power) = value {
+                runtime.commands.observe_power(power, fresh);
+            }
+            if let super::AirConditionerValue::Mode(mode) = value
+                && fresh
+            {
+                runtime.mode_revision = runtime.mode_revision.wrapping_add(1);
+                runtime.planning_mode = None;
+                runtime.observed_mode = Some(mode);
+            }
+            changed |= runtime.snapshot.update(value, source_time, received_at);
         }
-        if let super::AirConditionerValue::Mode(mode) = value
-            && fresh
-        {
-            runtime.mode_revision = runtime.mode_revision.wrapping_add(1);
-            runtime.planning_mode = None;
-            runtime.observed_mode = Some(mode);
-        }
-        if runtime.snapshot.update(value, source_time, received_at) {
+        if changed {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }

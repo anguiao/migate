@@ -38,6 +38,10 @@ pub(crate) fn valid_value(value: &Value) -> bool {
     value.is_boolean() || value.as_f64().is_some_and(f64::is_finite)
 }
 
+pub(crate) fn valid_observation(value: &Value) -> bool {
+    value.is_string() || valid_value(value)
+}
+
 pub(crate) fn valid_bindings(bindings: &[PropertyBinding]) -> bool {
     !bindings.is_empty()
         && bindings.iter().enumerate().all(|(index, binding)| {

@@ -323,7 +323,7 @@ impl SessionDriver {
                     let value = message
                         .payload
                         .get("value")
-                        .filter(|value| crate::xiaomi::property::valid_value(value))
+                        .filter(|value| crate::xiaomi::property::valid_observation(value))
                         .ok_or(CentralError::Protocol)?;
                     let update_time = crate::xiaomi::property::update_time(&message.payload);
                     let event = if publish.retain {

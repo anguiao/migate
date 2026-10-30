@@ -357,3 +357,65 @@ fn binding_constructors_reject_invalid_native_codes_and_formats() {
     assert_eq!(integer.encode(26), json!(26));
     assert_eq!(integer.read_value(&json!(-1)).unwrap(), -1);
 }
+
+#[test]
+fn mcn04_uses_private_feedback_and_native_integer_temperature() {
+    let parsed = super::super::parse_device_for_model(
+        crate::device::DeviceKey::new("xiaomi", "mcn04"),
+        "lumi.acpartner.mcn04",
+        &instance(),
+    )
+    .unwrap();
+    let function = parsed
+        .functions()
+        .iter()
+        .find(|f| f.id() == "air-conditioner:3")
+        .unwrap();
+    assert_eq!(
+        function.observation_bindings(),
+        vec![
+            PropertyBinding { siid: 8, piid: 7 },
+            PropertyBinding { siid: 8, piid: 6 }
+        ]
+    );
+    assert_eq!(
+        function.air_conditioner().unwrap().temperature().encode(26),
+        json!(26)
+    );
+}
+
+#[test]
+fn mcn04_requires_its_real_private_feedback_and_records_patch() {
+    let parsed = super::super::parse_device_for_model(
+        crate::device::DeviceKey::new("xiaomi", "mcn04"),
+        "lumi.acpartner.mcn04",
+        &instance(),
+    )
+    .unwrap();
+    assert!(
+        parsed
+            .recognition()
+            .unwrap()
+            .patches()
+            .iter()
+            .any(|patch| patch.id() == "lumi.mcn04.air-conditioner"
+                && patch.target() == "air-conditioner:3")
+    );
+    for piid in [6, 7] {
+        let mut invalid = instance();
+        property(&mut invalid, 8, piid)["access"] = json!(["read", "write"]);
+        let result = super::super::parse_device_for_model(
+            crate::device::DeviceKey::new("xiaomi", "mcn04"),
+            "lumi.acpartner.mcn04",
+            &invalid,
+        );
+        assert!(
+            result.is_err()
+                || result
+                    .unwrap()
+                    .functions()
+                    .iter()
+                    .all(|function| function.air_conditioner().is_none())
+        );
+    }
+}

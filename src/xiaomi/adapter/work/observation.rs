@@ -29,6 +29,15 @@ impl DeviceWork {
                 changed
             };
             if changed {
+                if function
+                    .air_conditioner()
+                    .is_some_and(|ac| ac.mcn04().is_some())
+                {
+                    self.physical()
+                        .function(id)
+                        .unwrap()
+                        .air_conditioner_source_changed();
+                }
                 for binding in function.observation_bindings() {
                     super::super::refresh::reconcile_state_read(
                         self,
@@ -229,7 +238,12 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
-        if function.air_conditioner().is_some() {
+        if function
+            .air_conditioner()
+            .is_some_and(|ac| ac.mcn04().is_some())
+        {
+            self.observe_mcn04(function, binding, value, observation, Origin::Read)?;
+        } else if function.air_conditioner().is_some() {
             let decoded = Self::decode_air_conditioner(function, binding, value)?;
             self.observe_air_conditioner(function, binding, decoded, observation, Origin::Read);
         } else if function.fan().is_some() {
@@ -271,6 +285,74 @@ impl DeviceWork {
         Ok(())
     }
 
+    pub(in crate::xiaomi::adapter) fn mcn04_problem(
+        &self,
+        id: &str,
+        binding: PropertyBinding,
+    ) -> Option<String> {
+        self.mcn04_problems
+            .borrow()
+            .get(&super::super::observations::key(id, binding))
+            .cloned()
+    }
+    pub(in crate::xiaomi::adapter) fn mcn04_range(&self, id: &str) -> Option<String> {
+        self.mcn04_ranges.borrow().get(id).cloned()
+    }
+    pub(in crate::xiaomi::adapter) fn observe_mcn04(
+        &self,
+        function: &ParsedFunction,
+        binding: PropertyBinding,
+        value: &serde_json::Value,
+        observation: Observation,
+        origin: Origin,
+    ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
+        if self.life.is_closed() || matches!(origin, Origin::Cache) {
+            return Ok(());
+        }
+        let ac = function.air_conditioner().unwrap();
+        let patch = ac.mcn04().unwrap();
+        let id = function.id();
+        let physical = self.physical().function(id).unwrap();
+        let key = super::super::observations::key(id, binding);
+        let result = if binding == patch.state {
+            super::super::mcn04::state(ac, value).map(|report| {
+                physical.observe_air_conditioner_report(
+                    &report.values,
+                    observation.source_time,
+                    observation.received_at,
+                );
+                report.problem
+            })
+        } else {
+            debug_assert_eq!(binding, patch.range);
+            super::super::mcn04::range(ac, value).map(|constraints| {
+                physical.set_air_conditioner_constraints(Some(constraints));
+                self.mcn04_ranges
+                    .borrow_mut()
+                    .insert(id.to_owned(), value.as_str().unwrap().to_owned());
+                None
+            })
+        };
+        let problem = match &result {
+            Ok(problem) => problem.clone(),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(problem) = problem {
+            self.mcn04_problems.borrow_mut().insert(key, problem);
+        } else {
+            self.mcn04_problems.borrow_mut().remove(&key);
+        }
+        result?;
+        self.observations.observed(self, id, binding, origin);
+        if matches!(origin, Origin::Notification) {
+            self.refresh.borrow_mut().satisfy_baseline(id, binding);
+        }
+        self.property_sources.borrow_mut().insert(
+            super::super::observations::key(id, binding),
+            observation.source,
+        );
+        Ok(())
+    }
     pub(in crate::xiaomi::adapter) fn observe_air_conditioner(
         &self,
         function: &ParsedFunction,

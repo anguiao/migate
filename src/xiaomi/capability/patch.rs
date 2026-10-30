@@ -3,6 +3,7 @@
 pub(super) mod cp7pd;
 pub(super) mod dmaker;
 pub(super) mod ls2307;
+pub(super) mod mcn04;
 
 use super::{AppliedPatch, ParsedDevice, RecognitionDiagnostic, description::Urn};
 
@@ -46,7 +47,9 @@ pub(super) fn validate_native(
                 .unwrap();
             let matches =
                 |rule: BuiltinPatch| rule.id == applied.id() && rule.stage == applied.stage();
-            if matches(ls2307::PATCH) {
+            if matches(mcn04::PATCH) {
+                mcn04::validate_applied(model, urn, function)?;
+            } else if matches(ls2307::PATCH) {
                 ls2307::validate_applied(model, urn, function)?;
             } else if matches(dmaker::PATCH) {
                 dmaker::validate_applied(model, urn, function)?;
@@ -57,6 +60,7 @@ pub(super) fn validate_native(
             }
         }
     }
+    mcn04::validate_bindings(device, model, urn)?;
     ls2307::validate_bindings(device, model, urn)?;
     dmaker::validate_bindings(device, model, urn)
 }

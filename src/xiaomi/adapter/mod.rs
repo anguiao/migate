@@ -7,6 +7,7 @@ mod group_rules;
 mod groups;
 mod lighting;
 mod local;
+mod mcn04;
 mod membership;
 mod model;
 mod notifications;

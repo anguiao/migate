@@ -363,7 +363,9 @@ impl ParsedFunction {
     }
 
     pub(crate) fn observation_bindings(&self) -> Vec<PropertyBinding> {
-        if let Some(curtain) = self.curtain() {
+        if let Some(ac) = self.air_conditioner() {
+            ac.observation_bindings()
+        } else if let Some(curtain) = self.curtain() {
             vec![
                 curtain.status().property(),
                 curtain.current().property(),

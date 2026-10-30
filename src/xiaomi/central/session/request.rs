@@ -3,7 +3,8 @@ use super::{LIMIT, Timing};
 use crate::xiaomi::{
     capability::{EventBinding, PropertyBinding},
     property::{
-        PropertyReading, PropertyResults, correlate, update_time, valid_bindings, valid_value,
+        PropertyReading, PropertyResults, correlate, update_time, valid_bindings,
+        valid_observation, valid_value,
     },
 };
 use event_listener::Event;
@@ -665,7 +666,7 @@ pub(super) fn parse_response(kind: &RequestKind, value: &Value) -> ResultValue {
             Ok(Response::PropertyValue(PropertyReading {
                 value: value
                     .get("value")
-                    .filter(|value| valid_value(value))
+                    .filter(|value| valid_observation(value))
                     .cloned()
                     .ok_or(CentralError::Protocol)?,
                 update_time: update_time(value),

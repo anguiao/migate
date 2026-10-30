@@ -410,6 +410,9 @@ pub(super) fn property_diagnostics(property: Option<&ObservedPropertyStatus>) ->
             |problem| format!("read: {problem}"),
         ),
     ];
+    if let Some(detail) = &property.source_detail {
+        fields.push(format!("source details {detail}"));
+    }
     fields.extend(property.subscriptions.iter().map(|subscription| {
         let mut text = format!(
             "{} subscription {}",

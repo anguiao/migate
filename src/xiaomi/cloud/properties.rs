@@ -2,7 +2,8 @@ use super::{CloudClient, CloudError, CloudErrorKind, response::valid_description
 use crate::xiaomi::{
     capability::PropertyBinding,
     property::{
-        PropertyReading, PropertyResults, correlate, update_time, valid_bindings, valid_value,
+        PropertyReading, PropertyResults, correlate, update_time, valid_bindings,
+        valid_observation, valid_value,
     },
 };
 use serde_json::{Value, json};
@@ -64,7 +65,7 @@ impl CloudClient {
                 Ok(PropertyReading {
                     value: item
                         .get("value")
-                        .filter(|value| valid_value(value))
+                        .filter(|value| valid_observation(value))
                         .cloned()
                         .ok_or_else(|| CloudError::protocol(operation))?,
                     update_time: update_time(item),

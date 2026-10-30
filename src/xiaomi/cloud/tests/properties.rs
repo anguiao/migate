@@ -167,8 +167,15 @@ fn property_requests_use_official_paths_and_correlated_boolean_results() {
 }
 
 #[test]
-fn property_reads_accept_boolean_and_numeric_values_with_successful_item_codes() {
-    for value in [json!(true), json!(false), json!(0), json!(1), json!(2.5)] {
+fn property_reads_accept_scalar_values_with_successful_item_codes() {
+    for value in [
+        json!(true),
+        json!(false),
+        json!(0),
+        json!(1),
+        json!(2.5),
+        json!("P0_M0_T26_S0_D1"),
+    ] {
         let body =
             json!({"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":value}]})
                 .to_string();
@@ -179,7 +186,7 @@ fn property_reads_accept_boolean_and_numeric_values_with_successful_item_codes()
             value
         );
     }
-    for value in [Value::Null, json!("true"), json!([]), json!({})] {
+    for value in [Value::Null, json!([]), json!({})] {
         let body =
             json!({"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":value}]})
                 .to_string();

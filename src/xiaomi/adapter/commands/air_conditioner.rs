@@ -70,6 +70,11 @@ impl StepRequest for AirConditionerSequence {
         self.request.mark_sent(step)?;
         if step == AirConditionerStep::Power(false) {
             self.work.observations.invalidate_write(&self.id, binding);
+            if let Some(patch) = self.bindings.mcn04() {
+                self.work
+                    .observations
+                    .invalidate_write(&self.id, patch.state);
+            }
         }
         Ok(())
     }

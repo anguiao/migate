@@ -180,18 +180,27 @@ impl Context {
                             Vec::new()
                         },
                         properties: if let Some(ac) = function.air_conditioner() {
+                            let state = ac.mcn04().map(|patch| patch.state);
+                            let mut bindings = vec![
+                                ("Power", Some(state.unwrap_or(ac.power()))),
+                                ("Mode", Some(state.unwrap_or(ac.mode().property()))),
+                                (
+                                    "Temperature",
+                                    Some(state.unwrap_or(ac.temperature().property())),
+                                ),
+                                ("Speed", Some(state.unwrap_or(ac.speed().property()))),
+                                (
+                                    "Vertical swing",
+                                    ac.swing().map(|swing| state.unwrap_or(swing)),
+                                ),
+                            ];
+                            if let Some(patch) = ac.mcn04() {
+                                bindings.push(("Control range", Some(patch.range)));
+                            }
                             property_statuses(
                                 &work,
                                 function.id(),
-                                [
-                                    ("Power", Some(ac.power())),
-                                    ("Mode", Some(ac.mode().property())),
-                                    ("Temperature", Some(ac.temperature().property())),
-                                    ("Speed", Some(ac.speed().property())),
-                                    ("Vertical swing", ac.swing()),
-                                ]
-                                .into_iter()
-                                .filter_map(|(name, binding)| {
+                                bindings.into_iter().filter_map(|(name, binding)| {
                                     binding.map(|binding| (name, binding))
                                 }),
                             )
@@ -372,7 +381,12 @@ fn property_statuses(
             binding,
             observation_source: work.property_source(id, binding),
             native_mode: (name == "Native mode").then(|| work.fan_mode_observation(id)),
-            read_problem: refresh.property_problem(id, binding),
+            read_problem: work
+                .mcn04_problem(id, binding)
+                .or_else(|| refresh.property_problem(id, binding)),
+            source_detail: (name == "Control range")
+                .then(|| work.mcn04_range(id))
+                .flatten(),
             subscriptions: subscriptions
                 .iter()
                 .filter(|item| item.binding == SubscriptionBinding::Property(binding))

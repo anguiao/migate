@@ -117,7 +117,6 @@ fn general_property_reads_reject_invalid_values_and_present_identity_mismatches(
     block_on(async {
         for body in [
             json!({"value":null}),
-            json!({"value":"50"}),
             json!({"value":[]}),
             json!({"did":"foreign","value":50}),
             json!({"siid":3,"value":50}),

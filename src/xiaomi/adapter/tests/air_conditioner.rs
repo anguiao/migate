@@ -461,3 +461,551 @@ fn replacement_source_rebuilds_baseline_and_rejects_retired_notifications() {
         .await;
     }));
 }
+
+#[test]
+fn mcn04_state_report_updates_valid_fields_atomically_and_preserves_invalid_fields() {
+    let instance = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/lumi-mcn04.json"
+    ))
+    .unwrap();
+    let rig = Rig::custom_lights(&[("one", "lumi.acpartner.mcn04", instance)]);
+    let state = PropertyBinding { siid: 8, piid: 7 };
+    let range = PropertyBinding { siid: 8, piid: 6 };
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.value("one", state, json!("P0_M0_T24_S1_D1"));
+        peer.value(
+            "one",
+            range,
+            json!(
+                "{\"models\":[{\"mode\":0,\"temps\":[24,26],\"speeds\":[0,1,2,3],\"directs\":[1]}]}"
+            ),
+        );
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| snapshot(control).power.value == Some(true)).await;
+            let function = function(&control.context.registry, "one", ID);
+            let before = function.snapshot().revision;
+            peer.notify_value_at("one", state, json!("P1_M1_T999_S3_D0"), Some(777), false);
+            until(|| snapshot(control).mode.value == Some(Mode::Heat)).await;
+            let after = function.snapshot();
+            assert_eq!(after.revision, before + 1);
+            let observed = after.air_conditioner().unwrap();
+            assert_eq!(observed.power.value, Some(false));
+            assert_eq!(observed.mode.value, Some(Mode::Heat));
+            assert_eq!(observed.temperature.value, Some(24));
+            assert_eq!(observed.speed.value, Some(Speed::High));
+            assert_eq!(observed.swing.value, Some(true));
+            assert_eq!(observed.power.source_time, Some(777));
+            assert_eq!(observed.speed.source_time, Some(777));
+            assert!(
+                work(control)
+                    .mcn04_problem(ID, state)
+                    .unwrap()
+                    .contains("T")
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn mcn04_range_is_unknown_until_a_source_reports_it() {
+    let instance = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/lumi-mcn04.json"
+    ))
+    .unwrap();
+    let rig = Rig::custom_lights(&[("one", "lumi.acpartner.mcn04", instance)]);
+    block_on(rig.run(|c| async move {
+        let function = function(&c.context.registry, "one", ID);
+        assert!(function.air_conditioner_constraints().is_none());
+    }));
+}
+
+const MCN_STATE: PropertyBinding = PropertyBinding { siid: 8, piid: 7 };
+const MCN_RANGE: PropertyBinding = PropertyBinding { siid: 8, piid: 6 };
+
+fn mcn04_rig() -> Rig {
+    let instance = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/lumi-mcn04.json"
+    ))
+    .unwrap();
+    Rig::custom_lights(&[("one", "lumi.acpartner.mcn04", instance)])
+}
+fn mcn04_range() -> Value {
+    json!(
+        json!({"models":[
+            {"mode":0,"speeds":[0,1,2,3,99],"temps":[16,24,26,30,99],"directs":[1],"type":2},
+            {"mode":1,"speeds":[0,1,2,3],"temps":[24,26],"directs":[1],"type":2},
+            {"mode":2,"speeds":[0,1,2,3],"temps":[],"directs":[1],"type":2},
+            {"mode":3,"speeds":[0,1,2,3],"temps":[24,26],"directs":[1],"type":2},
+            {"mode":4,"speeds":[1],"temps":[24,26],"directs":[1],"type":2}
+        ]})
+        .to_string()
+    )
+}
+fn mcn04_peer() -> Rc<Peer> {
+    let peer = Rc::new(Peer::default());
+    peer.value("one", MCN_STATE, json!("P0_M0_T24_S1_D1"));
+    peer.value("one", MCN_RANGE, mcn04_range());
+    peer
+}
+
+#[test]
+fn mcn04_range_controls_commands_and_invalid_reports_preserve_last_valid_range() {
+    block_on(mcn04_rig().run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(mcn04_peer(), |peer| async move {
+            let function = function(&control.context.registry, "one", ID);
+            until(|| {
+                function.air_conditioner_constraints_ready()
+                    && snapshot(control).mode.value == Some(Mode::Cool)
+            })
+            .await;
+            let constraints = function.air_conditioner_constraints().unwrap();
+            assert_eq!(
+                constraints.temperatures(Mode::Cool),
+                Some([16, 24, 26, 30].as_slice())
+            );
+            assert_eq!(
+                constraints.speeds(Mode::Cool),
+                Some([Speed::Auto, Speed::Low, Speed::Medium, Speed::High].as_slice())
+            );
+            assert_eq!(constraints.temperatures(Mode::Auto), Some([].as_slice()));
+            assert_eq!(constraints.speeds(Mode::Dry), Some([Speed::Low].as_slice()));
+            let statuses = work(control).subscription_status(ID);
+            for binding in [MCN_STATE, MCN_RANGE] {
+                assert!(
+                    statuses
+                        .iter()
+                        .any(|status| status.source == PathKind::Local
+                            && status.binding
+                                == super::model::SubscriptionBinding::Property(binding)
+                            && status.ready)
+                );
+            }
+            for binding in [POWER, MODE, TEMP, SPEED, SWING] {
+                assert!(
+                    !statuses.iter().any(|status| status.binding
+                        == super::model::SubscriptionBinding::Property(binding))
+                );
+            }
+            let before = function.snapshot();
+            function
+                .begin_air_conditioner(Command::Temperature(26))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            assert_eq!(writes(&peer)[0], (json!(3), json!(4), json!(26)));
+            assert_eq!(function.snapshot(), before);
+            peer.notify_value_at("one", MCN_RANGE, json!("not json"), Some(900), false);
+            until(|| work(control).mcn04_problem(ID, MCN_RANGE).is_some()).await;
+            assert_eq!(function.air_conditioner_constraints().unwrap(), constraints);
+            assert!(function.air_conditioner_constraints_ready());
+            assert!(work(control).mcn04_range(ID).unwrap().contains("directs"));
+            let status = crate::terminal::AuthStatus::new(
+                control.context.status.borrow().authentication.clone(),
+                "/bin/migate".into(),
+                "/data".into(),
+            );
+            status.update_adapter(control.context.diagnostics());
+            let terminal =
+                crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
+            let output = terminal
+                .handle_line("status one", 0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(output.contains("property 8.7"), "{output}");
+            assert!(
+                output.contains("Control range source: property 8.6"),
+                "{output}"
+            );
+            assert!(
+                output.contains("ac-ctrl-range") && output.contains("directs"),
+                "{output}"
+            );
+            peer.notify_value_at("one", MCN_STATE, json!("P0_M2_T24_S1_D1"), Some(901), false);
+            until(|| snapshot(control).mode.value == Some(Mode::Auto)).await;
+            assert_eq!(
+                function
+                    .begin_air_conditioner(Command::Temperature(24))
+                    .unwrap()
+                    .accepted()
+                    .await,
+                Err(CommandError::InvalidInState)
+            );
+            peer.notify_value_at("one", MCN_STATE, json!("P0_M4_T24_S1_D1"), Some(902), false);
+            until(|| snapshot(control).mode.value == Some(Mode::Dry)).await;
+            assert_eq!(
+                function
+                    .begin_air_conditioner(Command::Speed(Speed::High))
+                    .unwrap()
+                    .accepted()
+                    .await,
+                Err(CommandError::InvalidInState)
+            );
+            function
+                .begin_air_conditioner(Command::Speed(Speed::Low))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn mcn04_without_range_allows_power_and_swing_but_not_dependent_commands() {
+    block_on(mcn04_rig().run(|c| async move {
+        c.announce();
+        let peer = mcn04_peer();
+        peer.state
+            .borrow_mut()
+            .read_fail
+            .insert(("one".into(), MCN_RANGE.siid, MCN_RANGE.piid));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            let function = function(&control.context.registry, "one", ID);
+            until(|| {
+                snapshot(control).mode.value == Some(Mode::Cool)
+                    && work(control).function_observer(ID).is_some()
+            })
+            .await;
+            assert!(!function.air_conditioner_constraints_ready());
+            assert_eq!(
+                function
+                    .begin_air_conditioner(Command::Mode(Mode::Heat))
+                    .unwrap()
+                    .accepted()
+                    .await,
+                Err(CommandError::UnknownState)
+            );
+            function
+                .begin_air_conditioner(Command::Power(false))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            function
+                .begin_air_conditioner(Command::Swing(true))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            assert_eq!(
+                writes(&peer),
+                vec![
+                    (json!(3), json!(1), json!(false)),
+                    (json!(4), json!(4), json!(true))
+                ]
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn mcn04_old_read_and_retained_on_do_not_release_off_barrier() {
+    block_on(mcn04_rig().run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(mcn04_peer(), |peer| async move {
+            let function = function(&control.context.registry, "one", ID);
+            until(|| {
+                function.air_conditioner_constraints_ready()
+                    && snapshot(control).power.value == Some(true)
+            })
+            .await;
+            peer.state.borrow_mut().read_timeout.insert((
+                "one".into(),
+                MCN_STATE.siid,
+                MCN_STATE.piid,
+            ));
+            work(control).refresh_property(ID, MCN_STATE);
+            until(|| {
+                peer.state.borrow().held.iter().any(|(publish, _)| {
+                    let payload = decode_mips(&publish.payload).unwrap().payload;
+                    payload["siid"] == 8 && payload["piid"] == 7
+                })
+            })
+            .await;
+            function
+                .begin_air_conditioner(Command::Power(false))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            peer.release_property(
+                "one",
+                MCN_STATE,
+                json!({"value":"P0_M0_T30_S3_D0","updateTime":1}),
+            )
+            .await;
+            until(|| !work(control).refresh.borrow().contains(ID, MCN_STATE)).await;
+            assert_eq!(snapshot(control).temperature.value, Some(24));
+            peer.notify_value_at("one", MCN_STATE, json!("P0_M0_T24_S1_D1"), Some(2), true);
+            for _ in 0..100 {
+                future::yield_now().await;
+            }
+            function
+                .begin_air_conditioner(Command::Speed(Speed::High))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            assert_eq!(
+                writes(&peer),
+                vec![
+                    (json!(3), json!(1), json!(false)),
+                    (json!(3), json!(1), json!(true)),
+                    (json!(4), json!(2), json!(3))
+                ]
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn mcn04_cloud_read_notification_and_standard_writes() {
+    let rig = mcn04_rig();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud
+            .raw_values
+            .insert(("one".into(), 8, 7), json!("P1_M0_T24_S1_D1"));
+        cloud.raw_values.insert(("one".into(), 8, 6), mcn04_range());
+    }
+    let (rig, listener, cloud) = with_cloud_rig(rig);
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            let function = function(&c.context.registry, "one", ID);
+            until(|| {
+                function.air_conditioner_constraints_ready()
+                    && snapshot(&c).power.value == Some(false)
+                    && work(&c).function_observer(ID).is_some()
+            })
+            .await;
+            let before = function.snapshot();
+            function
+                .begin_air_conditioner(Command::Temperature(26))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            assert_eq!(function.snapshot(), before);
+            let writes = c
+                .cloud
+                .lock()
+                .unwrap()
+                .numeric_writes
+                .iter()
+                .map(|(items, _)| items[0].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(writes[0]["siid"], 3);
+            assert_eq!(writes[0]["piid"], 4);
+            assert_eq!(writes[0]["value"], json!(26));
+            cloud.property_at("one", 8, 7, json!("P0_M1_T26_S3_D0"));
+            until(|| snapshot(&c).mode.value == Some(Mode::Heat)).await;
+            assert_eq!(snapshot(&c).temperature.value, Some(26));
+            assert_eq!(snapshot(&c).swing.value, Some(true));
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn mcn04_replacement_source_reloads_state_and_range_and_rejects_old_notifications() {
+    block_on(mcn04_rig().run(|c| async move {
+        c.announce();
+        let old = Rc::new(RefCell::new(None));
+        let captured = old.clone();
+        let control = &c;
+        c.peer(mcn04_peer(), |_| async move {
+            let function = function(&control.context.registry, "one", ID);
+            until(|| {
+                function.air_conditioner_constraints_ready()
+                    && snapshot(control).mode.value == Some(Mode::Cool)
+                    && work(control).function_observer(ID).is_some()
+            })
+            .await;
+            *captured.borrow_mut() = work(control).function_observer(ID);
+        })
+        .await;
+        until(|| c.context.live.borrow().session.is_none()).await;
+        let initial = function(&c.context.registry, "one", ID);
+        assert!(!initial.air_conditioner_constraints_ready());
+        let replacement = mcn04_peer();
+        replacement.value("one", MCN_STATE, json!("P0_M1_T26_S3_D0"));
+        let control = &c;
+        c.peer(replacement, |_| async move {
+            let function = function(&control.context.registry, "one", ID);
+            until(|| {
+                function.air_conditioner_constraints_ready()
+                    && snapshot(control).mode.value == Some(Mode::Heat)
+                    && work(control).function_observer(ID).is_some()
+            })
+            .await;
+            let before = snapshot(control);
+            let constraints = function.air_conditioner_constraints();
+            for (binding, value) in [
+                (MCN_STATE, json!("P1_M4_T30_S0_D1")),
+                (MCN_RANGE, json!("{\"models\":[]}")),
+            ] {
+                control.context.property_value_event(
+                    old.borrow().as_ref().unwrap(),
+                    "one",
+                    binding,
+                    &value,
+                    Some(999),
+                    false,
+                );
+            }
+            assert_eq!(snapshot(control), before);
+            assert_eq!(function.air_conditioner_constraints(), constraints);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn mcn04_retained_report_cannot_replace_fresh_state_or_range_diagnostic() {
+    block_on(mcn04_rig().run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(mcn04_peer(), |_| async move {
+            let function = function(&control.context.registry, "one", ID);
+            until(|| {
+                function.air_conditioner_constraints_ready()
+                    && snapshot(control).mode.value == Some(Mode::Cool)
+                    && work(control).function_observer(ID).is_some()
+            })
+            .await;
+            let source = work(control).function_observer(ID).unwrap();
+            let before = snapshot(control);
+            control.context.property_value_event(
+                &source,
+                "one",
+                MCN_RANGE,
+                &json!("invalid"),
+                Some(1),
+                false,
+            );
+            assert!(work(control).mcn04_problem(ID, MCN_RANGE).is_some());
+            control.context.property_value_event(
+                &source,
+                "one",
+                MCN_STATE,
+                &json!("P1_M1_T30_S3_D0"),
+                Some(2),
+                true,
+            );
+            control.context.property_value_event(
+                &source,
+                "one",
+                MCN_RANGE,
+                &mcn04_range(),
+                Some(2),
+                true,
+            );
+            assert_eq!(snapshot(control), before);
+            assert!(work(control).mcn04_problem(ID, MCN_RANGE).is_some());
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn mcn04_new_range_notification_wins_over_old_inflight_read() {
+    block_on(mcn04_rig().run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(mcn04_peer(), |peer| async move {
+            let function = function(&control.context.registry, "one", ID);
+            until(|| {
+                function.air_conditioner_constraints_ready()
+                    && work(control).function_observer(ID).is_some()
+            })
+            .await;
+            peer.state.borrow_mut().read_timeout.insert((
+                "one".into(),
+                MCN_RANGE.siid,
+                MCN_RANGE.piid,
+            ));
+            work(control).refresh_property(ID, MCN_RANGE);
+            until(|| {
+                peer.state.borrow().held.iter().any(|(publish, _)| {
+                    let payload = decode_mips(&publish.payload).unwrap().payload;
+                    payload["siid"] == 8 && payload["piid"] == 6
+                })
+            })
+            .await;
+            let reordered = json!(
+                json!({"models":[
+                    {"mode":4,"speeds":[1],"temps":[26],"directs":[9]},
+                    {"mode":0,"speeds":[3],"temps":[24],"directs":[8]}
+                ]})
+                .to_string()
+            );
+            peer.notify_value_at("one", MCN_RANGE, reordered, Some(50), false);
+            until(|| {
+                function
+                    .air_conditioner_constraints()
+                    .unwrap()
+                    .speeds(Mode::Cool)
+                    == Some([Speed::High].as_slice())
+            })
+            .await;
+            peer.release_property(
+                "one",
+                MCN_RANGE,
+                json!({"value":mcn04_range(),"updateTime":1}),
+            )
+            .await;
+            until(|| !work(control).refresh.borrow().contains(ID, MCN_RANGE)).await;
+            let current = function.air_conditioner_constraints().unwrap();
+            assert_eq!(current.speeds(Mode::Cool), Some([Speed::High].as_slice()));
+            assert_eq!(current.temperatures(Mode::Dry), Some([26].as_slice()));
+            assert_eq!(current.temperatures(Mode::Heat), None);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn mcn04_combined_steps_recheck_new_feedback_after_mode_send() {
+    block_on(mcn04_rig().run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(mcn04_peer(), |peer| async move {
+            let function = function(&control.context.registry, "one", ID);
+            until(|| {
+                function.air_conditioner_constraints_ready()
+                    && snapshot(control).mode.value == Some(Mode::Cool)
+            })
+            .await;
+            peer.state.borrow_mut().hold_writes = true;
+            let action = function
+                .begin_air_conditioner(Command::Combined(AirConditionerTarget {
+                    mode: Some(Mode::Heat),
+                    temperature: Some(24),
+                    speed: Some(Speed::High),
+                    swing: None,
+                }))
+                .unwrap();
+            until(|| writes(&peer).len() == 1).await;
+            assert_eq!(writes(&peer)[0], (json!(3), json!(2), json!(1)));
+            peer.notify_value_at("one", MCN_STATE, json!("P0_M2_T24_S1_D1"), Some(60), false);
+            until(|| snapshot(control).mode.value == Some(Mode::Auto)).await;
+            accept(&peer, MODE).await;
+            assert_eq!(action.accepted().await, Err(CommandError::InvalidInState));
+            assert_eq!(writes(&peer).len(), 1);
+        })
+        .await;
+    }));
+}

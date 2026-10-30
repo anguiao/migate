@@ -61,6 +61,8 @@ enum WireFunction {
         temperature: WireAirConditionerTemperature,
         speed: WireAirConditionerEnum<4>,
         swing: Option<WireBinding>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcn04: Option<WireMcn04>,
     },
     Curtain {
         id: String,
@@ -107,6 +109,13 @@ enum WireFunction {
         label: String,
         state: WireState,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireMcn04 {
+    state: WireBinding,
+    range: WireBinding,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -415,6 +424,10 @@ impl WireFunction {
                     codes: ac.speed().codes(),
                 },
                 swing: ac.swing().map(Into::into),
+                mcn04: ac.mcn04().map(|patch| WireMcn04 {
+                    state: patch.state.into(),
+                    range: patch.range.into(),
+                }),
             };
         }
         if let Some(fan) = function.fan() {
@@ -576,6 +589,7 @@ impl WireFunction {
                 temperature,
                 speed,
                 swing,
+                mcn04,
             } => {
                 let grid = TemperatureGrid::new(temperature.min, temperature.max, temperature.step)
                     .map_err(|_| "Stored air-conditioner binding is invalid")?;
@@ -594,7 +608,7 @@ impl WireFunction {
                     speed.codes,
                 )
                 .map_err(|_| "Stored air-conditioner binding is invalid")?;
-                let bindings = AirConditionerBindings::new(
+                let mut bindings = AirConditionerBindings::new(
                     power.into(),
                     mode,
                     temperature,
@@ -602,6 +616,11 @@ impl WireFunction {
                     swing.map(Into::into),
                 )
                 .map_err(|_| "Stored air-conditioner binding is invalid")?;
+                if let Some(patch) = mcn04 {
+                    bindings = bindings
+                        .with_mcn04(patch.state.into(), patch.range.into())
+                        .map_err(|_| "Stored air-conditioner binding is invalid")?;
+                }
                 if bindings.function_id() != id {
                     return Err("Stored air-conditioner identity is invalid");
                 }

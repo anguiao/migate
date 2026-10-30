@@ -403,6 +403,19 @@ fn render(view: &View, did: Option<&str>, status: &AuthStatus, show_commands: bo
                     {
                         lines.push("    Current fan level: unknown (automatic speed).".into());
                     }
+                    if let Some(property) = status
+                        .function_properties(&key.id, &function.function_key().id)
+                        .iter()
+                        .find(|property| property.name == "Control range")
+                    {
+                        lines.push(format!(
+                            "    Control range source: {}.",
+                            super::status::property_diagnostics(Some(property))
+                        ));
+                    }
+                    if !function.air_conditioner_constraints_ready() {
+                        lines.push("    Control range is awaiting source confirmation.".into());
+                    }
                     if let Some(constraints) = function.air_conditioner_constraints() {
                         for mode in crate::device::air_conditioner::AirConditionerMode::ALL {
                             if let Some(temperatures) = constraints.temperatures(mode) {

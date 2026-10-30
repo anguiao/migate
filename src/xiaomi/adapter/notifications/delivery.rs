@@ -22,6 +22,28 @@ impl Context {
                     && function.observation_bindings().contains(&binding)
             })
         {
+            if function.air_conditioner().unwrap().mcn04().is_some() {
+                if self.accept_state_notification(work, function.id(), source) {
+                    let _ = work.observe_mcn04(
+                        function,
+                        binding,
+                        value,
+                        Observation {
+                            source: source.kind(),
+                            source_time: update_time,
+                            received_at: self.clock.unix_now(),
+                        },
+                        if cached_report {
+                            Origin::Cache
+                        } else {
+                            Origin::Notification
+                        },
+                    );
+                    self.update_routing("mcn04 property observed");
+                    self.status_changed.notify(usize::MAX);
+                }
+                return;
+            }
             if let Ok(value) = DeviceWork::decode_air_conditioner(function, binding, value)
                 && self.accept_state_notification(work, function.id(), source)
             {

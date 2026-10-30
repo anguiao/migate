@@ -126,6 +126,7 @@ pub(crate) struct AirConditionerTemperatureBinding {
     property: PropertyBinding,
     format: NumericFormat,
     grid: TemperatureGrid,
+    integer_encoding: bool,
 }
 impl AirConditionerTemperatureBinding {
     pub(crate) fn new(
@@ -146,6 +147,7 @@ impl AirConditionerTemperatureBinding {
             property,
             format,
             grid,
+            integer_encoding: false,
         })
     }
     pub(crate) fn property(&self) -> PropertyBinding {
@@ -157,11 +159,16 @@ impl AirConditionerTemperatureBinding {
     pub(crate) fn grid(&self) -> TemperatureGrid {
         self.grid
     }
+    fn use_integer_encoding(&mut self) {
+        self.integer_encoding = true;
+    }
     /// Encode a target already checked against the effective constraints.
     pub(crate) fn encode(&self, temperature: i16) -> Value {
         debug_assert!(self.grid.contains(temperature));
         match self.format {
-            NumericFormat::Float => serde_json::json!(f64::from(temperature)),
+            NumericFormat::Float if !self.integer_encoding => {
+                serde_json::json!(f64::from(temperature))
+            }
             _ => serde_json::json!(temperature),
         }
     }
@@ -184,6 +191,12 @@ impl AirConditionerTemperatureBinding {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Mcn04Bindings {
+    pub(crate) state: PropertyBinding,
+    pub(crate) range: PropertyBinding,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AirConditionerBindings {
     power: PropertyBinding,
@@ -191,6 +204,7 @@ pub(crate) struct AirConditionerBindings {
     temperature: AirConditionerTemperatureBinding,
     speed: AirConditionerSpeedBinding,
     swing: Option<PropertyBinding>,
+    mcn04: Option<Mcn04Bindings>,
 }
 impl AirConditionerBindings {
     pub(crate) fn new(
@@ -230,7 +244,37 @@ impl AirConditionerBindings {
             temperature,
             speed,
             swing,
+            mcn04: None,
         })
+    }
+    pub(crate) fn with_mcn04(
+        mut self,
+        state: PropertyBinding,
+        range: PropertyBinding,
+    ) -> Result<Self, CapabilityError> {
+        if !valid_property(state)
+            || !valid_property(range)
+            || state == range
+            || state.siid != range.siid
+            || self.bindings().contains(&state)
+            || self.bindings().contains(&range)
+        {
+            return Err(CapabilityError::InvalidDescription(
+                "mcn04 feedback bindings",
+            ));
+        }
+        self.temperature.use_integer_encoding();
+        self.mcn04 = Some(Mcn04Bindings { state, range });
+        Ok(self)
+    }
+    pub(crate) fn mcn04(&self) -> Option<Mcn04Bindings> {
+        self.mcn04
+    }
+    pub(crate) fn observation_bindings(&self) -> Vec<PropertyBinding> {
+        match self.mcn04 {
+            Some(patch) => vec![patch.state, patch.range],
+            None => self.bindings(),
+        }
     }
     pub(crate) fn function_id(&self) -> String {
         format!("air-conditioner:{}", self.power.siid)
@@ -260,6 +304,11 @@ impl AirConditionerBindings {
         ]
         .into_iter()
         .flatten()
+        .chain(
+            self.mcn04
+                .into_iter()
+                .flat_map(|patch| [patch.state, patch.range]),
+        )
         .collect()
     }
 }

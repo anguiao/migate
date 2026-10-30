@@ -70,6 +70,8 @@ pub(super) struct DeviceWork {
     active: RefCell<BTreeMap<String, NotificationSource>>,
     observation_sources: RefCell<BTreeMap<String, PathKind>>,
     property_sources: RefCell<BTreeMap<super::observations::PropertyKey, PathKind>>,
+    mcn04_problems: RefCell<BTreeMap<super::observations::PropertyKey, String>>,
+    mcn04_ranges: RefCell<BTreeMap<String, String>>,
     fan_modes: RefCell<BTreeMap<String, NativeModeObservation>>,
     state_read_paths: RefCell<BTreeMap<String, Option<super::routing::ControlPath>>>,
     condition_generation: Cell<u64>,
@@ -89,6 +91,17 @@ impl DeviceWork {
         refresh_changed: Rc<Event>,
         light_write: Option<Rc<DeviceWriteGate>>,
     ) -> Self {
+        for function in native.device().functions() {
+            if function
+                .air_conditioner()
+                .is_some_and(|ac| ac.mcn04().is_some())
+            {
+                sink.physical
+                    .function(function.id())
+                    .unwrap()
+                    .require_air_conditioner_source_constraints();
+            }
+        }
         let key = native.device().key().clone();
         let battery_issue = native.device().battery_issue().map(str::to_owned);
         Self {
@@ -103,6 +116,8 @@ impl DeviceWork {
             active: RefCell::new(BTreeMap::new()),
             observation_sources: RefCell::new(BTreeMap::new()),
             property_sources: RefCell::new(BTreeMap::new()),
+            mcn04_problems: RefCell::new(BTreeMap::new()),
+            mcn04_ranges: RefCell::new(BTreeMap::new()),
             fan_modes: RefCell::new(BTreeMap::new()),
             state_read_paths: RefCell::new(BTreeMap::new()),
             condition_generation: Cell::new(0),
@@ -124,7 +139,27 @@ impl DeviceWork {
     }
     /// Swap the logical delivery target and return the retired one.
     pub(super) fn replace_sink(&self, sink: Rc<LogicalSink>) -> Rc<LogicalSink> {
-        std::mem::replace(&mut *self.sink.borrow_mut(), sink)
+        for function in self.native.device().functions() {
+            if function
+                .air_conditioner()
+                .is_some_and(|ac| ac.mcn04().is_some())
+            {
+                sink.physical
+                    .function(function.id())
+                    .unwrap()
+                    .require_air_conditioner_source_constraints();
+            }
+        }
+        let old = std::mem::replace(&mut *self.sink.borrow_mut(), sink);
+        for function in self.native.device().functions() {
+            if function
+                .air_conditioner()
+                .is_some_and(|ac| ac.mcn04().is_some())
+            {
+                self.function_source_changed(function.id());
+            }
+        }
+        old
     }
     pub(super) fn physical(&self) -> PhysicalDevice {
         self.current_sink().physical.clone()

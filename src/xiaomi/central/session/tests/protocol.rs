@@ -220,7 +220,7 @@ fn strict_business_values_and_returned_identity_are_required() {
         binding,
     };
     for value in [
-        json!({"value":"false"}),
+        json!({"value":[]}),
         json!({"did":"other","value":true}),
         json!({"siid":3,"piid":1,"value":true}),
     ] {
@@ -232,6 +232,10 @@ fn strict_business_values_and_returned_identity_are_required() {
     assert!(matches!(
         parse_response(&read, &json!({"value":1})),
         Ok(Response::PropertyValue(value)) if value.value == json!(1)
+    ));
+    assert!(matches!(
+        parse_response(&read, &json!({"value":"P0_M0_T26_S0_D1"})),
+        Ok(Response::PropertyValue(value)) if value.value == json!("P0_M0_T26_S0_D1")
     ));
     let write = RequestKind::Write {
         did: "target".into(),
@@ -290,7 +294,7 @@ fn invalid_device_messages_do_not_disconnect_the_shared_session() {
                         wire::encode_mips(
                             100,
                             None,
-                            &json!({"did":"target","siid":2,"piid":1,"value":"on"}),
+                            &json!({"did":"target","siid":2,"piid":1,"value":[]}),
                         ),
                     ),
                     (

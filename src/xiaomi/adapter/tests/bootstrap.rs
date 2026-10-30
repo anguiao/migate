@@ -655,3 +655,76 @@ fn corrupt_saved_credentials_or_cached_topology_fail_before_network_requests() {
         assert_eq!(rig.cloud.lock().unwrap().homes, 0);
     }
 }
+
+#[test]
+fn unsupported_cached_mcn04_is_recognized_without_disturbing_existing_identity_or_pairing() {
+    let rig = Rig::new(true, &["one", "two"]);
+    let mut before = rig.store.devices().load_configuration().unwrap();
+    let existing_key = DeviceKey::new("xiaomi", "two");
+    let existing = before.device(&existing_key).unwrap().clone();
+    before.devices.retain(|device| device.key.id != "one");
+    let input: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/lumi-mcn04.json"
+    ))
+    .unwrap();
+    let cached = before
+        .descriptions
+        .iter_mut()
+        .find(|raw| raw.key.id == "one")
+        .unwrap();
+    cached.model = "lumi.acpartner.mcn04".into();
+    cached.instance_type = input["type"].as_str().unwrap().into();
+    cached.instance = input;
+    cached.diagnostic = Some("previous rules did not recognize this source".into());
+    rig.store
+        .devices()
+        .commit_configuration(&before, &[])
+        .unwrap();
+    let fabric_key = rs_matter::persist::FABRIC_KEYS_START + 1;
+    rig.store
+        .matter()
+        .put(fabric_key, b"existing fabric")
+        .unwrap();
+    let (restored, _) = XiaomiAdapter::build(
+        rig.store.clone(),
+        rig.source.cloud.clone(),
+        rig.discovery.clone(),
+        rig.clock.clone(),
+    )
+    .unwrap();
+    let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
+    let plan = app
+        .plan()
+        .unwrap()
+        .expect("cached mcn04 must be recognized");
+    app.apply(app.prepare(plan)).unwrap();
+    let after = rig.store.devices().load_configuration().unwrap();
+    assert_eq!(after.device(&existing_key).unwrap(), &existing);
+    assert_eq!(
+        rig.store.matter().get(fabric_key).unwrap(),
+        Some(b"existing fabric".to_vec())
+    );
+    let work = restored.context.live.borrow().devices["one"]
+        .admitted
+        .clone()
+        .unwrap();
+    assert_eq!(
+        work.native.device().functions()[0].observation_bindings(),
+        vec![
+            crate::xiaomi::capability::PropertyBinding { siid: 8, piid: 7 },
+            crate::xiaomi::capability::PropertyBinding { siid: 8, piid: 6 },
+        ]
+    );
+    let function = work.physical().function("air-conditioner:3").unwrap();
+    assert!(
+        function
+            .snapshot()
+            .air_conditioner()
+            .unwrap()
+            .power
+            .value
+            .is_none()
+    );
+    assert!(function.air_conditioner_constraints().is_none());
+    assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
+}

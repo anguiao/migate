@@ -247,7 +247,7 @@ fn malformed_notification_payloads_are_isolated_from_valid_notifications() {
             broker.accept(pkid).await;
             for payload in [
                 "not JSON".to_owned(),
-                json!({"params":{"siid":2,"piid":1,"value":"1"}}).to_string(),
+                json!({"params":{"siid":2,"piid":1,"value":[]}}).to_string(),
                 json!({"params":{"siid":3,"piid":1,"value":true}}).to_string(),
                 json!({"params":{"did":"foreign","siid":2,"piid":1,"value":true}}).to_string(),
                 json!({"params":{"siid":"2","piid":1,"value":true}}).to_string(),

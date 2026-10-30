@@ -286,6 +286,7 @@ pub struct ObservedPropertyStatus {
     pub observation_source: Option<PathKind>,
     pub native_mode: Option<NativeModeObservation>,
     pub read_problem: Option<String>,
+    pub source_detail: Option<String>,
     pub subscriptions: Vec<SubscriptionStatus>,
 }
 #[derive(Clone, Debug, PartialEq)]

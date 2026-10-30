@@ -617,7 +617,7 @@ impl NotificationDriver {
                 }
                 let value = params
                     .get("value")
-                    .filter(|value| crate::xiaomi::property::valid_value(value))
+                    .filter(|value| crate::xiaomi::property::valid_observation(value))
                     .ok_or(NotificationError::Protocol)?;
                 let update_time = crate::xiaomi::property::update_time_map(params);
                 let event = if publish.retain {

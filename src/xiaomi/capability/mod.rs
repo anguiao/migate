@@ -57,6 +57,15 @@ pub fn parse_device_for_model(
         let candidate = if service.urn.standard("service", "air-conditioner", 0x780f) {
             Some(
                 air_conditioner::parse_air_conditioner(&description, &mut diagnostics)
+                    .and_then(|bindings| {
+                        if model == "lumi.acpartner.mcn04" {
+                            let bindings = patch::mcn04::parse(model, &description, bindings)?;
+                            patches.push(patch::mcn04::PATCH.applied(bindings.function_id()));
+                            Ok(bindings)
+                        } else {
+                            Ok(bindings)
+                        }
+                    })
                     .map(|bindings| ParsedFunction::air_conditioner_control("空调", bindings))
                     .map_err(|error| diagnostic("air-conditioner", error)),
             )

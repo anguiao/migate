@@ -79,3 +79,47 @@ fn standard_air_conditioner_round_trips_identity_bindings_and_unknown_state() {
         assert!(store.devices().load_configuration().is_err(), "{pointer}");
     }
 }
+
+#[test]
+fn mcn04_patch_round_trips_bindings_without_restoring_observations() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(directory.path()).unwrap();
+    let native = fixture(
+        "ac",
+        "lumi.acpartner.mcn04",
+        include_str!("../../../tests/fixtures/miot/lumi-mcn04.json"),
+    );
+    let planned = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![native],
+    )
+    .configuration;
+    save(&store, &planned);
+    let restored = load(&store);
+    assert_eq!(restored, planned);
+    let entry = &restored.devices[0];
+    let ac = entry.native.as_ref().unwrap().device().functions()[0]
+        .air_conditioner()
+        .unwrap();
+    assert_eq!(
+        ac.observation_bindings(),
+        vec![
+            crate::xiaomi::capability::PropertyBinding { siid: 8, piid: 7 },
+            crate::xiaomi::capability::PropertyBinding { siid: 8, piid: 6 }
+        ]
+    );
+    assert_eq!(ac.temperature().encode(26), serde_json::json!(26));
+    let (physical, _) = PhysicalDevice::new(
+        restored.derive().served[&DeviceKey::new("xiaomi", "ac")]
+            .description
+            .clone(),
+    );
+    assert_eq!(
+        physical.functions()[0]
+            .snapshot()
+            .air_conditioner()
+            .unwrap(),
+        Default::default()
+    );
+}

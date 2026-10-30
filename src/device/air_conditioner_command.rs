@@ -134,7 +134,24 @@ impl Function {
             };
             assert_eq!(constraints.grid(), temperature);
         }
+        runtime.constraints_current = constraints.is_some();
         runtime.constraints = constraints;
+    }
+    pub(crate) fn require_air_conditioner_source_constraints(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        let runtime = state.air_conditioner_mut().unwrap();
+        runtime.dynamic_constraints = true;
+        runtime.constraints = None;
+        runtime.constraints_current = false;
+    }
+    pub(crate) fn air_conditioner_constraints_ready(&self) -> bool {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .air_conditioner()
+            .unwrap()
+            .constraints_current
     }
     pub(crate) fn air_conditioner_constraints(&self) -> Option<AirConditionerConstraints> {
         self.0
@@ -267,6 +284,7 @@ impl AirConditionerRequest {
         let constraints = runtime
             .constraints
             .as_ref()
+            .filter(|_| runtime.constraints_current)
             .ok_or(CommandError::UnknownState)?;
         let map = |violation| match violation {
             ConstraintViolation::Constraint => CommandError::Constraint,
@@ -337,6 +355,7 @@ impl AirConditionerRequest {
         let constraints = runtime
             .constraints
             .as_ref()
+            .filter(|_| runtime.constraints_current)
             .ok_or(CommandError::UnknownState)?;
         let map = |violation| match violation {
             ConstraintViolation::Constraint => CommandError::Constraint,
