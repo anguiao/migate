@@ -7,6 +7,7 @@ mod light_observation;
 mod model;
 mod registry;
 mod state;
+mod step_command;
 
 pub use command::{
     ActionToken, CommandReceiver, CommandRequest, DeviceRequest, LightAction,

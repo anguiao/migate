@@ -28,6 +28,7 @@ mod curtain;
 mod fan;
 mod feedback;
 mod properties;
+mod steps;
 use feedback::LightFeedback;
 
 /// Receipts and recent numeric feedback retain their gate across device replacements.
