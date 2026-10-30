@@ -9,7 +9,11 @@ const TEMPERATURE: PropertyBinding = PropertyBinding { siid: 2, piid: 3 };
 #[test]
 fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
     let rig = Rig::new(false, &["one"]);
-    rig.cloud.lock().unwrap().unsupported.insert("one".into());
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.unsupported.insert("one".into());
+        cloud.names.insert("one".into(), "Future device".into());
+    }
     block_on(rig.run(|c| async move {
         c.announce();
         until(|| {
@@ -26,6 +30,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         assert!(c.context.registry.list().is_empty());
         let saved = c.store.devices().load_configuration().unwrap();
         let raw = &saved.descriptions[0];
+        assert_eq!(raw.name.as_deref(), Some("Future device"));
         assert!(
             raw.diagnostic
                 .as_deref()
@@ -104,6 +109,16 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
                 .is_some()
         );
         assert!(restored.context.registry.list().is_empty());
+        assert_eq!(
+            restored.context.live.borrow().devices["one"]
+                .candidate
+                .as_ref()
+                .unwrap()
+                .raw
+                .name
+                .as_deref(),
+            Some("Future device")
+        );
         let app = crate::app::App::open(restored.source_handle(), c.store.clone()).unwrap();
         assert!(app.plan().unwrap().is_none());
         assert_eq!(c.cloud.lock().unwrap().instance_reads, reads_before_restart);

@@ -136,9 +136,9 @@ impl AppSource {
             .devices
             .entry(description.key().id.clone())
             .or_default();
-        let native = native_for(&description);
+        let mut native = native_for(&description);
+        native.raw.name = Some(description.label().to_owned());
         slot.candidate = Some(native.into());
-        slot.latest_name = Some(description.label().to_owned());
         slot.confirmed = true;
     }
 
@@ -147,6 +147,6 @@ impl AppSource {
         let slot = live.devices.get_mut(&key.id).unwrap();
         let native = slot.admitted.as_ref().unwrap().native.clone();
         slot.candidate.as_mut().unwrap().native = Some(native);
-        slot.latest_name = Some(name.to_owned());
+        slot.candidate.as_mut().unwrap().raw.name = Some(name.to_owned());
     }
 }

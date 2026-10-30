@@ -109,7 +109,6 @@ impl SourceHandle {
             if let Some(description) = description {
                 devices.push(SourceDevice {
                     description: description.clone(),
-                    name: slot.latest_name.clone(),
                     fresh: slot.confirmed,
                 });
             }
@@ -342,13 +341,6 @@ impl SourceHandle {
                     .devices
                     .get_mut(&description.raw.key.id)
                     .expect("committed source retains its slot");
-                if slot
-                    .candidate
-                    .as_ref()
-                    .is_some_and(|candidate| candidate.raw == description.raw)
-                {
-                    slot.latest_name = None;
-                }
                 slot.committed = Some(description);
             }
         }

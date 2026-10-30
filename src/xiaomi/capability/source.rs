@@ -8,6 +8,7 @@ use serde_json::Value;
 pub(crate) struct RawDescription {
     pub(crate) key: DeviceKey,
     pub(crate) model: String,
+    pub(crate) name: Option<String>,
     pub(crate) instance_type: String,
     pub(crate) instance: Value,
     pub(crate) diagnostic: Option<String>,
@@ -26,6 +27,7 @@ impl RawDescription {
     pub(crate) fn new(
         key: DeviceKey,
         model: String,
+        name: Option<String>,
         instance_type: String,
         instance: Value,
         diagnostic: Option<String>,
@@ -33,6 +35,12 @@ impl RawDescription {
         super::validate_source_identity(&key)?;
         if model.is_empty() || model.chars().any(char::is_control) {
             return Err(CapabilityError::InvalidDescription("native model"));
+        }
+        if name
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty() || name.chars().any(char::is_control))
+        {
+            return Err(CapabilityError::InvalidDescription("source name"));
         }
         if instance.get("type").and_then(Value::as_str) != Some(instance_type.as_str()) {
             return Err(CapabilityError::InvalidDescription(
@@ -51,6 +59,7 @@ impl RawDescription {
         Ok(Self {
             key,
             model,
+            name,
             instance_type,
             instance,
             diagnostic,

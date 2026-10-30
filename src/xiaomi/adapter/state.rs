@@ -83,9 +83,6 @@ pub(super) struct DeviceSlot {
     pub(super) recompute_failed: bool,
     /// A confirmed group record lacked the target instance type.
     pub(super) description_target_missing: bool,
-    /// Directory name for `candidate`; display/planning metadata only.
-    pub(super) latest_name: Option<String>,
-
     pub(super) confirmed: bool,
     /// The installed native runtime; native control and subscriptions live here.
     pub(super) admitted: Option<Rc<DeviceWork>>,

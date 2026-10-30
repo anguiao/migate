@@ -37,7 +37,29 @@ fn persists_the_complete_original_miot_description() {
     save(&store, &configuration);
     let saved: Value = serde_json::from_str(&raw(&store)).unwrap();
     assert_eq!(saved["descriptions"][0]["instance"], expected);
+    assert_eq!(saved["descriptions"][0]["name"], "devcea.light.ls2307");
+    assert_eq!(
+        load(&store).descriptions[0].name.as_deref(),
+        Some("devcea.light.ls2307")
+    );
     assert_eq!(load(&store).devices.len(), 1);
+}
+
+#[test]
+fn loading_a_cache_without_source_names_preserves_saved_device_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    seed(&store, vec![fixture("did", "cuco.plug.v3", OUTLET)]);
+    let previous = load(&store);
+    let mut stored: Value = serde_json::from_str(&raw(&store)).unwrap();
+    stored["descriptions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("name");
+    corrupt(&store, &stored);
+    let restored = load(&store);
+    assert_eq!(restored.devices, previous.devices);
+    assert_eq!(restored.descriptions[0].name, None);
 }
 
 #[test]
@@ -103,10 +125,12 @@ pub(super) fn next(
         scope: Some(scope),
         devices: natives
             .into_iter()
-            .map(|native| SourceDevice {
-                name: Some(native.model().to_owned()),
-                description: native.into(),
-                fresh: true,
+            .map(|mut native| {
+                native.raw.name = Some(native.model().to_owned());
+                SourceDevice {
+                    description: native.into(),
+                    fresh: true,
+                }
             })
             .collect(),
         relations: Vec::new(),

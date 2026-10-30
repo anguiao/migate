@@ -40,6 +40,8 @@ struct WireDescription {
     source: String,
     device_id: String,
     model: String,
+    #[serde(default)]
+    name: Option<String>,
     instance_type: String,
     instance: serde_json::Value,
     #[serde(default, deserialize_with = "present_option")]
@@ -161,6 +163,7 @@ impl WireDescription {
             source: raw.key.source.clone(),
             device_id: raw.key.id.clone(),
             model: raw.model.clone(),
+            name: raw.name.clone(),
             instance_type: raw.instance_type.clone(),
             instance: raw.instance.clone(),
             diagnostic: Some(raw.diagnostic.clone()),
@@ -171,6 +174,7 @@ impl WireDescription {
         RawDescription::new(
             DeviceKey::new(self.source, self.device_id),
             self.model,
+            self.name,
             self.instance_type,
             self.instance,
             self.diagnostic

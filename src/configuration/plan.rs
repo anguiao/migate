@@ -209,6 +209,8 @@ pub(crate) fn plan<Shape: PartialEq>(
 
 fn device_label(device: &SourceDevice) -> String {
     device
+        .description
+        .raw
         .name
         .as_deref()
         .map(import_label)

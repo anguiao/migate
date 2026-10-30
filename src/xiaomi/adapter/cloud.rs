@@ -335,14 +335,13 @@ pub(super) async fn run(
                     slot.finish_loading(&life);
                 }
                 match result {
-                    Ok((description, name)) => {
+                    Ok(description) => {
                         let matches_target = target.as_ref().is_none_or(|(model, urn)| {
                             *model == description.raw.model && *urn == description.raw.instance_type
                         });
                         if matches_target {
                             if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
                                 slot.candidate = Some(description);
-                                slot.latest_name = name;
                                 slot.blocked = None;
                                 slot.recompute_failed = false;
                             }

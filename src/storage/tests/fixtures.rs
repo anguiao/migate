@@ -95,10 +95,12 @@ pub(crate) fn planned_from(
         scope: Some(scope()),
         devices: natives
             .into_iter()
-            .map(|native| SourceDevice {
-                name: Some(native.model().to_owned()),
-                description: native.into(),
-                fresh: true,
+            .map(|mut native| {
+                native.raw.name = Some(native.model().to_owned());
+                SourceDevice {
+                    description: native.into(),
+                    fresh: true,
+                }
             })
             .collect(),
         relations: Vec::new(),

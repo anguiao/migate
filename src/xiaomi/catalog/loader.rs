@@ -84,7 +84,7 @@ pub(crate) async fn load_device(
     credentials: &XiaomiRecord,
     home: &OwnedHome,
     did: &str,
-) -> Result<(SourceDescription, Option<String>), CatalogError> {
+) -> Result<SourceDescription, CatalogError> {
     if home.uid != credentials.uid {
         return Err(CatalogError::InvalidScope);
     }
@@ -103,11 +103,11 @@ pub(crate) async fn load_device(
     let raw = RawDescription::new(
         DeviceKey::new("xiaomi", did),
         details.model,
+        details.name,
         details.instance_type,
         instance,
         None,
     )
     .map_err(CatalogError::Capability)?;
-    let description = raw.recognize(false).map_err(CatalogError::Capability)?;
-    Ok((description, details.name))
+    raw.recognize(false).map_err(CatalogError::Capability)
 }

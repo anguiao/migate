@@ -35,7 +35,9 @@ fn empty_saved_name_survives_restart_and_later_directory_names() {
             .contains("Test Outlet")
     );
     source.directory_name(&key, "Directory rename");
-    assert!(app.plan().unwrap().is_none());
+    let plan = app.plan().unwrap().unwrap();
+    assert!(!plan.rebuild);
+    app.apply(app.prepare(plan)).unwrap();
     let saved = store.devices().load_configuration().unwrap();
     let renamed = saved.device(&key).unwrap();
     assert_eq!(renamed.label, "");

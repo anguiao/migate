@@ -31,7 +31,9 @@ fn instance(composite: bool) -> Value {
 
 fn plan(current: &CommittedConfiguration, value: Value) -> Plan {
     let key = DeviceKey::new("xiaomi", "composite");
-    let description = SourceFixture::new("composite", "example.composite", value).into();
+    let mut source = SourceFixture::new("composite", "example.composite", value);
+    source.raw.name = Some("Composite".into());
+    let description = source.into();
     let derived = current.derive();
     let facts = SourceFacts {
         scope: Some(Scope {
@@ -40,7 +42,6 @@ fn plan(current: &CommittedConfiguration, value: Value) -> Plan {
         }),
         devices: vec![SourceDevice {
             description,
-            name: Some("Composite".into()),
             fresh: true,
         }],
         relations: vec![],

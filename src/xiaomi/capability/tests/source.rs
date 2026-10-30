@@ -18,6 +18,7 @@ impl SourceFixture {
         let raw = RawDescription::new(
             DeviceKey::new("xiaomi", id),
             model.into(),
+            None,
             instance["type"].as_str().unwrap().into(),
             instance,
             None,

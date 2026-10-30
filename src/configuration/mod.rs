@@ -112,7 +112,6 @@ pub(crate) struct DerivedConfiguration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceDevice {
     pub description: SourceDescription,
-    pub name: Option<String>,
     pub fresh: bool,
 }
 

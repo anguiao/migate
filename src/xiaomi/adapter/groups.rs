@@ -208,6 +208,7 @@ impl Context {
                         match RawDescription::new(
                             DeviceKey::new("xiaomi", group_did.clone()),
                             model,
+                            name,
                             instance_type,
                             instance,
                             None,
@@ -221,7 +222,6 @@ impl Context {
                                     slot.blocked = None;
                                     slot.recompute_failed = false;
                                     slot.candidate = Some(description);
-                                    slot.latest_name = name;
                                 }
                                 context.clear_description_problem(&group_did);
                                 context.stage();

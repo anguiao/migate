@@ -67,7 +67,6 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             control.context.remove("one").unwrap();
             let slot = super::super::super::state::DeviceSlot {
                 candidate,
-                latest_name: None,
                 access,
                 cloud_access,
                 // A genuine fresh confirmation clears the durable tombstone.

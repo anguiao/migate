@@ -17,6 +17,7 @@ fn previously_unsupported_cached_source_can_gain_its_first_function_on_startup()
     let rig = Rig::new(true, &["one"]);
     let mut previous = rig.store.devices().load_configuration().unwrap();
     previous.devices.clear();
+    previous.descriptions[0].name = Some("Cached outlet name".into());
     previous.descriptions[0].diagnostic =
         Some("previous rules did not recognize this source".into());
     rig.store
@@ -42,6 +43,8 @@ fn previously_unsupported_cached_source_can_gain_its_first_function_on_startup()
     );
     assert!(saved.descriptions[0].diagnostic.is_none());
     assert!(saved.devices[0].native.is_some());
+    assert_eq!(saved.devices[0].label, "Cached outlet name");
+    assert_eq!(saved.descriptions[0].name, previous.descriptions[0].name);
     assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
     assert!(app.plan().unwrap().is_none());
 }

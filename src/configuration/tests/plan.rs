@@ -119,14 +119,13 @@ fn historical(id: &str, endpoint: u16) -> CommittedDevice {
 #[derive(Clone)]
 struct TestSource {
     fixture: SourceFixture,
-    name: Option<String>,
     fresh: bool,
 }
-fn source(id: &str, fixture: SourceFixture, name: Option<&str>) -> TestSource {
+fn source(id: &str, mut fixture: SourceFixture, name: Option<&str>) -> TestSource {
     assert_eq!(fixture.raw.key, key(id));
+    fixture.raw.name = name.map(str::to_owned);
     TestSource {
         fixture,
-        name: name.map(str::to_owned),
         fresh: true,
     }
 }
@@ -137,7 +136,6 @@ fn facts(scope: Scope, devices: Vec<TestSource>, relations: Vec<GroupRelation>) 
             .into_iter()
             .map(|source| SourceDevice {
                 description: source.fixture.into(),
-                name: source.name,
                 fresh: source.fresh,
             })
             .collect(),
@@ -653,7 +651,8 @@ fn empty_saved_label_survives_plan_and_validation() {
         Vec::new(),
     );
     let plan = plan(current, facts, BTreeMap::new()).unwrap();
-    assert!(!plan.changed);
+    assert!(plan.changed);
+    assert!(!plan.rebuild);
     assert_eq!(
         plan.configuration.device(&key("outlet")).unwrap().label,
         previous.label
