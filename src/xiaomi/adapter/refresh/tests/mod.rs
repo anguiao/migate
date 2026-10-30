@@ -28,7 +28,7 @@ fn satisfying_one_property_baseline_preserves_the_others() {
         .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
         .unwrap();
     state.satisfy_baseline("main", bindings[0]);
-    state.complete(reserved, ReadResult::Retired, Duration::ZERO, false);
+    state.complete(reserved, ReadResult::Retired, Duration::ZERO);
     state.inflight.clear();
     assert!(!state.contains("main", bindings[0]));
     assert!(state.contains("main", bindings[1]));
@@ -55,7 +55,7 @@ fn a_satisfied_reserved_baseline_is_not_requeued_when_withdrawn() {
         .unwrap();
 
     state.satisfy_baseline("motion", binding);
-    state.complete(read, ReadResult::Retired, Duration::ZERO, false);
+    state.complete(read, ReadResult::Retired, Duration::ZERO);
 
     assert!(state.pending.is_empty());
 }
@@ -139,7 +139,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
         if ordinary {
             state.satisfy_baseline("motion", binding);
         }
-        state.complete(read, ReadResult::Retired, Duration::ZERO, false);
+        state.complete(read, ReadResult::Retired, Duration::ZERO);
         assert_eq!(state.pending.len(), 1);
     }
 
@@ -150,13 +150,13 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
         .unwrap();
     state.satisfy_baseline("motion", binding);
     state.request_baseline("motion", binding);
-    state.complete(old, ReadResult::Retired, Duration::ZERO, false);
+    state.complete(old, ReadResult::Retired, Duration::ZERO);
     assert_eq!(state.pending.len(), 1);
     state.inflight.clear();
     let (new, _) = state
         .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
         .unwrap();
-    state.complete(new, ReadResult::Retired, Duration::ZERO, false);
+    state.complete(new, ReadResult::Retired, Duration::ZERO);
     assert_eq!(state.pending.len(), 1);
 
     state.request("motion", binding);
@@ -189,7 +189,7 @@ fn returned_ordinary_demand_survives_a_pending_baseline(drop_lease: bool) {
     if !drop_lease {
         work.refresh
             .borrow_mut()
-            .complete(read, ReadResult::Retired, Duration::ZERO, false);
+            .complete(read, ReadResult::Retired, Duration::ZERO);
         cleanup.retry = false;
     }
     drop(cleanup);

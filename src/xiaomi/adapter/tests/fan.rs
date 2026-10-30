@@ -351,7 +351,7 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
 }
 
 #[test]
-fn fan_failed_property_read_keeps_last_value_and_reports_its_own_problem() {
+fn fan_first_failed_read_is_reported_until_automatic_retry_succeeds() {
     block_on(rig().run(|c| async move {
         c.announce();
         let control = &c;
@@ -362,24 +362,42 @@ fn fan_failed_property_read_keeps_last_value_and_reports_its_own_problem() {
                     && !work(control).refresh.borrow().contains("fan:2", SPEED)
             })
             .await;
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let reads_before = peer.count("get", "one", SPEED.siid);
             peer.notify_value_at("one", SPEED, json!(101), Some(801), false);
             peer.state
                 .borrow_mut()
                 .read_fail
                 .insert(("one".into(), 8, 1));
             work(control).refresh_property("fan:2", SPEED);
-            work(control)
-                .refresh
-                .borrow_mut()
-                .exhaust_pending("fan:2", SPEED);
             until(|| {
-                work(control)
+                let reported = work(control)
                     .refresh
                     .borrow()
                     .property_problem("fan:2", SPEED)
-                    .is_some()
+                    .is_some();
+                if !reported {
+                    control.clock.advance(Duration::from_millis(200));
+                }
+                reported
             })
             .await;
+            assert_eq!(peer.count("get", "one", SPEED.siid), reads_before + 1);
+            assert_eq!(
+                work(control)
+                    .refresh
+                    .borrow()
+                    .snapshot()
+                    .pending
+                    .iter()
+                    .find(|read| read.id == "fan:2" && read.binding == SPEED)
+                    .unwrap()
+                    .attempts,
+                1
+            );
             assert_eq!(fan(control).speed.value, Some(40));
             assert_ne!(fan(control).speed.source_time, Some(801));
             assert!(
@@ -418,15 +436,19 @@ fn fan_failed_property_read_keeps_last_value_and_reports_its_own_problem() {
                 }
             }
             peer.state.borrow_mut().read_fail.clear();
-            work(control).refresh_property("fan:2", SPEED);
             until(|| {
-                work(control)
+                let recovered = work(control)
                     .refresh
                     .borrow()
                     .property_problem("fan:2", SPEED)
-                    .is_none()
+                    .is_none();
+                if !recovered {
+                    control.clock.advance(Duration::from_millis(200));
+                }
+                recovered
             })
             .await;
+            assert_eq!(peer.count("get", "one", SPEED.siid), reads_before + 2);
             assert_eq!(fan(control).speed.value, Some(40));
         })
         .await;

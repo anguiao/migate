@@ -36,6 +36,21 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                             })
                 })
                 .await;
+                if !timeout {
+                    until(|| {
+                        !control.context.live.borrow().devices["one"]
+                            .admitted
+                            .as_ref()
+                            .unwrap()
+                            .refresh
+                            .borrow()
+                            .contains(
+                                "outlet:2",
+                                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                            )
+                    })
+                    .await;
+                }
                 assert!(
                     control
                         .context

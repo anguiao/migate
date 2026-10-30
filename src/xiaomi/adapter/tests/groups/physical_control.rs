@@ -104,18 +104,10 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
             cloud.read_gates.remove(&key);
             cloud.raw_values.insert(key.clone(), json!("invalid"));
         }
-        // CloudFirst records the failed read on its first attempt; the route
-        // stays usable because only the property value is invalid.
-        c.context
-            .priority
-            .set(super::super::routing::PathPriority::CloudFirst);
         let attempts = reads();
         light.execute(Command::On).await.unwrap();
         until(|| reads() > attempts && !work.refresh.borrow().snapshot().problems.is_empty()).await;
         assert_eq!(light.snapshot().power(), Some(Power::Off));
-        c.context
-            .priority
-            .set(super::super::routing::PathPriority::LocalFirst);
     }));
 }
 

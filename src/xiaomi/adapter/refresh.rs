@@ -159,13 +159,7 @@ impl RefreshState {
             self.pending.push_back(read);
         }
     }
-    fn complete(
-        &mut self,
-        mut read: Refresh,
-        result: ReadResult,
-        now: Duration,
-        cloud_first: bool,
-    ) {
+    fn complete(&mut self, mut read: Refresh, result: ReadResult, now: Duration) {
         if !self.required(&read) {
             return;
         }
@@ -175,12 +169,9 @@ impl RefreshState {
             }
             ReadResult::Retired => self.requeue(read),
             ReadResult::Failed(problem) => {
-                if cloud_first {
-                    self.problems.insert(read.key(), problem.clone());
-                }
+                self.problems.insert(read.key(), problem);
                 if read.attempts == 3 {
                     self.pending.retain(|queued| queued.key() != read.key());
-                    self.problems.insert(read.key(), problem);
                 } else {
                     read.attempts += 1;
                     read.ready_at = now + RETRY_DELAY;
@@ -679,12 +670,9 @@ fn read_one(
                 }
             }
             if current {
-                work.refresh.borrow_mut().complete(
-                    read,
-                    result,
-                    context.clock.now(),
-                    context.priority() == super::routing::PathPriority::CloudFirst,
-                );
+                work.refresh
+                    .borrow_mut()
+                    .complete(read, result, context.clock.now());
             }
             work.report(&context, &did);
         }
