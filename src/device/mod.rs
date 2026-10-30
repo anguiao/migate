@@ -1,3 +1,4 @@
+pub(crate) mod air_conditioner;
 mod command;
 mod curtain_command;
 mod curtain_projection;
