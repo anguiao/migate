@@ -365,18 +365,19 @@ impl DeviceWork {
             return;
         }
         let id = function.id();
-        self.observations.observed(self, id, binding, origin);
-        if !matches!(origin, Origin::Read) {
-            self.refresh.borrow_mut().satisfy_baseline(id, binding);
-        }
         let function = self.physical().function(id).unwrap();
         if matches!(origin, Origin::Cache) {
+            // A retained projection must not cancel or stale fresh baseline reads.
             function.observe_cached_air_conditioner(
                 value,
                 observation.source_time,
                 observation.received_at,
             );
         } else {
+            self.observations.observed(self, id, binding, origin);
+            if matches!(origin, Origin::Notification) {
+                self.refresh.borrow_mut().satisfy_baseline(id, binding);
+            }
             function.observe_air_conditioner(
                 value,
                 observation.source_time,

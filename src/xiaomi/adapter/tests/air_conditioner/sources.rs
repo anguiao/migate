@@ -28,6 +28,7 @@ fn cloud_reads_writes_and_notifications_use_the_same_standard_bindings() {
                     && ac.speed.value == Some(Speed::Auto)
                     && ac.swing.value == Some(false)
                     && work(&c).function_observer(ID).is_some()
+                    && !work(&c).refresh.borrow().contains(ID, MODE)
             })
             .await;
             let function = function(&c.context.registry, "one", ID);
@@ -112,6 +113,91 @@ fn replacement_source_rebuilds_baseline_and_rejects_retired_notifications() {
                 future::yield_now().await;
             }
             assert_eq!(snapshot(control), observed);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn retained_mode_keeps_recovery_reads_and_commands_require_the_fresh_mode() {
+    block_on(rig().run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(peer(), |_| async move {
+            until(|| {
+                snapshot(control).mode.value == Some(Mode::Cool)
+                    && work(control).function_observer(ID).is_some()
+            })
+            .await;
+        })
+        .await;
+        until(|| c.context.live.borrow().session.is_none()).await;
+
+        let replacement = peer();
+        replacement.value("one", POWER, json!(true));
+        replacement.value("one", MODE, json!(1));
+        for binding in [POWER, MODE] {
+            replacement.state.borrow_mut().read_timeout.insert((
+                "one".into(),
+                binding.siid,
+                binding.piid,
+            ));
+        }
+        let control = &c;
+        c.peer(replacement, |peer| async move {
+            let held_read = |binding: PropertyBinding| {
+                peer.state.borrow().held.iter().any(|(publish, _)| {
+                    let payload = decode_mips(&publish.payload).unwrap().payload;
+                    payload["siid"] == binding.siid && payload["piid"] == binding.piid
+                })
+            };
+            until(|| held_read(POWER) && work(control).function_observer(ID).is_some()).await;
+            let source = work(control).function_observer(ID).unwrap();
+            control
+                .context
+                .property_value_event(&source, "one", MODE, &json!(2), Some(1), true);
+            assert_eq!(snapshot(control).mode.value, Some(Mode::Auto));
+            assert!(work(control).refresh.borrow().contains(ID, MODE));
+
+            peer.release_property("one", POWER, json!({"value":true,"updateTime":2}))
+                .await;
+            until(|| held_read(MODE)).await;
+            control
+                .context
+                .property_value_event(&source, "one", MODE, &json!(4), Some(3), true);
+            assert_eq!(snapshot(control).mode.value, Some(Mode::Dry));
+            let function = function(&control.context.registry, "one", ID);
+            for command in [Command::Temperature(26), Command::Speed(Speed::High)] {
+                assert_eq!(
+                    function
+                        .begin_air_conditioner(command)
+                        .unwrap()
+                        .accepted()
+                        .await,
+                    Err(CommandError::UnknownState)
+                );
+            }
+            assert!(writes(&peer).is_empty());
+
+            peer.release_property("one", MODE, json!({"value":1,"updateTime":4}))
+                .await;
+            until(|| !work(control).refresh.borrow().contains(ID, MODE)).await;
+            assert_eq!(snapshot(control).mode.value, Some(Mode::Heat));
+            for command in [Command::Temperature(26), Command::Speed(Speed::High)] {
+                function
+                    .begin_air_conditioner(command)
+                    .unwrap()
+                    .accepted()
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                writes(&peer),
+                vec![
+                    (json!(3), json!(4), json!(26.0)),
+                    (json!(4), json!(2), json!(3))
+                ]
+            );
         })
         .await;
     }));
