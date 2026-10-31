@@ -37,7 +37,7 @@ fn device(swing: bool) -> (PhysicalDevice, CommandReceiver) {
 }
 
 #[test]
-fn publishes_room_ac_and_only_declared_features() {
+fn publishes_thermostat_and_only_declared_features() {
     for swing in [false, true] {
         let device = device(swing).0;
         let model = model_handler(vec![single_entry(&device)]);
@@ -47,7 +47,7 @@ fn publishes_room_ac_and_only_declared_features() {
                 endpoint
                     .device_types
                     .iter()
-                    .any(|kind| kind.dtype == 0x72 && kind.drev == 3)
+                    .any(|kind| kind.dtype == 0x301 && kind.drev == 6)
             );
             assert_eq!(endpoint.cluster(6).unwrap().feature_map, 2);
             let thermostat = endpoint.cluster(0x201).unwrap();

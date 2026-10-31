@@ -19,9 +19,9 @@ const FAN: DeviceType = DeviceType {
     dtype: 0x002b,
     drev: 4,
 };
-const ROOM_AIR_CONDITIONER: DeviceType = DeviceType {
-    dtype: 0x0072,
-    drev: 3,
+const AIR_CONDITIONER_THERMOSTAT: DeviceType = DeviceType {
+    dtype: 0x0301,
+    drev: 6,
 };
 const AIR_CONDITIONER_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
@@ -256,13 +256,13 @@ impl Entry {
             Role::Child { function, .. } => match &function.kind {
                 FunctionHandlerKind::AirConditioner(_) => Endpoint::new(
                     self.endpoint,
-                    devices!(ROOM_AIR_CONDITIONER),
+                    devices!(AIR_CONDITIONER_THERMOSTAT),
                     AIR_CONDITIONER_CLUSTERS,
                 )
                 .with_tags(tags),
                 FunctionHandlerKind::AirConditionerSwing(_) => Endpoint::new(
                     self.endpoint,
-                    devices!(ROOM_AIR_CONDITIONER),
+                    devices!(AIR_CONDITIONER_THERMOSTAT),
                     AIR_CONDITIONER_ROCKING_CLUSTERS,
                 )
                 .with_tags(tags),

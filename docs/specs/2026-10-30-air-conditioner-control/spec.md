@@ -97,7 +97,9 @@ mcn04 的控制范围是运行期来源输入，启动与恢复时读取、正�
 
 ## Matter 表达
 
-空调子端点采用 Room Air Conditioner（`0x0072`，revision `3`），提供 Descriptor、Identify、On/Off、Thermostat 和 Fan Control。物理父端点继续承载身份、名称与可用性。On/Off 使用该设备类型要求的 Dead Front 行为；操作入口和功能名称仍归属于同一个空调。
+空调子端点采用 Thermostat（`0x0301`，revision `6`），用于 Home 的温控模式兼容，提供 Descriptor、Identify、On/Off、Thermostat 和 Fan Control。物理父端点继续承载身份、名称与可用性。On/Off 保留 Dead Front 行为与独立开关语义；操作入口和功能名称仍归属于同一个空调。
+
+本轮开发环境中已有空调的发布类型调整，通过停机后一次性更新当前已发布空调及桥的配置版本，使 Home 重新读取设备类型。物理设备与功能身份、端点、名称、原生绑定及配对记录保持，无须删除配件重新加入。
 
 Thermostat 使用 `0x0201`、revision `11`；代表设备提供 Heating、Cooling、AutoMode 和 LocalTemperatureNotExposed。不提供日程、预设、占用感知、无人温度设定、温度补偿或需求推断。使用当前锁定 `rs-matter` 的生成接口接入现有异步命令和实际观测，避免默认处理器恢复设置时驱动设备。
 
@@ -113,7 +115,7 @@ Thermostat 使用 `0x0201`、revision `11`；代表设备提供 Heating、Coolin
 | `SetpointRaiseLower` | 基于已有温度设定计算目标，使用相同量程和步长规则；`Both` 对同一个目标只执行一次。未知基线时拒绝，超出限值按命令规范限制到边界。 |
 | 运行状态 | 不发布缺少真实输入的可选 `ThermostatRunningMode`、`ThermostatRunningState` 或冷热需求属性。 |
 
-这两个冷热设定属性是对同一个原生设定的投影，不表示 mcn04 提供独立冷热阈值。伴侣在自动模式下报告的保留温度也不作为自动模式可调目标；MiGate 只切换原生自动模式，不根据环境温度自行控制冷暖。Home 对这种原生自动模式的入口与显示需与实际协议写入对照。
+这两个冷热设定属性是对同一个原生设定的投影，不表示 mcn04 提供独立冷热阈值。伴侣在自动模式下报告的保留温度不意味着该模式一定可调，仍以当前配码范围为准；MiGate 只切换原生自动模式，不根据环境温度自行控制冷暖。客户端仍可能显示可编辑的自动温度范围；该模式不开放调温时，两个设定属性的写入均返回 `InvalidInState`，不保存虚假的温度区间，也不切换模式绕过限制。
 
 Fan Control 使用 `0x0202`、revision `6`，提供 MultiSpeed 和 Auto，`SpeedMax = 3`，`FanModeSequence = OffLowMedHighAuto`。上下摆风的有效布尔绑定成立时提供 Rocking，仅使用 `RockUpDown`；不提供其他摆动方向、自然风或 Step。
 
@@ -173,7 +175,7 @@ README 增加空调功能与代表型号；运行指南说明空调功能标识�
 
 正常网络且来源通知已就绪时，影响 Home 投影的伴侣状态变化在 `3` 秒内反映到 Home。恢复观察上限为 `20` 分钟：断连和路径恢复从通信条件恢复起计，重启从 Matter 服务重新提供起计。
 
-Home 的最低验收标准是开关、制冷／制热切换、整数调温及这些操作对应的状态自动刷新；任一必达项失败均不能通过验收，不能仅记录为客户端限制。自动、送风、除湿、风速和摆风若没有 Home 入口，可以使用标准 Matter 客户端核对协议行为，并记录 Home 的实际入口与显示限制；存在 Home 入口时仍需确认其可操作性。
+Home 的最低验收标准是开关、制冷／制热及原生自动模式切换、整数调温及这些操作对应的状态自动刷新；任一必达项失败均不能通过验收，不能仅记录为客户端限制。自动模式需核对实际 `Auto` 写入与伴侣反馈，并确认该模式拒绝不允许的调温。送风、除湿、风速和摆风若没有 Home 入口，可以使用标准 Matter 客户端核对协议行为，并记录 Home 的实际入口与显示限制；存在 Home 入口时仍需确认其可操作性。
 
 若某条真实路径在现场不可用，分别说明现场覆盖与自动化覆盖，不把切换后的缓存值当作新通知。无需逐项观察空调本体动作，也不以压缩机启动时间作为 MiGate 成功标准。
 
@@ -182,5 +184,5 @@ Home 的最低验收标准是开关、制冷／制热切换、整数调温及这
 - 项目现有[风扇控制设计](../2026-10-29-fan-control/spec.md)及组合命令实现，提供可复用的顺序、受理、取消和恢复契约；功能身份与发布结构以[设备功能组合设计](../2026-10-29-device-capability-composition/spec.md)为准。
 - [mcn04 MIoT 实例描述](https://miot-spec.org/miot-spec-v2/instance?type=urn%3Amiot-spec-v2%3Adevice%3Aair-condition-outlet%3A0000A045%3Alumi-mcn04%3A1)，结合本轮授权只读取得的固件与控制配置，提供代表输入。
 - [小米官方集成的空调实现](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/custom_components/xiaomi_home/climate.py)，参考标准属性控制与 `ac-state` 字段含义；不沿用其根据模式推断实际工作状态的做法。
-- Matter 1.6 的 [Room Air Conditioner](https://github.com/project-chip/connectedhomeip/blob/v1.6.0.0/data_model/1.6/device_types/RoomAirConditioner.xml)、[Thermostat](https://github.com/project-chip/connectedhomeip/blob/v1.6.0.0/data_model/1.6/clusters/Thermostat.xml)及 [Fan Control](https://github.com/project-chip/connectedhomeip/blob/v1.6.0.0/data_model/1.6/clusters/FanControl.xml)定义，提供设备形态、模式、特性和属性依据。
+- Matter 1.6 的 [Thermostat 设备类型](https://github.com/project-chip/connectedhomeip/blob/v1.6.0.0/data_model/1.6/device_types/Thermostat.xml)、[Thermostat cluster](https://github.com/project-chip/connectedhomeip/blob/v1.6.0.0/data_model/1.6/clusters/Thermostat.xml)及 [Fan Control](https://github.com/project-chip/connectedhomeip/blob/v1.6.0.0/data_model/1.6/clusters/FanControl.xml)定义，提供设备形态、模式、特性和属性依据。
 - [Matter 1.4.2 Application Cluster Specification](https://csa-iot.org/wp-content/uploads/2025/08/3-27350_matter-1-4-2-adopted-application-cluster-specification.pdf)的 Thermostat 与 Fan Control 行为条款，结合当前锁定的 `rs-matter` 版本 `14baec0955483b794680bb0c56bb7f4faa2741dc` 核对具体接口。
