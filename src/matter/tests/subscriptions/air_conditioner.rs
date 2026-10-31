@@ -92,6 +92,10 @@ fn locked_stack_subscription_tracks_observations_across_both_clusters_without_re
                         (0x201, 18),
                         (0x201, 28),
                         (0x202, 0),
+                        (0x202, 2),
+                        (0x202, 3),
+                        (0x202, 5),
+                        (0x202, 6),
                         (0x202, 8),
                     ]
                     .map(|(cluster, attribute)| {
@@ -135,10 +139,77 @@ fn locked_stack_subscription_tracks_observations_across_both_clusters_without_re
                     assert_ne!(temperature.thermostat[&17].0, initial.thermostat[&17].0);
                     wait_committed(&state).await;
                     function.observe_air_conditioner(Value::Mode(Mode::Heat), Some(3), 3);
-                    function.observe_air_conditioner(Value::Speed(Speed::Auto), Some(3), 3);
+                    function.observe_air_conditioner(Value::Speed(Speed::High), Some(3), 3);
                     let changed = receive_observed(&client, id).await.unwrap();
                     assert_eq!(changed.thermostat[&28].1, 4);
-                    assert_eq!(changed.fan[&0].1, 5);
+                    assert_eq!(changed.fan[&0].1, 3);
+                    let mut sequence = 3;
+                    let mut fan_version = changed.fan[&0].0;
+                    for _ in 0..3 {
+                        for (speed, level, percent) in [
+                            (Speed::Low, 1, 33),
+                            (Speed::Medium, 2, 66),
+                            (Speed::High, 3, 100),
+                        ] {
+                            wait_committed(&state).await;
+                            sequence += 1;
+                            function.observe_air_conditioner(
+                                Value::Speed(speed),
+                                Some(sequence),
+                                sequence,
+                            );
+                            let report = receive_observed(&client, id).await.unwrap();
+                            for (attribute, expected) in [
+                                (0, level),
+                                (2, percent),
+                                (3, percent),
+                                (5, level),
+                                (6, level),
+                            ] {
+                                assert_eq!(report.fan[&attribute].1, expected);
+                                assert_ne!(report.fan[&attribute].0, fan_version);
+                                assert_eq!(report.fan[&attribute].0, report.fan[&0].0);
+                            }
+                            fan_version = report.fan[&0].0;
+                        }
+                        for swing in [true, false] {
+                            wait_committed(&state).await;
+                            sequence += 1;
+                            function.observe_air_conditioner(
+                                Value::Swing(swing),
+                                Some(sequence),
+                                sequence,
+                            );
+                            let report = receive_observed(&client, id).await.unwrap();
+                            assert_eq!(report.fan[&8].1, if swing { 2 } else { 0 });
+                            assert_ne!(report.fan[&8].0, fan_version);
+                            fan_version = report.fan[&8].0;
+                        }
+                    }
+                    // Auto reports a known mode while its current speed remains unknown.
+                    let auto_paths = paths
+                        .iter()
+                        .filter(|path| {
+                            path.cluster != Some(0x202) || matches!(path.attr, Some(0 | 8))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let (auto_id, _) = subscribe_paths(&client, &auto_paths).await.unwrap();
+                    wait_committed(&state).await;
+                    sequence += 1;
+                    function.observe_air_conditioner(
+                        Value::Mode(Mode::Cool),
+                        Some(sequence),
+                        sequence,
+                    );
+                    function.observe_air_conditioner(
+                        Value::Speed(Speed::Auto),
+                        Some(sequence),
+                        sequence,
+                    );
+                    let automatic = receive_observed(&client, auto_id).await.unwrap();
+                    assert_eq!(automatic.thermostat[&28].1, 3);
+                    assert_eq!(automatic.fan[&0].1, 5);
                     assert!(
                         futures_lite::future::poll_once(receiver.next_operation())
                             .await
