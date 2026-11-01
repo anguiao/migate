@@ -1,6 +1,6 @@
 # 运行 MiGate
 
-当前支持 macOS / Apple Silicon，需要 Rust 1.96 和 Cargo。仅支持中国大陆服务区，一次运行接入一个米家自有家庭。首次绑定时，Mac 与该家庭的小米主中枢须处于同一局域网。
+当前运行范围为 macOS / Apple Silicon，需要 Rust 1.96 和 Cargo；Linux 部署暂缓。仅支持中国大陆服务区，一次运行接入一个米家自有家庭。首次绑定时，Mac 与该家庭的小米主中枢须处于同一局域网。
 
 ## 启动
 
@@ -45,7 +45,7 @@ cargo run --locked -- auth login
 cargo run --locked -- auth check
 ```
 
-检查会显示账号与证书状态，并在需要时自动更新。提示 `sign-in required` 时，重新执行 `auth login`，再使用原数据目录启动；网络故障时待恢复后重试。
+检查会显示账号与证书状态，并在需要时自动更新。要恢复云端同步而提示 `sign-in required` 时，重新执行 `auth login`，再使用原数据目录启动；网络故障时待恢复后重试。已经确认并保存直连凭据的设备，可在云端登录或中枢证书过期时按下文离线恢复直连。
 
 退出登录：
 
@@ -53,7 +53,7 @@ cargo run --locked -- auth check
 cargo run --locked -- auth logout
 ```
 
-该命令删除本地米家账号凭据，保留 Apple Home 配对，也不会撤销远端 HA 应用授权。
+该命令删除本地米家账号及已保存的设备直连凭据，保留 Apple Home 配对，也不会撤销远端 HA 应用授权。
 
 ## 添加到 Apple Home
 
@@ -76,17 +76,31 @@ MiGate 自动接入受支持的插座、灯光、米家原生灯组、窗帘、�
 
 使用受支持的数据目录启动新版 MiGate 后，程序会按当前规则重新识别已有设备和灯组；用 `list` 或 `status DID` 查看结果。运行时型号或实例 URN 变化后，等待云端同步并检查更新结果；固件号变化本身不会触发重新获取描述，详见[已知限制](known-limitations.md#home-显示与恢复)。
 
+### 直连与路径
+
+首次仍按米家账号与家庭接入流程取得目录中的设备候选。当前 IP 直连只支持 `dmaker.fan.p5c` 和 `lumi.acpartner.mcn02`；设备须属于当前家庭，且目录提供有效地址和 token。程序验证设备身份及 token 并完成只读确认后，才使用和保存直连凭据。局域网发现只提供地址线索，不单独授予访问资格。BLE 和代理子设备继续通过现有中枢或云端路径接入。
+
+保留同一数据目录后，已确认资格及凭据的设备可在外网不可用、云端 OAuth 令牌或中枢证书过期时重启并重新认证直连，不必等待云端登录刷新或中枢上线。已知的访问撤销、设备移除、退出账号及家庭范围变化仍会生效；正常目录同步可提供更新的地址或 token，新候选通过验证后才替换已保存记录，无效候选不会覆盖有效记录。地址变化或连接断开时等待该设备自动发现和恢复，其他设备各自恢复；健康闲置时不会持续扫描。
+
+控制与读取正常按中枢（`hub`）→ 直连（`direct`）→ 云端（`cloud`）选择可用路径。中枢业务降级时优先使用直连和云端；两者不可用时用户控制仍可按原有规则尝试合格的中枢，自动读取等待原有恢复调度。中枢恢复后重新获得优先级。通知独立选择可用中枢或云端；不要把直连读取成功当作通知已就绪。
+
+用 `status DID` 查看直连协议或映射、地址、身份是否确认、可用候选、选中的读取和控制路径、通知来源、恢复进度及最近命令的实际路径。正常同步或连接变化后等待自动恢复；若提示凭据无效，检查账号和目录同步，等待连接信息更新。命令超时的结果可能不确定，先核对设备实际状态，程序不会自动重放已经发出或可能发出的控制。
+
+对有可读反馈的控制功能，如果当前没有可用通知，整次命令的步骤处理结束且至少一步明确受理时，会在最后一次实际写入后补读一轮；即使后续步骤失败也适用。没有任何一步明确受理时不触发这项补读；没有可用读取路径或读取失败只记录同步诊断，不重试补读或重放控制，控制回执不等待补读完成。有可用通知时不因本次控制新增补读。既有灯光、灯组写后和渐变帧回读及原有重试继续保留，不增加周期轮询。单次补读只取得快照，外部遥控器或米家的后续变化仍可能不同步。
+
+### 功能操作
+
 空调在同一端点声明温控器和风扇类型，Home 中的入口与图标仍需真机核对。保留原数据目录可继续使用已有的设备身份、名称、端点和配对。
 
 可接入的灯组在 Home 中显示为一盏灯，已唯一匹配的成员灯光入口隐藏，仍可在米家单独控制，也可在终端用 `on DID FUNCTION`、`off DID FUNCTION` 控制；成员的其他控制、测量和状态继续发布，有其他可见功能时，如有共享电量也随父端点保留。成员有多个灯光而无法确定归属时，不会任意隐藏，独立可用的原生组功能仍可接入。用 `status` 查看组的原生能力、成员派生的 RGB、状态来源及成员关系问题。组解散后，受支持且不属于其他已发布组的成员恢复独立入口；Home 的具体显示与分组以客户端为准。
 
-窗帘可在 Home 中设置位置；是否提供独立停止入口取决于客户端。若 Home 没有停止入口，可使用标准 Matter 客户端发送 `StopMotion`。实际位置、设备目标和运动状态以设备报告为准；`status DID` 显示各项的来源时间、接收时间、读取与通知诊断，以及最近命令和回执。首次读取前为未知，读取或连接中断时保留最近有效值；状态更新依靠启动和恢复读取及设备通知。重启或恢复后不重放之前的目标或停止命令。
+窗帘可在 Home 中设置位置；是否提供独立停止入口取决于客户端。若 Home 没有停止入口，可使用标准 Matter 客户端发送 `StopMotion`。实际位置、设备目标和运动状态以设备报告为准；`status DID` 显示各项的来源时间、接收时间、读取与通知诊断，以及最近命令和回执。首次读取前为未知，读取或连接中断时保留最近有效值；启动和恢复时读取，运行时依靠设备通知及上述无通知时的单次补读。补读可能只读到中途位置和运行状态，后续没有有效读取或通知时会保留该快照，不推断动作完成或自动追读。重启或恢复后不重放之前的目标或停止命令。
 
 空调可选择制冷、制热、自动、送风和除湿，以及自动／低／中／高风速；温度按整度设置，上下摆风只在设备支持时提供。独立开关保留设备记忆的模式、温度和风速；切换模式或设置非零及自动风速时会在必要时先开机。单独调温不会开机或切换模式，风速设为零会关机，上下摆风只调整摆风。可设值取决于当前控制范围；例如 mcn04 的代表配码在自动模式下不允许调温，实际配码请以 `status DID` 为准。终端对空调只提供开关控制；模式、温度、风速和摆风由支持对应功能的 Matter 客户端操作。
 
 Home 选择“自动”用于切换设备的原生自动模式。若当前配码不允许自动模式调温，拖动 Home 显示的温度范围会被拒绝，界面可能回到原值；需要调温时先选择允许调温的模式，再设置整数温度。
 
-用 `status DID` 查看空调的 `Power`、`Mode`、`Target temperature`、`Speed`、可选 `Vertical swing`、各模式控制范围、读取与通知来源及最近命令。mcn04 的 `Control range source` 显示范围来源和诊断；显示 `Control range is awaiting source confirmation` 时，等待来源恢复并重新确认，依赖范围的模式、温度和风速设置暂不可用，独立开关与支持的上下摆风仍按各自命令处理。mcn04 状态以伴侣整包反馈为准，其他标准空调以设备属性反馈为准；命令受理不代表状态已更新。首次读取前状态未知，来源中断保留最近有效值，恢复后重新读取。自动风下若显示 `Current fan level: unknown (automatic speed)`，表示设备未提供实际挡位；恢复或重启不重放之前的空调命令。
+用 `status DID` 查看空调的 `Power`、`Mode`、`Target temperature`、`Speed`、可选 `Vertical swing`、各模式控制范围、读取与通知来源及最近命令。mcn04 的 `Control range source` 显示范围来源和诊断；显示 `Control range is awaiting source confirmation` 时，等待来源恢复并重新确认，依赖范围的模式、温度和风速设置暂不可用，独立开关与支持的上下摆风仍按各自命令处理。mcn04 状态以伴侣整包反馈为准；mcn02 直连使用其旧 miIO 映射，其他符合契约的标准空调以设备属性反馈为准，mcn04 的状态及范围补丁不用于 mcn02。命令受理不代表状态已更新。首次读取前状态未知，来源中断保留最近有效值，恢复后重新读取。自动风下若显示 `Current fan level: unknown (automatic speed)`，表示设备未提供实际挡位；恢复或重启不重放之前的空调命令。
 
 空调开机并选择自动风时，Home 的风速数字使用 `33%`（或 1 挡）作为显示占位，使控制界面保持可操作；实际模式仍为 Auto，终端显示当前风速未知是预期行为。不要用这个占位数字判断实际出风强弱或配置依赖真实风速的自动化。切换普通风后显示设备报告的设定，关机后显示零。
 
@@ -162,7 +176,8 @@ unbind-sensor 234567890 air-conditioner:3
 | 运动长时间保持检测到移动 | 用 `status DID` 检查最近输入是运动事件还是原生无移动时长，并检查时长属性订阅，再核对米家状态。恢复由设备原生报告决定，MiGate 不自行倒计时。 |
 | 没有电量或电量不更新 | 用 `status DID` 查看电量能力及错误，核对米家读数。并非所有设备都提供可自动更新的电量；失败时保留已有读数，不影响其他测量与状态。 |
 | 提示 Matter 映射不支持 | 用 `status DID` 查看对应功能的原生读数和映射诊断；MiGate 保留原生值，无法表示为协议数值的项目不能正常发布读数。 |
-| 云端暂时不可用 | 等待网络或服务恢复。本地连接有效时，已有设备仍可使用，新设备接入与移除同步可能延迟。 |
+| 云端暂时不可用 | 等待网络或服务恢复。中枢或已确认的设备直连可用时，已有设备仍可使用；新设备接入与移除同步可能延迟。 |
+| 直连不可用或地址变化 | 用 `status DID` 检查协议、身份、地址、候选和恢复进度，确认设备供电及局域网连接；等待自动重新发现。凭据无效时检查账号和目录同步，等待地址或 token 更新。其他路径可按各自资格继续使用。 |
 | 窗帘位置或运动状态不更新 | 用 `status DID` 分别检查当前位置、目标、运动状态的读取和通知诊断，核对米家状态；读取成功不代表通知已就绪。来源恢复后等待重新读取与通知。 |
 | 窗帘停止或目标命令报错 | 查看 `status DID` 中的请求结果并核对实际窗帘；回执超时后命令仍可能执行，MiGate 不会重放。 |
 | 风扇状态未更新或调速报错 | 用 `status DID` 检查开关、风速、适用的模式与直吹设定及读取和通知诊断，再核对米家与实际设备。请求受理不代表状态已经回传；超时后命令仍可能执行，MiGate 不会重放。 |
@@ -175,7 +190,7 @@ unbind-sensor 234567890 air-conditioner:3
 | 米家调整成员后又被组渐变覆盖 | 先在 Home 停止或替换组动作，再调整成员。 |
 | 描述获取或配置保存失败 | 用 `list`、`status` 和错误日志查看原因，检查网络、数据目录权限与可用空间；程序保留上次配置并继续重试。 |
 | 启动后提示缓存识别失败 | 用 `list` 或 `status DID` 查看原因并保留原数据目录。该设备继续使用旧配置，其他设备仍可更新；等待目录提供新描述，或更新 MiGate 后重启。相同输入不会定时重试。 |
-| 启动失败 | 检查错误日志、数据目录权限、可用空间、端口与网络；修复后用原目录启动，无须清空数据。旧格式不受支持时按下节使用新目录。 |
+| 启动失败 | 检查错误日志、数据目录权限、可用空间、端口与网络；修复后用原目录启动，无须清空数据。schema-10 开发数据按下节停机备份后升级，其他旧格式按下节处理。 |
 | 日志提示忽略了无法加载的 Matter 数据 | 保留数据目录，等待 Home 恢复订阅；若重新出现配对窗口，按下节使用原目录重新配对。恢复范围见[已知限制](known-limitations.md#home-显示与恢复)。 |
 | 提示需要重新登录 | 停止网桥，执行 `auth login`，然后用原目录重启。 |
 | 提示数据目录正在使用 | 停止使用该目录的另一个 MiGate 进程，再重试；不要删除锁文件。 |
@@ -203,9 +218,9 @@ RUST_LOG=info,migate=debug cargo run --locked
 
 相对路径按命令执行目录解析，启动日志会显示实际路径。异常退出后可直接使用原目录重启，无须删除 `instance.lock`。重启会恢复设备配置并重新识别已有设备，再同步目录和实际状态，不继续执行上次未完成的灯光动作，也不重放窗帘、风扇或空调命令。
 
-### 旧 schema-10 开发数据的一次性调整
+### 更早的 schema-10 环境温度配置调整
 
-从空调环境温度增强之前的开发版本升级时，若原 `state.db` 的配置尚无 `temperature_bindings`，先停止所有使用该目录的 MiGate 进程，再执行以下操作。将 `.migate` 改为实际数据目录；需要 Python 3。操作备份数据库、补充空绑定，并为现有空调更新配置版本，保留身份、名称、端点和配对。备份同样包含凭据和配对信息，请妥善保管。
+从空调环境温度增强之前的开发版本升级时，若原 `state.db` 的配置尚无 `temperature_bindings`，先停止所有使用该目录的 MiGate 进程，再执行以下操作，之后继续下方 schema-11 升级。若已包含该字段，跳过本节，直接执行 schema-11 升级；下方脚本也会检查该字段。将 `.migate` 改为实际数据目录；需要 Python 3。操作备份数据库、补充空绑定，并为现有空调更新配置版本，保留身份、名称、端点和配对。备份同样包含凭据和配对信息，请妥善保管。
 
 ```sh
 (
@@ -260,9 +275,72 @@ PY
 )
 ```
 
-成功后使用原数据目录启动 MiGate，再按上文绑定温度来源。此操作只执行一次；若提示字段或备份已存在，先核对是否已经调整，不要清空已有绑定或再次增加版本。若需撤销，停止 MiGate 后用备份恢复 `state.db`。
+此操作只执行一次；若提示字段或备份已存在，先核对是否已经调整，不要清空已有绑定或再次增加版本。仍为 schema-10 的数据库完成此调整后，继续下方升级；全部完成后使用原数据目录启动，再按需绑定温度来源。若需撤销，停止 MiGate 后用备份恢复 `state.db`。
 
-旧格式的数据目录会被拒绝，需停止 MiGate 并选择一个为空或尚不存在的新目录，依次登录和启动。例如：
+### schema-10 升级到 schema-11
+
+现有 schema-10 开发数据不会自动迁移。先停止所有使用该目录的 MiGate 进程；如需上面的环境温度配置调整，须先完成，再执行以下操作。当前已包含 `temperature_bindings` 的 schema-10 数据无需再次修改 JSON 或配置版本。将 `.migate` 改为实际数据目录，保持指向原目录；需要 Python 3 且其 SQLite 版本至少为 3.37。
+
+脚本只打开已有的 `state.db`，在同一目录创建 `state.db.before-lan-schema-11` 备份，再将独立的设备直连凭据表和 schema 版本一起提交。已有认证、配置 JSON、设备身份、端点、名称、温度绑定、Matter 数据与配对、访问撤销记录均保留。备份包含敏感数据，请与原数据目录一样妥善保管，不要共享或提交。
+
+```sh
+(
+  umask 077
+  MIGATE_UPGRADE_DIR=".migate" python3 - <<'PY'
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import sqlite3
+
+if sqlite3.sqlite_version_info < (3, 37, 0):
+    raise SystemExit("SQLite 3.37 or newer is required")
+
+directory = Path(os.environ["MIGATE_UPGRADE_DIR"]).resolve()
+database = directory / "state.db"
+backup_path = directory / "state.db.before-lan-schema-11"
+db = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, isolation_level=None)
+try:
+    if db.execute("PRAGMA user_version").fetchone()[0] != 10:
+        raise SystemExit("This operation is only for schema-10 data")
+    row = db.execute("SELECT json FROM bridge_configuration WHERE id = 1").fetchone()
+    if row is None:
+        raise SystemExit("Committed configuration is missing")
+    if "temperature_bindings" not in json.loads(row[0]):
+        raise SystemExit("Run the earlier schema-10 temperature configuration adjustment first")
+
+    backup_fd = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(backup_fd)
+    with closing(sqlite3.connect(backup_path.as_uri() + "?mode=rw", uri=True)) as backup:
+        db.backup(backup)
+
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("""
+            CREATE TABLE xiaomi_lan (
+                did TEXT PRIMARY KEY,
+                uid TEXT NOT NULL,
+                home_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                address TEXT NOT NULL,
+                token BLOB NOT NULL CHECK (length(token) = 16)
+            ) STRICT
+        """)
+        db.execute("PRAGMA user_version = 11")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+    print(f"Upgraded schema 10 to 11; backup: {backup_path}")
+finally:
+    db.close()
+PY
+)
+```
+
+成功后使用原数据目录启动。脚本拒绝其他 schema 版本、重复执行及覆盖已有备份；如果中途失败，原库不会完成升级，事务内失败会回滚，已创建的备份会保留，先检查备份和错误原因再处理。需要恢复备份时，停止 MiGate，将当前 `state.db` 及同名 `-wal`、`-shm` 文件（如存在）移至安全位置，再把备份复制为 `state.db` 并确认权限。恢复到 schema 10 后须重新完成升级，才能使用新版。
+
+当前列出的原目录升级步骤适用于 schema-10；其他不受支持的旧格式会被拒绝。若需要全新实例，可停止 MiGate 并选择一个为空或尚不存在的新目录，依次登录和启动。例如：
 
 ```sh
 cargo run --locked -- --data-dir .migate-new auth login
