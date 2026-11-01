@@ -83,7 +83,16 @@ impl XiaomiAdapter {
                         super::notifications::run(self.context.clone()),
                         future::or(
                             super::refresh::cloud(self.context.clone()),
-                            self.context.tasks.run(),
+                            future::or(
+                                super::lan::watch_network(
+                                    self.context.clone(),
+                                    self.discovery.clone(),
+                                ),
+                                future::or(
+                                    super::lan::run(self.context.clone()),
+                                    self.context.tasks.run(),
+                                ),
+                            ),
                         ),
                     ),
                 ),

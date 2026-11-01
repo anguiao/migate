@@ -144,6 +144,7 @@ impl Context {
     }
     /// Retire one native runtime and its current logical sink.
     pub(super) fn retire_work(&self, did: &str) {
+        self.stop_lan(did);
         let work = self
             .live
             .borrow_mut()

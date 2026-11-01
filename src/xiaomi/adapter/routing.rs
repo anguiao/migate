@@ -617,13 +617,22 @@ impl Context {
             session.handle.close();
         }
         self.disconnect("Xiaomi adapter stopped".into());
-        for slot in self.live.borrow().devices.values() {
-            if let Some(work) = &slot.admitted {
+        let dids = self
+            .live
+            .borrow()
+            .devices
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for did in dids {
+            self.stop_lan(&did);
+            if let Some(work) = &self.live.borrow().devices[&did].admitted {
                 work.physical()
                     .set_availability(Availability::Unavailable("Xiaomi adapter stopped".into()));
                 work.retire();
             }
         }
+        self.changed.notify(usize::MAX);
     }
     /// Token rejection and HTTP failure share one account maintenance entry point.
     pub(super) fn cloud_error(

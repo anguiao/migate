@@ -142,6 +142,15 @@ impl XiaomiAdapter {
             ),
             priority: Cell::new(super::routing::PathPriority::LocalFirst),
             cloud: cloud.clone(),
+            lan_discovery: crate::xiaomi::lan::Discovery::default(),
+            lan_scope_invalid: Cell::new(false),
+            lan_network_changed: Event::new(),
+            #[cfg(test)]
+            lan_port: Cell::new(54321),
+            #[cfg(test)]
+            lan_test_endpoints: RefCell::new(BTreeMap::new()),
+            #[cfg(test)]
+            lan_timeout: Cell::new(Duration::from_secs(10)),
             cloud_sync: RefCell::new(super::cloud::CloudSync::default()),
             http_paused: Cell::new(false),
             cloud_scope_valid: Cell::new(false),

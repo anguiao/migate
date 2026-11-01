@@ -8,3 +8,5 @@ pub(crate) mod fixtures;
 mod validity;
 
 mod configuration_states;
+
+mod lan;

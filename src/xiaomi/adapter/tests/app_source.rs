@@ -139,6 +139,7 @@ impl AppSource {
                 model: raw.model.clone(),
                 instance_type: raw.instance_type.clone(),
                 online: false,
+                lan: crate::xiaomi::cloud::LanCredentials::NotIp,
             });
         }
     }

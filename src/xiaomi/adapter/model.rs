@@ -300,9 +300,26 @@ pub struct FunctionStatus {
     pub subscriptions: Vec<SubscriptionStatus>,
     pub properties: Vec<ObservedPropertyStatus>,
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LanState {
+    Ineligible,
+    MissingCredentials,
+    InvalidCredentials,
+    Authenticating,
+    Ready,
+    Failed,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LanStatus {
+    pub state: LanState,
+    pub address: Option<std::net::Ipv4Addr>,
+    pub problem: Option<String>,
+    pub recovery: RecoveryStatus,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceStatus {
     pub did: String,
+    pub lan: Option<LanStatus>,
     pub read_only: bool,
     pub usable_control_paths: Vec<PathKind>,
     pub selected_control: Option<PathKind>,

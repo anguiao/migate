@@ -3,6 +3,7 @@ use super::{
     StorageError,
     device::DeviceStore,
     identity::{self, Identity},
+    lan::LanStore,
     lock,
     matter::MatterStore,
     schema,
@@ -81,6 +82,10 @@ impl Store {
 
     pub fn xiaomi(&self) -> XiaomiStore {
         XiaomiStore::new(self.clone())
+    }
+
+    pub(crate) fn lan(&self) -> LanStore {
+        LanStore::new(self.clone())
     }
 
     pub fn devices(&self) -> DeviceStore {

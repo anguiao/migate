@@ -6,6 +6,7 @@ pub(crate) mod central;
 pub(crate) mod certificate;
 pub mod cloud;
 pub mod discovery;
+pub(crate) mod lan;
 mod mqtt;
 pub(crate) mod property;
 

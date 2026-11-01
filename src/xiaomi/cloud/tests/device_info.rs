@@ -45,12 +45,14 @@ fn home_device_info_paginates_with_scoped_requests_and_explicit_online_state() {
                 model: "vendor.plug".into(),
                 instance_type: "instance-type".into(),
                 online: true,
+                lan: super::super::catalog::LanCredentials::Unknown,
             },
             CloudDeviceInfo {
                 did: "second".into(),
                 model: "vendor.plug".into(),
                 instance_type: "instance-type".into(),
                 online: false,
+                lan: super::super::catalog::LanCredentials::Unknown,
             },
         ]
     );
@@ -320,4 +322,40 @@ fn home_device_info_skips_http_for_no_requested_members() {
             .is_empty()
     );
     assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn home_directory_extracts_only_valid_ip_device_credentials_without_exposing_tokens() {
+    use crate::xiaomi::cloud::catalog::LanCredentials;
+    let mut valid = device("656878122", true);
+    valid["model"] = json!("dmaker.fan.p5c");
+    valid["pid"] = json!(0);
+    valid["localip"] = json!("192.0.2.5");
+    valid["token"] = json!("00112233445566778899aabbccddeeff");
+    let mut ble = valid.clone();
+    ble["did"] = json!("2");
+    ble["pid"] = json!(6);
+    let mut proxy = valid.clone();
+    proxy["did"] = json!("3");
+    proxy["parent_id"] = json!("gateway");
+    let mut invalid = valid.clone();
+    invalid["did"] = json!("4");
+    invalid["token"] = json!("bad");
+    let (base, _) = mock_server(vec![response(
+        json!({"list":[valid,ble,proxy,invalid],"has_more":false}),
+    )]);
+    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let devices = future::block_on(get_home_devices(
+        &cloud,
+        "access",
+        &home(["656878122", "2", "3", "4"]),
+    ))
+    .unwrap();
+    assert!(
+        matches!(&devices[0].lan, LanCredentials::Candidate(candidate) if candidate.address.to_string() == "192.0.2.5")
+    );
+    assert!(matches!(devices[1].lan, LanCredentials::NotIp));
+    assert!(matches!(devices[2].lan, LanCredentials::NotIp));
+    assert!(matches!(devices[3].lan, LanCredentials::Invalid));
+    assert!(!format!("{devices:?}").contains("00112233445566778899aabbccddeeff"));
 }

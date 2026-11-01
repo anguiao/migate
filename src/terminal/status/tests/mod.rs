@@ -173,6 +173,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
         },
         devices: vec![DeviceStatus {
             functions: vec![],
+            lan: None,
             did: "one".into(),
             read_only: false,
             usable_control_paths: vec![PathKind::Local, PathKind::Cloud],
@@ -265,6 +266,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
         },
         devices: vec![DeviceStatus {
             functions: vec![],
+            lan: None,
             did: "one".into(),
             read_only: false,
             usable_control_paths: Vec::new(),
@@ -426,6 +428,7 @@ fn light_diagnostics_fixture() -> (crate::device::Function, crate::device::Comma
 fn action_report(function: &crate::device::Function) -> String {
     format_device(&DeviceStatus {
         functions: vec![],
+        lan: None,
         did: "light".into(),
         read_only: false,
         usable_control_paths: vec![PathKind::Cloud],
@@ -557,6 +560,7 @@ fn a_notification_limited_read_only_channel_is_reported_without_claiming_physica
     use crate::xiaomi::adapter::{ChannelCommands, DeviceStatus, PathKind};
     let report = super::format_device(&DeviceStatus {
         functions: vec![],
+        lan: None,
         did: "sensor".into(),
         read_only: true,
         usable_control_paths: Vec::new(),
@@ -582,6 +586,7 @@ fn a_notification_limited_read_only_channel_is_reported_without_claiming_physica
 fn battery_diagnostics_are_separate_from_physical_reachability() {
     let report = format_device(&DeviceStatus {
         functions: vec![],
+        lan: None,
         did: "sensor".into(),
         read_only: true,
         usable_control_paths: Vec::new(),

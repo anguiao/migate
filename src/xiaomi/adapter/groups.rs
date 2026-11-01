@@ -101,6 +101,7 @@ impl Context {
                             model: group.model.clone(),
                             instance_type: instance_type.clone(),
                             online: group.online,
+                            lan: crate::xiaomi::cloud::LanCredentials::NotIp,
                         });
                 group.membership.is_physical
                     && known.is_none_or(|(physical, model, instance_type)| {

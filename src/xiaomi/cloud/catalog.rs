@@ -2,11 +2,15 @@ use super::{
     CloudClient, CloudError,
     response::{Identifier, Members, Room, description, null_list, valid_description},
 };
+use crate::xiaomi::lan::Token;
 use isahc::Request;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha1::{Digest, Sha1};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    net::Ipv4Addr,
+};
 use url::Url;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,6 +41,53 @@ pub struct CloudDeviceInfo {
     pub model: String,
     pub instance_type: String,
     pub online: bool,
+    pub(crate) lan: LanCredentials,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LanCandidate {
+    pub(crate) address: Ipv4Addr,
+    pub(crate) token: Token,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LanCredentials {
+    Unknown,
+    NotIp,
+    Missing,
+    Invalid,
+    Candidate(LanCandidate),
+}
+
+fn lan_credentials(details: &Map<String, Value>) -> LanCredentials {
+    let pid = details.get("pid");
+    let is_ip = pid.and_then(Value::as_u64) == Some(0) || pid.and_then(Value::as_str) == Some("0");
+    let parent = details.get("parent_id");
+    if parent.is_some_and(|value| !value.is_null() && value.as_str() != Some("")) {
+        return LanCredentials::NotIp;
+    }
+    if pid.is_none() {
+        return LanCredentials::Unknown;
+    }
+    if !is_ip {
+        return LanCredentials::NotIp;
+    }
+    let (Some(address), Some(token)) = (details.get("localip"), details.get("token")) else {
+        return LanCredentials::Missing;
+    };
+    let Some(address) = address
+        .as_str()
+        .and_then(|value| value.parse::<Ipv4Addr>().ok())
+    else {
+        return LanCredentials::Invalid;
+    };
+    let Some(token) = token.as_str().and_then(Token::parse) else {
+        return LanCredentials::Invalid;
+    };
+    if address.is_unspecified() || address.is_multicast() || address.is_broadcast() {
+        return LanCredentials::Invalid;
+    }
+    LanCredentials::Candidate(LanCandidate { address, token })
 }
 
 pub fn group_id(uid: &str, home_id: &str) -> String {
@@ -272,6 +323,7 @@ impl CloudClient {
                     if !seen.insert(record.did.clone()) {
                         return Err(CloudError::protocol(operation));
                     }
+                    let lan = lan_credentials(&record.details);
                     let details: DeviceInfo = serde_json::from_value(Value::Object(record.details))
                         .map_err(|_| CloudError::protocol(operation))?;
                     devices.push(CloudDeviceInfo {
@@ -279,6 +331,7 @@ impl CloudClient {
                         model: details.description.model,
                         instance_type: details.description.spec_type,
                         online: details.online,
+                        lan,
                     });
                 }
                 cursor = pages.advance(

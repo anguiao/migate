@@ -252,8 +252,10 @@ impl Context {
                     .unwrap()
                     .light_action_diagnostics();
             }
+            let lan = self.live.borrow().devices[&did].lan.status.clone();
             devices.push(DeviceStatus {
                 did,
+                lan,
                 read_only,
                 usable_control_paths: usable,
                 selected_control: selected,

@@ -74,6 +74,7 @@ pub(super) struct DeviceSlot {
     /// This slot is a native group source. Executable group rules live only in
     /// the installed committed graph.
     pub(super) group: bool,
+    pub(super) lan: super::lan::LanSlot,
     /// Latest complete source fact, retained while its commit is pending.
     pub(super) candidate: Option<SourceDescription>,
     /// Source fact paired with the installed configuration.
@@ -293,6 +294,15 @@ pub(super) struct Context {
     pub(super) notification_connector: Cell<super::notifications::NotificationConnector>,
     pub(super) priority: Cell<super::routing::PathPriority>,
     pub(super) cloud: CloudClient,
+    pub(super) lan_discovery: crate::xiaomi::lan::Discovery,
+    pub(super) lan_scope_invalid: Cell<bool>,
+    pub(super) lan_network_changed: Event,
+    #[cfg(test)]
+    pub(super) lan_port: Cell<u16>,
+    #[cfg(test)]
+    pub(super) lan_test_endpoints: RefCell<BTreeMap<std::net::Ipv4Addr, std::net::SocketAddr>>,
+    #[cfg(test)]
+    pub(super) lan_timeout: Cell<Duration>,
     pub(super) cloud_sync: RefCell<CloudSync>,
     pub(super) http_paused: Cell<bool>,
     pub(super) cloud_scope_valid: Cell<bool>,

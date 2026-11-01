@@ -123,9 +123,10 @@ impl XiaomiStore {
         validate_record(record).map_err(|error| {
             StorageError::new(self.path(), "validate Xiaomi credentials", error)
         })?;
-        self.store
-            .connection()
-            .execute(
+        (|| {
+            let transaction = self.store.connection().unchecked_transaction()?;
+            transaction.execute("DELETE FROM xiaomi_lan WHERE uid <> ?1", [&record.uid])?;
+            transaction.execute(
                 "INSERT INTO xiaomi_auth (
                     id, uid, region, oauth_client_uuid, redirect_uri,
                     access_token, refresh_token, expires_at, refresh_at,
@@ -156,12 +157,13 @@ impl XiaomiStore {
                     &record.private_key_pem,
                     &record.certificate_pem,
                 ),
-            )
-            .map(|_| ())
-            .map_err(|error| {
-                self.store
-                    .database_error("replace Xiaomi credentials", error)
-            })
+            )?;
+            transaction.commit()
+        })()
+        .map_err(|error| {
+            self.store
+                .database_error("replace Xiaomi credentials", error)
+        })
     }
 
     pub fn update_tokens(&self, tokens: &TokenSet) -> Result<(), StorageError> {
@@ -201,14 +203,16 @@ impl XiaomiStore {
     }
 
     pub fn logout(&self) -> Result<(), StorageError> {
-        self.store
-            .connection()
-            .execute("DELETE FROM xiaomi_auth", [])
-            .map(|_| ())
-            .map_err(|error| {
-                self.store
-                    .database_error("delete Xiaomi credentials", error)
-            })
+        (|| {
+            let transaction = self.store.connection().unchecked_transaction()?;
+            transaction.execute("DELETE FROM xiaomi_lan", [])?;
+            transaction.execute("DELETE FROM xiaomi_auth", [])?;
+            transaction.commit()
+        })()
+        .map_err(|error| {
+            self.store
+                .database_error("delete Xiaomi credentials", error)
+        })
     }
 }
 

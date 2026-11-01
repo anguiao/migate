@@ -115,6 +115,7 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
             pending: Vec::new(),
             routing: Default::default(),
             devices: vec![crate::xiaomi::adapter::DeviceStatus {
+                lan: None,
                 did: "sensor".into(),
                 read_only: true,
                 usable_control_paths: Vec::new(),

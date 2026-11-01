@@ -45,4 +45,14 @@ CREATE TABLE publication_revocation (
 INSERT INTO bridge_configuration (id, json)
 VALUES (1, '{"scope":null,"root_version":1,"devices":[],"descriptions":[],"groups":[],"temperature_bindings":[]}');
 
-PRAGMA user_version = 10;
+-- Confirmed LAN credentials are separate from the published configuration.
+CREATE TABLE xiaomi_lan (
+    did TEXT PRIMARY KEY,
+    uid TEXT NOT NULL,
+    home_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    address TEXT NOT NULL,
+    token BLOB NOT NULL CHECK (length(token) = 16)
+) STRICT;
+
+PRAGMA user_version = 11;

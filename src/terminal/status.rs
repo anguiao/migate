@@ -331,6 +331,35 @@ fn format_device(status: &DeviceStatus) -> String {
         status.selected_read.map(path).unwrap_or("none"),
         status.notification_source.map(path).unwrap_or("none")
     );
+    if let Some(lan) = &status.lan {
+        let _ = write!(
+            report,
+            "\n  Direct LAN (MIoT properties): {}; address {}; identity {}.",
+            match lan.state {
+                crate::xiaomi::adapter::LanState::Ineligible =>
+                    "ineligible (not a direct IP device)",
+                crate::xiaomi::adapter::LanState::MissingCredentials => "credentials missing",
+                crate::xiaomi::adapter::LanState::InvalidCredentials => "credentials invalid",
+                crate::xiaomi::adapter::LanState::Authenticating => "authenticating",
+                crate::xiaomi::adapter::LanState::Ready => "ready",
+                crate::xiaomi::adapter::LanState::Failed => "failed",
+            },
+            lan.address
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+            if lan.state == crate::xiaomi::adapter::LanState::Ready {
+                "confirmed"
+            } else {
+                "unconfirmed"
+            }
+        );
+        if let Some(problem) = &lan.problem {
+            let _ = write!(report, "\n  Direct LAN: {problem}.");
+        }
+        if let RecoveryStatus::Scheduled(at) = lan.recovery {
+            let _ = write!(report, "\n  Direct LAN recovery scheduled at {at}.");
+        }
+    }
     if status.read_only {
         report.push_str("\n  Control: read-only.");
     }

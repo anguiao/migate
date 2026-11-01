@@ -11,6 +11,7 @@ mod fan;
 mod group_composition;
 mod groups;
 mod http_routing;
+mod lan;
 mod lighting;
 mod list_scheduling;
 mod local_device_errors;

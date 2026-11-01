@@ -435,6 +435,8 @@ impl Context {
 
     /// Confirmed removal closes every retained authority before persistence.
     pub(super) fn revoke(&self, did: &str, reason: &str) -> Result<(), AdapterError> {
+        self.stop_lan(did);
+        self.store.lan().remove(did)?;
         let key = DeviceKey::new("xiaomi", did);
         let (admitted, cached) = self
             .live

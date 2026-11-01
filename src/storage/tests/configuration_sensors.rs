@@ -1,4 +1,4 @@
-//! Sensor capability persistence in the current schema-10 private codec.
+//! Sensor capability persistence in the current schema-11 private codec.
 
 use super::configuration::{corrupt, fixture, load, next, raw, save, scope, seed};
 use crate::xiaomi::capability::tests::source::SourceFixture;

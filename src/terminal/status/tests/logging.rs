@@ -63,6 +63,7 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
     status.update_adapter(adapter.clone());
     adapter.devices.push(DeviceStatus {
         functions: vec![],
+        lan: None,
         did: "one".into(),
         read_only: false,
         usable_control_paths: vec![PathKind::Local],

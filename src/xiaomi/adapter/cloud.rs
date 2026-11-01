@@ -106,6 +106,9 @@ pub(super) async fn run(
             _ => None,
         };
         if let Some(reason) = identity_failure {
+            if matches!(reason, FailureReason::AccountIdentityMismatch) {
+                context.invalidate_lan_scope()?;
+            }
             context.set_catalog_problem(Some(reason.to_string()));
             context.authentication(AuthenticationState::Unavailable(reason));
             context.cloud_scope_valid.set(false);
@@ -132,6 +135,9 @@ pub(super) async fn run(
         let home = match selected {
             Ok(home) => home,
             Err(error) => {
+                if expected_scope.is_some() {
+                    context.invalidate_lan_scope()?;
+                }
                 context.set_catalog_problem(Some(error.to_string()));
                 context.cloud_scope_valid.set(false);
                 context.update_all_availability();
@@ -207,6 +213,7 @@ pub(super) async fn run(
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
         };
+        context.lan_scope_invalid.set(false);
         context.live.borrow_mut().scope = Some(scope.clone());
         context.stage();
         for did in removed {

@@ -35,7 +35,11 @@ fn the_old_schema_is_rejected_without_modification() {
         .err()
         .expect("the old schema must be rejected untouched");
     assert!(error.to_string().contains("validate database schema"));
-    assert!(error.to_string().contains("new data directory"));
+    assert!(
+        error
+            .to_string()
+            .contains("upgrade the existing data directory")
+    );
     assert_eq!(snapshot(&dir), before);
     let db = Connection::open(&path).unwrap();
     assert_eq!(
@@ -47,14 +51,14 @@ fn the_old_schema_is_rejected_without_modification() {
 }
 
 #[test]
-fn schema10_is_one_private_singleton() {
+fn schema11_is_one_private_singleton() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let db = Connection::open(store.path()).unwrap();
     let version = db
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     let rows = db
         .query_row("SELECT count(*) FROM bridge_configuration", [], |row| {
             row.get::<_, i64>(0)
