@@ -96,6 +96,8 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
             )],
             Some(PathKind::Local),
         ),
+        steps: Vec::new(),
+        feedback: None,
         actual_path: Some(PathKind::Local),
         result: Some(Ok(())),
     });

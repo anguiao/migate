@@ -86,6 +86,7 @@ pub(super) async fn send(
                         Err(error)
                     }
                 };
+                operation.0.schedule_feedback(&context, &work, &sink);
                 operation.0.finish(result);
                 if let Some(error) = receipt.maintenance {
                     return Err(error);

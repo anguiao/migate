@@ -202,6 +202,30 @@ pub struct CommandStatus {
     pub properties: Vec<CommandProperty>,
     pub actual_path: Option<PathKind>,
     pub result: Option<Result<(), CommandError>>,
+    pub steps: Vec<CommandStep>,
+    pub feedback: Option<CommandFeedback>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandStep {
+    pub binding: PropertyBinding,
+    pub path: PathKind,
+    pub receipt: StepReceipt,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum StepReceipt {
+    Awaiting,
+    Accepted,
+    Rejected(String),
+    Uncertain(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommandFeedback {
+    Pending,
+    Complete,
+    Failed(String),
 }
 impl CommandStatus {
     pub(crate) fn properties_text(&self) -> String {

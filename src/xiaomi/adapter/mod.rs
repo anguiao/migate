@@ -24,10 +24,10 @@ mod tasks;
 mod work;
 
 pub use model::{
-    AdapterError, AdapterStatus, ChannelCommands, CommandProperty, CommandStatus, CommandTarget,
-    DeviceStatus, FunctionStatus, GatewayStatus, LanProtocol, LanState, LanStatus,
-    ObservedPropertyStatus, PathKind, PendingDevice, RecoveryStatus, RoutingStatus,
-    SubscriptionBinding, SubscriptionStatus, TopologyReady,
+    AdapterError, AdapterStatus, ChannelCommands, CommandFeedback, CommandProperty, CommandStatus,
+    CommandStep, CommandTarget, DeviceStatus, FunctionStatus, GatewayStatus, LanProtocol, LanState,
+    LanStatus, ObservedPropertyStatus, PathKind, PendingDevice, RecoveryStatus, RoutingStatus,
+    StepReceipt, SubscriptionBinding, SubscriptionStatus, TopologyReady,
 };
 pub use publication::SourceHandle;
 pub use routing::PathPriority;

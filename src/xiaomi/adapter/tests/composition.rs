@@ -377,3 +377,79 @@ fn core_metadata_can_change_without_rebuilding_source_or_matter() {
         }),
     );
 }
+
+#[test]
+fn another_functions_ready_notification_does_not_suppress_fan_feedback() {
+    use crate::device::FanCommand;
+    use crate::xiaomi::adapter::CommandFeedback;
+    let mut description = instance();
+    let mut second_fan = description["services"][1].clone();
+    second_fan["iid"] = json!(5);
+    description["services"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_fan);
+    let rig = Rig::custom_lights(&[("one", "example.composite", description)]);
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        for (binding, value) in [
+            (PropertyBinding { siid: 2, piid: 1 }, json!(false)),
+            (PropertyBinding { siid: 3, piid: 1 }, json!(true)),
+            (PropertyBinding { siid: 3, piid: 2 }, json!(1)),
+            (PropertyBinding { siid: 4, piid: 1 }, json!(false)),
+            (PropertyBinding { siid: 5, piid: 1 }, json!(true)),
+            (PropertyBinding { siid: 5, piid: 2 }, json!(1)),
+        ] {
+            peer.value("one", binding, value);
+        }
+        peer.state
+            .borrow_mut()
+            .sub_reject
+            .insert(("one".into(), 5, 2));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                control.context.live.borrow().devices["one"]
+                    .admitted
+                    .is_some()
+            })
+            .await;
+            let work = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            until(|| {
+                control.context.active_notification("one") == Some(PathKind::Local)
+                    && work.function_observer("fan:3").is_some()
+                    && work.function_subscription_problem("fan:5").is_some()
+                    && [
+                        PropertyBinding { siid: 5, piid: 1 },
+                        PropertyBinding { siid: 5, piid: 2 },
+                    ]
+                    .iter()
+                    .all(|binding| !work.refresh.borrow().contains("fan:5", *binding))
+            })
+            .await;
+            assert!(work.function_observer("fan:5").is_none());
+            let before = peer.count("get", "one", 5);
+            function(&control.context.registry, "one", "fan:5")
+                .begin_fan(FanCommand::Power(false))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            until(|| {
+                control.context.diagnostics().devices[0]
+                    .commands
+                    .iter()
+                    .find(|command| command.channel == "fan:5")
+                    .and_then(|command| command.last.as_ref())
+                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+            })
+            .await;
+            assert_eq!(peer.count("get", "one", 5), before + 2);
+        })
+        .await;
+    }));
+}

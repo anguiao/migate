@@ -22,6 +22,7 @@ struct Wire {
     written: RefCell<Vec<u8>>,
     incoming: RefCell<VecDeque<u8>>,
     waker: RefCell<Option<Waker>>,
+    fail_read: Cell<bool>,
 }
 impl Wire {
     fn wake(&self) {
@@ -35,6 +36,10 @@ impl Wire {
     }
     fn accept(&self) {
         self.reply(accepted("one", 2, 0));
+    }
+    fn fail(&self) {
+        self.fail_read.set(true);
+        self.wake();
     }
     fn reply(&self, value: Value) {
         let mut frames = crate::xiaomi::mqtt::Frames::default();
@@ -62,6 +67,9 @@ impl AsyncRead for Transport {
         cx: &mut TaskContext<'_>,
         bytes: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
+        if self.0.fail_read.get() {
+            return Poll::Ready(Err(std::io::Error::other("test transport failure")));
+        }
         let mut incoming = self.0.incoming.borrow_mut();
         let count = incoming.len().min(bytes.len());
         if count == 0 {

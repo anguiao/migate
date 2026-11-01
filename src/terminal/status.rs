@@ -506,7 +506,7 @@ pub(super) fn property_diagnostics(property: Option<&ObservedPropertyStatus>) ->
 }
 
 fn format_command(channel: &str, state: &str, command: &CommandStatus) -> String {
-    format!(
+    let mut text = format!(
         "{channel} {state} command #{}: target {}; {} {}; actual path {}; {}.",
         command.id,
         command.target,
@@ -521,7 +521,43 @@ fn format_command(channel: &str, state: &str, command: &CommandStatus) -> String
         command.properties_text(),
         command.actual_path.map(path).unwrap_or("not sent"),
         command.result_text(),
-    )
+    );
+    if !command.steps.is_empty() {
+        let steps = command
+            .steps
+            .iter()
+            .map(|step| {
+                let receipt = match &step.receipt {
+                    crate::xiaomi::adapter::StepReceipt::Awaiting => "awaiting receipt".into(),
+                    crate::xiaomi::adapter::StepReceipt::Accepted => "accepted".into(),
+                    crate::xiaomi::adapter::StepReceipt::Rejected(reason) => {
+                        format!("rejected: {reason}")
+                    }
+                    crate::xiaomi::adapter::StepReceipt::Uncertain(reason) => {
+                        format!("result uncertain: {reason}")
+                    }
+                };
+                format!(
+                    "{}.{} ({}, {})",
+                    step.binding.siid,
+                    step.binding.piid,
+                    path(step.path),
+                    receipt
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        text.push_str(&format!(" Steps: {steps}."));
+    }
+    if let Some(feedback) = &command.feedback {
+        let value = match feedback {
+            crate::xiaomi::adapter::CommandFeedback::Pending => "pending".into(),
+            crate::xiaomi::adapter::CommandFeedback::Complete => "complete".into(),
+            crate::xiaomi::adapter::CommandFeedback::Failed(reason) => format!("failed: {reason}"),
+        };
+        text.push_str(&format!(" One-shot feedback: {value}."));
+    }
+    text
 }
 
 fn dimension(dimension: crate::device::LightDimension) -> &'static str {

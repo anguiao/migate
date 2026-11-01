@@ -200,3 +200,45 @@ fn unsent_speed_uses_the_latest_power_observation_at_the_send_boundary() {
         }));
     }
 }
+
+#[test]
+fn transport_failure_after_fan_bytes_is_reported_as_uncertain() {
+    use crate::xiaomi::adapter::StepReceipt;
+    block_on(fan_rig().run(|c| async move {
+        let wire = Rc::new(Wire::default());
+        wire.allow(1);
+        let (_, driver) = local(&c, wire.clone());
+        let fan = function(&c.context.registry, "one", "fan:2");
+        future::zip(
+            async {
+                let _ = driver.run(|_| {}).await;
+            },
+            async {
+                let action = fan.begin_fan(FanCommand::Speed(52)).unwrap();
+                until(|| wire.written.borrow().len() == 1).await;
+                wire.fail();
+                assert!(action.accepted().await.is_err());
+                let status = c.context.diagnostics();
+                let last = status.devices[0].commands[0].last.as_ref().unwrap();
+                assert_eq!(last.actual_path, Some(PathKind::Local));
+                assert!(matches!(last.steps[0].receipt, StepReceipt::Uncertain(_)));
+                let auth = crate::terminal::AuthStatus::new(
+                    c.context.status.borrow().authentication.clone(),
+                    "/bin/migate".into(),
+                    "/data".into(),
+                );
+                auth.update_adapter(status);
+                let terminal =
+                    crate::terminal::bridge::Context::committed(c.publication.clone(), &auth);
+                let text = terminal
+                    .handle_line("status one", 0)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(text.contains("result uncertain"), "{text}");
+                assert_eq!(wire.written.borrow().len(), 1);
+            },
+        )
+        .await;
+    }));
+}

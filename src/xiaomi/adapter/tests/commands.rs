@@ -282,3 +282,209 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
         .await;
     }));
 }
+
+#[test]
+fn outlet_without_notifications_uses_the_shared_post_write_feedback() {
+    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.state.borrow_mut().pushless.insert("one".into());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .and_then(|device| device.function("outlet:2"))
+                    .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
+            })
+            .await;
+            let work = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            until(|| {
+                !work.refresh.borrow().contains(
+                    "outlet:2",
+                    crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                )
+            })
+            .await;
+            assert!(work.function_observer("outlet:2").is_none());
+            let before = peer.count("get", "one", 2);
+            function(&control.context.registry, "one", "outlet:2")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            until(|| {
+                control.context.diagnostics().devices[0].commands[0]
+                    .last
+                    .as_ref()
+                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+            })
+            .await;
+            assert_eq!(peer.count("get", "one", 2), before + 1);
+            let status = control.context.diagnostics();
+            assert_eq!(
+                status.devices[0].commands[0].last.as_ref().unwrap().steps[0].receipt,
+                StepReceipt::Accepted
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn outlet_post_write_read_before_receipt_remains_the_observed_state() {
+    use crate::xiaomi::{adapter::CommandFeedback, capability::PropertyBinding};
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.state.borrow_mut().pushless.insert("one".into());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .and_then(|device| device.function("outlet:2"))
+                    .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
+            })
+            .await;
+            let work = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let binding = PropertyBinding { siid: 2, piid: 1 };
+            until(|| !work.refresh.borrow().contains("outlet:2", binding)).await;
+            peer.state.borrow_mut().hold_writes = true;
+            let before = peer.count("get", "one", 2);
+            let outlet = function(&control.context.registry, "one", "outlet:2");
+            let mut action = Box::pin(outlet.execute(Command::On));
+            assert!(poll_once(action.as_mut()).await.is_none());
+            until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            work.refresh_property("outlet:2", binding);
+            until(|| {
+                peer.count("get", "one", 2) == before + 1
+                    && !work.refresh.borrow().contains("outlet:2", binding)
+            })
+            .await;
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            action.await.unwrap();
+            assert_eq!(outlet.snapshot().power(), Some(Power::Off));
+            assert_eq!(peer.count("get", "one", 2), before + 1);
+            assert_eq!(
+                control.context.diagnostics().devices[0].commands[0]
+                    .last
+                    .as_ref()
+                    .unwrap()
+                    .feedback,
+                Some(CommandFeedback::Complete)
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn outlet_receipt_preserves_a_post_write_inflight_read_without_repeating_it() {
+    use crate::xiaomi::{adapter::CommandFeedback, capability::PropertyBinding};
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.state.borrow_mut().pushless.insert("one".into());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .and_then(|device| device.function("outlet:2"))
+                    .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
+            })
+            .await;
+            let work = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let binding = PropertyBinding { siid: 2, piid: 1 };
+            until(|| !work.refresh.borrow().contains("outlet:2", binding)).await;
+            peer.state.borrow_mut().hold_writes = true;
+            peer.state.borrow_mut().hold_reads = true;
+            let before = peer.count("get", "one", 2);
+            let outlet = function(&control.context.registry, "one", "outlet:2");
+            let mut action = Box::pin(outlet.execute(Command::On));
+            assert!(poll_once(action.as_mut()).await.is_none());
+            until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            work.refresh_property("outlet:2", binding);
+            until(|| peer.count("get", "one", 2) == before + 1).await;
+            peer.release("one", 2, accepted("one", 2, 0)).await;
+            assert_eq!(action.await.unwrap().power(), Some(Power::On));
+            peer.state.borrow_mut().hold_reads = false;
+            peer.release_property("one", binding, json!({"value":false}))
+                .await;
+            until(|| {
+                control.context.diagnostics().devices[0].commands[0]
+                    .last
+                    .as_ref()
+                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+            })
+            .await;
+            assert_eq!(peer.count("get", "one", 2), before + 1);
+            assert_eq!(outlet.snapshot().power(), Some(Power::Off));
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn outlet_read_started_before_the_write_does_not_satisfy_feedback() {
+    use crate::xiaomi::{adapter::CommandFeedback, capability::PropertyBinding};
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        peer.state.borrow_mut().pushless.insert("one".into());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                control
+                    .context
+                    .registry
+                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .and_then(|device| device.function("outlet:2"))
+                    .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
+            })
+            .await;
+            let work = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let binding = PropertyBinding { siid: 2, piid: 1 };
+            until(|| !work.refresh.borrow().contains("outlet:2", binding)).await;
+            peer.state.borrow_mut().hold_reads = true;
+            let before = peer.count("get", "one", 2);
+            work.refresh_property("outlet:2", binding);
+            until(|| peer.count("get", "one", 2) == before + 1).await;
+            let outlet = function(&control.context.registry, "one", "outlet:2");
+            outlet.execute(Command::On).await.unwrap();
+            assert_eq!(outlet.snapshot().power(), Some(Power::On));
+            peer.state.borrow_mut().hold_reads = false;
+            peer.release_property("one", binding, json!({"value":true}))
+                .await;
+            until(|| {
+                control.context.diagnostics().devices[0].commands[0]
+                    .last
+                    .as_ref()
+                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+            })
+            .await;
+            assert_eq!(peer.count("get", "one", 2), before + 2);
+            assert_eq!(outlet.snapshot().power(), Some(Power::Off));
+        })
+        .await;
+    }));
+}

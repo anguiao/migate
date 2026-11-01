@@ -893,3 +893,409 @@ fn first_member_acceptance_does_not_discard_another_members_queued_write() {
         future::zip(holding, scenario).await;
     }));
 }
+
+#[test]
+fn repaired_group_waits_for_all_member_receipts_before_new_feedback_reads() {
+    use crate::xiaomi::adapter::CommandFeedback;
+    let (rig, release) = gated_rig(0, true);
+    block_on(rig.run(|c| async move {
+        repair_ready(&c).await;
+        until(|| {
+            c.context
+                .live
+                .borrow()
+                .devices
+                .values()
+                .filter_map(|slot| slot.admitted.as_ref())
+                .all(|work| {
+                    work.refresh.borrow().snapshot().pending.is_empty()
+                        && work.refresh.borrow().snapshot().inflight.is_empty()
+                })
+        })
+        .await;
+        c.cloud.lock().unwrap().property_reads.clear();
+        let action = function(&c.context.registry, "group-1", "light:2")
+            .begin_light_action(rgb(0x0055ff), true)
+            .unwrap();
+        action.accepted().await.unwrap();
+        wait_for(
+            || !member_writes(&c, "member-b", 4, 1).is_empty(),
+            "second member write did not start",
+        )
+        .await;
+        wait_for(
+            || {
+                let cloud = c.cloud.lock().unwrap();
+                cloud.property_reads.contains(&("member-a".into(), 4, 1))
+                    && cloud.property_reads.contains(&("member-a".into(), 4, 2))
+            },
+            "existing member reads did not run",
+        )
+        .await;
+        async_io::Timer::after(Duration::from_millis(100)).await;
+        let early = c.cloud.lock().unwrap().property_reads.clone();
+        assert!(
+            early
+                .iter()
+                .all(|(did, siid, _)| did != "member-a" || *siid == 4),
+            "{early:?}"
+        );
+        release.send(()).unwrap();
+        wait_for(
+            || {
+                ["member-a", "member-b"].iter().all(|did| {
+                    c.context
+                        .commands
+                        .snapshot(did, ["light:2".to_owned()].into_iter())[0]
+                        .last
+                        .as_ref()
+                        .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+                })
+            },
+            "member feedback did not finish",
+        )
+        .await;
+    }));
+}
+
+#[test]
+fn repaired_group_feedback_follows_the_last_member_write_even_when_it_was_queued() {
+    use crate::xiaomi::adapter::CommandFeedback;
+    let (rig, release) = gated_rig(0, true);
+    block_on(rig.run(|c| async move {
+        repair_ready(&c).await;
+        until(|| {
+            c.context
+                .live
+                .borrow()
+                .devices
+                .values()
+                .filter_map(|slot| slot.admitted.as_ref())
+                .all(|work| {
+                    work.refresh.borrow().snapshot().pending.is_empty()
+                        && work.refresh.borrow().snapshot().inflight.is_empty()
+                })
+        })
+        .await;
+        c.cloud.lock().unwrap().property_reads.clear();
+        let member = function(&c.context.registry, "member-b", "light:2");
+        let blocker = member.begin_light_action(brightness(75.0), true).unwrap();
+        wait_for(
+            || !member_writes(&c, "member-b", 2, 2).is_empty(),
+            "member gate was not occupied",
+        )
+        .await;
+        let action = function(&c.context.registry, "group-1", "light:2")
+            .begin_light_action(rgb(0x0055ff), true)
+            .unwrap();
+        action.accepted().await.unwrap();
+        wait_for(
+            || {
+                let cloud = c.cloud.lock().unwrap();
+                cloud.property_reads.contains(&("member-a".into(), 4, 1))
+                    && cloud.property_reads.contains(&("member-a".into(), 4, 2))
+            },
+            "first member reads did not finish",
+        )
+        .await;
+        assert!(member_writes(&c, "member-b", 4, 1).is_empty());
+        release.send(()).unwrap();
+        blocker.accepted().await.unwrap();
+        wait_for(
+            || !member_writes(&c, "member-b", 4, 1).is_empty(),
+            "queued member write did not start",
+        )
+        .await;
+        release.send(()).unwrap();
+        wait_for(
+            || {
+                ["member-a", "member-b"].iter().all(|did| {
+                    c.context
+                        .commands
+                        .snapshot(did, ["light:2".to_owned()].into_iter())[0]
+                        .last
+                        .as_ref()
+                        .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+                })
+            },
+            "post-write member feedback did not finish",
+        )
+        .await;
+        let reads = c.cloud.lock().unwrap().property_reads.clone();
+        for piid in [1, 2] {
+            assert_eq!(
+                reads
+                    .iter()
+                    .filter(|(did, siid, property)| did == "member-a"
+                        && *siid == 4
+                        && *property == piid)
+                    .count(),
+                2,
+                "{reads:?}"
+            );
+        }
+    }));
+}
+
+#[test]
+fn repaired_group_partial_acceptance_reads_all_member_feedback() {
+    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    let rig = repair_rig(0, true);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.property_codes.insert(("member-b".into(), 4, 1), -704);
+        cloud.property_codes.insert(("member-b".into(), 4, 2), -704);
+    }
+    block_on(rig.run(|c| async move {
+        repair_ready(&c).await;
+        until(|| {
+            c.context
+                .live
+                .borrow()
+                .devices
+                .values()
+                .filter_map(|slot| slot.admitted.as_ref())
+                .all(|work| {
+                    work.refresh.borrow().snapshot().pending.is_empty()
+                        && work.refresh.borrow().snapshot().inflight.is_empty()
+                })
+        })
+        .await;
+        c.cloud.lock().unwrap().property_reads.clear();
+        let group = function(&c.context.registry, "group-1", "light:2");
+        group
+            .begin_light_action(rgb(0x0055ff), true)
+            .unwrap()
+            .accepted()
+            .await
+            .unwrap();
+        wait_for(
+            || {
+                ["member-a", "member-b"].iter().all(|did| {
+                    c.context
+                        .commands
+                        .snapshot(did, ["light:2".to_owned()].into_iter())[0]
+                        .last
+                        .as_ref()
+                        .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+                })
+            },
+            "member feedback did not finish",
+        )
+        .await;
+        let reads = c.cloud.lock().unwrap().property_reads.clone();
+        for did in ["member-a", "member-b"] {
+            for (siid, piid) in [(2, 1), (2, 2), (2, 3), (4, 1), (4, 2)] {
+                assert!(
+                    reads.iter().any(|(device, service, property)| device == did
+                        && *service == siid
+                        && *property == piid),
+                    "{reads:?}"
+                );
+            }
+        }
+        let statuses = c
+            .context
+            .commands
+            .snapshot("member-b", ["light:2".to_owned()].into_iter());
+        let last = statuses[0].last.as_ref().unwrap();
+        assert!(last.result.as_ref().unwrap().is_err());
+        assert!(
+            last.steps
+                .iter()
+                .all(|step| matches!(step.receipt, StepReceipt::Rejected(_)))
+        );
+        assert_eq!(last.feedback, Some(CommandFeedback::Complete));
+    }));
+}
+
+#[test]
+fn repaired_group_reads_only_if_any_sent_property_was_explicitly_accepted() {
+    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    for partial in [false, true] {
+        let rig = repair_rig(0, true);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            for did in ["member-a", "member-b"] {
+                cloud.property_codes.insert((did.into(), 4, 2), -704);
+                if !partial || did == "member-b" {
+                    cloud.property_codes.insert((did.into(), 4, 1), -704);
+                }
+            }
+        }
+        block_on(rig.run(|c| async move {
+            repair_ready(&c).await;
+            until(|| {
+                c.context
+                    .live
+                    .borrow()
+                    .devices
+                    .values()
+                    .filter_map(|slot| slot.admitted.as_ref())
+                    .all(|work| {
+                        work.refresh.borrow().snapshot().pending.is_empty()
+                            && work.refresh.borrow().snapshot().inflight.is_empty()
+                    })
+            })
+            .await;
+            c.cloud.lock().unwrap().property_reads.clear();
+            let group = function(&c.context.registry, "group-1", "light:2");
+            assert!(
+                group
+                    .begin_light_action(rgb(0x0055ff), true)
+                    .unwrap()
+                    .accepted()
+                    .await
+                    .is_err()
+            );
+            wait_for(
+                || {
+                    ["member-a", "member-b"].iter().all(|did| {
+                        c.context
+                            .commands
+                            .snapshot(did, ["light:2".to_owned()].into_iter())[0]
+                            .last
+                            .as_ref()
+                            .is_some_and(|last| last.result.is_some())
+                    })
+                },
+                "member receipts did not finish",
+            )
+            .await;
+            if partial {
+                wait_for(
+                    || {
+                        ["member-a", "member-b"].iter().all(|did| {
+                            c.context
+                                .commands
+                                .snapshot(did, ["light:2".to_owned()].into_iter())[0]
+                                .last
+                                .as_ref()
+                                .is_some_and(|last| {
+                                    last.feedback == Some(CommandFeedback::Complete)
+                                })
+                        })
+                    },
+                    "partially accepted group feedback did not finish",
+                )
+                .await;
+            } else {
+                async_io::Timer::after(Duration::from_millis(100)).await;
+            }
+            let reads = c.cloud.lock().unwrap().property_reads.clone();
+            for did in ["member-a", "member-b"] {
+                for (siid, piid) in [(2, 1), (2, 2), (2, 3), (4, 1), (4, 2)] {
+                    let count = reads
+                        .iter()
+                        .filter(|(device, service, property)| {
+                            device == did && *service == siid && *property == piid
+                        })
+                        .count();
+                    if siid == 4 || partial {
+                        assert!(count >= 1, "{reads:?}");
+                    } else {
+                        assert_eq!(count, 0, "{reads:?}");
+                    }
+                }
+                let status = c
+                    .context
+                    .commands
+                    .snapshot(did, ["light:2".to_owned()].into_iter());
+                let last = status[0].last.as_ref().unwrap();
+                assert!(last.result.as_ref().unwrap().is_err());
+                if !partial {
+                    assert!(last.feedback.is_none());
+                } else if did == "member-a" {
+                    assert!(
+                        last.steps
+                            .iter()
+                            .any(|step| step.receipt == StepReceipt::Accepted)
+                    );
+                    assert!(
+                        last.steps
+                            .iter()
+                            .any(|step| matches!(step.receipt, StepReceipt::Rejected(_)))
+                    );
+                }
+            }
+        }));
+    }
+}
+
+#[test]
+fn repaired_group_partial_acceptance_after_member_timeout_reports_feedback_failure() {
+    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    let (rig, release) = gated_rig(0, true);
+    block_on(rig.run(|c| async move {
+        repair_ready(&c).await;
+        let group = function(&c.context.registry, "group-1", "light:2");
+        group
+            .begin_light_action(rgb(0x0055ff), true)
+            .unwrap()
+            .accepted()
+            .await
+            .unwrap();
+        wait_for(
+            || {
+                ["member-a", "member-b"].iter().all(|did| {
+                    c.context
+                        .commands
+                        .snapshot(did, ["light:2".to_owned()].into_iter())[0]
+                        .last
+                        .as_ref()
+                        .is_some_and(|last| {
+                            matches!(last.feedback, Some(CommandFeedback::Failed(_)))
+                        })
+                })
+            },
+            "partial acceptance did not report unavailable group feedback",
+        )
+        .await;
+        let status = c
+            .context
+            .commands
+            .snapshot("member-b", ["light:2".to_owned()].into_iter());
+        let last = status[0].last.as_ref().unwrap();
+        assert!(last.result.as_ref().unwrap().is_err());
+        assert!(
+            last.steps
+                .iter()
+                .all(|step| matches!(step.receipt, StepReceipt::Uncertain(_)))
+        );
+        assert_eq!(member_writes(&c, "member-b", 4, 1).len(), 1);
+    }));
+    drop(release);
+}
+
+#[test]
+fn repaired_group_reads_eligible_members_after_an_accepted_member_retires() {
+    use crate::device::LightPatch;
+    use crate::xiaomi::adapter::CommandFeedback;
+    let (rig, release) = gated_rig(0, true);
+    block_on(rig.run(|c| async move {
+        repair_ready(&c).await;
+        until(|| c.context.live.borrow().devices.values().filter_map(|slot| slot.admitted.as_ref())
+            .all(|work| work.refresh.borrow().snapshot().pending.is_empty()
+                && work.refresh.borrow().snapshot().inflight.is_empty())).await;
+        c.cloud.lock().unwrap().property_reads.clear();
+        let member_b = function(&c.context.registry, "member-b", "light:2");
+        let blocker = member_b.begin_light_action(brightness(75.0), false).unwrap();
+        wait_for(|| !member_writes(&c, "member-b", 2, 2).is_empty(), "member gate was not occupied").await;
+        let group = function(&c.context.registry, "group-1", "light:2");
+        group.begin_light_action(rgb(0x0055ff), true).unwrap().accepted().await.unwrap();
+        assert!(member_writes(&c, "member-b", 4, 1).is_empty());
+        let retired = c.context.live.borrow().devices["member-a"].admitted.clone().unwrap();
+        retired.retire();
+        member_b.observe_light(LightPatch { power: Some(false), ..Default::default() }).unwrap();
+        release.send(()).unwrap();
+        blocker.accepted().await.unwrap();
+        wait_for(|| {
+            c.context.commands.snapshot("member-a", ["light:2".to_owned()].into_iter())[0]
+                .last.as_ref().is_some_and(|last| matches!(&last.feedback, Some(CommandFeedback::Failed(reason)) if reason.contains("retired")))
+                && c.cloud.lock().unwrap().property_reads.iter().any(|(did, siid, piid)| did == "member-b" && *siid == 2 && *piid == 1)
+        }, "remaining member feedback or retirement diagnostic did not finish").await;
+        let reads = c.cloud.lock().unwrap().property_reads.clone();
+        assert!(member_writes(&c, "member-b", 4, 1).is_empty());
+        assert!(reads.iter().any(|(did, siid, piid)| did == "member-b" && *siid == 2 && *piid == 1), "{reads:?}");
+    }));
+}

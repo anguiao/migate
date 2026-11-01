@@ -1,11 +1,12 @@
 use super::{
     bootstrap::Clock,
     model::{
-        AdapterError, ChannelCommands, CommandProperty, CommandStatus, CommandTarget, PathKind,
+        AdapterError, ChannelCommands, CommandFeedback, CommandProperty, CommandStatus,
+        CommandStep, CommandTarget, PathKind, StepReceipt,
     },
     routing::ControlPath,
     state::{Context, LogicalSink},
-    work::DeviceWork,
+    work::{DeviceWork, SourceRef},
 };
 use crate::{
     device::{CommandError, CommandReceiver, CommandRequest, DeviceRequest},
@@ -183,6 +184,8 @@ impl Commands {
             properties: properties.into_iter().map(Into::into).collect(),
             actual_path: None,
             result: None,
+            steps: Vec::new(),
+            feedback: None,
         };
         let mut records = self.records.borrow_mut();
         let entry = records
@@ -204,6 +207,9 @@ impl Commands {
             queued_at,
             sent_at: Cell::new(None),
             pending_step: RefCell::new(None),
+            write_stamps: RefCell::new(Vec::new()),
+            shared_feedback: RefCell::new(None),
+            feedback_enabled: Cell::new(true),
         }))
     }
     pub(super) fn snapshot(
@@ -233,7 +239,36 @@ impl Commands {
         self.changed.notify(usize::MAX);
     }
 }
-struct CommandOperation {
+struct FeedbackTarget {
+    work: Rc<DeviceWork>,
+    id: String,
+    stamps: BTreeMap<PropertyBinding, super::observations::ReadStamp>,
+}
+
+struct FeedbackScope {
+    group: SourceRef,
+    targets: Vec<(Rc<DeviceWork>, String)>,
+    stamps: RefCell<Vec<FeedbackTarget>>,
+}
+
+fn notifications_ready(context: &Context, work: &DeviceWork, id: &str) -> bool {
+    work.function_observer(id).is_some_and(|source| {
+        context.source_valid_for(&work.key.id, id, &source) && work.source_ready(id, &source)
+    })
+}
+
+fn work_current(context: &Context, work: &Rc<DeviceWork>) -> bool {
+    !work.life.is_closed()
+        && context
+            .live
+            .borrow()
+            .devices
+            .get(&work.key.id)
+            .and_then(|slot| slot.admitted.as_ref())
+            .is_some_and(|current| Rc::ptr_eq(current, work))
+}
+
+pub(super) struct CommandOperation {
     commands: Rc<Commands>,
     did: String,
     channel: String,
@@ -241,6 +276,9 @@ struct CommandOperation {
     queued_at: Instant,
     sent_at: Cell<Option<Instant>>,
     pending_step: RefCell<Option<CommandProperty>>,
+    write_stamps: RefCell<Vec<FeedbackTarget>>,
+    shared_feedback: RefCell<Option<Rc<FeedbackScope>>>,
+    feedback_enabled: Cell<bool>,
 }
 impl CommandOperation {
     fn pending_step(&self, property: (PropertyBinding, serde_json::Value)) {
@@ -275,10 +313,25 @@ impl CommandOperation {
             if let Some(mut property) = self.pending_step.borrow_mut().take() {
                 status.binding = property.binding;
                 property.path = Some(path);
+                status.steps.push(CommandStep {
+                    binding: property.binding,
+                    path,
+                    receipt: StepReceipt::Awaiting,
+                });
                 status.properties.push(property);
             } else if status.actual_path.is_some() {
                 return;
             } else {
+                let steps = status
+                    .properties
+                    .iter()
+                    .map(|property| CommandStep {
+                        binding: property.binding,
+                        path,
+                        receipt: StepReceipt::Awaiting,
+                    })
+                    .collect::<Vec<_>>();
+                status.steps.extend(steps);
                 for property in &mut status.properties {
                     property.path = Some(path);
                 }
@@ -312,6 +365,237 @@ impl CommandOperation {
             status.result_text(),
         );
         self.commands.changed.notify(usize::MAX);
+    }
+    fn mark_write(&self, context: &Context, work: &Rc<DeviceWork>) {
+        if self.feedback_enabled.get() {
+            let shared = self.shared_feedback.borrow();
+            let targets = if let Some(shared) = shared.as_ref() {
+                shared.targets.clone()
+            } else if context.is_virtual_group(&self.did) {
+                context.group_member_work(&self.did)
+            } else {
+                vec![(work.clone(), self.channel.clone())]
+            };
+            let mut stamps = Vec::new();
+            for (work, id) in targets {
+                let function = work
+                    .native
+                    .device()
+                    .functions()
+                    .iter()
+                    .find(|function| function.id() == id)
+                    .unwrap();
+                let mut readings = BTreeMap::new();
+                for binding in function.observation_bindings() {
+                    readings.insert(binding, work.observations.read_stamp(&id, binding));
+                }
+                stamps.push(FeedbackTarget {
+                    work,
+                    id,
+                    stamps: readings,
+                });
+            }
+            if let Some(shared) = shared.as_ref() {
+                *shared.stamps.borrow_mut() = stamps;
+            } else {
+                *self.write_stamps.borrow_mut() = stamps;
+            }
+        }
+    }
+    fn feedback_stamp(
+        &self,
+        work: &DeviceWork,
+        id: &str,
+        binding: PropertyBinding,
+    ) -> Option<super::observations::ReadStamp> {
+        let shared = self.shared_feedback.borrow();
+        let stamps = if let Some(shared) = shared.as_ref() {
+            shared.stamps.borrow()
+        } else {
+            self.write_stamps.borrow()
+        };
+        stamps
+            .iter()
+            .find(|target| std::ptr::eq(target.work.as_ref(), work) && target.id == id)
+            .and_then(|target| target.stamps.get(&binding).cloned())
+    }
+    fn write_feedback(
+        &self,
+        context: &Context,
+        work: &DeviceWork,
+        binding: PropertyBinding,
+    ) -> super::observations::WriteFeedback {
+        use super::observations::WriteFeedback;
+        if notifications_ready(context, work, &self.channel) {
+            return WriteFeedback::Ordinary;
+        }
+        if let Some(stamp) = self.feedback_stamp(work, &self.channel, binding) {
+            if work.observations.read_after(&self.channel, binding, &stamp) {
+                return WriteFeedback::Observed;
+            }
+            if work
+                .refresh
+                .borrow()
+                .inflight_after(context, work, &self.channel, binding, &stamp)
+            {
+                return WriteFeedback::InFlight;
+            }
+        }
+        WriteFeedback::Ordinary
+    }
+    fn receipts(&self, receipts: Vec<StepReceipt>) {
+        let status = {
+            let mut status = self.status.borrow_mut();
+            let start = status.steps.len() - receipts.len();
+            for (step, receipt) in status.steps[start..].iter_mut().zip(receipts) {
+                step.receipt = receipt;
+            }
+            status.clone()
+        };
+        self.publish(status);
+    }
+    fn has_accepted(&self) -> bool {
+        self.status
+            .borrow()
+            .steps
+            .iter()
+            .any(|step| matches!(step.receipt, StepReceipt::Accepted))
+    }
+    fn schedule_feedback(
+        self: &Rc<Self>,
+        context: &Context,
+        work: &Rc<DeviceWork>,
+        sink: &LogicalSink,
+    ) {
+        self.schedule_feedback_if(context, work, sink, self.has_accepted(), false);
+    }
+    fn schedule_feedback_if(
+        self: &Rc<Self>,
+        context: &Context,
+        work: &Rc<DeviceWork>,
+        sink: &LogicalSink,
+        accepted: bool,
+        include_all: bool,
+    ) {
+        if !self.feedback_enabled.get() || !accepted {
+            return;
+        }
+        let shared = self.shared_feedback.borrow();
+        if shared.as_ref().is_some_and(|scope| {
+            scope.group.sink.life.is_closed() || !work_current(context, &scope.group.work)
+        }) || ((!include_all || shared.is_none())
+            && (sink.life.is_closed() || !work_current(context, work)))
+        {
+            self.feedback(CommandFeedback::Failed("read source retired".into()));
+            return;
+        }
+        let stamps = if let Some(shared) = shared.as_ref() {
+            shared.stamps.borrow()
+        } else {
+            self.write_stamps.borrow()
+        };
+        if stamps.is_empty() {
+            self.feedback(CommandFeedback::Failed(
+                "no readable feedback source".into(),
+            ));
+            return;
+        }
+        let group_did = shared
+            .as_ref()
+            .map(|scope| scope.group.work.key.id.as_str())
+            .or_else(|| {
+                context
+                    .is_virtual_group(&self.did)
+                    .then_some(self.did.as_str())
+            });
+        let group_ready = group_did.is_some_and(|did| {
+            context.active_notification(did).is_some()
+                && stamps
+                    .iter()
+                    .all(|target| notifications_ready(context, &target.work, &target.id))
+        });
+        let mut needed = Vec::new();
+        let mut without_notifications = false;
+        for FeedbackTarget {
+            work: target,
+            id,
+            stamps: bindings,
+        } in stamps.iter()
+        {
+            if shared.is_some()
+                && !include_all
+                && (target.key.id != self.did || *id != self.channel)
+            {
+                continue;
+            }
+            if group_ready || (group_did.is_none() && notifications_ready(context, target, id)) {
+                continue;
+            }
+            without_notifications = true;
+            let current = work_current(context, target);
+            for (binding, stamp) in bindings {
+                if !current || !target.observations.read_after(id, *binding, stamp) {
+                    needed.push((target, id, *binding, stamp));
+                }
+            }
+        }
+        if needed.is_empty() {
+            if without_notifications {
+                self.feedback(CommandFeedback::Complete);
+            }
+            return;
+        }
+        let tracker = SyncTracker::new(self.clone(), needed.len());
+        for (target, id, binding, stamp) in needed {
+            let current = work_current(context, target);
+            if !current {
+                tracker.resolve(Some("read source retired".into()));
+            } else if context.read_path_for(&target.key.id, id).is_none() {
+                tracker.resolve(Some("no usable read path".into()));
+            } else {
+                target.refresh.borrow_mut().request_once(
+                    context,
+                    target,
+                    id,
+                    binding,
+                    stamp,
+                    tracker.clone(),
+                );
+                target.refresh_changed.notify(usize::MAX);
+            }
+        }
+    }
+    fn publish(&self, status: CommandStatus) {
+        if let Some(entry) = self
+            .commands
+            .records
+            .borrow_mut()
+            .get_mut(&(self.did.clone(), self.channel.clone()))
+        {
+            if entry
+                .inflight
+                .as_ref()
+                .is_some_and(|current| current.id == status.id)
+            {
+                entry.inflight = Some(status.clone());
+            }
+            if entry
+                .last
+                .as_ref()
+                .is_some_and(|current| current.id == status.id)
+            {
+                entry.last = Some(status);
+            }
+        }
+        self.commands.changed.notify(usize::MAX);
+    }
+    pub(super) fn feedback(&self, feedback: CommandFeedback) {
+        let status = {
+            let mut status = self.status.borrow_mut();
+            status.feedback = Some(feedback);
+            status.clone()
+        };
+        self.publish(status);
     }
     fn reject(&self, request: CommandRequest, error: CommandError) {
         self.finish(Err(error.clone()));
@@ -375,6 +659,40 @@ impl CommandOperation {
         self.commands.changed.notify(usize::MAX);
     }
 }
+
+pub(super) struct SyncTracker {
+    operation: Rc<CommandOperation>,
+    remaining: Cell<usize>,
+    problems: RefCell<Vec<String>>,
+}
+impl SyncTracker {
+    fn new(operation: Rc<CommandOperation>, count: usize) -> Rc<Self> {
+        operation.feedback(CommandFeedback::Pending);
+        Rc::new(Self {
+            operation,
+            remaining: Cell::new(count),
+            problems: RefCell::new(Vec::new()),
+        })
+    }
+    pub(super) fn resolve(&self, problem: Option<String>) {
+        if let Some(problem) = problem {
+            let mut problems = self.problems.borrow_mut();
+            if !problems.contains(&problem) {
+                problems.push(problem);
+            }
+        }
+        let remaining = self.remaining.get() - 1;
+        self.remaining.set(remaining);
+        if remaining == 0 {
+            let problems = self.problems.borrow();
+            self.operation.feedback(if problems.is_empty() {
+                CommandFeedback::Complete
+            } else {
+                CommandFeedback::Failed(problems.join("; "))
+            });
+        }
+    }
+}
 /// Only the consumer owns this lease; a transport callback cannot extend its lifetime.
 struct CommandLease(Rc<CommandOperation>);
 impl Drop for CommandLease {
@@ -416,6 +734,7 @@ async fn send_local_write(
     let guard_work = work.clone();
     let guard_sink = sink.clone();
     let guard_context = context.clone();
+    let sent_context = context.clone();
     let guard_handle = handle.clone();
     let guard_did = did.clone();
     let guard_id = id.clone();
@@ -437,6 +756,7 @@ async fn send_local_write(
             }
         },
         move || {
+            submitted.mark_write(&sent_context, &capture_work);
             submitted.submitted(super::model::PathKind::Local);
             *capture_stamp.borrow_mut() =
                 Some(capture_work.observations.write_stamp(&capture_id, binding));
@@ -453,14 +773,18 @@ async fn send_local_write(
             let request = completion.borrow_mut().take().unwrap();
             match outcome.result {
                 Ok(()) => {
+                    operation.receipts(vec![StepReceipt::Accepted]);
                     if let Some(stamp) = stamp.borrow_mut().take() {
-                        operation.finish(observing.observations.accept_write(
+                        let result = observing.observations.accept_write(
                             &observing,
                             &observing_sink,
                             &id,
                             &stamp,
+                            operation.write_feedback(&result_context, &observing, binding),
                             request,
-                        ));
+                        );
+                        operation.schedule_feedback(&result_context, &observing, &observing_sink);
+                        operation.finish(result);
                     } else {
                         let error =
                             CommandError::SendFailed("gateway accepted an unsent write".into());
@@ -468,6 +792,9 @@ async fn send_local_write(
                     }
                 }
                 Err(error) => {
+                    if outcome.stage != RequestStage::NotSent {
+                        operation.receipts(vec![properties::local_receipt(&error)]);
+                    }
                     operation.reject(request, command_error(error));
                 }
             }
@@ -632,6 +959,7 @@ async fn send_power(
                     },
                     || {
                         let _ = request.mark_sent();
+                        command.0.mark_write(&context, &work);
                         command.0.submitted(super::model::PathKind::Direct);
                         *stamp.borrow_mut() = Some(work.observations.write_stamp(function_id, binding));
                     },
@@ -648,20 +976,34 @@ async fn send_power(
                         if error.stage == SendStage::BeforeSend {
                             continue;
                         }
+                        command.0.receipts(vec![properties::direct_receipt(&error)]);
                         command
                             .0
                             .reject(request, properties::direct_command_error(&error));
                     }
                     Ok(results) => {
+                        command.0.receipts(
+                            results
+                                .items
+                                .iter()
+                                .map(|item| match item {
+                                    Ok(()) => StepReceipt::Accepted,
+                                    Err(error) => properties::direct_receipt(error),
+                                })
+                                .collect(),
+                        );
+                        let mut maintenance = None;
                         if results.protocol_error {
-                            context.lan_business_failure(
-                                &did,
-                                &client,
-                                &RequestError {
-                                    stage: SendStage::Sent,
-                                    failure: Failure::InvalidResponse,
-                                },
-                            )?;
+                            maintenance = context
+                                .lan_business_failure(
+                                    &did,
+                                    &client,
+                                    &RequestError {
+                                        stage: SendStage::Sent,
+                                        failure: Failure::InvalidResponse,
+                                    },
+                                )
+                                .err();
                             command.0.reject(
                                 request,
                                 CommandError::SendFailed("invalid direct response".into()),
@@ -673,13 +1015,19 @@ async fn send_power(
                                 .0
                                 .reject(request, properties::direct_command_error(error));
                         } else {
-                            command.0.finish(work.observations.accept_write(
+                            let result = work.observations.accept_write(
                                 &work,
                                 &sink,
                                 function_id,
                                 &stamp.into_inner().unwrap(),
+                                command.0.write_feedback(&context, &work, binding),
                                 request,
-                            ));
+                            );
+                            command.0.finish(result);
+                        }
+                        command.0.schedule_feedback(&context, &work, &sink);
+                        if let Some(error) = maintenance {
+                            return Err(error);
                         }
                     }
                 }
@@ -687,6 +1035,7 @@ async fn send_power(
             }
             ControlPath::Cloud(credentials) => {
                 let stamp = work.observations.write_stamp(function_id, binding);
+                command.0.mark_write(&context, &work);
                 command.0.submitted(super::model::PathKind::Cloud);
                 match context
                     .cloud
@@ -694,16 +1043,20 @@ async fn send_power(
                     .await
                 {
                     Ok(()) => {
+                        command.0.receipts(vec![StepReceipt::Accepted]);
                         let result = work.observations.accept_write(
                             &work,
                             &sink,
                             function_id,
                             &stamp,
+                            command.0.write_feedback(&context, &work, binding),
                             request,
                         );
+                        command.0.schedule_feedback(&context, &work, &sink);
                         command.0.finish(result);
                     }
                     Err(error) => {
+                        command.0.receipts(vec![properties::cloud_receipt(&error)]);
                         let command_error = match error.kind() {
                             crate::xiaomi::cloud::CloudErrorKind::Timeout => CommandError::Timeout,
                             crate::xiaomi::cloud::CloudErrorKind::Business(code)

@@ -78,6 +78,7 @@ fn mcn02_offline_direct_batches_feedback_and_uses_legacy_commands() {
             assert!(reads.iter().all(|request| request["params"]
                 == json!(["power", "mode", "tar_temp", "fan_level", "ver_swing"])));
             let before = ac.snapshot();
+            peer.hold_read.store(true, Ordering::Relaxed);
             ac.begin_air_conditioner(AirConditionerCommand::Temperature(26))
                 .unwrap()
                 .accepted()
@@ -88,6 +89,8 @@ fn mcn02_offline_direct_batches_feedback_and_uses_legacy_commands() {
                 before,
                 "a successful command receipt is not a state observation"
             );
+            peer.hold_read.store(false, Ordering::Relaxed);
+            until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(26)).await;
             ac.begin_air_conditioner(AirConditionerCommand::Combined(AirConditionerTarget {
                 mode: Some(AirConditionerMode::Heat),
                 temperature: Some(27),
@@ -142,6 +145,7 @@ fn mcn02_rejection_preserves_accepted_steps_and_never_sends_later_steps() {
                 .lock()
                 .unwrap()
                 .insert("set_mode".into(), -4004);
+            peer.hold_read.store(true, Ordering::Relaxed);
             let result = ac
                 .begin_air_conditioner(AirConditionerCommand::Combined(AirConditionerTarget {
                     mode: Some(AirConditionerMode::Heat),
@@ -170,6 +174,8 @@ fn mcn02_rejection_preserves_accepted_steps_and_never_sends_later_steps() {
                 ac.snapshot().air_conditioner().unwrap().power.value,
                 Some(false)
             );
+            peer.hold_read.store(false, Ordering::Relaxed);
+            until(|| ac.snapshot().air_conditioner().unwrap().power.value == Some(true)).await;
             assert!(control.context.direct_candidate(did).is_ok());
             let before = peer.requests.lock().unwrap().len();
             let result = ac.begin_air_conditioner(AirConditionerCommand::Temperature(15));
@@ -746,6 +752,177 @@ fn mcn02_does_not_become_ready_when_read_only_authentication_is_rejected() {
             let lan = status.lan.unwrap();
             assert!(lan.problem.unwrap().contains("-4004"));
             assert_eq!(lan.recovery, RecoveryStatus::None);
+        })
+    }));
+}
+
+#[test]
+fn invalid_legacy_ack_is_shown_as_uncertain_by_the_command_diagnostics() {
+    use crate::xiaomi::adapter::StepReceipt;
+    let did = "308540429";
+    let (rig, peer) = setup(did);
+    block_on(rig.run(|control| {
+        Box::pin(async move {
+            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(24)).await;
+            control.clock.automatic.store(false, Ordering::Relaxed);
+            *peer.ack.lock().unwrap() = json!(["invalid"]);
+            let result = ac
+                .begin_air_conditioner(AirConditionerCommand::Temperature(26))
+                .unwrap()
+                .accepted()
+                .await;
+            assert!(result.is_err());
+            let status = control.context.diagnostics();
+            let device = status
+                .devices
+                .iter()
+                .find(|device| device.did == did)
+                .unwrap();
+            let last = device.commands[0].last.as_ref().unwrap();
+            assert_eq!(last.actual_path, Some(PathKind::Direct));
+            assert!(matches!(last.steps[0].receipt, StepReceipt::Uncertain(_)));
+            assert!(last.feedback.is_none());
+            let auth = crate::terminal::AuthStatus::new(
+                control.context.status.borrow().authentication.clone(),
+                "/bin/migate".into(),
+                "/data".into(),
+            );
+            auth.update_adapter(status);
+            let terminal =
+                crate::terminal::bridge::Context::committed(control.publication.clone(), &auth);
+            let text = terminal
+                .handle_line(&format!("status {did}"), 0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(text.contains("result uncertain"), "{text}");
+            assert_eq!(
+                peer.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r["method"] == "set_tar_temp")
+                    .count(),
+                1
+            );
+        })
+    }));
+}
+
+#[test]
+fn mcn02_partial_acceptance_reads_once_after_all_sent_steps() {
+    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    let did = "308540429";
+    let (rig, peer) = setup(did);
+    block_on(rig.run(|control| {
+        Box::pin(async move {
+            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(24)).await;
+            let work = control.context.live.borrow().devices[did]
+                .admitted
+                .clone()
+                .unwrap();
+            let bindings = work.native.device().functions()[0].observation_bindings();
+            until(|| {
+                bindings.iter().all(|binding| {
+                    !work
+                        .refresh
+                        .borrow()
+                        .contains("air-conditioner:2", *binding)
+                })
+            })
+            .await;
+            let before = peer
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"] == "get_prop")
+                .count();
+            peer.hold_read.store(true, Ordering::Relaxed);
+            peer.rejected
+                .lock()
+                .unwrap()
+                .insert("set_mode".into(), -4004);
+            let result = ac
+                .begin_air_conditioner(AirConditionerCommand::Combined(AirConditionerTarget {
+                    mode: Some(AirConditionerMode::Heat),
+                    temperature: Some(27),
+                    speed: Some(AirConditionerFanSpeed::High),
+                    swing: Some(true),
+                }))
+                .unwrap()
+                .accepted()
+                .await;
+            assert!(result.is_err());
+            until(|| {
+                peer.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r["method"] == "get_prop")
+                    .count()
+                    == before + 1
+            })
+            .await;
+            let requests = peer.requests.lock().unwrap().clone();
+            let writes = requests
+                .iter()
+                .filter_map(|r| r["method"].as_str())
+                .filter(|method| method.starts_with("set_"))
+                .collect::<Vec<_>>();
+            assert_eq!(writes, ["set_power", "set_mode"]);
+            let last_write = requests
+                .iter()
+                .rposition(|r| r["method"] == "set_mode")
+                .unwrap();
+            assert!(
+                requests[last_write + 1..]
+                    .iter()
+                    .any(|r| r["method"] == "get_prop")
+            );
+            assert_eq!(
+                ac.snapshot().air_conditioner().unwrap().power.value,
+                Some(false)
+            );
+            peer.hold_read.store(false, Ordering::Relaxed);
+            until(|| {
+                control
+                    .context
+                    .diagnostics()
+                    .devices
+                    .iter()
+                    .find(|device| device.did == did)
+                    .and_then(|device| device.commands[0].last.as_ref())
+                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+            })
+            .await;
+            assert_eq!(
+                ac.snapshot().air_conditioner().unwrap().power.value,
+                Some(true)
+            );
+            let status = control.context.diagnostics();
+            let last = status
+                .devices
+                .iter()
+                .find(|device| device.did == did)
+                .unwrap()
+                .commands[0]
+                .last
+                .as_ref()
+                .unwrap();
+            assert_eq!(last.steps[0].receipt, StepReceipt::Accepted);
+            assert!(matches!(last.steps[1].receipt, StepReceipt::Rejected(_)));
+            assert_eq!(
+                peer.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r["method"] == "get_prop")
+                    .count(),
+                before + 1
+            );
         })
     }));
 }

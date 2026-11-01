@@ -1,6 +1,6 @@
 //! Shared property transport and receipt settlement for device commands.
 use super::super::{
-    model::{AdapterError, PathKind},
+    model::{AdapterError, PathKind, StepReceipt},
     routing::ControlPath,
     state::{Context, LogicalSink},
     work::DeviceWork,
@@ -18,8 +18,15 @@ use crate::{
 use serde_json::Value;
 use std::{cell::RefCell, rc::Rc};
 
-type AfterWrite =
-    fn(&Context, &DeviceWork, &str, &[(PropertyBinding, Value)], &DeviceWriteGate, u64);
+type AfterWrite = fn(
+    &Context,
+    &DeviceWork,
+    &str,
+    &[(PropertyBinding, Value)],
+    &DeviceWriteGate,
+    u64,
+    &super::CommandOperation,
+);
 
 fn cloud_command_error(error: &CloudError) -> CommandError {
     match error.kind() {
@@ -28,6 +35,32 @@ fn cloud_command_error(error: &CloudError) -> CommandError {
             CommandError::Rejected(format!("cloud code {code}"))
         }
         _ => CommandError::SendFailed(error.to_string()),
+    }
+}
+pub(super) fn cloud_receipt(error: &CloudError) -> StepReceipt {
+    if matches!(
+        error.kind(),
+        CloudErrorKind::Business(_)
+            | CloudErrorKind::PropertyRejected(_)
+            | CloudErrorKind::Unauthorized
+    ) {
+        StepReceipt::Rejected(error.to_string())
+    } else {
+        StepReceipt::Uncertain(error.to_string())
+    }
+}
+pub(super) fn local_receipt(error: &CentralError) -> StepReceipt {
+    if matches!(error, CentralError::Rejected(_)) {
+        StepReceipt::Rejected(error.to_string())
+    } else {
+        StepReceipt::Uncertain(error.to_string())
+    }
+}
+pub(super) fn direct_receipt(error: &RequestError) -> StepReceipt {
+    if matches!(error.failure, Failure::Rejected(_)) {
+        StepReceipt::Rejected(error.to_string())
+    } else {
+        StepReceipt::Uncertain(error.to_string())
     }
 }
 pub(super) fn direct_command_error(error: &RequestError) -> CommandError {
@@ -117,8 +150,10 @@ pub(super) async fn submit_properties(
         ControlPath::Local(handle) => {
             let slot = Rc::new(RefCell::new(None::<BatchReceipt>));
             let guard_work = work.clone();
+            let sent_work = work.clone();
             let guard_sink = sink.clone();
             let guard_context = context.clone();
+            let sent_context = context.clone();
             let guard_handle = handle.clone();
             let guard_did = did.clone();
             let guard_function_id = function_id.to_owned();
@@ -136,6 +171,7 @@ pub(super) async fn submit_properties(
             let result_properties = properties.clone();
             let result_id = function_id.to_owned();
             let result_current = current.clone();
+            let result_operation = operation.clone();
             let hooks = SendHooks::new(
                 move || {
                     if guard_work.life.is_closed()
@@ -159,6 +195,7 @@ pub(super) async fn submit_properties(
                     // The synchronous guard proved the request current; a
                     // failed mark can only mean the frame was retired.
                     let _ = guard_mark();
+                    guard_operation.mark_write(&sent_context, &sent_work);
                     guard_operation.submitted(PathKind::Local);
                     if retain_feedback {
                         guard_gate.register_feedback_for(authority, &guard_properties);
@@ -182,11 +219,22 @@ pub(super) async fn submit_properties(
                             &result_properties,
                             &result_gate,
                             authority,
+                            &result_operation,
                         );
                     }
                     result_context.local_device_outcome(&result_handle, &result_work, &outcome);
                     let receipt = match outcome.result {
                         Ok(results) => {
+                            result_operation.receipts(
+                                results
+                                    .items
+                                    .iter()
+                                    .map(|item| match item {
+                                        Ok(()) => StepReceipt::Accepted,
+                                        Err(error) => local_receipt(error),
+                                    })
+                                    .collect(),
+                            );
                             result_gate.finish_feedback_for(
                                 authority,
                                 &result_properties,
@@ -219,6 +267,10 @@ pub(super) async fn submit_properties(
                             }
                         }
                         Err(error) => {
+                            if outcome.stage != RequestStage::NotSent {
+                                result_operation
+                                    .receipts(vec![local_receipt(&error); result_properties.len()]);
+                            }
                             result_gate.cancel_feedback();
                             let result = if outcome.stage == RequestStage::NotSent {
                                 // A cancelled not-sent request may already be
@@ -252,6 +304,7 @@ pub(super) async fn submit_properties(
             };
             let on_sent = || {
                 let _ = mark();
+                operation.mark_write(context, work);
                 operation.submitted(PathKind::Direct);
                 if retain_feedback {
                     gate.register_feedback_for(authority, &properties);
@@ -300,10 +353,28 @@ pub(super) async fn submit_properties(
                 .as_ref()
                 .is_err_and(|error| error.stage == SendStage::BeforeSend);
             if sent && let Some(after_write) = after_write {
-                after_write(context, work, function_id, &properties, gate, authority);
+                after_write(
+                    context,
+                    work,
+                    function_id,
+                    &properties,
+                    gate,
+                    authority,
+                    operation,
+                );
             }
             match result {
                 Ok(results) => {
+                    operation.receipts(
+                        results
+                            .items
+                            .iter()
+                            .map(|item| match item {
+                                Ok(()) => StepReceipt::Accepted,
+                                Err(error) => direct_receipt(error),
+                            })
+                            .collect(),
+                    );
                     gate.finish_feedback_for(authority, &properties, &results, retain_feedback);
                     let maintenance = if results.protocol_error {
                         context
@@ -334,6 +405,9 @@ pub(super) async fn submit_properties(
                     })
                 }
                 Err(error) => {
+                    if error.stage == SendStage::Sent {
+                        operation.receipts(vec![direct_receipt(&error); properties.len()]);
+                    }
                     gate.cancel_feedback();
                     let maintenance = context.lan_business_failure(&did, &client, &error).err();
                     if error.stage == SendStage::BeforeSend && maintenance.is_none() {
@@ -357,16 +431,35 @@ pub(super) async fn submit_properties(
             if retain_feedback {
                 gate.register_feedback_for(authority, &properties);
             }
+            operation.mark_write(context, work);
             operation.submitted(PathKind::Cloud);
             let result = context
                 .cloud
                 .set_properties(&credentials.access_token, &did, &properties)
                 .await;
             if let Some(after_write) = after_write {
-                after_write(context, work, function_id, &properties, gate, authority);
+                after_write(
+                    context,
+                    work,
+                    function_id,
+                    &properties,
+                    gate,
+                    authority,
+                    operation,
+                );
             }
             let receipt = match &result {
                 Ok(results) => {
+                    operation.receipts(
+                        results
+                            .items
+                            .iter()
+                            .map(|item| match item {
+                                Ok(()) => StepReceipt::Accepted,
+                                Err(error) => cloud_receipt(error),
+                            })
+                            .collect(),
+                    );
                     gate.finish_feedback_for(authority, &properties, results, retain_feedback);
                     let current = alive(work, sink);
                     let mut maintenance = None;
@@ -396,6 +489,7 @@ pub(super) async fn submit_properties(
                     }
                 }
                 Err(error) => {
+                    operation.receipts(vec![cloud_receipt(error); properties.len()]);
                     gate.cancel_feedback();
                     let maintenance = context
                         .cloud_error(

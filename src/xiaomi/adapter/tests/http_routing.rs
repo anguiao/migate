@@ -470,6 +470,14 @@ fn published_devices_restore_cloud_control_without_a_local_gateway() {
         let one = function(&c.context.registry, "one", "outlet:2");
         assert_eq!(one.snapshot().availability, Availability::Available);
         assert_eq!(one.snapshot().power(), Some(Power::Off));
+        let (_hold_reads, read_gate) = flume::bounded(2);
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud
+                .read_gates
+                .insert(("one".into(), 2, 1), read_gate.clone());
+            cloud.read_gates.insert(("multi".into(), 9, 1), read_gate);
+        }
         one.execute(Command::On).await.unwrap();
         let usb = function(&c.context.registry, "multi", "outlet:9");
         usb.execute(Command::Off).await.unwrap();

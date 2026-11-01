@@ -12,6 +12,7 @@ use crate::xiaomi::{
 use futures_lite::future;
 use futures_util::future::join_all;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     rc::Rc,
     time::Duration,
@@ -29,6 +30,8 @@ pub(super) struct Refresh {
     pub(super) ready_at: Duration,
     // Reserved reads and cleanup leases retain the notification baseline generation.
     baseline: Option<u64>,
+    retryable: bool,
+    waiters: Vec<Rc<super::commands::SyncTracker>>,
 }
 enum ReadResult {
     Observed,
@@ -79,6 +82,7 @@ impl RefreshState {
             .iter_mut()
             .find(|read| read.id == id && read.binding == binding)
         {
+            pending.retryable = true;
             if pending.baseline.is_some() {
                 pending.baseline = baseline;
             }
@@ -89,8 +93,55 @@ impl RefreshState {
                 attempts: 0,
                 ready_at: Duration::ZERO,
                 baseline,
+                retryable: true,
+                waiters: Vec::new(),
             });
         }
+    }
+    pub(super) fn request_once(
+        &mut self,
+        context: &Context,
+        work: &DeviceWork,
+        id: &str,
+        binding: PropertyBinding,
+        write: &super::observations::ReadStamp,
+        waiter: Rc<super::commands::SyncTracker>,
+    ) {
+        let key = key(id, binding);
+        if self.inflight_after(context, work, id, binding, write) {
+            self.inflight[&key]
+                .waiters
+                .borrow_mut()
+                .entry(key)
+                .or_default()
+                .push(waiter);
+            return;
+        }
+        if let Some(pending) = self.pending.iter_mut().find(|read| read.key() == key) {
+            pending.baseline = None;
+            pending.waiters.push(waiter);
+        } else {
+            self.pending.push_back(Refresh {
+                id: id.into(),
+                binding,
+                attempts: 0,
+                ready_at: Duration::ZERO,
+                baseline: None,
+                retryable: false,
+                waiters: vec![waiter],
+            });
+        }
+    }
+    fn fail_unroutable(&mut self, available: impl Fn(&str) -> bool) {
+        self.pending.retain_mut(|read| {
+            if !available(&read.id) {
+                for waiter in read.waiters.drain(..) {
+                    waiter.resolve(Some("no usable read path".into()));
+                }
+                return read.retryable;
+            }
+            true
+        });
     }
     pub(super) fn satisfy_baseline(&mut self, id: &str, binding: PropertyBinding) {
         let generation = self
@@ -104,6 +155,15 @@ impl RefreshState {
     fn required(&self, read: &Refresh) -> bool {
         read.baseline
             .is_none_or(|generation| self.baseline_generations[&read.key()] == generation)
+            || !read.waiters.is_empty()
+            || self.inflight.get(&read.key()).is_some_and(|flight| {
+                flight.retry_required.borrow().contains(&read.key())
+                    || flight
+                        .waiters
+                        .borrow()
+                        .get(&read.key())
+                        .is_some_and(|waiters| !waiters.is_empty())
+            })
     }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
         self.inflight.contains_key(&key(id, binding))
@@ -112,12 +172,35 @@ impl RefreshState {
                 .iter()
                 .any(|read| read.id == id && read.binding == binding)
     }
+    pub(super) fn inflight_after(
+        &self,
+        context: &Context,
+        work: &DeviceWork,
+        id: &str,
+        binding: PropertyBinding,
+        write: &super::observations::ReadStamp,
+    ) -> bool {
+        let key = key(id, binding);
+        self.inflight.get(&key).is_some_and(|flight| {
+            !flight.life.is_closed()
+                && flight.current(context, &work.key.id, id)
+                && flight.stamps.borrow().get(&key).is_none_or(|stamp| {
+                    stamp.at_or_after(write)
+                        && work.observations.read_is_current(work, id, binding, stamp)
+                })
+        })
+    }
+    pub(super) fn retain_inflight_retry(&mut self, id: &str, binding: PropertyBinding) {
+        let key = key(id, binding);
+        self.inflight[&key].retry_required.borrow_mut().insert(key);
+    }
     pub(super) fn request_dirty(&mut self, id: &str, binding: PropertyBinding) -> bool {
         let key = key(id, binding);
         if self.inflight.contains_key(&key) {
             self.dirty_again.insert(key);
             false
         } else if self.contains(id, binding) {
+            self.request(id, binding);
             false
         } else {
             self.request(id, binding);
@@ -156,11 +239,14 @@ impl RefreshState {
         let flight = Rc::new(ReadFlight {
             life: Lifetime::default(),
             path,
+            stamps: RefCell::new(BTreeMap::new()),
+            waiters: RefCell::new(BTreeMap::new()),
+            retry_required: RefCell::new(BTreeSet::new()),
         });
         self.inflight.insert(read.key(), flight.clone());
         Some((read, flight))
     }
-    fn requeue(&mut self, read: Refresh) {
+    fn requeue(&mut self, mut read: Refresh) {
         if !self.required(&read) {
             return;
         }
@@ -172,6 +258,8 @@ impl RefreshState {
             if read.baseline.is_none() {
                 pending.baseline = None;
             }
+            pending.retryable |= read.retryable;
+            pending.waiters.append(&mut read.waiters);
         } else {
             self.pending.push_back(read);
         }
@@ -184,12 +272,25 @@ impl RefreshState {
             ReadResult::Observed => {
                 self.problems.remove(&read.key());
             }
-            ReadResult::Retired => self.requeue(read),
+            ReadResult::Retired => {
+                if read.retryable {
+                    self.requeue(read);
+                }
+            }
             ReadResult::Failed(problem) => {
                 self.problems.insert(read.key(), problem);
-                if read.attempts == 3 {
-                    self.pending.retain(|queued| queued.key() != read.key());
-                } else {
+                if read.retryable && read.attempts == 3 {
+                    self.pending.retain_mut(|queued| {
+                        if queued.key() != read.key() {
+                            true
+                        } else if queued.waiters.is_empty() {
+                            false
+                        } else {
+                            queued.retryable = false;
+                            true
+                        }
+                    });
+                } else if read.retryable {
                     read.attempts += 1;
                     read.ready_at = now + RETRY_DELAY;
                     if let Some(queued) = self
@@ -197,7 +298,15 @@ impl RefreshState {
                         .iter_mut()
                         .find(|queued| queued.key() == read.key())
                     {
-                        *queued = read;
+                        if queued.waiters.is_empty() {
+                            *queued = read;
+                        } else {
+                            queued.retryable = true;
+                            queued.attempts = read.attempts;
+                            if read.baseline.is_none() {
+                                queued.baseline = None;
+                            }
+                        }
                     } else {
                         self.pending.push_back(read);
                     }
@@ -251,6 +360,9 @@ pub(super) struct RefreshSnapshot {
 pub(super) struct ReadFlight {
     life: Lifetime,
     path: ControlPath,
+    stamps: RefCell<BTreeMap<PropertyKey, super::observations::ReadStamp>>,
+    waiters: RefCell<BTreeMap<PropertyKey, Vec<Rc<super::commands::SyncTracker>>>>,
+    retry_required: RefCell<BTreeSet<PropertyKey>>,
 }
 impl Refresh {
     fn key(&self) -> PropertyKey {
@@ -274,8 +386,12 @@ fn works(context: &Context) -> Vec<Rc<DeviceWork>> {
         .collect()
 }
 pub(super) fn cancel(work: &DeviceWork) {
-    for flight in work.refresh.borrow().inflight.values() {
-        flight.life.close();
+    {
+        let mut refresh = work.refresh.borrow_mut();
+        refresh.fail_unroutable(|_| false);
+        for flight in refresh.inflight.values() {
+            flight.life.close();
+        }
     }
     work.refresh_changed.notify(usize::MAX);
 }
@@ -313,7 +429,11 @@ pub(super) fn reconcile_state_read(
 fn retire(context: &Context) {
     for work in works(context) {
         let did = &work.key.id;
-        for ((id, _, _), flight) in &work.refresh.borrow().inflight {
+        let mut refresh = work.refresh.borrow_mut();
+        refresh.fail_unroutable(|id| {
+            !work.life.is_closed() && context.read_path_for(did, id).is_some()
+        });
+        for ((id, _, _), flight) in &refresh.inflight {
             if work.life.is_closed() || !flight.current(context, did, id) {
                 flight.life.close();
             }
@@ -537,6 +657,7 @@ struct ReadCleanup {
 impl Drop for ReadCleanup {
     fn drop(&mut self) {
         self.flight.life.close();
+        retain_retry(&mut self.read, &self.flight);
         let mut state = self.work.refresh.borrow_mut();
         if state
             .inflight
@@ -546,7 +667,10 @@ impl Drop for ReadCleanup {
             state.inflight.remove(&self.read.key());
         }
         let dirty = state.finish_dirty(&self.read.id, self.read.binding);
-        if self.retry && !self.work.life.is_closed() {
+        if self.retry {
+            finish_waiters(&mut self.read, &self.flight, Some("read retired".into()));
+        }
+        if self.retry && self.read.retryable && !self.work.life.is_closed() {
             state.requeue(self.read.clone());
         }
         drop(state);
@@ -556,6 +680,21 @@ impl Drop for ReadCleanup {
                 .refresh(&self.read.id, self.read.binding);
         }
         self.work.refresh_changed.notify(usize::MAX);
+    }
+}
+fn retain_retry(read: &mut Refresh, flight: &ReadFlight) {
+    if flight.retry_required.borrow_mut().remove(&read.key()) {
+        read.retryable = true;
+        read.baseline = None;
+    }
+}
+fn finish_waiters(read: &mut Refresh, flight: &ReadFlight, problem: Option<String>) {
+    let mut waiters = std::mem::take(&mut read.waiters);
+    if let Some(mut attached) = flight.waiters.borrow_mut().remove(&read.key()) {
+        waiters.append(&mut attached);
+    }
+    for waiter in waiters {
+        waiter.resolve(problem.clone());
     }
 }
 fn read_legacy(
@@ -582,6 +721,9 @@ fn read_legacy(
             .iter()
             .map(|read| work.observations.read_stamp(&read.id, read.binding))
             .collect::<Vec<_>>();
+        for (read, stamp) in reads.iter().zip(&stamps) {
+            flight.stamps.borrow_mut().insert(read.key(), stamp.clone());
+        }
         let ControlPath::Direct(client) = &flight.path else {
             unreachable!()
         };
@@ -618,16 +760,17 @@ fn read_legacy(
             ),
         )
         .await;
-        for cleanup in &mut cleanups {
-            cleanup.retry = false;
-        }
         if let Some(Err(error)) = &result
             && !(error.stage == SendStage::BeforeSend && error.failure == Failure::Withdrawn)
         {
             context.lan_business_failure(did, client, error)?;
         }
-        for (read, stamp) in reads.into_iter().zip(stamps) {
+        for ((mut read, stamp), cleanup) in reads.into_iter().zip(stamps).zip(&mut cleanups) {
+            retain_retry(&mut read, &flight);
+            cleanup.retry = false;
+            cleanup.read.waiters.clear();
             if work.life.is_closed() || !work.contains(&read.id, read.binding) {
+                finish_waiters(&mut read, &flight, Some("read source retired".into()));
                 continue;
             }
             let outcome = match &result {
@@ -671,6 +814,18 @@ fn read_legacy(
                 || work
                     .observations
                     .read_is_current(&work, &read.id, read.binding, &stamp);
+            let problem = match &outcome {
+                ReadResult::Observed
+                    if work.observations.read_after(&read.id, read.binding, &stamp) =>
+                {
+                    None
+                }
+                ReadResult::Observed | ReadResult::Retired => {
+                    Some("read retired or superseded".into())
+                }
+                ReadResult::Failed(problem) => Some(problem.clone()),
+            };
+            finish_waiters(&mut read, &flight, problem);
             if current {
                 work.refresh
                     .borrow_mut()
@@ -715,6 +870,10 @@ fn read_one(
                         || function.air_conditioner().is_some())
             });
         let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
+        flight
+            .stamps
+            .borrow_mut()
+            .insert(read.key(), (*stamp).clone());
         let reading = async {
             if flight.life.is_closed()
                 || !flight.current(&context, &did, &read.id)
@@ -948,14 +1107,35 @@ fn read_one(
         )
         .await;
         cleanup.retry = false;
+        let mut read = read;
+        retain_retry(&mut read, &flight);
+        cleanup.read.waiters.clear();
         if !work.life.is_closed() && work.contains(&read.id, read.binding) {
-            let result = result?;
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    finish_waiters(&mut read, &flight, Some(error.to_string()));
+                    return Err(error);
+                }
+            };
             // A stale failure cannot consume demand queued after that read began.
             let current = !matches!(result, ReadResult::Failed(_))
                 || !ordered
                 || work
                     .observations
                     .read_is_current(&work, &read.id, read.binding, &stamp);
+            let problem = match &result {
+                ReadResult::Observed
+                    if work.observations.read_after(&read.id, read.binding, &stamp) =>
+                {
+                    None
+                }
+                ReadResult::Observed | ReadResult::Retired => {
+                    Some("read retired or superseded".into())
+                }
+                ReadResult::Failed(problem) => Some(problem.clone()),
+            };
+            finish_waiters(&mut read, &flight, problem);
             if current
                 && read.id == "battery"
                 && work
@@ -978,6 +1158,8 @@ fn read_one(
                     .complete(read, result, context.clock.now());
             }
             work.report(&context, &did);
+        } else {
+            finish_waiters(&mut read, &flight, Some("read source retired".into()));
         }
         work.refresh_changed.notify(usize::MAX);
         Ok(())

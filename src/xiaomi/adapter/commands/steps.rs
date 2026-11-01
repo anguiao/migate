@@ -146,6 +146,7 @@ pub(super) async fn send<R: StepRequest>(
                     });
                     if let Err(error) = result {
                         pending.borrow_mut().take().unwrap().reject(error.clone());
+                        operation.0.schedule_feedback(&context, &work, &sink);
                         operation.0.finish(Err(error));
                         if let Some(error) = receipt.maintenance {
                             return Err(error);
@@ -158,6 +159,7 @@ pub(super) async fn send<R: StepRequest>(
                             .take()
                             .unwrap()
                             .reject(CommandError::Cancelled);
+                        operation.0.schedule_feedback(&context, &work, &sink);
                         operation.0.finish(Err(CommandError::Cancelled));
                         return Err(error);
                     }
@@ -168,6 +170,7 @@ pub(super) async fn send<R: StepRequest>(
         }
     }
     let result = pending.borrow_mut().take().unwrap().accept();
+    operation.0.schedule_feedback(&context, &work, &sink);
     operation.0.finish(result);
     Ok(())
 }
