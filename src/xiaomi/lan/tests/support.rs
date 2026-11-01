@@ -1,9 +1,10 @@
 use super::super::{Token, wire};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     net::{SocketAddr, UdpSocket},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
@@ -15,7 +16,16 @@ pub(crate) struct FakeDevice {
     pub(crate) packets: Arc<AtomicUsize>,
     pub(crate) business: Arc<AtomicUsize>,
     pub(crate) reads: Arc<AtomicUsize>,
+    pub(crate) writes: Arc<Mutex<Vec<Value>>>,
+    pub(crate) values: Arc<Mutex<BTreeMap<(u64, u64), Value>>>,
+    pub(crate) write_codes: Arc<Mutex<BTreeMap<(u64, u64), i64>>>,
+    pub(crate) reverse_write_results: Arc<AtomicBool>,
+    pub(crate) omit_write_result: Arc<AtomicBool>,
+    pub(crate) hold_hello: Arc<AtomicBool>,
     pub(crate) hold_read: Arc<AtomicBool>,
+    pub(crate) hold_write: Arc<AtomicBool>,
+    pub(crate) drop_write: Arc<AtomicBool>,
+    pub(crate) reject_write: Arc<AtomicBool>,
     pub(crate) drop_business: Arc<AtomicBool>,
     pub(crate) reject_read: Arc<AtomicBool>,
     pub(crate) accept_replacement: Arc<AtomicBool>,
@@ -41,8 +51,31 @@ impl FakeDevice {
         let business_count = business.clone();
         let reads = Arc::new(AtomicUsize::new(0));
         let read_count = reads.clone();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let observed_writes = writes.clone();
+        let values = Arc::new(Mutex::new(BTreeMap::from([
+            ((2, 1), json!(true)),
+            ((2, 3), json!(1)),
+            ((2, 4), json!(false)),
+            ((8, 1), json!(40)),
+        ])));
+        let device_values = values.clone();
+        let write_codes = Arc::new(Mutex::new(BTreeMap::new()));
+        let device_codes = write_codes.clone();
+        let reverse_write_results = Arc::new(AtomicBool::new(false));
+        let reverse_results = reverse_write_results.clone();
+        let omit_write_result = Arc::new(AtomicBool::new(false));
+        let omit_result = omit_write_result.clone();
+        let hold_hello = Arc::new(AtomicBool::new(false));
+        let holding_hello = hold_hello.clone();
         let hold_read = Arc::new(AtomicBool::new(false));
         let holding = hold_read.clone();
+        let hold_write = Arc::new(AtomicBool::new(false));
+        let holding_write = hold_write.clone();
+        let drop_write = Arc::new(AtomicBool::new(false));
+        let dropping_write = drop_write.clone();
+        let reject_write = Arc::new(AtomicBool::new(false));
+        let rejecting_write = reject_write.clone();
         let drop_business = Arc::new(AtomicBool::new(false));
         let dropping = drop_business.clone();
         let reject_read = Arc::new(AtomicBool::new(false));
@@ -58,6 +91,13 @@ impl FakeDevice {
                 observed.fetch_add(1, Ordering::Relaxed);
                 let packet = &buffer[..length];
                 if packet == wire::HELLO {
+                    while holding_hello.load(Ordering::Relaxed) && !stopped.load(Ordering::Relaxed)
+                    {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    if stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let mut hello = wire::HELLO;
                     hello[4..12].copy_from_slice(&did.to_be_bytes());
                     hello[12..16].copy_from_slice(&42_u32.to_be_bytes());
@@ -94,14 +134,77 @@ impl FakeDevice {
                         if stopped.load(Ordering::Relaxed) {
                             break;
                         }
-                        let mut item = request["params"][0].clone();
-                        item["code"] = json!(if rejecting.load(Ordering::Relaxed) {
-                            -4004
-                        } else {
-                            0
-                        });
-                        item["value"] = json!(true);
-                        json!([item])
+                        let values = device_values.lock().unwrap();
+                        Value::Array(
+                            request["params"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|item| {
+                                    let mut item = item.clone();
+                                    item["code"] = json!(if rejecting.load(Ordering::Relaxed) {
+                                        -4004
+                                    } else {
+                                        0
+                                    });
+                                    item["value"] = values[&(
+                                        item["siid"].as_u64().unwrap(),
+                                        item["piid"].as_u64().unwrap(),
+                                    )]
+                                        .clone();
+                                    item
+                                })
+                                .collect(),
+                        )
+                    }
+                    "set_properties" => {
+                        observed_writes
+                            .lock()
+                            .unwrap()
+                            .extend(request["params"].as_array().unwrap().iter().cloned());
+                        while holding_write.load(Ordering::Relaxed)
+                            && !stopped.load(Ordering::Relaxed)
+                        {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        if stopped.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if dropping_write.load(Ordering::Relaxed) {
+                            continue;
+                        }
+                        let rejected = rejecting_write.load(Ordering::Relaxed);
+                        let mut values = device_values.lock().unwrap();
+                        let codes = device_codes.lock().unwrap();
+                        let mut results = request["params"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|item| {
+                                let binding = (
+                                    item["siid"].as_u64().unwrap(),
+                                    item["piid"].as_u64().unwrap(),
+                                );
+                                let code = if rejected {
+                                    -4004
+                                } else {
+                                    *codes.get(&binding).unwrap_or(&0)
+                                };
+                                if code == 0 {
+                                    values.insert(binding, item["value"].clone());
+                                }
+                                let mut item = item.clone();
+                                item["code"] = json!(code);
+                                item
+                            })
+                            .collect::<Vec<_>>();
+                        if reverse_results.load(Ordering::Relaxed) {
+                            results.reverse();
+                        }
+                        if omit_result.load(Ordering::Relaxed) {
+                            results.pop();
+                        }
+                        Value::Array(results)
                     }
                     method => panic!("unexpected method {method}"),
                 };
@@ -116,7 +219,16 @@ impl FakeDevice {
             packets,
             business,
             reads,
+            writes,
+            values,
+            write_codes,
+            reverse_write_results,
+            omit_write_result,
+            hold_hello,
             hold_read,
+            hold_write,
+            drop_write,
+            reject_write,
             drop_business,
             reject_read,
             accept_replacement,

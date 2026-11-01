@@ -89,8 +89,11 @@ impl XiaomiAdapter {
                                     self.discovery.clone(),
                                 ),
                                 future::or(
-                                    super::lan::run(self.context.clone()),
-                                    self.context.tasks.run(),
+                                    Box::pin(super::refresh::direct(self.context.clone())),
+                                    future::or(
+                                        super::lan::run(self.context.clone()),
+                                        self.context.tasks.run(),
+                                    ),
                                 ),
                             ),
                         ),

@@ -365,7 +365,7 @@ impl Context {
         drop(status);
         self.status_changed.notify(usize::MAX);
         self.update_all_availability();
-        self.update_routing("local gateway certificate updated");
+        self.update_routing("hub certificate updated");
         self.changed.notify(usize::MAX);
     }
 }

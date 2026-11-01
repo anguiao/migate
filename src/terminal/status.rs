@@ -247,7 +247,7 @@ pub fn format_report(report: &AuthReport, now: i64, executable: &Path, data_dir:
 
 fn format_gateway(status: &GatewayStatus) -> String {
     match status {
-        GatewayStatus::Discovering => "Gateway: discovering local gateway.".into(),
+        GatewayStatus::Discovering => "Gateway: discovering hub.".into(),
         GatewayStatus::Connecting(did) => format!("Gateway: connecting ({did})."),
         GatewayStatus::Connected(did) => format!("Gateway: connected ({did})."),
         GatewayStatus::Unavailable(reason) => format!("Gateway: unavailable. {reason}."),
@@ -256,18 +256,19 @@ fn format_gateway(status: &GatewayStatus) -> String {
 
 fn path(path: PathKind) -> &'static str {
     match path {
-        PathKind::Local => "local",
+        PathKind::Local => "hub",
+        PathKind::Direct => "direct",
         PathKind::Cloud => "cloud",
     }
 }
 
 fn format_routing(status: &RoutingStatus) -> String {
     let priority = match status.priority {
-        PathPriority::LocalFirst => "local-first",
-        PathPriority::CloudFirst => "cloud-first",
+        PathPriority::LocalFirst => "hub-first",
+        PathPriority::CloudFirst => "hub-degraded",
     };
     let mut report = format!(
-        "Routing: {priority}; local {}; business {}.",
+        "Routing: {priority}; hub {}; business {}.",
         if status.local_connected {
             "connected"
         } else {
@@ -280,15 +281,15 @@ fn format_routing(status: &RoutingStatus) -> String {
         }
     );
     match status.recovery {
-        RecoveryStatus::None => report.push_str("\nLocal recovery: none."),
+        RecoveryStatus::None => report.push_str("\nHub recovery: none."),
         RecoveryStatus::Scheduled(deadline) => {
             let _ = write!(
                 report,
-                "\nLocal recovery: scheduled for {}.",
+                "\nHub recovery: scheduled for {}.",
                 timestamp(deadline)
             );
         }
-        RecoveryStatus::Running => report.push_str("\nLocal recovery: running."),
+        RecoveryStatus::Running => report.push_str("\nHub recovery: running."),
     }
     if let Some(reason) = &status.last_switch_reason {
         let _ = write!(report, "\nRouting last switch: {reason}.");
@@ -356,9 +357,19 @@ fn format_device(status: &DeviceStatus) -> String {
         if let Some(problem) = &lan.problem {
             let _ = write!(report, "\n  Direct LAN: {problem}.");
         }
-        if let RecoveryStatus::Scheduled(at) = lan.recovery {
-            let _ = write!(report, "\n  Direct LAN recovery scheduled at {at}.");
+        match lan.recovery {
+            RecoveryStatus::None => {}
+            RecoveryStatus::Running => report.push_str("\n  Direct LAN recovery: running."),
+            RecoveryStatus::Scheduled(at) => {
+                let _ = write!(
+                    report,
+                    "\n  Direct LAN recovery: scheduled for {}.",
+                    timestamp(at)
+                );
+            }
         }
+    } else if let Some(reason) = &status.direct_unavailable_reason {
+        let _ = write!(report, "\n  Direct LAN: unavailable ({reason}).");
     }
     if status.read_only {
         report.push_str("\n  Control: read-only.");

@@ -9,6 +9,7 @@ use crate::{
         capability::PropertyBinding,
         cloud::{LanCandidate, LanCredentials},
         lan::{Client, Failure, RequestError, SendStage},
+        property::{self, PropertyReading, PropertyResults},
     },
 };
 use futures_lite::future;
@@ -19,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MODEL: &str = "dmaker.fan.p5c";
+pub(super) const MODEL: &str = "dmaker.fan.p5c";
 #[cfg(not(test))]
 const PORT: u16 = 54321;
 
@@ -102,22 +103,38 @@ impl Context {
         if let Some(scope) = scope {
             self.store.lan().remove_scope(&scope)?;
         }
+        self.update_all_availability();
+        self.update_routing("direct LAN scope revoked");
+        self.refresh_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
         Ok(())
     }
-    pub(super) fn stop_lan(&self, did: &str) {
+    pub(super) fn stop_lan(&self, did: &str) -> bool {
+        let mut was_active = false;
         if let Some(slot) = self.live.borrow_mut().devices.get_mut(did) {
             if let Some(task) = slot.lan.task.take() {
                 task.close();
             }
-            slot.lan.active = None;
+            was_active = slot.lan.active.take().is_some();
             slot.lan.desired = None;
             slot.lan.status = None;
         }
+        if was_active {
+            self.refresh_changed.notify(usize::MAX);
+        }
+        was_active
     }
 
     /// Start work only for the installed, non-retired member of the saved scope.
     pub(super) fn reconcile_lan(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
+        self.reconcile_lan_after(did, None)
+    }
+
+    fn reconcile_lan_after(
+        self: &Rc<Self>,
+        did: &str,
+        failure: Option<RequestError>,
+    ) -> Result<(), AdapterError> {
         let eligible = {
             let live = self.live.borrow();
             let Some(slot) = live.devices.get(did) else {
@@ -158,7 +175,11 @@ impl Context {
             }
         };
         let Some((scope, binding, cloud)) = eligible else {
-            self.stop_lan(did);
+            if self.stop_lan(did) {
+                self.update_availability(did);
+                self.update_routing("direct LAN eligibility ended");
+                self.changed.notify(usize::MAX);
+            }
             return Ok(());
         };
         if matches!(cloud, Some(LanCredentials::NotIp)) {
@@ -185,6 +206,9 @@ impl Context {
                 recovery: RecoveryStatus::None,
             });
             self.status_changed.notify(usize::MAX);
+            self.update_availability(did);
+            self.update_routing("device is not eligible for direct LAN");
+            self.changed.notify(usize::MAX);
             return Ok(());
         }
         let stored = self
@@ -210,6 +234,7 @@ impl Context {
             };
             let mut live = self.live.borrow_mut();
             let lan = &mut live.devices.get_mut(did).unwrap().lan;
+            let was_active = lan.active.is_some();
             if let Some(task) = lan.task.take() {
                 task.close();
             }
@@ -222,6 +247,12 @@ impl Context {
                 recovery: RecoveryStatus::None,
             });
             drop(live);
+            if was_active {
+                self.update_availability(did);
+                self.update_routing("direct LAN credentials unavailable");
+                self.refresh_changed.notify(usize::MAX);
+                self.changed.notify(usize::MAX);
+            }
             self.status_changed.notify(usize::MAX);
             return Ok(());
         };
@@ -262,13 +293,20 @@ impl Context {
         self.tasks.spawn(async move {
             future::or(
                 async {
-                    context
-                        .run_lan(did, candidate, stored, binding, life.clone(), active)
-                        .await
-                },
-                async {
                     life.ended().await;
                     Ok(())
+                },
+                async {
+                    context
+                        .run_lan(
+                            did,
+                            candidate,
+                            stored,
+                            binding,
+                            life.clone(),
+                            (active, failure),
+                        )
+                        .await
                 },
             )
             .await
@@ -284,10 +322,39 @@ impl Context {
         stored: Option<LanRecord>,
         binding: PropertyBinding,
         life: Rc<Lifetime>,
-        had_active: bool,
+        start: (bool, Option<RequestError>),
     ) -> Result<(), AdapterError> {
+        let (had_active, initial_failure) = start;
         let mut backoff = Backoff::new(1, 30);
         let mut fallback = stored.filter(|record| record != &candidate);
+        if let Some(error) = initial_failure {
+            let delay = backoff.failed();
+            self.lan_failed(
+                &did,
+                &error,
+                RecoveryStatus::Scheduled(self.clock.unix_now() + delay.as_secs() as i64),
+            );
+            let network_changed = self.lan_network_changed.listen();
+            future::or(self.clock.wait_until(self.clock.now() + delay), async {
+                network_changed.await;
+            })
+            .await;
+            if !self.lan_current(&did, &candidate.scope, &life) {
+                return Ok(());
+            }
+            if let Some(status) = &mut self
+                .live
+                .borrow_mut()
+                .devices
+                .get_mut(&did)
+                .unwrap()
+                .lan
+                .status
+            {
+                status.recovery = RecoveryStatus::Running;
+            }
+            self.status_changed.notify(usize::MAX);
+        }
         loop {
             let result = probe(
                 &candidate,
@@ -313,6 +380,10 @@ impl Context {
                         recovery: RecoveryStatus::None,
                     });
                     drop(live);
+                    self.update_availability(&did);
+                    self.refresh_source(&did);
+                    self.update_routing("direct LAN authenticated");
+                    self.refresh_changed.notify(usize::MAX);
                     self.status_changed.notify(usize::MAX);
                     self.changed.notify(usize::MAX);
                     return Ok(());
@@ -368,6 +439,10 @@ impl Context {
                                 recovery: RecoveryStatus::None,
                             });
                             drop(live);
+                            self.update_availability(&did);
+                            self.refresh_source(&did);
+                            self.update_routing("direct LAN authenticated after discovery");
+                            self.refresh_changed.notify(usize::MAX);
                             self.status_changed.notify(usize::MAX);
                             self.changed.notify(usize::MAX);
                             return Ok(());
@@ -437,6 +512,49 @@ impl Context {
             })
     }
 
+    pub(super) fn lan_business_failure(
+        self: &Rc<Self>,
+        did: &str,
+        client: &Client,
+        error: &RequestError,
+    ) -> Result<(), AdapterError> {
+        if !matches!(
+            error.failure,
+            Failure::Io | Failure::Timeout | Failure::InvalidResponse | Failure::Identity
+        ) {
+            return Ok(());
+        }
+        {
+            let mut live = self.live.borrow_mut();
+            let Some(slot) = live.devices.get_mut(did) else {
+                return Ok(());
+            };
+            if slot
+                .admitted
+                .as_ref()
+                .is_none_or(|work| work.life.is_closed())
+                || !slot
+                    .lan
+                    .active
+                    .as_ref()
+                    .is_some_and(|(_, active)| active.same(client))
+            {
+                return Ok(());
+            }
+            if let Some(task) = slot.lan.task.take() {
+                task.close();
+            }
+            slot.lan.active = None;
+            slot.lan.desired = None;
+        }
+        self.reconcile_lan_after(did, Some(error.clone()))?;
+        self.update_availability(did);
+        self.update_routing("direct LAN business request failed");
+        self.refresh_changed.notify(usize::MAX);
+        self.changed.notify(usize::MAX);
+        Ok(())
+    }
+
     fn lan_failed(&self, did: &str, error: &RequestError, recovery: RecoveryStatus) {
         if let Some(status) = &mut self
             .live
@@ -460,6 +578,82 @@ impl Context {
         }
         self.status_changed.notify(usize::MAX);
     }
+}
+
+fn invalid_response() -> RequestError {
+    RequestError {
+        stage: SendStage::Sent,
+        failure: Failure::InvalidResponse,
+    }
+}
+
+fn property_code(item: &Value) -> Result<(), RequestError> {
+    match item.get("code").and_then(Value::as_i64) {
+        Some(0) => Ok(()),
+        Some(code) => Err(RequestError {
+            stage: SendStage::Sent,
+            failure: Failure::Rejected(code),
+        }),
+        None => Err(invalid_response()),
+    }
+}
+
+pub(super) async fn set_properties(
+    client: &Client,
+    did: &str,
+    properties: &[(PropertyBinding, Value)],
+    guard: impl Fn() -> bool,
+    on_sent: impl FnOnce(),
+) -> Result<PropertyResults<(), RequestError>, RequestError> {
+    let params = properties.iter().map(|(binding, value)| {
+        json!({"did":did, "siid":binding.siid, "piid":binding.piid, "value":value})
+    }).collect::<Vec<_>>();
+    let result =
+        Box::pin(client.request_guarded("set_properties", json!(params), guard, on_sent)).await?;
+    let items = result.as_array().ok_or_else(invalid_response)?;
+    let bindings = properties
+        .iter()
+        .map(|(binding, _)| *binding)
+        .collect::<Vec<_>>();
+    Ok(property::correlate(
+        did,
+        &bindings,
+        items,
+        invalid_response(),
+        property_code,
+    ))
+}
+
+pub(super) async fn read_property(
+    client: &Client,
+    did: &str,
+    binding: PropertyBinding,
+    guard: impl Fn() -> bool,
+) -> Result<PropertyReading, RequestError> {
+    let result = client
+        .request_guarded(
+            "get_properties",
+            json!([{"did":did, "siid":binding.siid, "piid":binding.piid}]),
+            guard,
+            || {},
+        )
+        .await?;
+    let items = result.as_array().ok_or_else(invalid_response)?;
+    let results = property::correlate(did, &[binding], items, invalid_response(), |item| {
+        property_code(item)?;
+        let value = item
+            .get("value")
+            .filter(|value| property::valid_observation(value))
+            .ok_or_else(invalid_response)?;
+        Ok(PropertyReading {
+            value: value.clone(),
+            update_time: property::update_time(item),
+        })
+    });
+    if results.protocol_error {
+        return Err(invalid_response());
+    }
+    results.items.into_iter().next().unwrap()
 }
 
 async fn probe(

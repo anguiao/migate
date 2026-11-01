@@ -116,6 +116,7 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
             routing: Default::default(),
             devices: vec![crate::xiaomi::adapter::DeviceStatus {
                 lan: None,
+                direct_unavailable_reason: Some("device model not supported".into()),
                 did: "sensor".into(),
                 read_only: true,
                 usable_control_paths: Vec::new(),
@@ -159,7 +160,7 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
         assert!(output.contains("sensor/temperature:3:1001"), "{output}");
         assert!(output.contains("upstream time 100"), "{output}");
         assert!(
-            output.contains("selected read local; notification source none"),
+            output.contains("selected read hub; notification source none"),
             "{output}"
         );
         assert!(output.contains("read: temporary read failure"), "{output}");

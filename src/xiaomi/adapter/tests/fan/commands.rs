@@ -120,7 +120,7 @@ fn off_waits_for_sent_step_and_new_speed_reopens_after_stale_on() {
             assert_eq!(function.snapshot(), before);
             status.update_adapter(control.context.diagnostics());
             let text = terminal.handle_line("status one", 0).await.unwrap().unwrap();
-            assert!(text.contains("target speed level 80; properties 2.1=true (local), 2.3=0 (local), 8.1=80 (local); actual path local; accepted."), "{text}");
+            assert!(text.contains("target speed level 80; properties 2.1=true (hub), 2.3=0 (hub), 8.1=80 (hub); actual path hub; accepted."), "{text}");
         }).await;
     }));
 }

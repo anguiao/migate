@@ -68,7 +68,7 @@ fn terminal_describes_optional_recognition_failure_separately_from_connectivity(
                     "{text}"
                 );
                 assert!(!text.contains("Not connected fan:3"), "{text}");
-                assert!(text.contains("Notification source: local"), "{text}");
+                assert!(text.contains("Notification source: hub"), "{text}");
             })
             .await;
         }),

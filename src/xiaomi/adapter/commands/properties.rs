@@ -12,6 +12,7 @@ use crate::{
         capability::PropertyBinding,
         central::{CentralError, RequestStage, SendDecision, SendHooks},
         cloud::{CloudError, CloudErrorKind},
+        lan::{Failure, RequestError, SendStage},
     },
 };
 use serde_json::Value;
@@ -26,6 +27,13 @@ fn cloud_command_error(error: &CloudError) -> CommandError {
         CloudErrorKind::Business(code) | CloudErrorKind::PropertyRejected(code) => {
             CommandError::Rejected(format!("cloud code {code}"))
         }
+        _ => CommandError::SendFailed(error.to_string()),
+    }
+}
+pub(super) fn direct_command_error(error: &RequestError) -> CommandError {
+    match error.failure {
+        Failure::Timeout => CommandError::Timeout,
+        Failure::Rejected(code) => CommandError::Rejected(format!("device code {code}")),
         _ => CommandError::SendFailed(error.to_string()),
     }
 }
@@ -232,6 +240,87 @@ pub(super) async fn submit_properties(
             match slot.borrow_mut().take() {
                 Some(receipt) => BatchAttempt::Settled(receipt),
                 None => BatchAttempt::Withdrawn,
+            }
+        }
+        ControlPath::Direct(client) => {
+            let result = Box::pin(super::super::lan::set_properties(
+                &client,
+                &did,
+                &properties,
+                || {
+                    alive(work, sink)
+                        && current().is_ok()
+                        && frame_current.is_none_or(|frame| frame())
+                        && matches!(context.control_path(&did), Some(ControlPath::Direct(selected)) if selected.same(&client))
+                },
+                || {
+                    let _ = mark();
+                    operation.submitted(PathKind::Direct);
+                    if retain_feedback {
+                        gate.register_feedback_for(authority, &properties);
+                    }
+                },
+            )).await;
+            if matches!(&result, Err(error) if error.stage == SendStage::BeforeSend && error.failure == Failure::Withdrawn)
+            {
+                if let Err(error) = current() {
+                    return settled(Err(error));
+                }
+                return if alive(work, sink) {
+                    BatchAttempt::Withdrawn
+                } else {
+                    settled(Err(CommandError::Cancelled))
+                };
+            }
+            let sent = !result
+                .as_ref()
+                .is_err_and(|error| error.stage == SendStage::BeforeSend);
+            if sent && let Some(after_write) = after_write {
+                after_write(context, work, function_id, &properties, gate, authority);
+            }
+            match result {
+                Ok(results) => {
+                    gate.finish_feedback_for(authority, &properties, &results, retain_feedback);
+                    let maintenance = if results.protocol_error {
+                        context
+                            .lan_business_failure(
+                                &did,
+                                &client,
+                                &RequestError {
+                                    stage: SendStage::Sent,
+                                    failure: Failure::InvalidResponse,
+                                },
+                            )
+                            .err()
+                    } else {
+                        None
+                    };
+                    let result = if results.protocol_error {
+                        Err(CommandError::SendFailed("invalid direct response".into()))
+                    } else if let Some(error) =
+                        results.items.iter().find_map(|item| item.as_ref().err())
+                    {
+                        Err(direct_command_error(error))
+                    } else {
+                        Ok(())
+                    };
+                    BatchAttempt::Settled(BatchReceipt {
+                        result,
+                        maintenance,
+                    })
+                }
+                Err(error) => {
+                    gate.cancel_feedback();
+                    let maintenance = context.lan_business_failure(&did, &client, &error).err();
+                    if error.stage == SendStage::BeforeSend && maintenance.is_none() {
+                        BatchAttempt::Withdrawn
+                    } else {
+                        BatchAttempt::Settled(BatchReceipt {
+                            result: Err(direct_command_error(&error)),
+                            maintenance,
+                        })
+                    }
+                }
             }
         }
         ControlPath::Cloud(credentials) => {

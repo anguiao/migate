@@ -176,7 +176,7 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
         let now = context.clock.unix_now();
         if now >= validity.not_after && last_expiry != Some(validity.not_after) {
             last_expiry = Some(validity.not_after);
-            eligibility_changed(&context, "local gateway certificate expired");
+            eligibility_changed(&context, "hub certificate expired");
         }
         if validity.renewal_due(now) && context.cloud_authenticated() && context.clock.now() >= due
         {
@@ -189,7 +189,7 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
                         .wait_until(deadline(&context, validity.not_after))
                         .await;
                     last_expiry = Some(validity.not_after);
-                    eligibility_changed(&context, "local gateway certificate expired");
+                    eligibility_changed(&context, "hub certificate expired");
                     None
                 })
                 .await

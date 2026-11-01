@@ -29,8 +29,7 @@ fn curtain_local_commands_write_one_quantized_property_without_refresh() {
             for line in ["list", "status one"] {
                 let output = terminal(control, line).await;
                 assert!(
-                    output
-                        .contains("target 27.4%; properties 2.4=25; actual path local; accepted."),
+                    output.contains("target 27.4%; properties 2.4=25; actual path hub; accepted."),
                     "{output}"
                 );
             }
@@ -201,7 +200,7 @@ fn curtain_local_stop_waits_for_old_receipt_and_other_device_is_independent() {
                 );
                 assert!(
                     output.contains(
-                        "target 10%; properties 2.4=10; actual path local; awaiting result."
+                        "target 10%; properties 2.4=10; actual path hub; awaiting result."
                     ),
                     "{output}"
                 );

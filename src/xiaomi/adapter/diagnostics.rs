@@ -12,6 +12,7 @@ use crate::xiaomi::capability::PropertyBinding;
 fn path_kind(path: ControlPath) -> PathKind {
     match path {
         ControlPath::Local(_) => PathKind::Local,
+        ControlPath::Direct(_) => PathKind::Direct,
         ControlPath::Cloud(_) => PathKind::Cloud,
     }
 }
@@ -40,7 +41,7 @@ impl Context {
                     .certificate
                     .is_some_and(|validity| validity.not_after <= self.clock.unix_now())
             {
-                "local gateway certificate expired"
+                "hub certificate expired"
             } else {
                 reason
             }
@@ -81,6 +82,9 @@ impl Context {
                 if self.local_candidate(&did, false).is_ok() {
                     usable.push(PathKind::Local);
                 }
+                if self.direct_candidate(&did).is_ok() {
+                    usable.push(PathKind::Direct);
+                }
                 if self.cloud_candidate(&did, true).is_ok() {
                     usable.push(PathKind::Cloud);
                 }
@@ -89,6 +93,9 @@ impl Context {
             let mut usable_read = Vec::new();
             if self.local_candidate(&did, false).is_ok() {
                 usable_read.push(PathKind::Local);
+            }
+            if self.direct_candidate(&did).is_ok() {
+                usable_read.push(PathKind::Direct);
             }
             if self.cloud_observation_candidate(&did, true).is_ok() {
                 usable_read.push(PathKind::Cloud);
@@ -127,10 +134,13 @@ impl Context {
             };
             let unavailable_reason = (!self.device_path_available(&did)).then(|| {
                 format!(
-                    "local: {}; cloud: {}",
+                    "hub: {}; direct: {}; cloud: {}",
                     self.local_candidate(&did, false)
                         .err()
                         .expect("no local device path"),
+                    self.direct_candidate(&did)
+                        .err()
+                        .expect("no direct device path"),
                     self.cloud_observation_candidate(&did, true)
                         .expect_err("no cloud device path")
                 )
@@ -256,6 +266,7 @@ impl Context {
             devices.push(DeviceStatus {
                 did,
                 lan,
+                direct_unavailable_reason: self.direct_candidate(&work.key.id).err(),
                 read_only,
                 usable_control_paths: usable,
                 selected_control: selected,
@@ -308,7 +319,7 @@ impl Context {
             Ok(()) => "notifications disconnected or subscriptions not ready".into(),
             Err(reason) => reason,
         };
-        format!("local notifications: {local}; cloud notifications: {cloud}")
+        format!("hub notifications: {local}; cloud notifications: {cloud}")
     }
     pub(super) fn request_sync(&self) {
         self.sync_requested.set(true);

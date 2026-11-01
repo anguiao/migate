@@ -64,6 +64,7 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
     adapter.devices.push(DeviceStatus {
         functions: vec![],
         lan: None,
+        direct_unavailable_reason: Some("device model not supported".into()),
         did: "one".into(),
         read_only: false,
         usable_control_paths: vec![PathKind::Local],

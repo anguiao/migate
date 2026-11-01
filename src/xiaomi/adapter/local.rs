@@ -212,7 +212,7 @@ async fn access_refreshes(
         let current = context.clone();
         let connection = handle.clone();
         let recovery = matches!(request, AccessRequest::Recovery);
-        context.update_routing("local recovery check started");
+        context.update_routing("hub recovery check started");
         let mut affected = None;
         let result = match request {
             AccessRequest::Full | AccessRequest::Recovery => {
@@ -264,7 +264,7 @@ async fn access_refreshes(
             }
         };
         finish_access_round(&access, recovery, &result, context.clock.now());
-        context.update_routing("local recovery check finished");
+        context.update_routing("hub recovery check finished");
         match result {
             Ok(_) => {
                 if let Some(dids) = affected {

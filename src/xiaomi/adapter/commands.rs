@@ -340,7 +340,8 @@ impl CommandOperation {
             entry.last = Some(status.clone());
         }
         let path = status.actual_path.map_or("none", |path| match path {
-            PathKind::Local => "local",
+            PathKind::Local => "hub",
+            PathKind::Direct => "direct",
             PathKind::Cloud => "cloud",
         });
         let result = status.result_text();
@@ -587,6 +588,10 @@ async fn send_power(
             command.0.reject(request, CommandError::Cancelled);
             break;
         }
+        if let Err(error) = request.current_result() {
+            command.0.reject(request, error);
+            break;
+        }
         let Some(path) = context.control_path(&did) else {
             command.0.reject(
                 request,
@@ -610,6 +615,74 @@ async fn send_power(
                     break;
                 };
                 request = withdrawn;
+            }
+            ControlPath::Direct(client) => {
+                use crate::xiaomi::lan::{Failure, RequestError, SendStage};
+                let stamp = RefCell::new(None);
+                let result = super::lan::set_properties(
+                    &client,
+                    &did,
+                    &[(binding, serde_json::Value::Bool(target))],
+                    || {
+                        !work.life.is_closed()
+                            && !sink.life.is_closed()
+                            && request.current_result().is_ok()
+                            && matches!(context.control_path(&did), Some(ControlPath::Direct(selected)) if selected.same(&client))
+                    },
+                    || {
+                        let _ = request.mark_sent();
+                        command.0.submitted(super::model::PathKind::Direct);
+                        *stamp.borrow_mut() = Some(work.observations.write_stamp(function_id, binding));
+                    },
+                ).await;
+                match result {
+                    Err(error)
+                        if error.stage == SendStage::BeforeSend
+                            && error.failure == Failure::Withdrawn =>
+                    {
+                        continue;
+                    }
+                    Err(error) => {
+                        context.lan_business_failure(&did, &client, &error)?;
+                        if error.stage == SendStage::BeforeSend {
+                            continue;
+                        }
+                        command
+                            .0
+                            .reject(request, properties::direct_command_error(&error));
+                    }
+                    Ok(results) => {
+                        if results.protocol_error {
+                            context.lan_business_failure(
+                                &did,
+                                &client,
+                                &RequestError {
+                                    stage: SendStage::Sent,
+                                    failure: Failure::InvalidResponse,
+                                },
+                            )?;
+                            command.0.reject(
+                                request,
+                                CommandError::SendFailed("invalid direct response".into()),
+                            );
+                        } else if let Some(error) =
+                            results.items.iter().find_map(|item| item.as_ref().err())
+                        {
+                            command
+                                .0
+                                .reject(request, properties::direct_command_error(error));
+                        } else {
+                            command.0.finish(work.observations.accept_write(
+                                &work,
+                                &sink,
+                                function_id,
+                                &stamp.into_inner().unwrap(),
+                                request,
+                            ));
+                        }
+                    }
+                }
+                break;
             }
             ControlPath::Cloud(credentials) => {
                 let stamp = work.observations.write_stamp(function_id, binding);

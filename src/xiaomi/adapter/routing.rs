@@ -5,6 +5,7 @@ use crate::{
         auth::{AuthenticationState, FailureReason},
         central::{CentralError, RequestOutcome, RequestStage, RequestTimeout, SessionHandle},
         cloud::CloudError,
+        lan::Client,
     },
 };
 use std::{rc::Rc, time::Duration};
@@ -18,12 +19,14 @@ pub(super) fn unreliable_cloud_online(did: &str) -> bool {
 #[derive(Clone)]
 pub(super) enum ControlPath {
     Local(SessionHandle),
+    Direct(Client),
     Cloud(CloudPath),
 }
 impl ControlPath {
     pub(super) fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Local(a), Self::Local(b)) => a.same_connection(b),
+            (Self::Direct(a), Self::Direct(b)) => a.same(b),
             (Self::Cloud(a), Self::Cloud(b)) => a.uid == b.uid && a.access_token == b.access_token,
             _ => false,
         }
@@ -50,6 +53,55 @@ impl Context {
             .session
             .as_ref()
             .is_some_and(|session| session.handle.same_connection(handle))
+    }
+    pub(super) fn direct_candidate(&self, did: &str) -> Result<Client, String> {
+        let live = self.live.borrow();
+        let slot = live
+            .devices
+            .get(did)
+            .ok_or("device description unavailable")?;
+        let work = slot
+            .admitted
+            .as_ref()
+            .ok_or("device description or binding unavailable")?;
+        if self.lan_scope_invalid.get() || work.life.is_closed() {
+            return Err("device source retired or scope revoked".into());
+        }
+        if slot
+            .committed
+            .as_ref()
+            .is_some_and(|source| source.raw.model != super::lan::MODEL)
+        {
+            return Err("device model not supported".into());
+        }
+        slot.lan
+            .active
+            .as_ref()
+            .map(|(_, client)| client.clone())
+            .ok_or_else(|| {
+                slot.lan.status.as_ref().map_or_else(
+                    || "not yet initialized".into(),
+                    |status| {
+                        status.problem.clone().unwrap_or_else(|| {
+                            match status.state {
+                                super::model::LanState::Ineligible => {
+                                    "device is not an eligible IP device"
+                                }
+                                super::model::LanState::MissingCredentials => "credentials missing",
+                                super::model::LanState::InvalidCredentials => "credentials invalid",
+                                super::model::LanState::Authenticating => {
+                                    "authentication in progress"
+                                }
+                                super::model::LanState::Ready => "session unavailable",
+                                super::model::LanState::Failed => {
+                                    "authentication or communication failed"
+                                }
+                            }
+                            .into()
+                        })
+                    },
+                )
+            })
     }
     pub(super) fn local_reads_allowed(&self, did: &str, handle: &SessionHandle) -> bool {
         self.priority() == PathPriority::LocalFirst
@@ -94,7 +146,7 @@ impl Context {
         }
         work.retry_subscriptions();
         self.update_availability(did);
-        self.update_routing(&format!("local device {did} reported offline or missing"));
+        self.update_routing(&format!("hub reported device {did} offline or missing"));
         self.refresh_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
     }
@@ -129,7 +181,7 @@ impl Context {
                 work.retry_subscriptions();
             }
             self.update_all_availability();
-            self.update_routing("local business response timed out");
+            self.update_routing("hub business response timed out");
             self.refresh_changed.notify(usize::MAX);
             self.changed.notify(usize::MAX);
         }
@@ -147,7 +199,7 @@ impl Context {
                 self.priority.replace(PathPriority::LocalFirst) == PathPriority::CloudFirst;
             access.recovered();
             if recovering {
-                log::info!("Gateway device list succeeded; local control priority restored");
+                log::info!("Gateway device list succeeded; hub control priority restored");
                 let works = self
                     .live
                     .borrow()
@@ -161,7 +213,7 @@ impl Context {
                 }
                 self.refresh_changed.notify(usize::MAX);
                 self.changed.notify(usize::MAX);
-                self.update_routing("current local device list succeeded");
+                self.update_routing("current hub device list succeeded");
             }
         }
     }
@@ -212,7 +264,7 @@ impl Context {
             return Err("gateway certificate not currently valid".into());
         }
         if virtual_group {
-            return Err("virtual group has no local route".into());
+            return Err("virtual group has no hub route".into());
         }
         let work = slot
             .admitted
@@ -391,8 +443,10 @@ impl Context {
             return self.control_path(did);
         }
         let local = self.local_candidate(did, false).ok();
+        let direct = self.direct_candidate(did).ok();
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
+            _ if direct.is_some() => direct.map(ControlPath::Direct),
             _ if self.cloud_observation_candidate(did, true).is_ok() => {
                 self.live.borrow().credentials.as_ref().map(|credentials| {
                     ControlPath::Cloud(CloudPath {
@@ -409,8 +463,10 @@ impl Context {
             return None;
         }
         let local = self.local_candidate(did, false).ok();
+        let direct = self.direct_candidate(did).ok();
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
+            _ if direct.is_some() => direct.map(ControlPath::Direct),
             _ if self.cloud_candidate(did, true).is_ok() => {
                 self.live.borrow().credentials.as_ref().map(|credentials| {
                     ControlPath::Cloud(CloudPath {
@@ -609,7 +665,7 @@ impl Context {
         }
         self.set_access_problem(None);
         self.update_all_availability();
-        self.update_routing(&format!("local gateway unavailable: {reason}"));
+        self.update_routing(&format!("hub unavailable: {reason}"));
         self.changed.notify(usize::MAX);
     }
     pub(super) fn stop(&self) {

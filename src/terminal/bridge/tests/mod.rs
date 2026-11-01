@@ -578,6 +578,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
                 .map(|did| DeviceStatus {
                     functions: vec![],
                     lan: None,
+                    direct_unavailable_reason: Some("device model not supported".into()),
                     did: did.into(),
                     read_only: false,
                     usable_control_paths: vec![PathKind::Local, PathKind::Cloud],
@@ -609,7 +610,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         assert!(!selected.contains("one routing:"), "{selected}");
         assert!(!selected.contains("one (name one)"), "{selected}");
         assert!(selected.contains("Gateway: connected (hub)."), "{selected}");
-        assert!(selected.contains("Routing: cloud-first"), "{selected}");
+        assert!(selected.contains("Routing: hub-degraded"), "{selected}");
         assert!(selected.contains("2023-11-14T22:14:20Z"), "{selected}");
         let all = handle_line(
             &registry,
@@ -635,7 +636,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             .unwrap()
             .unwrap();
         assert!(help.contains("Available commands:"));
-        assert!(help.contains("Routing: cloud-first"));
+        assert!(help.contains("Routing: hub-degraded"));
         assert!(!help.contains("one routing:"));
         assert!(!help.contains("multi routing:"));
     });

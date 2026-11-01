@@ -174,6 +174,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
         devices: vec![DeviceStatus {
             functions: vec![],
             lan: None,
+            direct_unavailable_reason: Some("device model not supported".into()),
             did: "one".into(),
             read_only: false,
             usable_control_paths: vec![PathKind::Local, PathKind::Cloud],
@@ -216,21 +217,27 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
     });
     let output = status.render_devices(1_700_000_000, None);
     assert!(
-        output.contains("Routing: cloud-first; local connected; business degraded."),
+        output.contains("Routing: hub-degraded; hub connected; business degraded."),
         "{output}"
     );
     assert!(
-        output.contains("Local recovery: scheduled for 2023-11-14T22:14:20Z."),
+        output.contains("Hub recovery: scheduled for 2023-11-14T22:14:20Z."),
         "{output}"
     );
     assert!(
-        output.contains("Usable control paths: local, cloud."),
+        output.contains("Usable control paths: hub, cloud."),
         "{output}"
     );
     assert!(output.contains("Selected control: cloud."), "{output}");
-    assert!(output.contains("Notification source: local."), "{output}");
-    assert!(output.contains("main in-flight command #42: target on; property 2.1; actual path local; awaiting result."), "{output}");
-    assert!(output.contains("main last command #41: target off; property 2.1; actual path cloud; command acceptance timed out."), "{output}");
+    assert!(output.contains("Direct LAN: unavailable"), "{output}");
+    assert!(output.contains("Notification source: hub."), "{output}");
+    assert!(
+        output.contains(
+            "main in-flight command #42: target on; property 2.1; actual path hub; awaiting result."
+        ),
+        "{output}"
+    );
+    assert!(output.contains("main last command #41: target off; property 2.1; actual path cloud; command acceptance timed out (result uncertain)."), "{output}");
     assert!(
         output.contains("State synchronization limited: cloud property subscriptions pending."),
         "{output}"
@@ -240,7 +247,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
         "{output}"
     );
     let help = status.render(1_700_000_000);
-    assert!(help.contains("Routing: cloud-first"));
+    assert!(help.contains("Routing: hub-degraded"));
     assert!(!help.contains("command #"));
     assert!(!help.contains("one routing:"));
 }
@@ -267,6 +274,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
         devices: vec![DeviceStatus {
             functions: vec![],
             lan: None,
+            direct_unavailable_reason: Some("device model not supported".into()),
             did: "one".into(),
             read_only: false,
             usable_control_paths: Vec::new(),
@@ -308,7 +316,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
         }],
     });
     let output = status.render_devices(0, Some("one"));
-    assert!(output.contains("Local recovery: running."), "{output}");
+    assert!(output.contains("Hub recovery: running."), "{output}");
     assert!(output.contains("Usable control paths: none."), "{output}");
     assert!(output.contains("Selected control: none."), "{output}");
     assert!(output.contains("Notification source: none."), "{output}");
@@ -318,9 +326,8 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
     );
     assert!(output.contains("main in-flight command #8: target off; property 3.1; actual path not sent; awaiting result."), "{output}");
     assert!(
-        output.contains(
-            "main last command #7: target on; property 3.1; actual path local; accepted."
-        ),
+        output
+            .contains("main last command #7: target on; property 3.1; actual path hub; accepted."),
         "{output}"
     );
 }
@@ -352,7 +359,7 @@ fn lighting_command_records_show_explicit_targets_actual_batch_and_no_write_resu
     };
     assert_eq!(
         format_command("main", "last", &command),
-        "main last command #42: target power=off, temperature=4000 K; properties 2.1=false, 2.2=13, 2.3=4000, 4.2=0; actual path local; accepted."
+        "main last command #42: target power=off, temperature=4000 K; properties 2.1=false, 2.2=13, 2.3=4000, 4.2=0; actual path hub; accepted."
     );
     command.target = CommandTarget::Light(LightTarget::rgb(
         None,
@@ -429,6 +436,7 @@ fn action_report(function: &crate::device::Function) -> String {
     format_device(&DeviceStatus {
         functions: vec![],
         lan: None,
+        direct_unavailable_reason: Some("device model not supported".into()),
         did: "light".into(),
         read_only: false,
         usable_control_paths: vec![PathKind::Cloud],
@@ -561,6 +569,7 @@ fn a_notification_limited_read_only_channel_is_reported_without_claiming_physica
     let report = super::format_device(&DeviceStatus {
         functions: vec![],
         lan: None,
+        direct_unavailable_reason: Some("device model not supported".into()),
         did: "sensor".into(),
         read_only: true,
         usable_control_paths: Vec::new(),
@@ -583,10 +592,59 @@ fn a_notification_limited_read_only_channel_is_reported_without_claiming_physica
 }
 
 #[test]
+fn direct_status_identifies_running_and_scheduled_recovery() {
+    use crate::xiaomi::adapter::{LanState, LanStatus};
+    let mut device = DeviceStatus {
+        did: "fan".into(),
+        lan: Some(LanStatus {
+            state: LanState::Failed,
+            address: Some("192.0.2.12".parse().unwrap()),
+            problem: Some("LAN request timed out".into()),
+            recovery: RecoveryStatus::Running,
+        }),
+        direct_unavailable_reason: Some("LAN request timed out".into()),
+        read_only: false,
+        usable_control_paths: vec![PathKind::Cloud],
+        selected_control: Some(PathKind::Cloud),
+        usable_read_paths: vec![PathKind::Cloud],
+        selected_read: Some(PathKind::Cloud),
+        physical_online: None,
+        notification_source: Some(PathKind::Local),
+        unavailable_reason: None,
+        sync_limited_reason: None,
+        battery_problem: None,
+        last_switch_reason: None,
+        commands: Vec::new(),
+        functions: Vec::new(),
+    };
+    let report = format_device(&device);
+    assert!(report.contains("Selected control: cloud."), "{report}");
+    assert!(report.contains("Notification source: hub."), "{report}");
+    assert!(
+        report.contains(
+            "Direct LAN (MIoT properties): failed; address 192.0.2.12; identity unconfirmed."
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains("Direct LAN: LAN request timed out."),
+        "{report}"
+    );
+    assert!(report.contains("Direct LAN recovery: running."), "{report}");
+    device.lan.as_mut().unwrap().recovery = RecoveryStatus::Scheduled(1_700_000_060);
+    let report = format_device(&device);
+    assert!(
+        report.contains("Direct LAN recovery: scheduled for 2023-11-14T22:14:20Z."),
+        "{report}"
+    );
+}
+
+#[test]
 fn battery_diagnostics_are_separate_from_physical_reachability() {
     let report = format_device(&DeviceStatus {
         functions: vec![],
         lan: None,
+        direct_unavailable_reason: Some("device model not supported".into()),
         did: "sensor".into(),
         read_only: true,
         usable_control_paths: Vec::new(),

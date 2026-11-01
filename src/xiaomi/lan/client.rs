@@ -64,6 +64,10 @@ struct Inner {
 }
 
 impl Client {
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
     pub(crate) fn new(did: u64, address: SocketAddr, token: Token) -> Self {
         Self(Rc::new(Inner {
             did,

@@ -31,7 +31,7 @@ impl fmt::Display for AdapterError {
             Self::Discovery(e) => e.fmt(f),
             Self::Central(e) => e.fmt(f),
             Self::Unavailable(e) => f.write_str(e),
-            Self::NoLocalGateway => f.write_str("no current local gateway for the selected home"),
+            Self::NoLocalGateway => f.write_str("no current gateway for the selected home"),
             Self::Cancelled => f.write_str("Xiaomi adapter stopped"),
         }
     }
@@ -94,12 +94,14 @@ pub struct PendingDevice {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathKind {
     Local,
+    Direct,
     Cloud,
 }
 impl fmt::Display for PathKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Local => "local",
+            Self::Local => "hub",
+            Self::Direct => "direct",
             Self::Cloud => "cloud",
         })
     }
@@ -233,6 +235,14 @@ impl CommandStatus {
             None => "awaiting result".into(),
             Some(Ok(())) if self.properties.is_empty() => "unchanged (no write)".into(),
             Some(Ok(())) => "accepted".into(),
+            Some(Err(CommandError::Timeout)) if self.actual_path.is_some() => {
+                let message = "command acceptance timed out (result uncertain)";
+                if matches!(self.target, CommandTarget::Power(_)) {
+                    message.into()
+                } else {
+                    format!("failed: {message}")
+                }
+            }
             Some(Err(error)) if matches!(self.target, CommandTarget::Power(_)) => error.to_string(),
             Some(Err(CommandError::Superseded)) => "superseded".into(),
             Some(Err(CommandError::Stopped)) => "stopped".into(),
@@ -320,6 +330,7 @@ pub struct LanStatus {
 pub struct DeviceStatus {
     pub did: String,
     pub lan: Option<LanStatus>,
+    pub direct_unavailable_reason: Option<String>,
     pub read_only: bool,
     pub usable_control_paths: Vec<PathKind>,
     pub selected_control: Option<PathKind>,

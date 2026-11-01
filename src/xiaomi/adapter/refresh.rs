@@ -19,6 +19,7 @@ use std::{
 
 const ROUND_DELAY: Duration = Duration::from_millis(200);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
+const DIRECT_READ_LIMIT: usize = 8;
 
 #[derive(Clone)]
 pub(super) struct Refresh {
@@ -33,6 +34,22 @@ enum ReadResult {
     Observed,
     Retired,
     Failed(String),
+}
+#[derive(Clone, Copy)]
+enum ReadQueue {
+    Local,
+    Direct,
+    Cloud,
+}
+impl ReadQueue {
+    fn accepts(self, path: &ControlPath) -> bool {
+        matches!(
+            (self, path),
+            (Self::Local, ControlPath::Local(_))
+                | (Self::Direct, ControlPath::Direct(_))
+                | (Self::Cloud, ControlPath::Cloud(_))
+        )
+    }
 }
 
 #[derive(Default)]
@@ -126,14 +143,14 @@ impl RefreshState {
         &mut self,
         now: Duration,
         path_for: impl Fn(&str) -> Option<ControlPath>,
-        local: bool,
+        queue: ReadQueue,
     ) -> Option<(Refresh, Rc<ReadFlight>)> {
         let (index, path) = self.pending.iter().enumerate().find_map(|(index, read)| {
             if read.ready_at > now || self.inflight.contains_key(&read.key()) {
                 return None;
             }
             let path = path_for(&read.id)?;
-            (matches!(path, ControlPath::Local(_)) == local).then_some((index, path))
+            queue.accepts(&path).then_some((index, path))
         })?;
         let read = self.pending.remove(index).unwrap();
         let flight = Rc::new(ReadFlight {
@@ -306,7 +323,7 @@ fn retire(context: &Context) {
 fn reserve(
     work: &Rc<DeviceWork>,
     context: &Context,
-    local: bool,
+    queue: ReadQueue,
 ) -> Option<(Refresh, Rc<ReadFlight>)> {
     if work.life.is_closed() {
         return None;
@@ -314,7 +331,7 @@ fn reserve(
     work.refresh.borrow_mut().reserve(
         context.clock.now(),
         |id| context.read_path_for(&work.key.id, id),
-        local,
+        queue,
     )
 }
 
@@ -355,7 +372,7 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
             if !context.current_local(&handle) {
                 return None;
             }
-            reserve(&work, &context, true)
+            reserve(&work, &context, ReadQueue::Local)
                 .map(|(read, flight)| read_one(work, read, flight, context.clone()))
         });
         // Keep the local round barrier: one property per DID, concurrent DIDs.
@@ -366,6 +383,78 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
         next_round = Some(context.clock.now() + ROUND_DELAY);
     }
 }
+pub(super) async fn direct(context: Rc<Context>) -> Result<(), AdapterError> {
+    let mut next_round = BTreeMap::<String, Duration>::new();
+    loop {
+        let listener = context.refresh_changed.listen();
+        let changed = context.changed.listen();
+        retire(&context);
+        let candidates = works(&context);
+        next_round.retain(|did, _| candidates.iter().any(|work| &work.key.id == did));
+        let mut in_flight = candidates
+            .iter()
+            .map(|work| {
+                work.refresh
+                    .borrow()
+                    .inflight
+                    .values()
+                    .filter(|flight| matches!(flight.path, ControlPath::Direct(_)))
+                    .count()
+            })
+            .sum::<usize>();
+        let now = context.clock.now();
+        let mut due_at = None;
+        for work in candidates {
+            if in_flight == DIRECT_READ_LIMIT {
+                break;
+            }
+            let refresh = work.refresh.borrow();
+            if refresh
+                .inflight
+                .values()
+                .any(|flight| matches!(flight.path, ControlPath::Direct(_)))
+            {
+                continue;
+            }
+            let due = refresh.next_due(|id| {
+                matches!(
+                    context.read_path_for(&work.key.id, id),
+                    Some(ControlPath::Direct(_))
+                )
+            });
+            drop(refresh);
+            let Some(due) = due else {
+                continue;
+            };
+            let next = next_round
+                .entry(work.key.id.clone())
+                .or_insert(now + ROUND_DELAY);
+            let due = due.max(*next);
+            if due > now {
+                due_at = Some(due_at.map_or(due, |previous: Duration| previous.min(due)));
+                continue;
+            }
+            if let Some((read, flight)) = reserve(&work, &context, ReadQueue::Direct) {
+                *next = now + ROUND_DELAY;
+                in_flight += 1;
+                context
+                    .tasks
+                    .spawn(read_one(work, read, flight, context.clone()));
+            }
+        }
+        let wake = future::or(listener, changed);
+        if in_flight < DIRECT_READ_LIMIT {
+            if let Some(due) = due_at {
+                future::or(wake, context.clock.wait_until(due)).await;
+            } else {
+                wake.await;
+            }
+        } else {
+            wake.await;
+        }
+    }
+}
+
 pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
     loop {
         let listener = context.refresh_changed.listen();
@@ -373,7 +462,7 @@ pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
         let credentials = context.credentials_changed.listen();
         retire(&context);
         for work in works(&context) {
-            while let Some((read, flight)) = reserve(&work, &context, false) {
+            while let Some((read, flight)) = reserve(&work, &context, ReadQueue::Cloud) {
                 context
                     .tasks
                     .spawn(read_one(work.clone(), read, flight, context.clone()));
@@ -581,6 +670,64 @@ fn read_one(
                             read.binding,
                             &error,
                         ))),
+                    }
+                }
+                ControlPath::Direct(client) => {
+                    let result = super::lan::read_property(client, &did, read.binding, || {
+                        !flight.life.is_closed()
+                            && !work.life.is_closed()
+                            && flight.current(&context, &did, &read.id)
+                            && work.refresh.borrow().required(&read)
+                            && work.observations.read_is_current(
+                                &work,
+                                &read.id,
+                                read.binding,
+                                &stamp,
+                            )
+                    })
+                    .await;
+                    match result {
+                        Ok(reading) => {
+                            if work.life.is_closed() || !flight.current(&context, &did, &read.id) {
+                                Ok(ReadResult::Retired)
+                            } else {
+                                match work.observe_read_at(
+                                    &read.id,
+                                    read.binding,
+                                    &stamp,
+                                    &reading.value,
+                                    Observation {
+                                        source: super::model::PathKind::Direct,
+                                        source_time: reading.update_time,
+                                        received_at: context.clock.unix_now(),
+                                    },
+                                ) {
+                                    Ok(()) => {
+                                        context.refresh_group_states(&did);
+                                        Ok(ReadResult::Observed)
+                                    }
+                                    Err(error) => Ok(ReadResult::Failed(work.problem(
+                                        "read",
+                                        read.binding,
+                                        &error,
+                                    ))),
+                                }
+                            }
+                        }
+                        Err(error)
+                            if error.stage == crate::xiaomi::lan::SendStage::BeforeSend
+                                && error.failure == crate::xiaomi::lan::Failure::Withdrawn =>
+                        {
+                            Ok(ReadResult::Retired)
+                        }
+                        Err(error) => {
+                            context.lan_business_failure(&did, client, &error)?;
+                            Ok(ReadResult::Failed(work.problem(
+                                "read",
+                                read.binding,
+                                &error,
+                            )))
+                        }
                     }
                 }
                 ControlPath::Cloud(credentials) => {

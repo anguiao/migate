@@ -428,9 +428,9 @@ fn fan_first_failed_read_is_reported_until_automatic_retry_succeeds() {
                     .unwrap();
                 for expected in [
                     "property 8.1",
-                    "observation source local",
+                    "observation source hub",
                     "read: one read 8.1",
-                    "local subscription ready",
+                    "hub subscription ready",
                 ] {
                     assert!(line.contains(expected), "missing {expected}: {line}");
                 }

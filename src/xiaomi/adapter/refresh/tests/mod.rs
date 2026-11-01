@@ -25,7 +25,7 @@ fn satisfying_one_property_baseline_preserves_the_others() {
         state.request_baseline("main", binding);
     }
     let (reserved, _) = state
-        .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
+        .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
         .unwrap();
     state.satisfy_baseline("main", bindings[0]);
     state.complete(reserved, ReadResult::Retired, Duration::ZERO);
@@ -51,7 +51,7 @@ fn a_satisfied_reserved_baseline_is_not_requeued_when_withdrawn() {
     };
     state.request_baseline("motion", binding);
     let (read, _) = state
-        .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
+        .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
         .unwrap();
 
     state.satisfy_baseline("motion", binding);
@@ -100,7 +100,7 @@ fn an_unpolled_baseline_lease_is_not_returned_after_notification() {
         let mut state = work.refresh.borrow_mut();
         state.request_baseline("motion", binding);
         state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
+            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
             .unwrap()
     };
     // This lease exists before the read future's first poll.
@@ -134,7 +134,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
             state.request_baseline("motion", binding);
         }
         let (read, _) = state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
+            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
             .unwrap();
         if ordinary {
             state.satisfy_baseline("motion", binding);
@@ -146,7 +146,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
     let mut state = RefreshState::default();
     state.request_baseline("motion", binding);
     let (old, _) = state
-        .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
+        .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
         .unwrap();
     state.satisfy_baseline("motion", binding);
     state.request_baseline("motion", binding);
@@ -154,7 +154,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
     assert_eq!(state.pending.len(), 1);
     state.inflight.clear();
     let (new, _) = state
-        .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
+        .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
         .unwrap();
     state.complete(new, ReadResult::Retired, Duration::ZERO);
     assert_eq!(state.pending.len(), 1);
@@ -174,7 +174,7 @@ fn returned_ordinary_demand_survives_a_pending_baseline(drop_lease: bool) {
         let mut state = work.refresh.borrow_mut();
         state.request("motion", binding);
         state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
+            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
             .unwrap()
     };
     let mut cleanup = ReadCleanup {
@@ -198,7 +198,7 @@ fn returned_ordinary_demand_survives_a_pending_baseline(drop_lease: bool) {
     state.satisfy_baseline("motion", binding);
     assert!(
         state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), false)
+            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
             .is_some()
     );
 }

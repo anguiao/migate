@@ -211,7 +211,7 @@ fn local_standard_reads_notifications_and_ordered_writes_keep_receipts_separate(
                     && text.contains("Speed"),
                 "{text}"
             );
-            assert!(text.contains("local"), "{text}");
+            assert!(text.contains("hub"), "{text}");
             peer.notify_value_at("one", POWER, json!(true), Some(702), false);
             peer.notify_value_at("one", SPEED, json!(0), Some(703), false);
             until(|| {

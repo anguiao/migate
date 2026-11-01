@@ -23,9 +23,9 @@ fn terminal_lists_each_curtain_value_source_and_subscription() {
                     "Status: opening",
                     "upstream time 201",
                     "received at",
-                    "observation source local",
+                    "observation source hub",
                     "property 2.3",
-                    "local subscription ready",
+                    "hub subscription ready",
                 ] {
                     assert!(text.contains(expected), "missing {expected}: {text}");
                 }
