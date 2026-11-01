@@ -99,6 +99,8 @@ status 234567890
 
 `status 空调DID` 中的 `Target temperature` 是空调设定温度，`Ambient source` 和 `Ambient temperature` 是绑定的来源及环境温度，并显示来源时间和接收时间。未绑定、尚待有效读数、来源不可用或来源不在目录时，环境温度显示 `unknown` 及原因。若来源失效，`Last reading (diagnostic only)` 是仅供排障的旧读数；查看 `Ambient source synchronization` 以及传感器的 `status DID`，核对读取和通知诊断。若显示 `Matter mapping unsupported: native ambient temperature cannot be represented`，来源读数无法用 Matter 温度表示，原始读数仍保留，Matter 返回空值。恢复访问后等待新的有效读数；正常静默及单次同步失败不会自动丢弃已有有效读数。来源移除或撤权时绑定仍保留，也可直接按空调标识解除。
 
+Home 在没有当前有效环境温度时，仍可能显示 `0℃` 或保留旧温度。用 `status 空调DID` 的 `Ambient temperature` 判断读数是否有效；出现 `unknown` 时按原因排查绑定及来源，不将 Home 的数值当作当前有效温度。
+
 风扇的百分比风速映射到设备实际可达的挡位；满足识别条件的普通数值范围（含步长）或有序离散挡位可接入，不表示设备支持连续调速。`0%` 表示关机，非零调速会先确保开机。水平摇头只调整摇头，不改变电源或风速。Home 的具体风速和摇头入口以及何时发送写入，以客户端实际提供的控件为准。
 
 已支持的 `dmaker` 风扇自然风在米家中设置；自然风运行时显示的是设备记忆的直吹风速设定，不是自然风瞬时风速。Home 或其他 Matter 客户端发送非零风速会切回直吹，即使写入的百分比与当前显示值相同也会接管。独立开机保留设备记忆的模式和风速；关机或设置 `0%` 保留原生模式和直吹设定，设备确认关机后显示关闭及零风速。
