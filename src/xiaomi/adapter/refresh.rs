@@ -618,7 +618,6 @@ pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
         }
         let due = works(&context)
             .iter()
-            .filter(|work| matches!(context.read_path(&work.key.id), Some(ControlPath::Cloud(_))))
             .filter_map(|work| {
                 work.refresh.borrow().next_due(|id| {
                     matches!(

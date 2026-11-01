@@ -24,7 +24,11 @@ fn instance() -> Value {
 }
 
 fn setup(did: &str) -> (Rig, LegacyDevice) {
-    let rig = Rig::custom_lights(&[(did, "lumi.acpartner.mcn02", instance())]);
+    setup_with_description(did, instance())
+}
+
+fn setup_with_description(did: &str, description: Value) -> (Rig, LegacyDevice) {
+    let rig = Rig::custom_lights(&[(did, "lumi.acpartner.mcn02", description)]);
     let token = Token::parse("00112233445566778899aabbccddeeff").unwrap();
     let peer = LegacyDevice::new(token.clone(), did.parse().unwrap());
     let scope = rig
@@ -925,4 +929,162 @@ fn mcn02_partial_acceptance_reads_once_after_all_sent_steps() {
             );
         })
     }));
+}
+
+#[test]
+fn cloud_only_function_retries_at_deadline_while_air_conditioner_uses_direct() {
+    use super::super::routing::ControlPath;
+    use crate::xiaomi::{
+        capability::PropertyBinding,
+        cloud::{CloudDeviceInfo, LanCredentials},
+    };
+
+    let did = "308540429";
+    let mut description = instance();
+    description["services"].as_array_mut().unwrap().push(json!({
+        "iid": 4, "type": "urn:miot-spec-v2:service:light:00007802:example:1",
+        "properties": [{"iid": 1, "type": "urn:miot-spec-v2:property:on:00000006:example:1", "format": "bool", "access": ["read", "write", "notify"]}]
+    }));
+    let (rig, _peer) = setup_with_description(did, description);
+    let context = rig.source.context.clone();
+    let clock = rig.clock.clone();
+    clock.automatic.store(false, Ordering::Relaxed);
+    context.reconcile_lan(did).unwrap();
+    block_on(future::or(
+        async {
+            context.tasks.run().await.unwrap();
+            panic!("task runner stopped")
+        },
+        async {
+            future::or(until(|| context.direct_candidate(did).is_ok()), async {
+                async_io::Timer::after(Duration::from_secs(1)).await;
+                panic!("direct probe stalled")
+            })
+            .await;
+        },
+    ));
+    context
+        .live
+        .borrow_mut()
+        .devices
+        .get_mut(did)
+        .unwrap()
+        .cloud_access = Some(CloudDeviceInfo {
+        did: did.into(),
+        model: "lumi.acpartner.mcn02".into(),
+        instance_type: "test".into(),
+        online: true,
+        lan: LanCredentials::Unknown,
+    });
+    context.adopt_credentials(rig.store.xiaomi().load().unwrap().unwrap());
+    context.cloud_scope_valid.set(true);
+    let binding = PropertyBinding { siid: 4, piid: 1 };
+    let key = (did.to_owned(), binding.siid, binding.piid);
+    rig.cloud
+        .lock()
+        .unwrap()
+        .raw_values
+        .insert(key.clone(), json!("invalid"));
+    let work = context.live.borrow().devices[did].admitted.clone().unwrap();
+    let read_count = || {
+        rig.cloud
+            .lock()
+            .unwrap()
+            .property_reads
+            .iter()
+            .filter(|read| **read == key)
+            .count()
+    };
+    assert!(matches!(
+        context.read_path(did),
+        Some(ControlPath::Direct(_))
+    ));
+    assert!(matches!(
+        context.read_path_for(did, "air-conditioner:2"),
+        Some(ControlPath::Direct(_))
+    ));
+    assert!(matches!(
+        context.read_path_for(did, "light:4"),
+        Some(ControlPath::Cloud(_))
+    ));
+    work.refresh_property("light:4", binding);
+    block_on(future::or(
+        async {
+            future::or(
+                super::super::refresh::cloud(context.clone()),
+                context.tasks.run(),
+            )
+            .await
+            .unwrap();
+            panic!("refresh runner stopped");
+        },
+        async {
+            future::or(
+                until(|| {
+                    let state = work.refresh.borrow().snapshot();
+                    state.inflight.is_empty()
+                        && state
+                            .pending
+                            .iter()
+                            .any(|read| read.id == "light:4" && read.attempts == 1)
+                }),
+                async {
+                    async_io::Timer::after(Duration::from_secs(2)).await;
+                    panic!("initial cloud read did not fail");
+                },
+            )
+            .await;
+            let pending = work
+                .refresh
+                .borrow()
+                .snapshot()
+                .pending
+                .into_iter()
+                .find(|read| read.id == "light:4")
+                .unwrap();
+            assert_eq!(pending.ready_at, Duration::from_secs(3));
+            assert_eq!(read_count(), 1);
+            // Let the scheduler consume the failed read's completion before advancing time.
+            async_io::Timer::after(Duration::from_millis(40)).await;
+            clock.advance(Duration::from_millis(2999));
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(read_count(), 1);
+            rig.cloud
+                .lock()
+                .unwrap()
+                .raw_values
+                .insert(key.clone(), json!(true));
+            clock.advance(Duration::from_millis(1));
+            future::or(until(|| read_count() == 2), async {
+                async_io::Timer::after(Duration::from_secs(1)).await;
+                panic!("cloud retry was not woken at its deadline")
+            })
+            .await;
+            future::or(
+                until(|| {
+                    work.physical()
+                        .function("light:4")
+                        .unwrap()
+                        .snapshot()
+                        .power()
+                        == Some(Power::On)
+                }),
+                async {
+                    async_io::Timer::after(Duration::from_secs(2)).await;
+                    panic!("retried cloud reading did not settle");
+                },
+            )
+            .await;
+            assert!(
+                work.refresh
+                    .borrow()
+                    .property_problem("light:4", binding)
+                    .is_none()
+            );
+            assert!(matches!(
+                context.read_path_for(did, "air-conditioner:2"),
+                Some(ControlPath::Direct(_))
+            ));
+        },
+    ));
 }
