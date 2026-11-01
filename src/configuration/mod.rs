@@ -80,6 +80,7 @@ pub(crate) struct CommittedConfiguration {
     pub devices: Vec<CommittedDevice>,
     pub descriptions: Vec<RawDescription>,
     pub groups: Vec<GroupRelation>,
+    pub temperature_bindings: BTreeMap<FunctionKey, FunctionKey>,
 }
 
 impl Default for CommittedConfiguration {
@@ -228,6 +229,7 @@ impl CommittedConfiguration {
             devices: Vec::new(),
             descriptions: Vec::new(),
             groups: Vec::new(),
+            temperature_bindings: BTreeMap::new(),
         }
     }
 
@@ -263,6 +265,7 @@ impl CommittedConfiguration {
         } else if self.devices.iter().any(|device| device.native.is_some())
             || !self.descriptions.is_empty()
             || !self.groups.is_empty()
+            || !self.temperature_bindings.is_empty()
         {
             return Err("Committed configuration has facts without a home scope");
         }
@@ -343,6 +346,44 @@ impl CommittedConfiguration {
             .any(|device| device.native.is_some() && !sources.contains(&device.key))
         {
             return Err("Committed source description is missing");
+        }
+        for (target, source) in &self.temperature_bindings {
+            for key in [target, source] {
+                validate_text(&key.device.source)?;
+                validate_text(&key.device.id)?;
+                validate_text(&key.id)?;
+                let Some(device) = self.device(&key.device) else {
+                    return Err("Temperature binding device identity is missing");
+                };
+                if !device
+                    .functions
+                    .iter()
+                    .any(|function| function.id == key.id)
+                {
+                    return Err("Temperature binding function identity is missing");
+                }
+            }
+            for (key, is_target) in [(target, true), (source, false)] {
+                if let Some(native) = self
+                    .device(&key.device)
+                    .and_then(|device| device.native.as_ref())
+                {
+                    let function = native
+                        .device()
+                        .functions()
+                        .iter()
+                        .find(|function| function.id() == key.id);
+                    let valid =
+                        function.is_some_and(|function| match function.description().kind {
+                            crate::device::FunctionKind::AirConditioner { .. } => is_target,
+                            crate::device::FunctionKind::Temperature(_) => !is_target,
+                            _ => false,
+                        });
+                    if !valid {
+                        return Err("Temperature binding function type is invalid");
+                    }
+                }
+            }
         }
         let mut groups = BTreeSet::new();
         for group in &self.groups {

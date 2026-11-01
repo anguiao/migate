@@ -406,6 +406,16 @@ pub enum TemperatureSourceState {
     Available(MeasurementSnapshot),
 }
 
+/// An air conditioner's current ambient temperature projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AmbientTemperature {
+    Unbound,
+    SourceMissing,
+    SourceUnavailable,
+    AwaitingReading,
+    Available(MeasurementSnapshot),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurtainMotion {
     Opening,
@@ -490,6 +500,8 @@ pub struct FunctionSnapshot {
     pub availability: Availability,
     pub revision: u64,
     pub(super) temperature_source: Option<TemperatureSourceState>,
+    pub(super) ambient_temperature: Option<AmbientTemperature>,
+    pub(super) ambient_source_revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -536,6 +548,10 @@ impl FunctionSnapshot {
     /// Return the temperature source state, or `None` for other functions.
     pub fn temperature_source(&self) -> Option<TemperatureSourceState> {
         self.temperature_source
+    }
+    /// Ambient temperature is independent of the air-conditioner setpoint.
+    pub fn ambient_temperature(&self) -> Option<AmbientTemperature> {
+        self.ambient_temperature
     }
     pub fn air_conditioner(&self) -> Option<super::AirConditionerSnapshot> {
         match self.state {

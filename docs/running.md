@@ -86,7 +86,18 @@ MiGate 自动接入受支持的插座、灯光、米家原生灯组、窗帘、�
 
 Home 选择“自动”用于切换设备的原生自动模式。若当前配码不允许自动模式调温，拖动 Home 显示的温度范围会被拒绝，界面可能回到原值；需要调温时先选择允许调温的模式，再设置整数温度。
 
-用 `status DID` 查看空调的 `Power`、`Mode`、`Temperature`、`Speed`、可选 `Vertical swing`、各模式控制范围、读取与通知来源及最近命令。mcn04 的 `Control range source` 显示范围来源和诊断；显示 `Control range is awaiting source confirmation` 时，等待来源恢复并重新确认，依赖范围的模式、温度和风速设置暂不可用，独立开关与支持的上下摆风仍按各自命令处理。mcn04 状态以伴侣整包反馈为准，其他标准空调以设备属性反馈为准；命令受理不代表状态已更新。首次读取前状态未知，来源中断保留最近有效值，恢复后重新读取。自动风下若显示 `Current fan level: unknown (automatic speed)`，表示设备未提供实际挡位；恢复或重启不重放之前的空调命令。
+用 `status DID` 查看空调的 `Power`、`Mode`、`Target temperature`、`Speed`、可选 `Vertical swing`、各模式控制范围、读取与通知来源及最近命令。mcn04 的 `Control range source` 显示范围来源和诊断；显示 `Control range is awaiting source confirmation` 时，等待来源恢复并重新确认，依赖范围的模式、温度和风速设置暂不可用，独立开关与支持的上下摆风仍按各自命令处理。mcn04 状态以伴侣整包反馈为准，其他标准空调以设备属性反馈为准；命令受理不代表状态已更新。首次读取前状态未知，来源中断保留最近有效值，恢复后重新读取。自动风下若显示 `Current fan level: unknown (automatic speed)`，表示设备未提供实际挡位；恢复或重启不重放之前的空调命令。
+
+为指定空调手动绑定一个已接入的环境温度功能。先用 `list` 查找空调和传感器的 DID 与功能标识，再在运行 MiGate 的终端输入：
+
+```text
+bind-sensor 234567890 air-conditioner:3 345678901 temperature:3:7
+status 234567890
+```
+
+以上标识仅为示例，请替换为 `list` 中的实际值。一个空调功能最多绑定一个温度功能，同一个温度功能可供多个空调使用；再次执行 `bind-sensor` 并指定另一来源即可更换。解除绑定时执行 `unbind-sensor 234567890 air-conditioner:3`。两端须属于当前家庭且具备访问资格，传感器暂时离线也可绑定；绑定不会控制空调或传感器。绑定随数据目录保存，重启后等待温度来源重新取得读数；切换米家账号或家庭会清空绑定。
+
+`status 空调DID` 中的 `Target temperature` 是空调设定温度，`Ambient source` 和 `Ambient temperature` 是绑定的来源及环境温度，并显示来源时间和接收时间。未绑定、尚待有效读数、来源不可用或来源不在目录时，环境温度显示 `unknown` 及原因。若来源失效，`Last reading (diagnostic only)` 是仅供排障的旧读数；查看 `Ambient source synchronization` 以及传感器的 `status DID`，核对读取和通知诊断。恢复访问后等待新的有效读数；正常静默及单次同步失败不会自动丢弃已有有效读数。来源移除或撤权时绑定仍保留，也可直接按空调标识解除。
 
 风扇的百分比风速映射到设备实际可达的挡位；满足识别条件的普通数值范围（含步长）或有序离散挡位可接入，不表示设备支持连续调速。`0%` 表示关机，非零调速会先确保开机。水平摇头只调整摇头，不改变电源或风速。Home 的具体风速和摇头入口以及何时发送写入，以客户端实际提供的控件为准。
 
@@ -108,6 +119,8 @@ Home 选择“自动”用于切换设备的原生自动模式。若当前配码
 | `status [DID]` | 查看账号、中枢、设备及各功能读数、状态、时间、当前路径和诊断 |
 | `on DID FUNCTION` | 开启指定功能 |
 | `off DID FUNCTION` | 关闭指定功能 |
+| `bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION` | 为空调绑定或更换环境温度来源 |
+| `unbind-sensor TARGET_DID TARGET_FUNCTION` | 解除空调的环境温度绑定 |
 | `help` | 查看命令帮助 |
 
 先用 `list` 查找 DID 和功能标识，单功能设备也必须指定功能。控制功能以服务为锚点，例如 `light:2`、`fan:3`、`air-conditioner:3`、`outlet:9`；测量和状态功能以属性为锚点，例如 `temperature:3:7`。以下 DID 和功能标识均为示例，请替换为实际值：
@@ -122,6 +135,9 @@ off 987654321 fan:3
 status 234567890
 on 234567890 air-conditioner:3
 off 234567890 air-conditioner:3
+bind-sensor 234567890 air-conditioner:3 345678901 temperature:3:7
+status 234567890
+unbind-sensor 234567890 air-conditioner:3
 ```
 
 `list` 和 `status DID` 显示设备品类、功能能力、绑定与生效补丁。`core` 是用途说明，可有多个或没有，不影响功能接入和控制；必须明确指定控制目标。`Recognition issue` 提示候选功能、可选能力或补丁的识别问题，需与已接入功能的连接、读取和通知故障区分。灯组的 `Native capabilities`、`Repaired` 和 `State source` 分别说明原生能力、成员派生的增强和状态来源，`Member relation` 提示成员定位问题。
@@ -146,6 +162,7 @@ off 234567890 air-conditioner:3
 | 窗帘位置或运动状态不更新 | 用 `status DID` 分别检查当前位置、目标、运动状态的读取和通知诊断，核对米家状态；读取成功不代表通知已就绪。来源恢复后等待重新读取与通知。 |
 | 窗帘停止或目标命令报错 | 查看 `status DID` 中的请求结果并核对实际窗帘；回执超时后命令仍可能执行，MiGate 不会重放。 |
 | 风扇状态未更新或调速报错 | 用 `status DID` 检查开关、风速、适用的模式与直吹设定及读取和通知诊断，再核对米家与实际设备。请求受理不代表状态已经回传；超时后命令仍可能执行，MiGate 不会重放。 |
+| 空调环境温度显示 `unknown` | 用 `status 空调DID` 确认绑定对象与未知原因，再查看来源设备的 `status DID` 和同步诊断。等待来源恢复并取得新的有效读数；仅供诊断的旧读数不代表当前温度。 |
 | 空调状态未更新或设置报错 | 用 `status DID` 检查当前模式、各模式控制范围、读取及通知诊断和最近命令，再核对米家与实际设备。范围未知或等待来源确认时检查连接并等待恢复；已列出的范围可能不允许当前模式下调温或所选风速。受理或超时都不能代替反馈，超时后先核对状态，MiGate 不会重放。 |
 | 功能未接入或设备不可用 | 用 `list` 或 `status DID` 查看识别问题和实际功能；没有可发布功能时会显示 `not published` 和原因。已接入但不可用时检查连接、路径、读取与通知诊断。 |
 | 灯组未出现或成员仍独立显示 | 用 `status DID` 检查组和成员的接入原因及 `Member relation`，等待云端同步；多个灯光无法定位时不会任意隐藏。 |

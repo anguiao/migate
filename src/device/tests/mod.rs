@@ -1,4 +1,5 @@
 mod air_conditioner_commands;
+mod ambient_temperature;
 mod fan;
 mod fan_commands;
 async fn next_power(

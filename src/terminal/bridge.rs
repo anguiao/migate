@@ -6,10 +6,13 @@ use super::{AuthStatus, current_time, status::timestamp};
 use crate::{
     RuntimeError,
     configuration::GroupRelation,
-    device::{Availability, Capability, Command, DeviceKey, LightMode, Power},
+    device::{
+        AmbientTemperature, Availability, Capability, Command, DeviceKey, FunctionKey, LightMode,
+        Power,
+    },
     storage::StorageError,
 };
-pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, help\nUse list to find stable function keys.";
+pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, help\nUse list to find stable function keys.";
 fn invalid(view: &View, status: &AuthStatus, now: i64, reason: &str) -> String {
     format!(
         "{reason}\n{COMMAND_HELP}\n{}",
@@ -260,9 +263,14 @@ fn observed_function_lines(
     for (name, value, source_time, received_at) in entries {
         let source_time = source_time.map_or_else(|| "unknown".into(), |time| time.to_string());
         let received_at = received_at.map_or_else(|| "unknown".into(), timestamp);
-        let diagnostic = super::status::property_diagnostics(
-            properties.iter().find(|property| property.name == name),
-        );
+        let diagnostic = super::status::property_diagnostics(properties.iter().find(|property| {
+            property.name
+                == if name == "Target temperature" {
+                    "Temperature"
+                } else {
+                    name
+                }
+        }));
         lines.push(format!("    {name}: {value}; upstream time {source_time}; received at {received_at}; {diagnostic}."));
     }
     if show_commands {
@@ -361,7 +369,7 @@ fn render(view: &View, did: Option<&str>, status: &AuthStatus, show_commands: bo
                             ac.mode.received_at,
                         ),
                         (
-                            "Temperature",
+                            "Target temperature",
                             ac.temperature
                                 .value
                                 .map_or_else(|| "unknown".into(), |value| format!("{value} °C")),
@@ -398,6 +406,49 @@ fn render(view: &View, did: Option<&str>, status: &AuthStatus, show_commands: bo
                         entries,
                         show_commands,
                     ));
+                    let ambient = snapshot
+                        .ambient_temperature()
+                        .expect("air-conditioner projection");
+                    let source = view
+                        .current
+                        .configuration
+                        .temperature_bindings
+                        .get(function.function_key());
+                    if let Some(source) = source {
+                        let device = view.get(&source.device);
+                        let name = device.as_ref().map(|device| device.label());
+                        lines.push(format!(
+                            "    Ambient source: {}/{}{}.",
+                            source.device.id,
+                            source.id,
+                            name.map(|name| format!(" ({name})")).unwrap_or_default()
+                        ));
+                        let text = match ambient {
+                            AmbientTemperature::Available(reading) => measurement_text(reading, "°C"),
+                            AmbientTemperature::SourceMissing => "unknown (source not in current directory or access revoked); upstream time unknown; received at unknown".into(),
+                            AmbientTemperature::SourceUnavailable => "unknown (temperature source unavailable); upstream time unknown; received at unknown".into(),
+                            AmbientTemperature::AwaitingReading => "unknown (awaiting a valid temperature reading); upstream time unknown; received at unknown".into(),
+                            AmbientTemperature::Unbound => unreachable!("bound source has an ambient projection"),
+                        };
+                        lines.push(format!("    Ambient temperature: {text}."));
+                        if !matches!(ambient, AmbientTemperature::Available(_))
+                            && let Some(sensor) =
+                                device.and_then(|device| device.function(&source.id))
+                            && let Some(reading) = sensor.snapshot().measurement()
+                            && reading.value.is_some()
+                        {
+                            lines.push(format!(
+                                "    Last reading (diagnostic only): {}.",
+                                measurement_text(reading, "°C")
+                            ));
+                        }
+                        lines.push(format!(
+                            "    Ambient source synchronization: {}.",
+                            status.function_sync(&source.device.id, &source.id)
+                        ));
+                    } else {
+                        lines.push("    Ambient temperature: unknown (not bound); upstream time unknown; received at unknown.".into());
+                    }
                     if ac.power.value == Some(true)
                         && ac.speed.value == Some(crate::device::AirConditionerFanSpeed::Auto)
                     {
@@ -800,7 +851,33 @@ impl Context<'_> {
         line: &str,
         now: i64,
     ) -> Result<Option<String>, StorageError> {
-        self.view().handle_line(line, now, self.status).await
+        let words = line.split_whitespace().collect::<Vec<_>>();
+        match words.as_slice() {
+            ["bind-sensor", target_did, target_id, sensor_did, sensor_id] => {
+                let target = FunctionKey::new(DeviceKey::new("xiaomi", *target_did), *target_id);
+                let source = FunctionKey::new(DeviceKey::new("xiaomi", *sensor_did), *sensor_id);
+                let result = self.app.bind_sensor(target, source);
+                Ok(Some(match result {
+                    Ok(true) => {
+                        format!("{target_did}/{target_id}: bound to {sensor_did}/{sensor_id}.")
+                    }
+                    Ok(false) => format!(
+                        "{target_did}/{target_id}: already bound to {sensor_did}/{sensor_id}."
+                    ),
+                    Err(error) => format!("Sensor binding failed: {error}"),
+                }))
+            }
+            ["unbind-sensor", target_did, target_id] => {
+                let target = FunctionKey::new(DeviceKey::new("xiaomi", *target_did), *target_id);
+                let result = self.app.unbind_sensor(&target);
+                Ok(Some(match result {
+                    Ok(true) => format!("{target_did}/{target_id}: sensor unbound."),
+                    Ok(false) => format!("{target_did}/{target_id}: sensor already unbound."),
+                    Err(error) => format!("Sensor unbinding failed: {error}"),
+                }))
+            }
+            _ => self.view().handle_line(line, now, self.status).await,
+        }
     }
 }
 

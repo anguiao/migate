@@ -435,6 +435,7 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     let mut kept_record = identity(&kept.physical_description("saved name"), 2);
     kept_record.native = Some(kept.native);
     let configuration = crate::configuration::CommittedConfiguration {
+        temperature_bindings: Default::default(),
         scope: Some(scope(&tls.credentials.uid)),
         root_version: 1,
         descriptions: vec![kept.raw],

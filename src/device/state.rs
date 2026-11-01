@@ -1,8 +1,8 @@
 use super::{
     command::{CommandCoordinator, CommandReceiver},
     model::{
-        Availability, BatterySnapshot, FunctionDescription, FunctionKey, FunctionSnapshot,
-        FunctionState, MeasurementSnapshot, PhysicalDeviceDescription, Power,
+        AmbientTemperature, Availability, BatterySnapshot, FunctionDescription, FunctionKey,
+        FunctionSnapshot, FunctionState, MeasurementSnapshot, PhysicalDeviceDescription, Power,
         TemperatureSourceState,
     },
 };
@@ -31,6 +31,7 @@ struct FanRuntime {
 }
 pub(super) struct AirConditionerRuntime {
     pub(super) snapshot: super::AirConditionerSnapshot,
+    ambient_source: Option<AmbientSource>,
     pub(super) commands: super::air_conditioner_command::AirConditionerCoordinator,
     pub(super) constraints: Option<super::air_conditioner::AirConditionerConstraints>,
     pub(super) dynamic_constraints: bool,
@@ -38,6 +39,11 @@ pub(super) struct AirConditionerRuntime {
     pub(super) planning_mode: Option<super::AirConditionerMode>,
     pub(super) observed_mode: Option<super::AirConditionerMode>,
     pub(super) mode_revision: u64,
+}
+#[derive(Clone)]
+struct AmbientSource {
+    key: FunctionKey,
+    function: Option<Function>,
 }
 struct CurtainRuntime {
     snapshot: super::CurtainSnapshot,
@@ -82,6 +88,7 @@ impl RuntimeState {
         Self {
             value: RuntimeValue::AirConditioner(Box::new(AirConditionerRuntime {
                 snapshot: super::AirConditionerSnapshot::default(),
+                ambient_source: None,
                 commands: super::air_conditioner_command::AirConditionerCoordinator::default(),
                 constraints: None,
                 dynamic_constraints: false,
@@ -579,6 +586,34 @@ impl Function {
         let physical = self.0.physical.state.lock().unwrap();
         let availability = physical.availability.clone();
         let revision = state.revision.wrapping_add(physical.revision);
+        drop(physical);
+        let (ambient_temperature, ambient_source_revision) = match &state.value {
+            RuntimeValue::AirConditioner(runtime) => match &runtime.ambient_source {
+                None => (Some(AmbientTemperature::Unbound), None),
+                Some(source) => match &source.function {
+                    None => (Some(AmbientTemperature::SourceMissing), None),
+                    Some(function) => {
+                        let snapshot = function.snapshot();
+                        let ambient = match snapshot
+                            .temperature_source()
+                            .expect("ambient source is a temperature function")
+                        {
+                            TemperatureSourceState::Unavailable => {
+                                AmbientTemperature::SourceUnavailable
+                            }
+                            TemperatureSourceState::AwaitingReading => {
+                                AmbientTemperature::AwaitingReading
+                            }
+                            TemperatureSourceState::Available(value) => {
+                                AmbientTemperature::Available(value)
+                            }
+                        };
+                        (Some(ambient), Some(snapshot.revision))
+                    }
+                },
+            },
+            _ => (None, None),
+        };
         let temperature_source = match &state.value {
             RuntimeValue::Measurement(measurement) => measurement.temperature_source,
             _ => None,
@@ -654,7 +689,44 @@ impl Function {
             availability,
             revision,
             temperature_source,
+            ambient_temperature,
+            ambient_source_revision,
         }
+    }
+    /// Replace the associated ambient source after the configuration commits.
+    pub(crate) fn set_ambient_temperature_source(
+        &self,
+        source: Option<(FunctionKey, Option<Function>)>,
+    ) {
+        let mut state = self.0.state.lock().unwrap();
+        let runtime = state
+            .air_conditioner_mut()
+            .expect("air-conditioner function");
+        let next = source.map(|(key, function)| AmbientSource { key, function });
+        let same = match (&runtime.ambient_source, &next) {
+            (None, None) => true,
+            (Some(before), Some(after)) => {
+                before.key == after.key
+                    && match (&before.function, &after.function) {
+                        (None, None) => true,
+                        (Some(before), Some(after)) => Arc::ptr_eq(&before.0, &after.0),
+                        _ => false,
+                    }
+            }
+            _ => false,
+        };
+        if !same {
+            runtime.ambient_source = next;
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+    }
+    fn ambient_source(&self) -> Option<Function> {
+        let state = self.0.state.lock().unwrap();
+        state
+            .air_conditioner()
+            .and_then(|runtime| runtime.ambient_source.as_ref())
+            .and_then(|source| source.function.clone())
     }
     /// Update the function's acquisition eligibility without changing its last reading.
     pub(crate) fn set_temperature_source_available(&self, available: bool) {
@@ -1032,9 +1104,11 @@ impl Function {
         self.0.submitted.notify(usize::MAX);
     }
     pub fn subscribe(&self) -> FunctionChanges {
+        let snapshot = self.snapshot();
         FunctionChanges {
             function: self.clone(),
-            revision: self.snapshot().revision,
+            revision: snapshot.revision,
+            ambient_source_revision: snapshot.ambient_source_revision,
         }
     }
 }
@@ -1042,6 +1116,7 @@ impl Function {
 pub struct FunctionChanges {
     function: Function,
     revision: u64,
+    ambient_source_revision: Option<u64>,
 }
 
 /// One physical battery's independent state changes.
@@ -1094,12 +1169,31 @@ impl FunctionChanges {
         loop {
             let listener = self.function.0.changed.listen();
             let physical = self.function.0.physical.changed.listen();
+            let source = self.function.ambient_source();
+            let source_listener = source.as_ref().map(|source| source.0.changed.listen());
+            let source_physical = source
+                .as_ref()
+                .map(|source| source.0.physical.changed.listen());
             let snapshot = self.function.snapshot();
-            if snapshot.revision != self.revision {
+            if snapshot.revision != self.revision
+                || snapshot.ambient_source_revision != self.ambient_source_revision
+            {
                 self.revision = snapshot.revision;
+                self.ambient_source_revision = snapshot.ambient_source_revision;
                 return snapshot;
             }
-            futures_lite::future::or(listener, physical).await;
+            let local = futures_lite::future::or(listener, physical);
+            if let (Some(source_listener), Some(source_physical)) =
+                (source_listener, source_physical)
+            {
+                futures_lite::future::or(
+                    local,
+                    futures_lite::future::or(source_listener, source_physical),
+                )
+                .await;
+            } else {
+                local.await;
+            }
         }
     }
 }

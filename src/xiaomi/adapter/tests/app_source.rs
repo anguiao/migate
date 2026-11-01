@@ -130,6 +130,49 @@ impl AppSource {
         }
     }
 
+    pub(crate) fn confirm_all(&self) {
+        for (did, slot) in &mut self.handle.0.live.borrow_mut().devices {
+            slot.confirmed = true;
+            let raw = &slot.committed.as_ref().unwrap().raw;
+            slot.cloud_access = Some(crate::xiaomi::cloud::CloudDeviceInfo {
+                did: did.clone(),
+                model: raw.model.clone(),
+                instance_type: raw.instance_type.clone(),
+                online: false,
+            });
+        }
+    }
+
+    pub(crate) fn forbid(&self, did: &str) {
+        self.handle
+            .0
+            .live
+            .borrow_mut()
+            .devices
+            .get_mut(did)
+            .unwrap()
+            .cloud_forbidden = true;
+    }
+
+    pub(crate) fn allow(&self, did: &str) {
+        self.handle
+            .0
+            .live
+            .borrow_mut()
+            .devices
+            .get_mut(did)
+            .unwrap()
+            .cloud_forbidden = false;
+    }
+
+    pub(crate) fn remove(&self, did: &str) {
+        self.handle.0.remove(did).unwrap();
+    }
+
+    pub(crate) fn scope(&self, scope: crate::configuration::Scope) {
+        self.handle.0.live.borrow_mut().scope = Some(scope);
+    }
+
     pub(crate) fn describe(&self, description: PhysicalDeviceDescription) {
         let mut live = self.handle.0.live.borrow_mut();
         let slot = live

@@ -102,6 +102,35 @@ impl AuthStatus {
             .unwrap_or_default()
     }
 
+    pub(super) fn function_sync(&self, did: &str, id: &str) -> String {
+        let adapter = self.adapter.borrow();
+        let Some(function) = adapter
+            .as_ref()
+            .and_then(|adapter| adapter.devices.iter().find(|device| device.did == did))
+            .and_then(|device| {
+                device
+                    .functions
+                    .iter()
+                    .find(|function| function.function == id)
+            })
+        else {
+            return "synchronization diagnostics unavailable".into();
+        };
+        let mut details = format!(
+            "selected read {}; notification source {}; observation source {}",
+            function.selected_read.map(path).unwrap_or("none"),
+            function.notification_source.map(path).unwrap_or("none"),
+            function.observation_source.map(path).unwrap_or("unknown")
+        );
+        if let Some(reason) = &function.read_problem {
+            let _ = write!(details, "; read: {reason}");
+        }
+        if let Some(reason) = &function.sync_limited_reason {
+            let _ = write!(details, "; synchronization limited: {reason}");
+        }
+        details
+    }
+
     pub(super) fn function_commands(&self, did: &str, id: &str) -> Vec<String> {
         self.adapter
             .borrow()

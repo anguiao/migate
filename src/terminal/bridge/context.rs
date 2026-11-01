@@ -9,7 +9,7 @@ use std::{fmt::Write as _, rc::Rc};
 /// Every command takes the current effective version once; hidden members stay
 /// visible and controllable.
 pub(crate) struct Context<'a> {
-    app: Rc<App>,
+    pub(super) app: Rc<App>,
     pub(super) status: &'a AuthStatus,
 }
 

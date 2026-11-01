@@ -127,12 +127,18 @@ pub(crate) fn plan<Shape: PartialEq>(
     }
     next_devices.sort_by(|a, b| a.key.cmp(&b.key));
 
+    let temperature_bindings = if current.scope.as_ref() == Some(&scope) {
+        current.temperature_bindings.clone()
+    } else {
+        BTreeMap::new()
+    };
     let mut configuration = CommittedConfiguration {
         scope: Some(scope),
         root_version: current.root_version,
         devices: next_devices,
         descriptions,
         groups: facts.relations,
+        temperature_bindings,
     };
     let derived = configuration.derive();
     let mut root_changed = current_derived.published != derived.published;

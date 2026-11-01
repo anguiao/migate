@@ -4,7 +4,7 @@ use crate::{
     configuration::{
         CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation, Scope,
     },
-    device::DeviceKey,
+    device::{DeviceKey, FunctionKey},
     xiaomi::capability::RawDescription,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -32,6 +32,39 @@ struct WireConfiguration {
     devices: Vec<WireIdentity>,
     descriptions: Vec<WireDescription>,
     groups: Vec<WireGroup>,
+    temperature_bindings: Vec<WireTemperatureBinding>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTemperatureBinding {
+    target: WireFunctionKey,
+    source: WireFunctionKey,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireFunctionKey {
+    source: String,
+    device_id: String,
+    function_id: String,
+}
+
+impl WireFunctionKey {
+    fn from_key(key: &FunctionKey) -> Self {
+        Self {
+            source: key.device.source.clone(),
+            device_id: key.device.id.clone(),
+            function_id: key.id.clone(),
+        }
+    }
+
+    fn into_key(self) -> FunctionKey {
+        FunctionKey::new(
+            DeviceKey::new(self.source, self.device_id),
+            self.function_id,
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -122,6 +155,14 @@ impl WireConfiguration {
                 .iter()
                 .map(WireGroup::from_relation)
                 .collect(),
+            temperature_bindings: configuration
+                .temperature_bindings
+                .iter()
+                .map(|(target, source)| WireTemperatureBinding {
+                    target: WireFunctionKey::from_key(target),
+                    source: WireFunctionKey::from_key(source),
+                })
+                .collect(),
         }
     }
 
@@ -133,6 +174,15 @@ impl WireConfiguration {
                 uid: scope.uid,
                 home_id: scope.home_id,
             });
+        let mut temperature_bindings = std::collections::BTreeMap::new();
+        for binding in self.temperature_bindings {
+            if temperature_bindings
+                .insert(binding.target.into_key(), binding.source.into_key())
+                .is_some()
+            {
+                return Err("Temperature binding target is duplicated");
+            }
+        }
         let configuration = CommittedConfiguration {
             scope,
             root_version: self.root_version,
@@ -151,6 +201,7 @@ impl WireConfiguration {
                 .into_iter()
                 .map(WireGroup::into_relation)
                 .collect(),
+            temperature_bindings,
         };
         configuration.validate()?;
         Ok(configuration)

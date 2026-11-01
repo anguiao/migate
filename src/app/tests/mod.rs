@@ -2,6 +2,7 @@ mod configuration;
 mod labels;
 mod lifecycle;
 mod process;
+mod sensor_binding;
 
 use crate::{
     device::{DeviceKey, FunctionDescription, FunctionKind, PhysicalDeviceDescription},

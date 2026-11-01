@@ -127,6 +127,7 @@ pub(super) fn scope(uid: &str) -> Scope {
 pub(super) fn commit_natives(store: &Store, uid: &str, natives: &[SourceFixture]) {
     use crate::configuration::{CommittedConfiguration, CommittedDevice, CommittedFunction};
     let mut configuration = CommittedConfiguration {
+        temperature_bindings: Default::default(),
         scope: Some(scope(uid)),
         root_version: 1,
         descriptions: Vec::new(),

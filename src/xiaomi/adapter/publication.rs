@@ -73,6 +73,34 @@ impl SourceHandle {
             .collect()
     }
 
+    /// Binding requires confirmed membership and unrevoked source authority,
+    /// but does not require the device to be online.
+    pub(crate) fn binding_accessible(
+        &self,
+        scope: &Option<crate::configuration::Scope>,
+        key: &DeviceKey,
+    ) -> bool {
+        let live = self.0.live.borrow();
+        live.scope == *scope
+            && live.scope.is_some()
+            && live.devices.get(&key.id).is_some_and(|slot| {
+                key.source == "xiaomi"
+                    && slot.confirmed
+                    && ((slot.cloud_access.is_some() && !slot.cloud_forbidden)
+                        || slot.access.as_ref().is_some_and(|access| {
+                            access.as_ref().is_ok_and(|access| access.spec_v2_access)
+                        }))
+                    && slot
+                        .committed
+                        .as_ref()
+                        .is_some_and(|source| source.raw.key == *key)
+                    && slot
+                        .admitted
+                        .as_ref()
+                        .is_some_and(|work| !work.life.is_closed())
+            })
+    }
+
     pub(crate) fn committed_graph(&self) -> Rc<crate::configuration::DerivedConfiguration> {
         self.0.graph.borrow().clone()
     }

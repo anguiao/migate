@@ -440,6 +440,7 @@ fn in_memory_native_key_mismatch_is_rejected() {
     )
     .unwrap();
     let configuration = CommittedConfiguration {
+        temperature_bindings: Default::default(),
         scope: Some(scope()),
         root_version: 1,
         descriptions: Vec::new(),

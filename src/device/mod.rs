@@ -30,11 +30,11 @@ pub use fan_command::{FanAction, FanCommand, FanRequest};
 pub use light_command::{LightColorTarget, LightTarget};
 pub(crate) use model::mired_span;
 pub use model::{
-    Availability, BatterySnapshot, Capability, Command, CommandError, CurtainMotion,
-    CurtainSnapshot, DeviceKey, FanSnapshot, FunctionDescription, FunctionKind, FunctionSnapshot,
-    FunctionState, LightMode, LightPatch, LightProfile, LightProfileKind, LightSnapshot,
-    MeasurementRange, MeasurementSnapshot, NumericRange, PhysicalDeviceDescription, Power, Rgb,
-    StateInput, StateSnapshot, TemperatureInterval, TemperatureSourceState,
+    AmbientTemperature, Availability, BatterySnapshot, Capability, Command, CommandError,
+    CurtainMotion, CurtainSnapshot, DeviceKey, FanSnapshot, FunctionDescription, FunctionKind,
+    FunctionSnapshot, FunctionState, LightMode, LightPatch, LightProfile, LightProfileKind,
+    LightSnapshot, MeasurementRange, MeasurementSnapshot, NumericRange, PhysicalDeviceDescription,
+    Power, Rgb, StateInput, StateSnapshot, TemperatureInterval, TemperatureSourceState,
 };
 pub(crate) use model::{CurtainValue, FanValue, FunctionKey};
 pub use registry::DeviceRegistry;
