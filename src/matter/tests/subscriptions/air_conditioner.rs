@@ -2,8 +2,8 @@ use super::*;
 use crate::device::{
     AirConditionerCommand as Command, AirConditionerFanSpeed as Speed, AirConditionerMode as Mode,
     AirConditionerStep as Step, AirConditionerValue as Value, CommandReceiver, DeviceKey,
-    DeviceRequest, FunctionDescription, FunctionKind, PhysicalDevice, PhysicalDeviceDescription,
-    TemperatureGrid,
+    DeviceRequest, FunctionDescription, FunctionKind, MeasurementRange, PhysicalDevice,
+    PhysicalDeviceDescription, TemperatureGrid,
 };
 
 fn device() -> (PhysicalDevice, CommandReceiver) {
@@ -24,6 +24,179 @@ fn device() -> (PhysicalDevice, CommandReceiver) {
     );
     device.set_availability(Availability::Available);
     (device, receivers.remove(0))
+}
+
+#[test]
+fn locked_stack_ambient_subscription_tracks_values_null_and_ignores_time_only_changes() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path()).unwrap();
+            let identity = store.load_identity().unwrap();
+            let info = basic_info(&identity);
+            let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            let protocol = StoreAdapter::new(store.matter());
+            let kv = matter.kv(protocol.clone());
+            matter.startup(&kv).unwrap();
+            let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+            connect(&matter, SERVER_ID, CLIENT_ID, 96);
+            connect(&client, CLIENT_ID, SERVER_ID, 96);
+            let crypto = test_only_crypto();
+            let buffers: MatterBuffers = MatterBuffers::new();
+            let state: InteractionModelState = InteractionModelState::new();
+            let (device, mut receiver) = device();
+            let function = &device.functions()[0];
+            let sensor_device = PhysicalDevice::new(
+                PhysicalDeviceDescription::new(
+                    DeviceKey::new("xiaomi", "sensor"),
+                    "Sensor",
+                    vec![FunctionDescription {
+                        id: "temperature:3:7".into(),
+                        label: "Temperature".into(),
+                        kind: FunctionKind::Temperature(
+                            MeasurementRange::new(-30.0, 100.0).unwrap(),
+                        ),
+                    }],
+                )
+                .unwrap(),
+            )
+            .0;
+            let sensor = &sensor_device.functions()[0];
+            let handler = model_handler(vec![single_entry(&device)]);
+            let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+            let incoming = Pipe::default();
+            let outgoing = Pipe::default();
+            let responder = DefaultResponder::new(&im);
+            block_on(async {
+                im.startup().await.unwrap();
+                let services = async {
+                    or(
+                        matter.run(
+                            &crypto,
+                            SendPipe(&outgoing),
+                            ReceivePipe(&incoming),
+                            NoNetwork,
+                        ),
+                        or(
+                            client.run(
+                                &crypto,
+                                SendPipe(&incoming),
+                                ReceivePipe(&outgoing),
+                                NoNetwork,
+                            ),
+                            or(responder.run::<4, 4>(), im.run()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    panic!("ambient subscription services exited");
+                };
+                let controller = async {
+                    let paths = [AttrPath::from_gp(&GenericPath::new(
+                        Some(2),
+                        Some(0x201),
+                        Some(0),
+                    ))];
+                    let (id, initial) = subscribe_paths(&client, &paths).await.unwrap();
+                    let (mut version, value) = initial.ambient_temperature.unwrap();
+                    assert_eq!(value, None);
+                    wait_committed(&state).await;
+                    function.set_ambient_temperature_source(Some((
+                        sensor.function_key().clone(),
+                        Some(sensor.clone()),
+                    )));
+                    sensor.set_temperature_source_available(true);
+                    sensor.observe_measurement(0.0, Some(1), 1).unwrap();
+                    let zero = receive_observed(&client, id)
+                        .await
+                        .unwrap()
+                        .ambient_temperature
+                        .unwrap();
+                    assert_eq!(zero.1, Some(0));
+                    assert_ne!(zero.0, version);
+                    version = zero.0;
+                    wait_committed(&state).await;
+                    sensor.observe_measurement(21.5, Some(2), 2).unwrap();
+                    let next = receive_observed(&client, id)
+                        .await
+                        .unwrap()
+                        .ambient_temperature
+                        .unwrap();
+                    assert_eq!(next.1, Some(2150));
+                    assert_ne!(next.0, version);
+                    version = next.0;
+                    wait_committed(&state).await;
+                    sensor.observe_measurement(21.5, Some(3), 3).unwrap();
+                    or(
+                        async {
+                            let report = receive_observed(&client, id).await.unwrap();
+                            panic!("unexpected time-only report: {report:?}");
+                        },
+                        async { async_io::Timer::after(Duration::from_millis(200)).await },
+                    )
+                    .await;
+                    sensor.set_temperature_source_available(false);
+                    let unknown = receive_observed(&client, id)
+                        .await
+                        .unwrap()
+                        .ambient_temperature
+                        .unwrap();
+                    assert_eq!(unknown.1, None);
+                    assert_ne!(unknown.0, version);
+                    version = unknown.0;
+                    wait_committed(&state).await;
+                    sensor.set_temperature_source_available(true);
+                    sensor.observe_measurement(23.0, Some(4), 4).unwrap();
+                    let restored = receive_observed(&client, id)
+                        .await
+                        .unwrap()
+                        .ambient_temperature
+                        .unwrap();
+                    assert_eq!(restored.1, Some(2300));
+                    assert_ne!(restored.0, version);
+                    version = restored.0;
+                    wait_committed(&state).await;
+                    function.set_ambient_temperature_source(None);
+                    let unbound = receive_observed(&client, id)
+                        .await
+                        .unwrap()
+                        .ambient_temperature
+                        .unwrap();
+                    assert_eq!(unbound.1, None);
+                    assert_ne!(unbound.0, version);
+                    wait_committed(&state).await;
+                    function.set_ambient_temperature_source(Some((
+                        sensor.function_key().clone(),
+                        Some(sensor.clone()),
+                    )));
+                    let rebound = receive_observed(&client, id)
+                        .await
+                        .unwrap()
+                        .ambient_temperature
+                        .unwrap();
+                    assert_eq!(rebound.1, Some(2300));
+                    assert_ne!(rebound.0, unbound.0);
+                    assert!(
+                        futures_lite::future::poll_once(receiver.next_operation())
+                            .await
+                            .is_none()
+                    );
+                };
+                or(
+                    services,
+                    or(controller, async {
+                        async_io::Timer::after(Duration::from_secs(8)).await;
+                        panic!("ambient subscription timed out");
+                    }),
+                )
+                .await;
+            });
+            protocol.check_failure().unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

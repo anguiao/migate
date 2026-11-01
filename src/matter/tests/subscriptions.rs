@@ -517,6 +517,7 @@ struct Observed {
     curtain: std::collections::BTreeMap<u32, (u32, Option<u16>)>,
     fan: std::collections::BTreeMap<u32, (u32, u8)>,
     thermostat: std::collections::BTreeMap<u32, (u32, i16)>,
+    ambient_temperature: Option<(u32, Option<i16>)>,
 }
 impl Observed {
     fn add(&mut self, report: &ReportDataResp<'_>) {
@@ -570,6 +571,16 @@ impl Observed {
                                     attribute,
                                     (data.data_ver.unwrap(), data.data.u8().unwrap()),
                                 );
+                            }
+                            (Some(0x201), Some(0)) => {
+                                self.ambient_temperature = Some((
+                                    data.data_ver.unwrap(),
+                                    if data.data.null().is_ok() {
+                                        None
+                                    } else {
+                                        Some(data.data.i16().unwrap())
+                                    },
+                                ));
                             }
                             (Some(0x201), Some(attribute)) => {
                                 let value = if attribute == 28 {

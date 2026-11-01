@@ -4,8 +4,8 @@ use super::support::{
 use crate::device::{
     AirConditionerCommand, AirConditionerFanSpeed as Speed, AirConditionerMode as Mode,
     AirConditionerStep as Step, AirConditionerValue as Value, Availability, CommandReceiver,
-    DeviceKey, DeviceRequest, FunctionDescription, FunctionKind, PhysicalDevice,
-    PhysicalDeviceDescription, TemperatureGrid,
+    DeviceKey, DeviceRequest, FunctionDescription, FunctionKey, FunctionKind, MeasurementRange,
+    PhysicalDevice, PhysicalDeviceDescription, TemperatureGrid,
 };
 use futures_lite::future::{block_on, poll_once};
 use rs_matter::{
@@ -36,6 +36,22 @@ fn device(swing: bool) -> (PhysicalDevice, CommandReceiver) {
     (device, receivers.remove(0))
 }
 
+fn sensor() -> PhysicalDevice {
+    PhysicalDevice::new(
+        PhysicalDeviceDescription::new(
+            DeviceKey::new("xiaomi", "sensor"),
+            "Sensor",
+            vec![FunctionDescription {
+                id: "temperature:3:7".into(),
+                label: "Temperature".into(),
+                kind: FunctionKind::Temperature(MeasurementRange::new(-300.0, 400.0).unwrap()),
+            }],
+        )
+        .unwrap(),
+    )
+    .0
+}
+
 #[test]
 fn publishes_thermostat_and_only_declared_features() {
     for swing in [false, true] {
@@ -43,15 +59,17 @@ fn publishes_thermostat_and_only_declared_features() {
         let model = model_handler(vec![single_entry(&device)]);
         model.access(|node| {
             let endpoint = node.endpoint(2).unwrap();
-            assert!(
+            assert_eq!(
                 endpoint
                     .device_types
                     .iter()
-                    .any(|kind| kind.dtype == 0x301 && kind.drev == 6)
+                    .map(|kind| (kind.dtype, kind.drev))
+                    .collect::<Vec<_>>(),
+                [(0x301, 6), (0x2b, 4)]
             );
             assert_eq!(endpoint.cluster(6).unwrap().feature_map, 2);
             let thermostat = endpoint.cluster(0x201).unwrap();
-            assert_eq!((thermostat.revision, thermostat.feature_map), (11, 99));
+            assert_eq!((thermostat.revision, thermostat.feature_map), (11, 35));
             for id in [0, 3, 4, 5, 6, 17, 18, 25, 27, 28] {
                 assert!(thermostat.attribute(id).is_some());
             }
@@ -69,6 +87,96 @@ fn publishes_thermostat_and_only_declared_features() {
             assert_eq!(fan.attribute(8).is_some(), swing);
         });
     }
+}
+
+#[test]
+fn ambient_temperature_reads_versions_and_reports_only_protocol_value_changes() {
+    let (device, mut receiver) = device(true);
+    let sensor_device = sensor();
+    let sensor = &sensor_device.functions()[0];
+    let ac = &device.functions()[0];
+    fan_model!(&device, handler, im);
+    let ctx = Context::new(&im, 0x201, 0);
+    block_on(async {
+        let read = || read_bytes(&handler, &ctx);
+        let first = read().await.unwrap();
+        assert!(report_value(&first).null().is_ok());
+        let initial_version = report_dataver(&first);
+        let mut run = pin!(handler.run(&ctx));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        ctx.changes.borrow_mut().clear();
+
+        ac.set_ambient_temperature_source(Some((
+            sensor.function_key().clone(),
+            Some(sensor.clone()),
+        )));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().is_empty());
+        sensor.set_temperature_source_available(true);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().is_empty());
+
+        // The target setpoint stays independent of the sensor value.
+        ac.observe_air_conditioner(Value::Temperature(24), Some(1), 1);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        ctx.changes.borrow_mut().clear();
+        let mut version = report_dataver(&read().await.unwrap());
+        assert_ne!(version, initial_version);
+        for (value, expected) in [
+            (0.0, Some(0)),
+            (21.234, Some(2123)),
+            (400.0, None),
+            (22.0, Some(2200)),
+        ] {
+            sensor.observe_measurement(value, Some(2), 2).unwrap();
+            assert!(poll_once(run.as_mut()).await.is_none());
+            assert_eq!(ctx.changes.replace(Vec::new()), [(2, 0x201, 0)]);
+            let bytes = read().await.unwrap();
+            match expected {
+                Some(expected) => assert_eq!(report_value(&bytes).i16().unwrap(), expected),
+                None => assert!(report_value(&bytes).null().is_ok()),
+            }
+            let next = report_dataver(&bytes);
+            assert_ne!(next, version);
+            version = next;
+            assert_eq!(
+                crate::matter::measurement_mapping_issue(ac),
+                (value == 400.0).then_some("native ambient temperature cannot be represented")
+            );
+            assert_eq!(sensor.snapshot().measurement().unwrap().value, Some(value));
+        }
+        sensor.observe_measurement(22.004, Some(3), 3).unwrap();
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().is_empty());
+        assert_eq!(report_dataver(&read().await.unwrap()), version);
+        sensor.observe_measurement(22.004, Some(4), 4).unwrap();
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().is_empty());
+        assert_eq!(report_dataver(&read().await.unwrap()), version);
+
+        sensor.set_temperature_source_available(false);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert_eq!(ctx.changes.replace(Vec::new()), [(2, 0x201, 0)]);
+        let bytes = read().await.unwrap();
+        assert!(report_value(&bytes).null().is_ok());
+        assert_ne!(report_dataver(&bytes), version);
+        version = report_dataver(&bytes);
+        ac.set_ambient_temperature_source(Some((
+            FunctionKey::new(DeviceKey::new("xiaomi", "missing"), "temperature:3:7"),
+            None,
+        )));
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().is_empty());
+        ac.set_ambient_temperature_source(None);
+        assert!(poll_once(run.as_mut()).await.is_none());
+        assert!(ctx.changes.borrow().is_empty());
+        assert_eq!(report_dataver(&read().await.unwrap()), version);
+        assert_eq!(
+            ac.snapshot().air_conditioner().unwrap().temperature.value,
+            Some(24)
+        );
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
 }
 
 #[test]

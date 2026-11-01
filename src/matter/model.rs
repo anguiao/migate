@@ -48,6 +48,18 @@ pub(super) use basic_info::{basic_info, persist_basic_info, prepare_basic_info};
 use endpoint::{Entry, Role};
 use function::{FunctionHandler, FunctionHandlerKind};
 
+const FAN_DEVICE_TYPE: DeviceType = DeviceType {
+    dtype: 0x002b,
+    drev: 4,
+};
+pub(super) const AIR_CONDITIONER_DEVICE_TYPES: &[DeviceType] = &[
+    DeviceType {
+        dtype: 0x0301,
+        drev: 6,
+    },
+    FAN_DEVICE_TYPE,
+];
+
 const AGGREGATOR_ENDPOINT: u16 = 1;
 const ROOT: Endpoint<'static> = root_endpoint!(eth);
 const AGGREGATOR: Endpoint<'static> = Endpoint::new(

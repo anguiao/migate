@@ -26,6 +26,10 @@ fn description(did: &str, kind: FunctionKind, id: &str) -> PhysicalDeviceDescrip
 }
 
 fn setup(store: &Store) -> AppSource {
+    setup_with_sensor_range(store, MeasurementRange::new(-30.0, 100.0).unwrap())
+}
+
+fn setup_with_sensor_range(store: &Store, sensor_range: MeasurementRange) -> AppSource {
     let devices = [
         description(
             "ac",
@@ -37,7 +41,7 @@ fn setup(store: &Store) -> AppSource {
         ),
         description(
             "sensor",
-            FunctionKind::Temperature(MeasurementRange::new(-30.0, 100.0).unwrap()),
+            FunctionKind::Temperature(sensor_range),
             "temperature:3:1001",
         ),
         description(
@@ -78,11 +82,17 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
-        let source = setup(&store);
+        let source = setup_with_sensor_range(&store, MeasurementRange::new(-30.0, 400.0).unwrap());
         let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
         let status = status(&store);
         let terminal = Context::committed(app.clone(), &status);
         let before = app.current().configuration.clone();
+        let source_event = app.listen();
+        let published = app
+            .frozen()
+            .into_iter()
+            .find(|entry| entry.device.key().id == "ac")
+            .unwrap();
         let sensor = app
             .current()
             .devices()
@@ -162,6 +172,28 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
         );
         assert_eq!(app.current().configuration.devices, before.devices);
         assert_eq!(
+            app.frozen()
+                .into_iter()
+                .find(|entry| entry.device.key().id == "ac")
+                .unwrap()
+                .identity,
+            published.identity
+        );
+        assert!(matches!(
+            published
+                .device
+                .function("air-conditioner:3")
+                .unwrap()
+                .snapshot()
+                .ambient_temperature(),
+            Some(crate::device::AmbientTemperature::Available(reading)) if reading.value == Some(21.5)
+        ));
+        assert!(
+            futures_lite::future::poll_once(source_event)
+                .await
+                .is_none()
+        );
+        assert_eq!(
             store.devices().load_configuration().unwrap(),
             app.current().configuration
         );
@@ -174,6 +206,33 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
             .unwrap()
             .unwrap();
         assert!(repeated.contains("already bound"), "{repeated}");
+        let native = before
+            .device(&DeviceKey::new("xiaomi", "sensor"))
+            .unwrap()
+            .native
+            .as_ref()
+            .unwrap();
+        let measurement = native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == "temperature:3:1001")
+            .unwrap()
+            .measurement()
+            .unwrap();
+        assert_eq!(measurement.read_value(&serde_json::json!(400.0)), Ok(400.0));
+        sensor.observe_measurement(400.0, Some(101), 201).unwrap();
+        let output = terminal.handle_line("status ac", 0).await.unwrap().unwrap();
+        assert!(
+            output.contains("Ambient temperature: 400.00 °C"),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "Matter mapping unsupported: native ambient temperature cannot be represented"
+            ),
+            "{output}"
+        );
     });
 }
 

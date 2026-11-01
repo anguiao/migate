@@ -76,13 +76,13 @@ MiGate 自动接入受支持的插座、灯光、米家原生灯组、窗帘、�
 
 使用受支持的数据目录启动新版 MiGate 后，程序会按当前规则重新识别已有设备和灯组；用 `list` 或 `status DID` 查看结果。运行时型号或实例 URN 变化后，等待云端同步并检查更新结果；固件号变化本身不会触发重新获取描述，详见[已知限制](known-limitations.md#home-显示与恢复)。
 
-空调在 Home 中按温控器类型显示，图标可能为温度计。保留原数据目录可继续使用已有的设备身份、名称、端点和配对。
+空调在同一端点声明温控器和风扇类型，Home 中的入口与图标仍需真机核对。保留原数据目录可继续使用已有的设备身份、名称、端点和配对。
 
 可接入的灯组在 Home 中显示为一盏灯，已唯一匹配的成员灯光入口隐藏，仍可在米家单独控制，也可在终端用 `on DID FUNCTION`、`off DID FUNCTION` 控制；成员的其他控制、测量和状态继续发布，有其他可见功能时，如有共享电量也随父端点保留。成员有多个灯光而无法确定归属时，不会任意隐藏，独立可用的原生组功能仍可接入。用 `status` 查看组的原生能力、成员派生的 RGB、状态来源及成员关系问题。组解散后，受支持且不属于其他已发布组的成员恢复独立入口；Home 的具体显示与分组以客户端为准。
 
 窗帘可在 Home 中设置位置；是否提供独立停止入口取决于客户端。若 Home 没有停止入口，可使用标准 Matter 客户端发送 `StopMotion`。实际位置、设备目标和运动状态以设备报告为准；`status DID` 显示各项的来源时间、接收时间、读取与通知诊断，以及最近命令和回执。首次读取前为未知，读取或连接中断时保留最近有效值；状态更新依靠启动和恢复读取及设备通知。重启或恢复后不重放之前的目标或停止命令。
 
-空调可选择制冷、制热、自动、送风和除湿，以及自动／低／中／高风速；温度按整度设置，上下摆风只在设备支持时提供。独立开关保留设备记忆的模式、温度和风速；切换模式或设置非零及自动风速时会在必要时先开机。单独调温不会开机或切换模式，风速设为零会关机，上下摆风只调整摆风。可设值取决于当前控制范围；例如 mcn04 的代表配码在自动模式下不允许调温，实际配码请以 `status DID` 为准。终端对空调只提供开关控制；模式、温度、风速和摆风由支持对应功能的 Matter 客户端操作。Home 的具体入口与显示取决于客户端；若 Home 缺少自动、送风、除湿、风速或摆风入口，可使用支持对应功能的其他标准 Matter 客户端。
+空调可选择制冷、制热、自动、送风和除湿，以及自动／低／中／高风速；温度按整度设置，上下摆风只在设备支持时提供。独立开关保留设备记忆的模式、温度和风速；切换模式或设置非零及自动风速时会在必要时先开机。单独调温不会开机或切换模式，风速设为零会关机，上下摆风只调整摆风。可设值取决于当前控制范围；例如 mcn04 的代表配码在自动模式下不允许调温，实际配码请以 `status DID` 为准。终端对空调只提供开关控制；模式、温度、风速和摆风由支持对应功能的 Matter 客户端操作。Home 单入口内的自动风和环境温度未知值显示尚待真机核对。
 
 Home 选择“自动”用于切换设备的原生自动模式。若当前配码不允许自动模式调温，拖动 Home 显示的温度范围会被拒绝，界面可能回到原值；需要调温时先选择允许调温的模式，再设置整数温度。
 
@@ -95,9 +95,9 @@ bind-sensor 234567890 air-conditioner:3 345678901 temperature:3:7
 status 234567890
 ```
 
-以上标识仅为示例，请替换为 `list` 中的实际值。一个空调功能最多绑定一个温度功能，同一个温度功能可供多个空调使用；再次执行 `bind-sensor` 并指定另一来源即可更换。解除绑定时执行 `unbind-sensor 234567890 air-conditioner:3`。两端须属于当前家庭且具备访问资格，传感器暂时离线也可绑定；绑定不会控制空调或传感器。绑定随数据目录保存，重启后等待温度来源重新取得读数；切换米家账号或家庭会清空绑定。
+以上标识仅为示例，请替换为 `list` 中的实际值。一个空调功能最多绑定一个温度功能，同一个温度功能可供多个空调使用；再次执行 `bind-sensor` 并指定另一来源即可更换。解除绑定时执行 `unbind-sensor 234567890 air-conditioner:3`。两端须属于当前家庭且具备访问资格，传感器暂时离线也可绑定；环境温度仅供显示，不参与空调控制，独立传感器继续展示。绑定随数据目录保存，重启后等待温度来源重新取得读数；切换米家账号或家庭会清空绑定。
 
-`status 空调DID` 中的 `Target temperature` 是空调设定温度，`Ambient source` 和 `Ambient temperature` 是绑定的来源及环境温度，并显示来源时间和接收时间。未绑定、尚待有效读数、来源不可用或来源不在目录时，环境温度显示 `unknown` 及原因。若来源失效，`Last reading (diagnostic only)` 是仅供排障的旧读数；查看 `Ambient source synchronization` 以及传感器的 `status DID`，核对读取和通知诊断。恢复访问后等待新的有效读数；正常静默及单次同步失败不会自动丢弃已有有效读数。来源移除或撤权时绑定仍保留，也可直接按空调标识解除。
+`status 空调DID` 中的 `Target temperature` 是空调设定温度，`Ambient source` 和 `Ambient temperature` 是绑定的来源及环境温度，并显示来源时间和接收时间。未绑定、尚待有效读数、来源不可用或来源不在目录时，环境温度显示 `unknown` 及原因。若来源失效，`Last reading (diagnostic only)` 是仅供排障的旧读数；查看 `Ambient source synchronization` 以及传感器的 `status DID`，核对读取和通知诊断。若显示 `Matter mapping unsupported: native ambient temperature cannot be represented`，来源读数无法用 Matter 温度表示，原始读数仍保留，Matter 返回空值。恢复访问后等待新的有效读数；正常静默及单次同步失败不会自动丢弃已有有效读数。来源移除或撤权时绑定仍保留，也可直接按空调标识解除。
 
 风扇的百分比风速映射到设备实际可达的挡位；满足识别条件的普通数值范围（含步长）或有序离散挡位可接入，不表示设备支持连续调速。`0%` 表示关机，非零调速会先确保开机。水平摇头只调整摇头，不改变电源或风速。Home 的具体风速和摇头入口以及何时发送写入，以客户端实际提供的控件为准。
 
@@ -198,6 +198,65 @@ RUST_LOG=info,migate=debug cargo run --locked
 3. `~/.migate/`。
 
 相对路径按命令执行目录解析，启动日志会显示实际路径。异常退出后可直接使用原目录重启，无须删除 `instance.lock`。重启会恢复设备配置并重新识别已有设备，再同步目录和实际状态，不继续执行上次未完成的灯光动作，也不重放窗帘、风扇或空调命令。
+
+### 旧 schema-10 开发数据的一次性调整
+
+从空调环境温度增强之前的开发版本升级时，若原 `state.db` 的配置尚无 `temperature_bindings`，先停止所有使用该目录的 MiGate 进程，再执行以下操作。将 `.migate` 改为实际数据目录；需要 Python 3。操作备份数据库、补充空绑定，并为现有空调更新配置版本，保留身份、名称、端点和配对。备份同样包含凭据和配对信息，请妥善保管。
+
+```sh
+(
+  umask 077
+  MIGATE_ADJUST_DIR=".migate" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+import sqlite3
+
+directory = Path(os.environ["MIGATE_ADJUST_DIR"]).resolve()
+database = directory / "state.db"
+backup_path = directory / "state.db.before-air-conditioner-enhancements"
+if backup_path.exists():
+    raise SystemExit("Backup already exists; check the data directory before continuing")
+
+db = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True)
+try:
+    if db.execute("PRAGMA user_version").fetchone()[0] != 10:
+        raise SystemExit("This operation is only for schema-10 data")
+    row = db.execute("SELECT json FROM bridge_configuration WHERE id = 1").fetchone()
+    if row is None:
+        raise SystemExit("Committed configuration is missing")
+    configuration = json.loads(row[0])
+    if "temperature_bindings" in configuration:
+        raise SystemExit("temperature_bindings already exists; do not repeat this operation")
+    affected = [
+        device for device in configuration["devices"]
+        if device["native"] is not None
+        and any(function["kind"] == "air_conditioner"
+                for function in device["native"]["functions"])
+    ]
+    if affected and (configuration["root_version"] >= 0xffffffff
+                     or any(device["configuration_version"] >= 0xffffffff for device in affected)):
+        raise SystemExit("Configuration version is exhausted")
+    with sqlite3.connect(backup_path) as backup:
+        db.backup(backup)
+    configuration["temperature_bindings"] = []
+    if affected:
+        configuration["root_version"] += 1
+        for device in affected:
+            device["configuration_version"] += 1
+    with db:
+        db.execute(
+            "UPDATE bridge_configuration SET json = ? WHERE id = 1",
+            (json.dumps(configuration, ensure_ascii=False, separators=(",", ":")),),
+        )
+    print(f"Updated configuration for {len(affected)} air-conditioner device(s); backup: {backup_path}")
+finally:
+    db.close()
+PY
+)
+```
+
+成功后使用原数据目录启动 MiGate，再按上文绑定温度来源。此操作只执行一次；若提示字段或备份已存在，先核对是否已经调整，不要清空已有绑定或再次增加版本。若需撤销，停止 MiGate 后用备份恢复 `state.db`。
 
 旧格式的数据目录会被拒绝，需停止 MiGate 并选择一个为空或尚不存在的新目录，依次登录和启动。例如：
 

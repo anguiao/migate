@@ -1,10 +1,10 @@
 //! Matter projections for a single-target, standard-feedback air conditioner.
 use std::cell::Cell;
 
-use super::on_off::OnOffHandler;
+use super::{on_off::OnOffHandler, units};
 use crate::device::{
     AirConditionerCommand as Command, AirConditionerFanSpeed as Speed, AirConditionerMode as Mode,
-    CommandError, Function, FunctionKind, TemperatureGrid,
+    AmbientTemperature, CommandError, Function, FunctionKind, TemperatureGrid,
 };
 use rs_matter::{
     dm::{
@@ -131,14 +131,25 @@ struct ThermalProjection {
     power: Option<bool>,
     mode: Option<Mode>,
     temperature: Option<i16>,
+    ambient_temperature: Option<i16>,
 }
 impl ThermalProjection {
     fn read(function: &Function) -> Self {
-        let value = function.snapshot().air_conditioner().unwrap();
+        let snapshot = function.snapshot();
+        let value = snapshot.air_conditioner().unwrap();
+        let ambient_temperature = match snapshot.ambient_temperature().unwrap() {
+            AmbientTemperature::Available(reading) => units::temperature_matter_value(
+                reading
+                    .value
+                    .expect("available ambient temperature has a value"),
+            ),
+            _ => None,
+        };
         Self {
             power: value.power.value,
             mode: value.mode.value,
             temperature: value.temperature.value,
+            ambient_temperature,
         }
     }
     fn mode(self) -> Option<th::SystemModeEnum> {
@@ -175,7 +186,10 @@ impl Thermostat {
     fn sync(&self) -> ThermalProjection {
         let value = ThermalProjection::read(&self.function);
         let old = self.versioned.replace(value);
-        if old.mode() != value.mode() || old.temperature != value.temperature {
+        if old.mode() != value.mode()
+            || old.temperature != value.temperature
+            || old.ambient_temperature != value.ambient_temperature
+        {
             self.dataver.changed();
         }
         value
@@ -200,8 +214,7 @@ impl th::ClusterAsyncHandler for Thermostat {
         .with_features(
             th::Feature::HEATING.bits()
                 | th::Feature::COOLING.bits()
-                | th::Feature::AUTO_MODE.bits()
-                | th::Feature::LOCAL_TEMPERATURE_NOT_EXPOSED.bits(),
+                | th::Feature::AUTO_MODE.bits(),
         )
         .with_attrs(|a, _, _| matches!(a.id, 0 | 3..=6 | 17 | 18 | 25 | 27 | 28 | 0xfff8..=0xfffd))
         .with_cmds(with!(th::CommandId::SetpointRaiseLower))
@@ -214,7 +227,7 @@ impl th::ClusterAsyncHandler for Thermostat {
         self.dataver.changed();
     }
     async fn local_temperature(&self, _: impl ReadContext) -> Result<Nullable<i16>, Error> {
-        Ok(Nullable::new(None))
+        Ok(Nullable::new(self.sync().ambient_temperature))
     }
     async fn abs_min_heat_setpoint_limit(&self, _: impl ReadContext) -> Result<i16, Error> {
         Ok(self.grid().min() * 100)
@@ -371,6 +384,9 @@ impl th::ClusterAsyncHandler for Thermostat {
                 for id in [17, 18] {
                     ctx.notify_attr_changed(self.endpoint, 0x201, id);
                 }
+            }
+            if previous.ambient_temperature != value.ambient_temperature {
+                ctx.notify_attr_changed(self.endpoint, 0x201, 0);
             }
             changes.changed().await;
         }

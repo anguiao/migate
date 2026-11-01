@@ -6,7 +6,7 @@
 //! perform writes or fabricate optional capabilities.
 
 use crate::{
-    device::{BatterySnapshot, Function, MeasurementRange, PhysicalDevice},
+    device::{AmbientTemperature, BatterySnapshot, Function, MeasurementRange, PhysicalDevice},
     matter::units,
 };
 use rs_matter::{
@@ -33,7 +33,17 @@ pub(super) type IlluminanceHandler = MeasurementHandler<u16>;
 pub(super) type Co2Handler = MeasurementHandler<f32>;
 
 pub(crate) fn measurement_mapping_issue(function: &Function) -> Option<&'static str> {
-    let value = function.snapshot().measurement()?.value;
+    let snapshot = function.snapshot();
+    if let Some(AmbientTemperature::Available(reading)) = snapshot.ambient_temperature() {
+        return units::temperature_matter_value(
+            reading
+                .value
+                .expect("available ambient temperature has a value"),
+        )
+        .is_none()
+        .then_some("native ambient temperature cannot be represented");
+    }
+    let value = snapshot.measurement()?.value;
     let (range_supported, value_supported) = match function.description().kind {
         crate::device::FunctionKind::Temperature(range) => (
             units::temperature_matter_bounds(range).is_some(),

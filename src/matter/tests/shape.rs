@@ -165,7 +165,7 @@ fn fan_shape_tracks_optional_horizontal_swing() {
 }
 
 #[test]
-fn air_conditioner_shape_compares_only_published_temperature_bounds_and_swing() {
+fn air_conditioner_shape_compares_published_temperature_bounds_and_swing() {
     let ac = |max, step, swing| FunctionDescription {
         id: "air-conditioner:3".into(),
         label: "Air conditioner".into(),
@@ -186,4 +186,73 @@ fn air_conditioner_shape_compares_only_published_temperature_bounds_and_swing() 
         fixed_shape(&[ac(30, 1, true)]),
         fixed_shape(&[ac(28, 1, true)])
     );
+}
+
+#[test]
+fn air_conditioner_shape_tracks_the_published_types_and_thermostat_features() {
+    use crate::device::{DeviceKey, PhysicalDevice, PhysicalDeviceDescription, TemperatureGrid};
+    use crate::matter::tests::support::{model_handler, single_entry};
+    use rs_matter::dm::Metadata;
+
+    for swing in [false, true] {
+        let description = FunctionDescription {
+            id: "air-conditioner:3".into(),
+            label: "AC".into(),
+            kind: FunctionKind::AirConditioner {
+                temperature: TemperatureGrid::new(16, 30, 1).unwrap(),
+                vertical_swing: swing,
+            },
+        };
+        let device = PhysicalDevice::new(
+            PhysicalDeviceDescription::new(
+                DeviceKey::new("xiaomi", "ac"),
+                "AC",
+                vec![description.clone()],
+            )
+            .unwrap(),
+        )
+        .0;
+        let model = model_handler(vec![single_entry(&device)]);
+        let shape = fixed_shape(&[description]);
+        let FixedKind::AirConditioner {
+            device_types,
+            thermostat_features,
+            ..
+        } = &shape.functions[0].kind
+        else {
+            panic!("expected air conditioner");
+        };
+        model.access(|node| {
+            let endpoint = node.endpoint(2).unwrap();
+            assert_eq!(
+                *device_types,
+                endpoint
+                    .device_types
+                    .iter()
+                    .map(|t| (t.dtype, t.drev))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                *thermostat_features,
+                endpoint.cluster(0x201).unwrap().feature_map
+            );
+        });
+        let mut different_types = shape.clone();
+        let FixedKind::AirConditioner { device_types, .. } = &mut different_types.functions[0].kind
+        else {
+            unreachable!()
+        };
+        device_types.pop();
+        assert_ne!(shape, different_types);
+        let mut different_features = shape.clone();
+        let FixedKind::AirConditioner {
+            thermostat_features,
+            ..
+        } = &mut different_features.functions[0].kind
+        else {
+            unreachable!()
+        };
+        *thermostat_features |= 64;
+        assert_ne!(shape, different_features);
+    }
 }

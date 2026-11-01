@@ -15,14 +15,6 @@ const CURTAIN_CHILD_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     identify::IdentifyHandler::<()>::CLUSTER,
     <curtain::CurtainHandler as window_covering::ClusterAsyncHandler>::CLUSTER
 );
-const FAN: DeviceType = DeviceType {
-    dtype: 0x002b,
-    drev: 4,
-};
-const AIR_CONDITIONER_THERMOSTAT: DeviceType = DeviceType {
-    dtype: 0x0301,
-    drev: 6,
-};
 const AIR_CONDITIONER_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
@@ -256,23 +248,26 @@ impl Entry {
             Role::Child { function, .. } => match &function.kind {
                 FunctionHandlerKind::AirConditioner(_) => Endpoint::new(
                     self.endpoint,
-                    devices!(AIR_CONDITIONER_THERMOSTAT),
+                    AIR_CONDITIONER_DEVICE_TYPES,
                     AIR_CONDITIONER_CLUSTERS,
                 )
                 .with_tags(tags),
                 FunctionHandlerKind::AirConditionerSwing(_) => Endpoint::new(
                     self.endpoint,
-                    devices!(AIR_CONDITIONER_THERMOSTAT),
+                    AIR_CONDITIONER_DEVICE_TYPES,
                     AIR_CONDITIONER_ROCKING_CLUSTERS,
                 )
                 .with_tags(tags),
                 FunctionHandlerKind::Fan(_) => {
-                    Endpoint::new(self.endpoint, devices!(FAN), FAN_CHILD_CLUSTERS).with_tags(tags)
-                }
-                FunctionHandlerKind::FanSwing(_) => {
-                    Endpoint::new(self.endpoint, devices!(FAN), FAN_ROCKING_CHILD_CLUSTERS)
+                    Endpoint::new(self.endpoint, devices!(FAN_DEVICE_TYPE), FAN_CHILD_CLUSTERS)
                         .with_tags(tags)
                 }
+                FunctionHandlerKind::FanSwing(_) => Endpoint::new(
+                    self.endpoint,
+                    devices!(FAN_DEVICE_TYPE),
+                    FAN_ROCKING_CHILD_CLUSTERS,
+                )
+                .with_tags(tags),
                 FunctionHandlerKind::Curtain(_) => Endpoint::new(
                     self.endpoint,
                     devices!(WINDOW_COVERING),

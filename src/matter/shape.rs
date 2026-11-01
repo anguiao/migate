@@ -3,13 +3,15 @@
 //! The frozen model and publication compare this exact surface when deciding
 //! root/endpoint ConfigurationVersion changes: the four standard light
 //! profiles with their published CT mired bounds, projected measurement ranges,
-//! visible function order and child tags, and the physical battery capability
-//! that decides the parent Power Source topology. Endpoint numbers, bindings,
-//! live state and every generated attribute/command are deliberately excluded.
+//! air-conditioner device types and thermostat features, visible function order
+//! and child tags, and the physical battery capability that decides the parent
+//! Power Source topology. Endpoint numbers, bindings, live state and every
+//! generated attribute/command are deliberately excluded.
 //! Equivalent Kelvin encodings of the same mired span compare equal.
 
-use super::units;
+use super::{air_conditioner, model, units};
 use crate::device::{FunctionDescription, FunctionKind, LightProfileKind};
+use rs_matter::dm::clusters::decl::thermostat::ClusterAsyncHandler;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FixedShape {
@@ -36,6 +38,8 @@ enum FixedKind {
     AirConditioner {
         temperature: (i16, i16),
         vertical_swing: bool,
+        device_types: Vec<(u16, u16)>,
+        thermostat_features: u32,
     },
     Contact,
     Motion,
@@ -85,6 +89,11 @@ pub(crate) fn fixed_shape_with_battery<'a>(
                     } => FixedKind::AirConditioner {
                         temperature: (temperature.min(), temperature.effective_max()),
                         vertical_swing,
+                        device_types: model::AIR_CONDITIONER_DEVICE_TYPES
+                            .iter()
+                            .map(|device_type| (device_type.dtype, device_type.drev))
+                            .collect(),
+                        thermostat_features: air_conditioner::Thermostat::CLUSTER.feature_map,
                     },
                     FunctionKind::Contact => FixedKind::Contact,
                     FunctionKind::Motion => FixedKind::Motion,
