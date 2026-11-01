@@ -276,23 +276,11 @@ impl App {
         if current.configuration.temperature_bindings.get(&target) == Some(&source) {
             return Ok(false);
         }
-        let target_function = self.binding_function(&current, &target, true)?;
-        let source_function = self.binding_function(&current, &source, false)?;
+        self.validate_binding_function(&current, &target, true)?;
+        self.validate_binding_function(&current, &source, false)?;
         let mut configuration = current.configuration.clone();
-        configuration
-            .temperature_bindings
-            .insert(target, source.clone());
-        self.store
-            .devices()
-            .commit_configuration(&configuration, &[])
-            .map_err(|error| error.to_string())?;
-        target_function.set_ambient_temperature_source(Some((source, Some(source_function))));
-        *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
-            configuration,
-            derived: current.derived.clone(),
-            entries: current.entries.clone(),
-            published: current.published.clone(),
-        });
+        configuration.temperature_bindings.insert(target, source);
+        self.commit_temperature_bindings(&current, configuration)?;
         Ok(true)
     }
 
@@ -334,28 +322,35 @@ impl App {
         }
         let mut configuration = current.configuration.clone();
         configuration.temperature_bindings.remove(target);
+        self.commit_temperature_bindings(&current, configuration)?;
+        Ok(true)
+    }
+
+    fn commit_temperature_bindings(
+        &self,
+        current: &EffectiveConfiguration,
+        configuration: CommittedConfiguration,
+    ) -> Result<(), String> {
         self.store
             .devices()
             .commit_configuration(&configuration, &[])
             .map_err(|error| error.to_string())?;
-        if let Some(function) = entry_function(&current.entries, target) {
-            function.set_ambient_temperature_source(None);
-        }
+        activate_temperature_bindings(&configuration, &current.entries);
         *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
             configuration,
             derived: current.derived.clone(),
             entries: current.entries.clone(),
             published: current.published.clone(),
         });
-        Ok(true)
+        Ok(())
     }
 
-    fn binding_function(
+    fn validate_binding_function(
         &self,
         current: &EffectiveConfiguration,
         key: &FunctionKey,
         target: bool,
-    ) -> Result<Function, String> {
+    ) -> Result<(), String> {
         let label = if target { "Target" } else { "Sensor" };
         if !self
             .source
@@ -383,7 +378,7 @@ impl App {
             }
             .into());
         }
-        Ok(function)
+        Ok(())
     }
 
     /// Rename one published or hidden device through the one application
