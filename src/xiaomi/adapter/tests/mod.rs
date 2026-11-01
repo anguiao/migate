@@ -12,6 +12,7 @@ mod group_composition;
 mod groups;
 mod http_routing;
 mod lan;
+mod legacy_miio;
 mod lighting;
 mod list_scheduling;
 mod local_device_errors;

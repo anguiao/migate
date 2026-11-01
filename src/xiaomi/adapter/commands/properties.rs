@@ -108,7 +108,7 @@ pub(super) async fn submit_properties(
     if frame_current.is_some_and(|frame| !frame()) {
         return BatchAttempt::Withdrawn;
     }
-    let Some(path) = context.control_path(&did) else {
+    let Some(path) = context.control_path_for(&did, function_id) else {
         return settled(Err(CommandError::Unavailable(
             "no usable control path".into(),
         )));
@@ -121,6 +121,7 @@ pub(super) async fn submit_properties(
             let guard_context = context.clone();
             let guard_handle = handle.clone();
             let guard_did = did.clone();
+            let guard_function_id = function_id.to_owned();
             let guard_properties = properties.clone();
             let guard_gate = gate.clone();
             let guard_operation = operation.clone();
@@ -146,7 +147,7 @@ pub(super) async fn submit_properties(
                     } else if guard_frame.as_ref().is_some_and(|frame| !frame()) {
                         SendDecision::Withdraw
                     } else if matches!(
-                        guard_context.control_path(&guard_did),
+                        guard_context.control_path_for(&guard_did, &guard_function_id),
                         Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle)
                     ) {
                         SendDecision::Send
@@ -243,24 +244,47 @@ pub(super) async fn submit_properties(
             }
         }
         ControlPath::Direct(client) => {
-            let result = Box::pin(super::super::lan::set_properties(
-                &client,
-                &did,
-                &properties,
-                || {
-                    alive(work, sink)
-                        && current().is_ok()
-                        && frame_current.is_none_or(|frame| frame())
-                        && matches!(context.control_path(&did), Some(ControlPath::Direct(selected)) if selected.same(&client))
-                },
-                || {
-                    let _ = mark();
-                    operation.submitted(PathKind::Direct);
-                    if retain_feedback {
-                        gate.register_feedback_for(authority, &properties);
+            let guard = || {
+                alive(work, sink)
+                    && current().is_ok()
+                    && frame_current.is_none_or(|frame| frame())
+                    && matches!(context.control_path_for(&did, function_id), Some(ControlPath::Direct(selected)) if selected.same(&client))
+            };
+            let on_sent = || {
+                let _ = mark();
+                operation.submitted(PathKind::Direct);
+                if retain_feedback {
+                    gate.register_feedback_for(authority, &properties);
+                }
+            };
+            let result = if let Some(mapping) = context.legacy_mapping(&did) {
+                match Box::pin(super::super::legacy_miio::set_property(
+                    mapping,
+                    &client,
+                    &properties,
+                    guard,
+                    on_sent,
+                ))
+                .await
+                {
+                    Ok(results) => Ok(results),
+                    Err(super::super::legacy_miio::WriteError::Mapping) => {
+                        return settled(Err(CommandError::SendFailed(
+                            "invalid legacy miIO mapping input".into(),
+                        )));
                     }
-                },
-            )).await;
+                    Err(super::super::legacy_miio::WriteError::Request(error)) => Err(error),
+                }
+            } else {
+                Box::pin(super::super::lan::set_properties(
+                    &client,
+                    &did,
+                    &properties,
+                    guard,
+                    on_sent,
+                ))
+                .await
+            };
             if matches!(&result, Err(error) if error.stage == SendStage::BeforeSend && error.failure == Failure::Withdrawn)
             {
                 if let Err(error) = current() {

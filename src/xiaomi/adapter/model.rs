@@ -319,8 +319,14 @@ pub enum LanState {
     Ready,
     Failed,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LanProtocol {
+    Miot,
+    LegacyMcn02,
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LanStatus {
+    pub protocol: LanProtocol,
     pub state: LanState,
     pub address: Option<std::net::Ipv4Addr>,
     pub problem: Option<String>,

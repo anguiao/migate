@@ -335,7 +335,12 @@ fn format_device(status: &DeviceStatus) -> String {
     if let Some(lan) = &status.lan {
         let _ = write!(
             report,
-            "\n  Direct LAN (MIoT properties): {}; address {}; identity {}.",
+            "\n  Direct LAN ({}): {}; address {}; identity {}.",
+            match lan.protocol {
+                crate::xiaomi::adapter::LanProtocol::Miot => "MIoT properties",
+                crate::xiaomi::adapter::LanProtocol::LegacyMcn02 =>
+                    "legacy miIO mapping lumi.acpartner.mcn02",
+            },
             match lan.state {
                 crate::xiaomi::adapter::LanState::Ineligible =>
                     "ineligible (not a direct IP device)",

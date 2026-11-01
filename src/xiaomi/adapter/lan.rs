@@ -1,5 +1,5 @@
 use super::{
-    model::{AdapterError, LanState, LanStatus, RecoveryStatus},
+    model::{AdapterError, LanProtocol, LanState, LanStatus, RecoveryStatus},
     state::{Backoff, Context, Lifetime},
 };
 use crate::{
@@ -21,6 +21,16 @@ use std::{
 };
 
 pub(super) const MODEL: &str = "dmaker.fan.p5c";
+
+pub(super) fn protocol(model: &str) -> Option<LanProtocol> {
+    if model == MODEL {
+        Some(LanProtocol::Miot)
+    } else if super::legacy_miio::mapping(model).is_some() {
+        Some(LanProtocol::LegacyMcn02)
+    } else {
+        None
+    }
+}
 #[cfg(not(test))]
 const PORT: u16 = 54321;
 
@@ -88,6 +98,12 @@ impl Context {
             Duration::from_secs(10)
         }
     }
+    pub(super) fn legacy_mapping(&self, did: &str) -> Option<&'static super::legacy_miio::Mapping> {
+        let live = self.live.borrow();
+        let model = &live.devices.get(did)?.committed.as_ref()?.raw.model;
+        super::legacy_miio::mapping(model)
+    }
+
     pub(super) fn invalidate_lan_scope(&self) -> Result<(), AdapterError> {
         self.lan_scope_invalid.set(true);
         let (scope, dids) = {
@@ -152,29 +168,41 @@ impl Context {
             if self.lan_scope_invalid.get()
                 || slot.group
                 || work.life.is_closed()
-                || source.raw.model != MODEL
+                || protocol(&source.raw.model).is_none()
                 || slot
                     .cloud_access
                     .as_ref()
-                    .is_some_and(|info| info.model != MODEL)
+                    .is_some_and(|info| info.model != source.raw.model)
             {
                 None
             } else {
+                let model = &source.raw.model;
+                let mapping = super::legacy_miio::mapping(model);
                 let binding = work
                     .native
                     .device()
                     .functions()
                     .iter()
-                    .find_map(|f| f.fan().map(|fan| fan.power()));
+                    .find_map(|function| {
+                        if let Some(mapping) = mapping {
+                            let ac = function.air_conditioner()?;
+                            let bindings = ac.bindings();
+                            (bindings.len() == mapping.fields().len()
+                                && bindings.iter().all(|binding| mapping.contains(*binding)))
+                            .then(|| ac.power())
+                        } else {
+                            function.fan().map(|fan| fan.power())
+                        }
+                    });
                 let cloud = slot
                     .cloud_access
                     .as_ref()
-                    .filter(|info| info.model == MODEL)
+                    .filter(|info| info.model == *model)
                     .map(|info| info.lan.clone());
-                binding.map(|binding| (scope, binding, cloud))
+                binding.map(|binding| (scope, binding, cloud, model.clone()))
             }
         };
-        let Some((scope, binding, cloud)) = eligible else {
+        let Some((scope, binding, cloud, model)) = eligible else {
             if self.stop_lan(did) {
                 self.update_availability(did);
                 self.update_routing("direct LAN eligibility ended");
@@ -200,6 +228,7 @@ impl Context {
                 .unwrap()
                 .lan
                 .status = Some(LanStatus {
+                protocol: protocol(&model).unwrap(),
                 state: LanState::Ineligible,
                 address: None,
                 problem: None,
@@ -215,12 +244,12 @@ impl Context {
             .store
             .lan()
             .load(&scope, did)?
-            .filter(|record| record.model == MODEL);
+            .filter(|record| record.model == model);
         let candidate = match &cloud {
             Some(LanCredentials::Candidate(LanCandidate { address, token })) => Some(LanRecord {
                 scope: scope.clone(),
                 did: did.into(),
-                model: MODEL.into(),
+                model: model.clone(),
                 address: *address,
                 token: token.clone(),
             }),
@@ -241,6 +270,7 @@ impl Context {
             lan.active = None;
             lan.desired = None;
             lan.status = Some(LanStatus {
+                protocol: protocol(&model).unwrap(),
                 state,
                 address: None,
                 problem: None,
@@ -280,6 +310,7 @@ impl Context {
             let active = lan.active.is_some();
             if !active {
                 lan.status = Some(LanStatus {
+                    protocol: protocol(&model).unwrap(),
                     state: LanState::Authenticating,
                     address: Some(candidate.address),
                     problem: None,
@@ -356,12 +387,12 @@ impl Context {
             self.status_changed.notify(usize::MAX);
         }
         loop {
-            let result = probe(
+            let result = Box::pin(probe(
                 &candidate,
                 self.lan_endpoint(candidate.address),
                 binding,
                 self.lan_timeout(),
-            )
+            ))
             .await;
             match result {
                 Ok(client) => {
@@ -374,6 +405,7 @@ impl Context {
                     lan.active = Some((candidate.clone(), client));
                     lan.task = None;
                     lan.status = Some(LanStatus {
+                        protocol: protocol(&candidate.model).unwrap(),
                         state: LanState::Ready,
                         address: Some(candidate.address),
                         problem: None,
@@ -416,12 +448,12 @@ impl Context {
                     {
                         let mut moved = candidate.clone();
                         moved.address = address;
-                        if let Ok(client) = probe(
+                        if let Ok(client) = Box::pin(probe(
                             &moved,
                             self.lan_endpoint(address),
                             binding,
                             self.lan_timeout(),
-                        )
+                        ))
                         .await
                         {
                             if !self.lan_current(&did, &candidate.scope, &life) {
@@ -433,6 +465,7 @@ impl Context {
                             lan.active = Some((moved, client));
                             lan.task = None;
                             lan.status = Some(LanStatus {
+                                protocol: protocol(&candidate.model).unwrap(),
                                 state: LanState::Ready,
                                 address: Some(address),
                                 problem: None,
@@ -679,7 +712,7 @@ async fn probe(
     };
     let started = Instant::now();
     {
-        let info = client.request("miIO.info", json!([])).await?;
+        let info = Box::pin(client.request("miIO.info", json!([]))).await?;
         if info.get("model").and_then(Value::as_str) != Some(&record.model) {
             return Err(invalid(Failure::Identity));
         }
@@ -690,13 +723,27 @@ async fn probe(
                 failure: Failure::Timeout,
             });
         }
-        let result = client
-            .request_with_timeout(
-                "get_properties",
-                json!([{"did":record.did,"siid":binding.siid,"piid":binding.piid}]),
+        if let Some(mapping) = super::legacy_miio::mapping(&record.model) {
+            let result = Box::pin(client.request_with_timeout(
+                "get_prop",
+                json!(mapping.fields()),
                 remaining,
-            )
+            ))
             .await?;
+            let values = mapping
+                .decode(&result)
+                .map_err(|_| invalid(Failure::InvalidResponse))?;
+            if values.iter().any(Result::is_err) {
+                return Err(invalid(Failure::InvalidResponse));
+            }
+            return Ok(client.clone());
+        }
+        let result = Box::pin(client.request_with_timeout(
+            "get_properties",
+            json!([{"did":record.did,"siid":binding.siid,"piid":binding.piid}]),
+            remaining,
+        ))
+        .await?;
         let item = result
             .as_array()
             .and_then(|items| (items.len() == 1).then(|| &items[0]))

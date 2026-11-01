@@ -42,6 +42,7 @@ fn retired_queued_lan_task_does_not_probe(recovery: bool) {
             let lan = &mut live.devices.get_mut(did).unwrap().lan;
             lan.active = Some((record, client.clone()));
             lan.status = Some(LanStatus {
+                protocol: super::super::model::LanProtocol::Miot,
                 state: LanState::Ready,
                 address: Some("127.0.0.1".parse().unwrap()),
                 problem: None,

@@ -6,6 +6,7 @@ mod diagnostics;
 mod group_rules;
 mod groups;
 mod lan;
+mod legacy_miio;
 mod lighting;
 mod local;
 mod mcn04;
@@ -24,9 +25,9 @@ mod work;
 
 pub use model::{
     AdapterError, AdapterStatus, ChannelCommands, CommandProperty, CommandStatus, CommandTarget,
-    DeviceStatus, FunctionStatus, GatewayStatus, LanState, LanStatus, ObservedPropertyStatus,
-    PathKind, PendingDevice, RecoveryStatus, RoutingStatus, SubscriptionBinding,
-    SubscriptionStatus, TopologyReady,
+    DeviceStatus, FunctionStatus, GatewayStatus, LanProtocol, LanState, LanStatus,
+    ObservedPropertyStatus, PathKind, PendingDevice, RecoveryStatus, RoutingStatus,
+    SubscriptionBinding, SubscriptionStatus, TopologyReady,
 };
 pub use publication::SourceHandle;
 pub use routing::PathPriority;

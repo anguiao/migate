@@ -597,6 +597,7 @@ fn direct_status_identifies_running_and_scheduled_recovery() {
     let mut device = DeviceStatus {
         did: "fan".into(),
         lan: Some(LanStatus {
+            protocol: crate::xiaomi::adapter::LanProtocol::Miot,
             state: LanState::Failed,
             address: Some("192.0.2.12".parse().unwrap()),
             problem: Some("LAN request timed out".into()),
@@ -631,6 +632,12 @@ fn direct_status_identifies_running_and_scheduled_recovery() {
         "{report}"
     );
     assert!(report.contains("Direct LAN recovery: running."), "{report}");
+    device.lan.as_mut().unwrap().protocol = crate::xiaomi::adapter::LanProtocol::LegacyMcn02;
+    let report = format_device(&device);
+    assert!(
+        report.contains("Direct LAN (legacy miIO mapping lumi.acpartner.mcn02): failed"),
+        "{report}"
+    );
     device.lan.as_mut().unwrap().recovery = RecoveryStatus::Scheduled(1_700_000_060);
     let report = format_device(&device);
     assert!(

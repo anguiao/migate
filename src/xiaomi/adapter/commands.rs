@@ -418,6 +418,7 @@ async fn send_local_write(
     let guard_context = context.clone();
     let guard_handle = handle.clone();
     let guard_did = did.clone();
+    let guard_id = id.clone();
     let result_context = context.clone();
     let result_handle = handle.clone();
     let submitted = operation.clone();
@@ -428,7 +429,7 @@ async fn send_local_write(
                 || !guard_context.current_local(&guard_handle)
             {
                 SendDecision::Cancel
-            } else if matches!(guard_context.control_path(&guard_did), Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle))
+            } else if matches!(guard_context.control_path_for(&guard_did, &guard_id), Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle))
             {
                 SendDecision::Send
             } else {
@@ -592,7 +593,7 @@ async fn send_power(
             command.0.reject(request, error);
             break;
         }
-        let Some(path) = context.control_path(&did) else {
+        let Some(path) = context.control_path_for(&did, function_id) else {
             command.0.reject(
                 request,
                 CommandError::Unavailable("no usable control path".into()),
@@ -627,7 +628,7 @@ async fn send_power(
                         !work.life.is_closed()
                             && !sink.life.is_closed()
                             && request.current_result().is_ok()
-                            && matches!(context.control_path(&did), Some(ControlPath::Direct(selected)) if selected.same(&client))
+                            && matches!(context.control_path_for(&did, function_id), Some(ControlPath::Direct(selected)) if selected.same(&client))
                     },
                     || {
                         let _ = request.mark_sent();

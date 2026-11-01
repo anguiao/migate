@@ -70,7 +70,7 @@ impl Context {
         if slot
             .committed
             .as_ref()
-            .is_some_and(|source| source.raw.model != super::lan::MODEL)
+            .is_some_and(|source| super::lan::protocol(&source.raw.model).is_none())
         {
             return Err("device model not supported".into());
         }
@@ -442,8 +442,14 @@ impl Context {
         if !self.has_sensors(did) {
             return self.control_path(did);
         }
+        self.observation_path_with_direct(did, self.direct_candidate(did).ok())
+    }
+    fn observation_path_with_direct(
+        &self,
+        did: &str,
+        direct: Option<Client>,
+    ) -> Option<ControlPath> {
         let local = self.local_candidate(did, false).ok();
-        let direct = self.direct_candidate(did).ok();
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
             _ if direct.is_some() => direct.map(ControlPath::Direct),
@@ -462,8 +468,39 @@ impl Context {
         if self.is_read_only(did) {
             return None;
         }
+        self.control_path_with_direct(did, self.direct_candidate(did).ok())
+    }
+    pub(super) fn control_path_for(&self, did: &str, id: &str) -> Option<ControlPath> {
+        if self.is_read_only(did) {
+            return None;
+        }
+        self.control_path_with_direct(did, self.direct_function_candidate(did, id))
+    }
+    fn direct_function_candidate(&self, did: &str, id: &str) -> Option<Client> {
+        if let Some(mapping) = self.legacy_mapping(did) {
+            let live = self.live.borrow();
+            let ac = live
+                .devices
+                .get(did)?
+                .admitted
+                .as_ref()?
+                .native
+                .device()
+                .functions()
+                .iter()
+                .find(|function| function.id() == id)?
+                .air_conditioner()?;
+            let bindings = ac.bindings();
+            if bindings.len() != mapping.fields().len()
+                || !bindings.iter().all(|binding| mapping.contains(*binding))
+            {
+                return None;
+            }
+        }
+        self.direct_candidate(did).ok()
+    }
+    fn control_path_with_direct(&self, did: &str, direct: Option<Client>) -> Option<ControlPath> {
         let local = self.local_candidate(did, false).ok();
-        let direct = self.direct_candidate(did).ok();
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
             _ if direct.is_some() => direct.map(ControlPath::Direct),
@@ -489,10 +526,15 @@ impl Context {
         self.control_read_path(did)
     }
     pub(super) fn read_path_for(&self, did: &str, id: &str) -> Option<ControlPath> {
+        if self.is_virtual_group(did) {
+            return None;
+        }
         if self.sensor_function(did, id) {
-            self.observation_path(did)
-        } else {
-            self.control_read_path(did)
+            return self.observation_path_with_direct(did, self.direct_function_candidate(did, id));
+        }
+        match self.control_path_for(did, id) {
+            Some(ControlPath::Local(_)) if self.priority() == PathPriority::CloudFirst => None,
+            path => path,
         }
     }
     fn control_read_path(&self, did: &str) -> Option<ControlPath> {

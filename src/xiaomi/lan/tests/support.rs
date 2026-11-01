@@ -243,3 +243,127 @@ impl Drop for FakeDevice {
         self.thread.take().unwrap().join().unwrap();
     }
 }
+
+pub(crate) struct LegacyDevice {
+    pub(crate) address: SocketAddr,
+    pub(crate) requests: Arc<Mutex<Vec<Value>>>,
+    pub(crate) values: Arc<Mutex<Vec<Value>>>,
+    pub(crate) ack: Arc<Mutex<Value>>,
+    pub(crate) rejected: Arc<Mutex<BTreeMap<String, i64>>>,
+    pub(crate) drop_write: Arc<AtomicBool>,
+    pub(crate) hold_read: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl LegacyDevice {
+    pub(crate) fn new(token: Token, did: u64) -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(25)))
+            .unwrap();
+        let address = socket.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let observed = requests.clone();
+        let values = Arc::new(Mutex::new(vec![
+            json!("off"),
+            json!("cool"),
+            json!(24),
+            json!("auto_fan"),
+            json!("off"),
+        ]));
+        let feedback = values.clone();
+        let ack = Arc::new(Mutex::new(json!(["ok"])));
+        let reply = ack.clone();
+        let rejected = Arc::new(Mutex::new(BTreeMap::<String, i64>::new()));
+        let rejections = rejected.clone();
+        let drop_write = Arc::new(AtomicBool::new(false));
+        let dropping = drop_write.clone();
+        let hold_read = Arc::new(AtomicBool::new(false));
+        let holding = hold_read.clone();
+        let thread = thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            while !stopped.load(Ordering::Relaxed) {
+                let Ok((length, source)) = socket.recv_from(&mut buffer) else {
+                    continue;
+                };
+                let packet = &buffer[..length];
+                if packet == wire::HELLO {
+                    let mut hello = wire::HELLO;
+                    hello[4..12].copy_from_slice(&did.to_be_bytes());
+                    hello[12..16].copy_from_slice(&42_u32.to_be_bytes());
+                    socket.send_to(&hello, source).unwrap();
+                    continue;
+                }
+                let Some(decoded) = wire::decode(packet, &token) else {
+                    continue;
+                };
+                let request: Value = serde_json::from_slice(&decoded.2).unwrap();
+                observed.lock().unwrap().push(request.clone());
+                let method = request["method"].as_str().unwrap();
+                let response = if let Some(code) = rejections.lock().unwrap().get(method).copied() {
+                    json!({"id":request["id"], "error":{"code":code,"message":"rejected"}})
+                } else {
+                    let result = match method {
+                        "miIO.info" => json!({"model":"lumi.acpartner.mcn02"}),
+                        "get_prop" => {
+                            while holding.load(Ordering::Relaxed)
+                                && !stopped.load(Ordering::Relaxed)
+                            {
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                            if stopped.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            json!(*feedback.lock().unwrap())
+                        }
+                        "set_power" | "set_mode" | "set_tar_temp" | "set_fan_level"
+                        | "set_ver_swing" => {
+                            if dropping.load(Ordering::Relaxed) {
+                                continue;
+                            }
+                            let index = match method {
+                                "set_power" => 0,
+                                "set_mode" => 1,
+                                "set_tar_temp" => 2,
+                                "set_fan_level" => 3,
+                                "set_ver_swing" => 4,
+                                _ => unreachable!(),
+                            };
+                            feedback.lock().unwrap()[index] = request["params"][0].clone();
+                            reply.lock().unwrap().clone()
+                        }
+                        _ => panic!("unexpected method {method}"),
+                    };
+                    json!({"id":request["id"],"result":result})
+                };
+                let packet = wire::encode(
+                    decoded.0,
+                    43,
+                    &token,
+                    &serde_json::to_vec(&response).unwrap(),
+                );
+                socket.send_to(&packet, source).unwrap();
+            }
+        });
+        Self {
+            address,
+            requests,
+            values,
+            ack,
+            rejected,
+            drop_write,
+            hold_read,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for LegacyDevice {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
