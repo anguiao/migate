@@ -520,6 +520,40 @@ impl Context {
             return;
         };
         let physical = work.physical();
+        for function in physical.functions().iter().filter(|function| {
+            matches!(
+                function.description().kind,
+                crate::device::FunctionKind::Temperature(_)
+            )
+        }) {
+            let id = &function.function_key().id;
+            let read_available = self.read_path_for(did, id).is_some();
+            let source_available = read_available
+                || work
+                    .function_observer(id)
+                    .is_some_and(|source| self.source_valid_for(did, id, &source));
+            let had_source = function
+                .snapshot()
+                .temperature_source()
+                .expect("temperature function")
+                != crate::device::TemperatureSourceState::Unavailable;
+            if had_source && !source_available {
+                super::refresh::cancel_function(&work, id);
+            }
+            function.set_temperature_source_available(source_available);
+            if !had_source && source_available && read_available {
+                let binding = work
+                    .native
+                    .device()
+                    .functions()
+                    .iter()
+                    .find(|native| native.id() == id)
+                    .and_then(|native| native.measurement())
+                    .expect("installed temperature binding")
+                    .property();
+                work.request_dirty_read(id, binding);
+            }
+        }
         let was_available = physical.availability() == Availability::Available;
         physical.set_availability(if available {
             Availability::Available

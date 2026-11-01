@@ -418,3 +418,5 @@ mod sensors;
 
 mod curtain;
 mod states;
+
+mod temperature_source;

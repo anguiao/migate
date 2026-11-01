@@ -3,6 +3,7 @@ use super::{
     model::{
         Availability, BatterySnapshot, FunctionDescription, FunctionKey, FunctionSnapshot,
         FunctionState, MeasurementSnapshot, PhysicalDeviceDescription, Power,
+        TemperatureSourceState,
     },
 };
 use event_listener::Event;
@@ -12,8 +13,12 @@ enum RuntimeValue {
     Curtain(Box<CurtainRuntime>),
     Fan(Box<FanRuntime>),
     AirConditioner(Box<AirConditionerRuntime>),
-    Measurement(MeasurementSnapshot),
+    Measurement(MeasurementRuntime),
     StateSensor(super::StateSnapshot),
+}
+struct MeasurementRuntime {
+    snapshot: MeasurementSnapshot,
+    temperature_source: Option<TemperatureSourceState>,
 }
 struct ControlRuntime {
     power: Power,
@@ -88,12 +93,15 @@ impl RuntimeState {
             revision: 0,
         }
     }
-    fn measurement_state() -> Self {
+    fn measurement_state(temperature: bool) -> Self {
         Self {
-            value: RuntimeValue::Measurement(MeasurementSnapshot {
-                value: None,
-                source_time: None,
-                received_at: None,
+            value: RuntimeValue::Measurement(MeasurementRuntime {
+                snapshot: MeasurementSnapshot {
+                    value: None,
+                    source_time: None,
+                    received_at: None,
+                },
+                temperature_source: temperature.then_some(TemperatureSourceState::Unavailable),
             }),
             revision: 0,
         }
@@ -238,7 +246,7 @@ impl RuntimeState {
             | RuntimeValue::StateSensor(_) => None,
         }
     }
-    fn measurement_mut(&mut self) -> Option<&mut MeasurementSnapshot> {
+    fn measurement_mut(&mut self) -> Option<&mut MeasurementRuntime> {
         match &mut self.value {
             RuntimeValue::Measurement(measurement) => Some(measurement),
             RuntimeValue::Control(_)
@@ -527,7 +535,10 @@ impl Function {
         } else if matches!(description.kind, super::FunctionKind::AirConditioner { .. }) {
             RuntimeState::new_air_conditioner()
         } else if description.kind.is_measurement() {
-            RuntimeState::measurement_state()
+            RuntimeState::measurement_state(matches!(
+                description.kind,
+                super::FunctionKind::Temperature(_)
+            ))
         } else if description.kind.is_state_sensor() {
             RuntimeState::state_sensor()
         } else {
@@ -568,6 +579,10 @@ impl Function {
         let physical = self.0.physical.state.lock().unwrap();
         let availability = physical.availability.clone();
         let revision = state.revision.wrapping_add(physical.revision);
+        let temperature_source = match &state.value {
+            RuntimeValue::Measurement(measurement) => measurement.temperature_source,
+            _ => None,
+        };
         let state = match (&self.description().kind, &state.value) {
             (super::FunctionKind::Outlet, RuntimeValue::Control(control))
                 if control.lighting.is_none() =>
@@ -599,22 +614,22 @@ impl Function {
             }
             (super::FunctionKind::Temperature(_), RuntimeValue::Measurement(measurement)) => {
                 FunctionState::Temperature {
-                    measurement: *measurement,
+                    measurement: measurement.snapshot,
                 }
             }
             (super::FunctionKind::Humidity(_), RuntimeValue::Measurement(measurement)) => {
                 FunctionState::Humidity {
-                    measurement: *measurement,
+                    measurement: measurement.snapshot,
                 }
             }
             (super::FunctionKind::CarbonDioxide(_), RuntimeValue::Measurement(measurement)) => {
                 FunctionState::CarbonDioxide {
-                    measurement: *measurement,
+                    measurement: measurement.snapshot,
                 }
             }
             (super::FunctionKind::Illuminance(_), RuntimeValue::Measurement(measurement)) => {
                 FunctionState::Illuminance {
-                    measurement: *measurement,
+                    measurement: measurement.snapshot,
                 }
             }
             (super::FunctionKind::Contact, RuntimeValue::StateSensor(state)) => {
@@ -638,6 +653,29 @@ impl Function {
             state,
             availability,
             revision,
+            temperature_source,
+        }
+    }
+    /// Update the function's acquisition eligibility without changing its last reading.
+    pub(crate) fn set_temperature_source_available(&self, available: bool) {
+        let mut state = self.0.state.lock().unwrap();
+        let measurement = state.measurement_mut().expect("temperature function");
+        let source = measurement
+            .temperature_source
+            .as_mut()
+            .expect("temperature function");
+        let next = if available {
+            match *source {
+                TemperatureSourceState::Unavailable => TemperatureSourceState::AwaitingReading,
+                current => current,
+            }
+        } else {
+            TemperatureSourceState::Unavailable
+        };
+        if *source != next {
+            *source = next;
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
         }
     }
     /// Apply one validated measurement. Missing source time stays unknown for
@@ -660,8 +698,15 @@ impl Function {
         let current = state
             .measurement_mut()
             .expect("measurement function has measurement state");
-        if *current != observed {
-            *current = observed;
+        let next_source = match current.temperature_source {
+            Some(
+                TemperatureSourceState::AwaitingReading | TemperatureSourceState::Available(_),
+            ) => Some(TemperatureSourceState::Available(observed)),
+            other => other,
+        };
+        if current.snapshot != observed || current.temperature_source != next_source {
+            current.snapshot = observed;
+            current.temperature_source = next_source;
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
@@ -962,6 +1007,9 @@ impl Function {
         }
     }
     pub(super) fn close(&self) {
+        if matches!(self.description().kind, super::FunctionKind::Temperature(_)) {
+            self.set_temperature_source_available(false);
+        }
         let mut state = self.0.state.lock().unwrap();
         let light = self.description().kind.is_light();
         if let Some(commands) = state.commands_mut() {

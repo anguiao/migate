@@ -82,3 +82,4 @@ mod access;
 mod battery;
 mod measurements;
 mod sources;
+mod temperature_source;

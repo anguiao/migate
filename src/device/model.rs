@@ -396,6 +396,16 @@ pub struct MeasurementSnapshot {
 }
 impl Eq for MeasurementSnapshot {}
 
+/// Current eligibility of a temperature function as an ambient source.
+/// `Available` contains an observation obtained while a path was valid;
+/// the ordinary measurement snapshot can retain an older diagnostic value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TemperatureSourceState {
+    Unavailable,
+    AwaitingReading,
+    Available(MeasurementSnapshot),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurtainMotion {
     Opening,
@@ -479,6 +489,7 @@ pub struct FunctionSnapshot {
     pub state: FunctionState,
     pub availability: Availability,
     pub revision: u64,
+    pub(super) temperature_source: Option<TemperatureSourceState>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -522,6 +533,10 @@ pub enum FunctionState {
     },
 }
 impl FunctionSnapshot {
+    /// Return the temperature source state, or `None` for other functions.
+    pub fn temperature_source(&self) -> Option<TemperatureSourceState> {
+        self.temperature_source
+    }
     pub fn air_conditioner(&self) -> Option<super::AirConditionerSnapshot> {
         match self.state {
             FunctionState::AirConditioner { air_conditioner } => Some(air_conditioner),
