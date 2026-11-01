@@ -501,7 +501,6 @@ pub struct FunctionSnapshot {
     pub revision: u64,
     pub(super) temperature_source: Option<TemperatureSourceState>,
     pub(super) ambient_temperature: Option<AmbientTemperature>,
-    pub(super) ambient_source_revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

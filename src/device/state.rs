@@ -587,32 +587,29 @@ impl Function {
         let availability = physical.availability.clone();
         let revision = state.revision.wrapping_add(physical.revision);
         drop(physical);
-        let (ambient_temperature, ambient_source_revision) = match &state.value {
-            RuntimeValue::AirConditioner(runtime) => match &runtime.ambient_source {
-                None => (Some(AmbientTemperature::Unbound), None),
+        let ambient_temperature = match &state.value {
+            RuntimeValue::AirConditioner(runtime) => Some(match &runtime.ambient_source {
+                None => AmbientTemperature::Unbound,
                 Some(source) => match &source.function {
-                    None => (Some(AmbientTemperature::SourceMissing), None),
-                    Some(function) => {
-                        let snapshot = function.snapshot();
-                        let ambient = match snapshot
-                            .temperature_source()
-                            .expect("ambient source is a temperature function")
-                        {
-                            TemperatureSourceState::Unavailable => {
-                                AmbientTemperature::SourceUnavailable
-                            }
-                            TemperatureSourceState::AwaitingReading => {
-                                AmbientTemperature::AwaitingReading
-                            }
-                            TemperatureSourceState::Available(value) => {
-                                AmbientTemperature::Available(value)
-                            }
-                        };
-                        (Some(ambient), Some(snapshot.revision))
-                    }
+                    None => AmbientTemperature::SourceMissing,
+                    Some(function) => match function
+                        .snapshot()
+                        .temperature_source()
+                        .expect("ambient source is a temperature function")
+                    {
+                        TemperatureSourceState::Unavailable => {
+                            AmbientTemperature::SourceUnavailable
+                        }
+                        TemperatureSourceState::AwaitingReading => {
+                            AmbientTemperature::AwaitingReading
+                        }
+                        TemperatureSourceState::Available(value) => {
+                            AmbientTemperature::Available(value)
+                        }
+                    },
                 },
-            },
-            _ => (None, None),
+            }),
+            _ => None,
         };
         let temperature_source = match &state.value {
             RuntimeValue::Measurement(measurement) => measurement.temperature_source,
@@ -690,7 +687,6 @@ impl Function {
             revision,
             temperature_source,
             ambient_temperature,
-            ambient_source_revision,
         }
     }
     /// Replace the associated ambient source after the configuration commits.
@@ -1108,7 +1104,7 @@ impl Function {
         FunctionChanges {
             function: self.clone(),
             revision: snapshot.revision,
-            ambient_source_revision: snapshot.ambient_source_revision,
+            ambient_temperature: snapshot.ambient_temperature,
         }
     }
 }
@@ -1116,7 +1112,7 @@ impl Function {
 pub struct FunctionChanges {
     function: Function,
     revision: u64,
-    ambient_source_revision: Option<u64>,
+    ambient_temperature: Option<AmbientTemperature>,
 }
 
 /// One physical battery's independent state changes.
@@ -1171,26 +1167,17 @@ impl FunctionChanges {
             let physical = self.function.0.physical.changed.listen();
             let source = self.function.ambient_source();
             let source_listener = source.as_ref().map(|source| source.0.changed.listen());
-            let source_physical = source
-                .as_ref()
-                .map(|source| source.0.physical.changed.listen());
             let snapshot = self.function.snapshot();
             if snapshot.revision != self.revision
-                || snapshot.ambient_source_revision != self.ambient_source_revision
+                || snapshot.ambient_temperature != self.ambient_temperature
             {
                 self.revision = snapshot.revision;
-                self.ambient_source_revision = snapshot.ambient_source_revision;
+                self.ambient_temperature = snapshot.ambient_temperature;
                 return snapshot;
             }
             let local = futures_lite::future::or(listener, physical);
-            if let (Some(source_listener), Some(source_physical)) =
-                (source_listener, source_physical)
-            {
-                futures_lite::future::or(
-                    local,
-                    futures_lite::future::or(source_listener, source_physical),
-                )
-                .await;
+            if let Some(source_listener) = source_listener {
+                futures_lite::future::or(local, source_listener).await;
             } else {
                 local.await;
             }

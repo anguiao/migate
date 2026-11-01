@@ -1,6 +1,6 @@
 use crate::device::{
-    AmbientTemperature as Ambient, DeviceKey, FunctionDescription, FunctionKey, FunctionKind,
-    MeasurementRange, MeasurementSnapshot, PhysicalDevice, PhysicalDeviceDescription,
+    AmbientTemperature as Ambient, Availability, DeviceKey, FunctionDescription, FunctionKey,
+    FunctionKind, MeasurementRange, MeasurementSnapshot, PhysicalDevice, PhysicalDeviceDescription,
     TemperatureGrid,
 };
 use futures_lite::future::{block_on, poll_once};
@@ -96,6 +96,17 @@ fn subscriptions_follow_validity_readings_and_normal_source_switches() {
         )));
         assert!(
             matches!(changes.changed().await.ambient_temperature(), Some(Ambient::Available(value)) if value.value == Some(23.0))
+        );
+        other.set_availability(Availability::Available);
+        assert!(poll_once(changes.changed()).await.is_none());
+        second.observe_measurement(23.0, Some(8), 12).unwrap();
+        assert_eq!(
+            changes.changed().await.ambient_temperature(),
+            Some(Ambient::Available(MeasurementSnapshot {
+                value: Some(23.0),
+                source_time: Some(8),
+                received_at: Some(12),
+            }))
         );
         ac.set_ambient_temperature_source(Some((second.function_key().clone(), Some(second))));
         assert!(poll_once(changes.changed()).await.is_none());
