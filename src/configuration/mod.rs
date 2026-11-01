@@ -348,7 +348,7 @@ impl CommittedConfiguration {
             return Err("Committed source description is missing");
         }
         for (target, source) in &self.temperature_bindings {
-            for key in [target, source] {
+            for (key, is_target) in [(target, true), (source, false)] {
                 validate_text(&key.device.source)?;
                 validate_text(&key.device.id)?;
                 validate_text(&key.id)?;
@@ -362,12 +362,7 @@ impl CommittedConfiguration {
                 {
                     return Err("Temperature binding function identity is missing");
                 }
-            }
-            for (key, is_target) in [(target, true), (source, false)] {
-                if let Some(native) = self
-                    .device(&key.device)
-                    .and_then(|device| device.native.as_ref())
-                {
+                if let Some(native) = &device.native {
                     let function = native
                         .device()
                         .functions()
