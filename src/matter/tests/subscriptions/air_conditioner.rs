@@ -359,11 +359,11 @@ fn locked_stack_subscription_tracks_observations_across_both_clusters_without_re
                             fan_version = report.fan[&8].0;
                         }
                     }
-                    // Auto reports a known mode while its current speed remains unknown.
+                    // Auto reports placeholder current values without changing the native mode.
                     let auto_paths = paths
                         .iter()
                         .filter(|path| {
-                            path.cluster != Some(0x202) || matches!(path.attr, Some(0 | 8))
+                            path.cluster != Some(0x202) || matches!(path.attr, Some(0 | 3 | 6 | 8))
                         })
                         .cloned()
                         .collect::<Vec<_>>();
@@ -383,6 +383,29 @@ fn locked_stack_subscription_tracks_observations_across_both_clusters_without_re
                     let automatic = receive_observed(&client, auto_id).await.unwrap();
                     assert_eq!(automatic.thermostat[&28].1, 3);
                     assert_eq!(automatic.fan[&0].1, 5);
+                    assert_eq!(automatic.fan[&3].1, 33);
+                    assert_eq!(automatic.fan[&6].1, 1);
+                    let mut fan_version = automatic.fan[&0].0;
+                    for (value, mode, percent, level) in [
+                        (Value::Speed(Speed::High), 3, 100, 3),
+                        (Value::Speed(Speed::Auto), 5, 33, 1),
+                        (Value::Power(false), 0, 0, 0),
+                    ] {
+                        wait_committed(&state).await;
+                        sequence += 1;
+                        function.observe_air_conditioner(value, Some(sequence), sequence);
+                        let report = receive_observed(&client, auto_id).await.unwrap();
+                        for (attribute, expected) in [(0, mode), (3, percent), (6, level)] {
+                            assert_eq!(report.fan[&attribute].1, expected);
+                            assert_eq!(report.fan[&attribute].0, report.fan[&0].0);
+                        }
+                        assert_ne!(report.fan[&0].0, fan_version);
+                        fan_version = report.fan[&0].0;
+                    }
+                    assert_eq!(
+                        function.snapshot().air_conditioner().unwrap().speed.value,
+                        Some(Speed::Auto)
+                    );
                     assert!(
                         futures_lite::future::poll_once(receiver.next_operation())
                             .await

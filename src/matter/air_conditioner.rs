@@ -430,6 +430,10 @@ impl FanProjection {
             Speed::High => Some(3),
         })
     }
+    fn current(self) -> Result<u8, Error> {
+        // Only known Auto has no setting; 1 is a display placeholder, not a measurement.
+        Ok(self.setting()?.unwrap_or(1))
+    }
 }
 pub(super) struct AirConditionerFan<const ROCKING: bool> {
     function: Function,
@@ -526,7 +530,7 @@ impl<const ROCKING: bool> fc::ClusterAsyncHandler for AirConditionerFan<ROCKING>
         ))
     }
     async fn percent_current(&self, _: impl ReadContext) -> Result<u8, Error> {
-        Ok((u16::from(self.sync().setting()?.ok_or(ErrorCode::Failure)?) * 100 / 3) as u8)
+        Ok((u16::from(self.sync().current()?) * 100 / 3) as u8)
     }
     async fn speed_max(&self, _: impl ReadContext) -> Result<u8, Error> {
         Ok(3)
@@ -535,9 +539,7 @@ impl<const ROCKING: bool> fc::ClusterAsyncHandler for AirConditionerFan<ROCKING>
         Ok(Nullable::new(self.sync().setting()?))
     }
     async fn speed_current(&self, _: impl ReadContext) -> Result<u8, Error> {
-        self.sync()
-            .setting()?
-            .ok_or_else(|| ErrorCode::Failure.into())
+        self.sync().current()
     }
     async fn rock_support(&self, _: impl ReadContext) -> Result<fc::RockBitmap, Error> {
         Ok(fc::RockBitmap::ROCK_UP_DOWN)

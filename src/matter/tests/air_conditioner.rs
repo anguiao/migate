@@ -180,8 +180,8 @@ fn ambient_temperature_reads_versions_and_reports_only_protocol_value_changes() 
 }
 
 #[test]
-fn automatic_fan_and_thermal_reads_never_invent_measurements() {
-    let device = device(true).0;
+fn automatic_fan_placeholder_preserves_mode_and_nullable_settings() {
+    let (device, mut receiver) = device(true);
     fan_model!(&device, handler, im);
     let function = &device.functions()[0];
     block_on(async {
@@ -207,6 +207,14 @@ fn automatic_fan_and_thermal_reads_never_invent_measurements() {
                 read_bytes(&handler, &ctx).await.unwrap_err().code(),
                 ErrorCode::Failure,
                 "{cluster:x}.{id}"
+            );
+        }
+        function.observe_air_conditioner(Value::Power(true), Some(1), 1);
+        for id in [3, 6] {
+            ctx.attribute = attr(0x202, id);
+            assert_eq!(
+                read_bytes(&handler, &ctx).await.unwrap_err().code(),
+                ErrorCode::Failure
             );
         }
         for value in [
@@ -251,13 +259,30 @@ fn automatic_fan_and_thermal_reads_never_invent_measurements() {
                     .is_ok()
             );
         }
-        for id in [3, 6] {
+        for (id, expected) in [(3, 33), (6, 1)] {
             ctx.attribute = attr(0x202, id);
             assert_eq!(
-                read_bytes(&handler, &ctx).await.unwrap_err().code(),
-                ErrorCode::Failure
+                report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                    .u8()
+                    .unwrap(),
+                expected
             );
         }
+        assert_eq!(
+            function.snapshot().air_conditioner().unwrap().speed.value,
+            Some(Speed::Auto)
+        );
+        function.observe_air_conditioner(Value::Power(false), Some(2), 2);
+        for id in [0, 2, 3, 5, 6] {
+            ctx.attribute = attr(0x202, id);
+            assert_eq!(
+                report_value(&read_bytes(&handler, &ctx).await.unwrap())
+                    .u8()
+                    .unwrap(),
+                0
+            );
+        }
+        assert!(poll_once(receiver.next_operation()).await.is_none());
     });
 }
 
