@@ -760,16 +760,15 @@ fn measurement_text(measurement: crate::device::MeasurementSnapshot, unit: &str)
 }
 
 impl View {
-    async fn handle_line(
+    async fn handle_words(
         &self,
-        line: &str,
+        words: &[&str],
         now: i64,
         status: &AuthStatus,
     ) -> Result<Option<String>, StorageError> {
         let view = self;
         let registry = self;
-        let words = line.split_whitespace().collect::<Vec<_>>();
-        let text = match words.as_slice() {
+        let text = match words {
             [] => return Ok(None),
             ["help"] => format!("{COMMAND_HELP}\n{}", view.render_status(status, now)),
             ["list"] => {
@@ -876,7 +875,7 @@ impl Context<'_> {
                     Err(error) => format!("Sensor unbinding failed: {error}"),
                 }))
             }
-            _ => self.view().handle_line(line, now, self.status).await,
+            _ => self.view().handle_words(&words, now, self.status).await,
         }
     }
 }

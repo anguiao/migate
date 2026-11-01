@@ -118,7 +118,10 @@ pub(crate) async fn handle_line(
     line: &str,
     now: i64,
 ) -> Result<Option<String>, StorageError> {
-    view(registry, store)?.handle_line(line, now, status).await
+    let words = line.split_whitespace().collect::<Vec<_>>();
+    view(registry, store)?
+        .handle_words(&words, now, status)
+        .await
 }
 
 pub(super) async fn run_input(
