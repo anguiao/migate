@@ -385,6 +385,168 @@ fn mcn02_hub_and_cloud_continue_using_standard_miot_properties() {
 }
 
 #[test]
+fn mcn02_unknown_swing_does_not_block_offline_direct_and_recovers() {
+    use crate::xiaomi::capability::PropertyBinding;
+
+    let did = "308540429";
+    let (rig, peer) = setup(did);
+    rig.cloud.lock().unwrap().status = 503;
+    peer.values.lock().unwrap()[4] = json!("unknown");
+    block_on(rig.run(|control| async move {
+        let id = "air-conditioner:2";
+        let swing = PropertyBinding { siid: 3, piid: 2 };
+        let ac = function(&control.context.registry, did, id);
+        let work = control.context.live.borrow().devices[did]
+            .admitted
+            .clone()
+            .unwrap();
+        until(|| {
+            let state = ac.snapshot().air_conditioner().unwrap();
+            control.context.direct_candidate(did).is_ok()
+                && state.power.value == Some(false)
+                && state.mode.value == Some(AirConditionerMode::Cool)
+                && state.temperature.value == Some(24)
+                && state.speed.value == Some(AirConditionerFanSpeed::Auto)
+                && work.refresh.borrow().property_problem(id, swing).is_some()
+        })
+        .await;
+        control.clock.automatic.store(false, Ordering::Relaxed);
+
+        assert_eq!(ac.snapshot().air_conditioner().unwrap().swing.value, None);
+        assert_eq!(work.property_source(id, swing), None);
+        for binding in [
+            PropertyBinding { siid: 2, piid: 1 },
+            PropertyBinding { siid: 2, piid: 2 },
+            PropertyBinding { siid: 2, piid: 3 },
+            PropertyBinding { siid: 3, piid: 1 },
+        ] {
+            assert_eq!(work.property_source(id, binding), Some(PathKind::Direct));
+            assert!(
+                work.refresh
+                    .borrow()
+                    .property_problem(id, binding)
+                    .is_none()
+            );
+        }
+        let status = control.context.diagnostics();
+        let device = status
+            .devices
+            .iter()
+            .find(|device| device.did == did)
+            .unwrap();
+        assert_eq!(device.selected_control, Some(PathKind::Direct));
+        assert_eq!(device.selected_read, Some(PathKind::Direct));
+        assert_eq!(device.notification_source, None);
+        let source = crate::xiaomi::adapter::SourceHandle(control.context.clone());
+        let configuration = control.store.devices().load_configuration().unwrap();
+        assert!(source.initial_reads_ready(&configuration));
+
+        peer.values.lock().unwrap()[4] = json!("on");
+        control.clock.advance(Duration::from_secs(4));
+        until(|| {
+            ac.snapshot().air_conditioner().unwrap().swing.value == Some(true)
+                && work.refresh.borrow().property_problem(id, swing).is_none()
+        })
+        .await;
+        assert_eq!(work.property_source(id, swing), Some(PathKind::Direct));
+        assert!(control.context.direct_candidate(did).is_ok());
+    }));
+}
+
+#[test]
+fn mcn02_invalid_identity_feedback_retries_after_backoff_and_recovers() {
+    for invalid in [
+        vec![
+            json!("unknown"),
+            json!("cool"),
+            json!(24),
+            json!("auto_fan"),
+            json!("off"),
+        ],
+        vec![json!("off"), json!("cool"), json!(24), json!("auto_fan")],
+    ] {
+        let did = "308540429";
+        let (rig, peer) = setup(did);
+        rig.cloud.lock().unwrap().status = 503;
+        rig.clock.automatic.store(false, Ordering::Relaxed);
+        *peer.values.lock().unwrap() = invalid;
+        block_on(rig.run(|control| async move {
+            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            until(|| {
+                control.context.diagnostics().devices.iter().any(|device| {
+                    device.did == did
+                        && device.lan.as_ref().is_some_and(|lan| {
+                            lan.state == LanState::Failed
+                                && matches!(lan.recovery, RecoveryStatus::Scheduled(_))
+                        })
+                })
+            })
+            .await;
+            assert!(control.context.direct_candidate(did).is_err());
+            assert_eq!(ac.snapshot().air_conditioner().unwrap().power.value, None);
+            let status = control.context.diagnostics();
+            let device = status
+                .devices
+                .iter()
+                .find(|device| device.did == did)
+                .unwrap();
+            let lan = device.lan.as_ref().unwrap();
+            assert_eq!(
+                lan.recovery,
+                RecoveryStatus::Scheduled(control.clock.wall() + 1)
+            );
+            assert!(lan.problem.is_some());
+
+            let deadline = control.clock.now() + Duration::from_secs(1);
+            until(|| control.clock.deadlines.lock().unwrap().contains(&deadline)).await;
+            *peer.values.lock().unwrap() = vec![
+                json!("off"),
+                json!("cool"),
+                json!(24),
+                json!("auto_fan"),
+                json!("off"),
+            ];
+            let reads = || {
+                peer.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request["method"] == "get_prop")
+                    .count()
+            };
+            assert_eq!(reads(), 1);
+            control.clock.advance(Duration::from_millis(999));
+            async_io::Timer::after(Duration::from_millis(30)).await;
+            assert_eq!(reads(), 1);
+            assert!(control.context.direct_candidate(did).is_err());
+
+            control.clock.advance(Duration::from_millis(1));
+            until(|| control.context.direct_candidate(did).is_ok()).await;
+            assert!(reads() >= 2);
+            assert_eq!(
+                peer.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request["method"] == "miIO.info")
+                    .count(),
+                2
+            );
+            control.clock.automatic.store(true, Ordering::Relaxed);
+            until(|| ac.snapshot().air_conditioner().unwrap().power.value == Some(false)).await;
+            assert!(control.context.direct_candidate(did).is_ok());
+            assert!(
+                peer.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|request| { !request["method"].as_str().unwrap().starts_with("set_") })
+            );
+        }));
+    }
+}
+
+#[test]
 fn mcn02_does_not_become_ready_when_read_only_authentication_is_rejected() {
     let did = "308540429";
     let (rig, peer) = setup(did);

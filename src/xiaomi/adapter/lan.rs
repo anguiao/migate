@@ -485,10 +485,7 @@ impl Context {
                     if !self.lan_current(&did, &candidate.scope, &life) {
                         return Ok(());
                     }
-                    if matches!(
-                        error.failure,
-                        Failure::Identity | Failure::Rejected(_) | Failure::InvalidResponse
-                    ) {
+                    if matches!(error.failure, Failure::Identity | Failure::Rejected(_)) {
                         self.lan_failed(&did, &error, RecoveryStatus::None);
                         self.live
                             .borrow_mut()

@@ -57,7 +57,10 @@ pub(super) async fn probe(
             let values = mapping
                 .decode(&result)
                 .map_err(|_| invalid(Failure::InvalidResponse))?;
-            if values.iter().any(Result::is_err) {
+            let index = mapping
+                .index(binding)
+                .expect("legacy profile contains the identity binding");
+            if values[index].is_err() {
                 return Err(invalid(Failure::InvalidResponse));
             }
             return Ok(client.clone());
