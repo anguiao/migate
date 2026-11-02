@@ -69,6 +69,7 @@ fn cloud_poll_rate_limit_backs_off_without_disabling_cloud_control() {
         future::or(cloud.run(&listener), async {
             settled(&c).await;
             c.clock.automatic.store(false, Ordering::Relaxed);
+            let before_snapshot = curtain(&c);
             c.cloud.lock().unwrap().read_status = 429;
             let before = c.cloud.lock().unwrap().read_batches.len();
             c.clock.advance(Duration::from_secs(11));
@@ -81,11 +82,15 @@ fn cloud_poll_rate_limit_backs_off_without_disabling_cloud_control() {
             })
             .await;
             c.clock.automatic.store(false, Ordering::Relaxed);
+            assert_eq!(curtain(&c), before_snapshot);
             assert!(!c.context.http_paused.get());
             assert_eq!(
                 c.context.diagnostics().devices[0].selected_control,
                 Some(PathKind::Cloud)
             );
+            cloud.property_at("one", CURRENT.siid, CURRENT.piid, json!(48));
+            until(|| curtain(&c).current_position.value == Some(48)).await;
+            assert!(work(&c).function_observer("curtain:2").is_some());
             let failed_batches = c.cloud.lock().unwrap().read_batches.len();
             c.cloud.lock().unwrap().read_status = 200;
             c.clock.advance(Duration::from_secs(20));

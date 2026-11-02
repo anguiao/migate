@@ -42,9 +42,11 @@ pub(in super::super) struct CloudState {
     pub(in super::super) property_writes: Vec<(String, u32, u32, bool, String)>,
     pub(in super::super) property_reads: Vec<(String, u32, u32)>,
     pub(in super::super) read_batches: Vec<Vec<(String, u32, u32)>>,
+    pub(in super::super) read_results: Option<Vec<Value>>,
     pub(in super::super) raw_values: BTreeMap<(String, u32, u32), Value>,
     pub(in super::super) update_times: BTreeMap<(String, u32, u32), i64>,
     pub(in super::super) property_codes: BTreeMap<(String, u32, u32), i64>,
+    pub(in super::super) read_codes: BTreeMap<(String, u32, u32), i64>,
     pub(in super::super) numeric_writes: Vec<(Vec<Value>, String)>,
     pub(in super::super) read_values: BTreeMap<(String, u32, u32), bool>,
     pub(in super::super) read_gates: BTreeMap<(String, u32, u32), flume::Receiver<()>>,
@@ -308,7 +310,8 @@ impl Rig {
                     let value = state.raw_values.get(&key).cloned().unwrap_or_else(|| {
                         json!(state.read_values.get(&key).copied().unwrap_or(false))
                     });
-                    let mut reading = json!({"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":0,"value":value});
+                    let code = state.read_codes.get(&key).copied().unwrap_or(0);
+                    let mut reading = json!({"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":code,"value":value});
                     if let Some(update_time) = state.update_times.get(&key) {
                         reading["updateTime"] = json!(update_time);
                     }
@@ -318,7 +321,8 @@ impl Rig {
                     readings.push(reading);
                 }
                 state.read_batches.push(batch);
-                let result = json!({"code":0,"result":readings});
+                let result =
+                    json!({"code":0,"result":state.read_results.as_ref().unwrap_or(&readings)});
                 let mut response = MockResponse::json(state.read_status, &result.to_string());
                 if let Some(gate) = gate {
                     response = response.gated(gate);

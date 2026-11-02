@@ -83,7 +83,7 @@ fn batch_property_identity_errors_keep_confirmed_items() {
 #[test]
 fn batch_reads_correlate_numeric_and_boolean_values_in_request_order() {
     let brightness = PropertyBinding { siid: 2, piid: 2 };
-    let (base, _) = mock_server(vec![MockResponse::json(
+    let (base, requests) = mock_server(vec![MockResponse::json(
         200,
         r#"{"code":0,"result":[{"did":"target","siid":2,"piid":2,"code":0,"value":35.5},{"did":"target","siid":2,"piid":1,"code":0,"value":true}]}"#,
     )]);
@@ -98,6 +98,12 @@ fn batch_reads_correlate_numeric_and_boolean_values_in_request_order() {
             .map(|item| item.map(|reading| reading.value))
             .collect::<Vec<_>>(),
         vec![Ok(json!(true)), Ok(json!(35.5))]
+    );
+    let request = requests.recv().unwrap();
+    assert_eq!(request.target, "/app/v2/miotspec/prop/get");
+    assert_eq!(
+        serde_json::from_str::<Value>(&request.body).unwrap(),
+        json!({"datasource":2,"params":[{"did":"target","siid":2,"piid":1},{"did":"target","siid":2,"piid":2}]})
     );
 }
 
@@ -144,7 +150,7 @@ fn property_requests_use_official_paths_and_correlated_boolean_results() {
     for (path, body) in [
         (
             "/app/v2/miotspec/prop/get",
-            json!({"datasource":1,"params":[{"did":"target","siid":2,"piid":1}]}),
+            json!({"datasource":2,"params":[{"did":"target","siid":2,"piid":1}]}),
         ),
         (
             "/app/v2/miotspec/prop/set",
@@ -163,6 +169,36 @@ fn property_requests_use_official_paths_and_correlated_boolean_results() {
         assert!(headers.contains("authorization: beareraccess-secret"));
         assert!(headers.contains("x-client-bizid: haapi"));
         assert!(headers.contains(&format!("x-client-appid: {CLIENT_ID}")));
+    }
+}
+
+#[test]
+fn realtime_read_failures_are_returned_without_a_cached_retry() {
+    for (status, body, expected) in [
+        (503, "{}", CloudErrorKind::HttpStatus(503)),
+        (
+            200,
+            r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":-704030023}]}"#,
+            CloudErrorKind::PropertyRejected(-704_030_023),
+        ),
+    ] {
+        let (base, requests) = mock_server(vec![
+            MockResponse::json(status, body),
+            MockResponse::json(
+                200,
+                r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":true}]}"#,
+            ),
+        ]);
+        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let error = future::block_on(cloud.read_property_observation("token", "target", POWER))
+            .unwrap_err();
+        assert_eq!(error.kind(), &expected);
+        let request = requests.recv().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&request.body).unwrap(),
+            json!({"datasource":2,"params":[{"did":"target","siid":2,"piid":1}]})
+        );
+        assert!(requests.recv_timeout(Duration::from_millis(20)).is_err());
     }
 }
 

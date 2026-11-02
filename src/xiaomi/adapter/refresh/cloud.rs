@@ -1,10 +1,18 @@
-use super::super::{observations::Observation, state::Backoff};
+use super::super::state::Backoff;
 use super::*;
 use futures_lite::future;
 use std::cell::RefCell;
 
+mod batch;
+use batch::read_cloud_batch;
+
+const CLOUD_READ_LIMIT: usize = 8;
+const CLOUD_DEVICE_READ_LIMIT: usize = 2;
+
 pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
     let poll = Rc::new(RefCell::new(CloudPoll::default()));
+    let mut next_round = BTreeMap::<String, Duration>::new();
+    let mut last_did: Option<String> = None;
     loop {
         let listener = context.refresh_changed.listen();
         let changed = context.changed.listen();
@@ -27,99 +35,93 @@ pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<()
                 poll.identity = identity;
                 poll.next = Duration::ZERO;
                 poll.backoff = Backoff::new(30, 300);
+                poll.generation = poll.generation.wrapping_add(1);
             }
         }
-        for work in works(&context) {
-            while let Some((read, flight)) =
-                reserve(&work, &context, ReadQueue::Cloud, ReadKind::Foreground)
-            {
-                context
-                    .tasks
-                    .spawn(read_one(work.clone(), read, flight, context.clone()));
-            }
+
+        let mut candidates = works(&context);
+        if let Some(last) = &last_did {
+            let next = candidates
+                .iter()
+                .position(|work| work.key.id > *last)
+                .unwrap_or(0);
+            candidates.rotate_left(next);
         }
-        let ready = {
-            let poll = poll.borrow();
-            !poll.running && context.clock.now() >= poll.next
-        };
-        if ready {
-            let mut candidates = works(&context);
-            if let Some(last) = &poll.borrow().last_did {
-                let next = candidates
-                    .iter()
-                    .position(|work| work.key.id > *last)
-                    .unwrap_or(0);
-                candidates.rotate_left(next);
-            }
-            for work in candidates {
-                let Some((read, flight)) =
-                    reserve(&work, &context, ReadQueue::Cloud, ReadKind::Periodic)
+        next_round.retain(|did, _| candidates.iter().any(|work| &work.key.id == did));
+        let mut in_flight = candidates
+            .iter()
+            .map(|work| cloud_flights(work).0)
+            .sum::<usize>();
+        let now = context.clock.now();
+
+        // Ready foreground work wins over periodic work. One slow function
+        // does not occupy the device's other slot or block other devices.
+        for kind in [ReadKind::Foreground, ReadKind::Periodic] {
+            for work in &candidates {
+                if in_flight >= CLOUD_READ_LIMIT {
+                    break;
+                }
+                let (device_flights, blocked) = cloud_flights(work);
+                if device_flights >= CLOUD_DEVICE_READ_LIMIT {
+                    continue;
+                }
+                let Some(due) = cloud_due(work, &context, kind, &blocked) else {
+                    continue;
+                };
+                let mut due = due.max(*next_round.get(&work.key.id).unwrap_or(&Duration::ZERO));
+                if matches!(kind, ReadKind::Periodic) {
+                    due = due.max(poll.borrow().next);
+                }
+                if due > now {
+                    continue;
+                }
+                let Some((reads, flight)) = reserve_cloud_batch(work, &context, kind, &blocked)
                 else {
                     continue;
                 };
-                let mut reads = vec![read];
-                {
-                    let mut state = work.refresh.borrow_mut();
-                    let mut index = 0;
-                    while index < state.pending.len() {
-                        let candidate = &state.pending[index];
-                        if candidate.periodic
-                            && candidate.id == reads[0].id
-                            && candidate.ready_at <= context.clock.now()
-                            && !state.inflight.contains_key(&candidate.key())
-                        {
-                            let candidate = state.pending.remove(index).unwrap();
-                            state.inflight.insert(candidate.key(), flight.clone());
-                            reads.push(candidate);
-                        } else {
-                            index += 1;
-                        }
-                    }
-                }
-                {
+                next_round.insert(work.key.id.clone(), now + ROUND_DELAY);
+                last_did = Some(work.key.id.clone());
+                in_flight += 1;
+                let periodic = if matches!(kind, ReadKind::Periodic) {
                     let mut poll = poll.borrow_mut();
-                    poll.running = true;
-                    poll.next = context.clock.now() + ROUND_DELAY;
-                    poll.last_did = Some(work.key.id.clone());
-                }
-                context.tasks.spawn(read_cloud_poll(
-                    work,
+                    poll.next = now + ROUND_DELAY;
+                    Some(poll.generation)
+                } else {
+                    None
+                };
+                context.tasks.spawn(read_cloud_batch(
+                    work.clone(),
                     reads,
                     flight,
                     context.clone(),
-                    poll.clone(),
+                    periodic.map(|generation| (poll.clone(), generation)),
                 ));
-                break;
             }
         }
-        let due_foreground = works(&context)
-            .iter()
-            .filter_map(|work| {
-                work.refresh.borrow().next_due(ReadKind::Foreground, |id| {
-                    matches!(
-                        context.read_path_for(&work.key.id, id),
-                        Some(ControlPath::Cloud(_))
-                    )
-                })
-            })
-            .min();
-        let due_poll = if poll.borrow().running {
+
+        // A newly started batch may leave another function ready for the
+        // device's second slot. Wake at its own spacing deadline even if the
+        // first request is still waiting for a response.
+        let due = if in_flight >= CLOUD_READ_LIMIT {
             None
         } else {
-            works(&context)
+            candidates
                 .iter()
                 .filter_map(|work| {
-                    work.refresh.borrow().next_due(ReadKind::Periodic, |id| {
-                        matches!(
-                            context.read_path_for(&work.key.id, id),
-                            Some(ControlPath::Cloud(_))
-                        )
-                    })
+                    let (device_flights, blocked) = cloud_flights(work);
+                    if device_flights >= CLOUD_DEVICE_READ_LIMIT {
+                        return None;
+                    }
+                    let gate = *next_round.get(&work.key.id).unwrap_or(&Duration::ZERO);
+                    let foreground = cloud_due(work, &context, ReadKind::Foreground, &blocked)
+                        .map(|due| due.max(gate));
+                    let poll = poll.borrow();
+                    let periodic = cloud_due(work, &context, ReadKind::Periodic, &blocked)
+                        .map(|due| due.max(gate).max(poll.next));
+                    foreground.into_iter().chain(periodic).min()
                 })
                 .min()
-                .map(|due| due.max(poll.borrow().next))
         };
-        let due = due_foreground.into_iter().chain(due_poll).min();
         let wake = future::or(
             async {
                 listener.await;
@@ -141,166 +143,90 @@ pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<()
     }
 }
 
+/// Count shared flights once, while keeping each function independent.
+fn cloud_flights(work: &DeviceWork) -> (usize, BTreeSet<String>) {
+    let state = work.refresh.borrow();
+    let mut flights = Vec::<Rc<ReadFlight>>::new();
+    let mut blocked = BTreeSet::new();
+    for ((id, _, _), flight) in &state.inflight {
+        if matches!(flight.path, ControlPath::Cloud(_)) {
+            blocked.insert(id.clone());
+            if !flights.iter().any(|other| Rc::ptr_eq(other, flight)) {
+                flights.push(flight.clone());
+            }
+        }
+    }
+    (flights.len(), blocked)
+}
+
+fn cloud_due(
+    work: &DeviceWork,
+    context: &Context,
+    kind: ReadKind,
+    blocked: &BTreeSet<String>,
+) -> Option<Duration> {
+    work.refresh.borrow().next_due(kind, |id| {
+        !blocked.contains(id)
+            && matches!(
+                context.read_path_for(&work.key.id, id),
+                Some(ControlPath::Cloud(_))
+            )
+    })
+}
+
+fn reserve_cloud_batch(
+    work: &Rc<DeviceWork>,
+    context: &Context,
+    kind: ReadKind,
+    blocked: &BTreeSet<String>,
+) -> Option<(Vec<Refresh>, Rc<ReadFlight>)> {
+    if work.life.is_closed() {
+        return None;
+    }
+    let now = context.clock.now();
+    let mut state = work.refresh.borrow_mut();
+    let (read, flight) = state.reserve(
+        now,
+        |id| {
+            (!blocked.contains(id))
+                .then(|| context.read_path_for(&work.key.id, id))
+                .flatten()
+        },
+        ReadQueue::Cloud,
+        kind,
+    )?;
+    let mut reads = vec![read];
+    let mut index = 0;
+    while index < state.pending.len() {
+        let candidate = &state.pending[index];
+        if candidate.periodic == reads[0].periodic
+            && candidate.id == reads[0].id
+            && candidate.ready_at <= now
+            && !state.inflight.contains_key(&candidate.key())
+        {
+            let candidate = state.pending.remove(index).unwrap();
+            state.inflight.insert(candidate.key(), flight.clone());
+            reads.push(candidate);
+        } else {
+            index += 1;
+        }
+    }
+    Some((reads, flight))
+}
+
 struct CloudPoll {
-    running: bool,
     next: Duration,
     backoff: Backoff,
     identity: Option<(String, String)>,
-    last_did: Option<String>,
+    generation: u64,
 }
 impl Default for CloudPoll {
     fn default() -> Self {
         Self {
-            running: false,
             next: Duration::ZERO,
             backoff: Backoff::new(30, 300),
             identity: None,
-            last_did: None,
+            generation: 0,
         }
-    }
-}
-struct CloudPollLease {
-    poll: Rc<RefCell<CloudPoll>>,
-    context: Rc<Context>,
-}
-impl Drop for CloudPollLease {
-    fn drop(&mut self) {
-        self.poll.borrow_mut().running = false;
-        self.context.refresh_changed.notify(usize::MAX);
-    }
-}
-fn read_cloud_poll(
-    work: Rc<DeviceWork>,
-    reads: Vec<Refresh>,
-    flight: Rc<ReadFlight>,
-    context: Rc<Context>,
-    poll: Rc<RefCell<CloudPoll>>,
-) -> impl std::future::Future<Output = Result<(), AdapterError>> {
-    let cleanups = reads
-        .iter()
-        .map(|read| ReadCleanup {
-            work: work.clone(),
-            flight: flight.clone(),
-            read: read.clone(),
-            retry: true,
-        })
-        .collect::<Vec<_>>();
-    // Construct leases before the future can be dropped without being polled.
-    let lease = CloudPollLease {
-        poll: poll.clone(),
-        context: context.clone(),
-    };
-    async move {
-        let _lease = lease;
-        let mut cleanups = cleanups;
-        let did = &work.key.id;
-        let ControlPath::Cloud(credentials) = &flight.path else {
-            unreachable!()
-        };
-        let stamps = reads
-            .iter()
-            .map(|read| work.observations.read_stamp(&read.id, read.binding))
-            .collect::<Vec<_>>();
-        let bindings = reads.iter().map(|read| read.binding).collect::<Vec<_>>();
-        let result = if flight.life.is_closed()
-            || work.life.is_closed()
-            || !flight.current(&context, did, &reads[0].id)
-        {
-            None
-        } else {
-            future::or(
-                async {
-                    work.life.ended().await;
-                    None
-                },
-                future::or(
-                    async {
-                        flight.life.ended().await;
-                        None
-                    },
-                    async {
-                        Some(
-                            context
-                                .cloud
-                                .read_properties(&credentials.access_token, did, &bindings)
-                                .await,
-                        )
-                    },
-                ),
-            )
-            .await
-        };
-        for cleanup in &mut cleanups {
-            cleanup.retry = false;
-        }
-        let current = !flight.life.is_closed()
-            && !work.life.is_closed()
-            && flight.current(&context, did, &reads[0].id);
-        match &result {
-            Some(Err(error)) if current && error.is_temporary() => {
-                let mut poll = poll.borrow_mut();
-                let delay = poll.backoff.failed();
-                poll.next = poll.next.max(context.clock.now() + delay);
-            }
-            Some(Ok(_)) if current => poll.borrow_mut().backoff = Backoff::new(30, 300),
-            _ => {}
-        }
-        let (results, batch_error) = match result {
-            None => (vec![None; reads.len()], false),
-            Some(Ok(results)) => (results.items.into_iter().map(Some).collect(), false),
-            Some(Err(error)) => {
-                context.cloud_background_property_error(
-                    &credentials.access_token,
-                    &work,
-                    &error,
-                )?;
-                (vec![Some(Err(error)); reads.len()], true)
-            }
-        };
-        for ((read, stamp), result) in reads.into_iter().zip(stamps).zip(results) {
-            if !batch_error && let Some(Err(error)) = &result {
-                context.cloud_background_property_error(&credentials.access_token, &work, error)?;
-            }
-            if work.life.is_closed() || !work.contains(&read.id, read.binding) {
-                continue;
-            }
-            let outcome = match result {
-                None => ReadResult::Retired,
-                Some(_) if flight.life.is_closed() || !flight.current(&context, did, &read.id) => {
-                    ReadResult::Retired
-                }
-                Some(Ok(reading)) => match work.observe_read_at(
-                    &read.id,
-                    read.binding,
-                    &stamp,
-                    &reading.value,
-                    Observation {
-                        source: super::super::model::PathKind::Cloud,
-                        source_time: reading.update_time,
-                        received_at: context.clock.unix_now(),
-                    },
-                ) {
-                    Ok(()) => {
-                        context.refresh_group_states(did);
-                        ReadResult::Observed
-                    }
-                    Err(error) => ReadResult::Failed(work.problem("read", read.binding, &error)),
-                },
-                Some(Err(error)) => ReadResult::Failed(work.problem("read", read.binding, &error)),
-            };
-            let current = !matches!(outcome, ReadResult::Failed(_))
-                || work
-                    .observations
-                    .read_is_current(&work, &read.id, read.binding, &stamp);
-            if current {
-                work.refresh
-                    .borrow_mut()
-                    .complete(read, outcome, context.clock.now());
-            }
-        }
-        if !work.life.is_closed() {
-            work.report(&context, did);
-        }
-        Ok(())
     }
 }

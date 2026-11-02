@@ -102,8 +102,8 @@ impl Context {
         self.refresh_changed.notify(usize::MAX);
         Ok(())
     }
-    /// Temporary periodic-read errors are retried by the reader, not account sync.
-    pub(in crate::xiaomi::adapter) fn cloud_background_property_error(
+    /// Temporary property-read errors are retried by the reader, not account sync.
+    pub(in crate::xiaomi::adapter) fn cloud_property_read_error(
         &self,
         token: &str,
         work: &DeviceWork,

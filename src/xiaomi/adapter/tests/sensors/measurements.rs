@@ -3,6 +3,73 @@
 use super::*;
 
 #[test]
+fn cloud_measurement_read_started_before_notification_cannot_overwrite_it() {
+    let (rig, listener, cloud) = with_cloud_sensors(&["sensor"]);
+    {
+        let mut values = rig.cloud.lock().unwrap();
+        values
+            .raw_values
+            .insert(("sensor".into(), 3, 1001), json!(21.0));
+        values
+            .raw_values
+            .insert(("sensor".into(), 3, 1008), json!(45.0));
+        values
+            .raw_values
+            .insert(("sensor".into(), 2, 1003), json!(55));
+    }
+    let (release, gate) = flume::bounded(1);
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            let id = "temperature:3:1001";
+            until(|| {
+                cloud_active(&c, "sensor")
+                    && measurement(&c.context, "sensor", id).value == Some(21.0)
+                    && !work(&c.context, "sensor")
+                        .refresh
+                        .borrow()
+                        .contains(id, TEMPERATURE)
+            })
+            .await;
+            c.clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            c.cloud
+                .lock()
+                .unwrap()
+                .read_gates
+                .insert(("sensor".into(), TEMPERATURE.siid, TEMPERATURE.piid), gate);
+            let count = || {
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .property_reads
+                    .iter()
+                    .filter(|(did, siid, piid)| {
+                        did == "sensor" && *siid == TEMPERATURE.siid && *piid == TEMPERATURE.piid
+                    })
+                    .count()
+            };
+            let before = count();
+            let work = work(&c.context, "sensor");
+            work.refresh_property(id, TEMPERATURE);
+            c.clock.advance(Duration::from_millis(201));
+            until(|| count() > before).await;
+            c.cloud
+                .lock()
+                .unwrap()
+                .raw_values
+                .insert(("sensor".into(), 3, 1001), json!(22.5));
+            cloud.property_at("sensor", 3, 1001, json!(22.5));
+            until(|| measurement(&c.context, "sensor", id).value == Some(22.5)).await;
+            release.send(()).unwrap();
+            until(|| !work.refresh.borrow().contains(id, TEMPERATURE)).await;
+            assert_eq!(measurement(&c.context, "sensor", id).value, Some(22.5));
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn initial_reads_keep_independent_values_and_upstream_update_times() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();

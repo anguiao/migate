@@ -89,6 +89,7 @@ async fn terminal(c: &Control, command: &str) -> String {
         .unwrap()
 }
 
+mod cloud_batch;
 mod commands;
 mod diagnostics;
 mod lifecycle;

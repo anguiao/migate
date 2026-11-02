@@ -51,7 +51,7 @@ impl CloudClient {
                 operation,
                 "/app/v2/miotspec/prop/get",
                 access_token,
-                json!({"datasource":1,"params":params}),
+                json!({"datasource":2,"params":params}),
                 Duration::from_secs(30),
             )
             .await?;

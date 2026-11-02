@@ -42,6 +42,38 @@ enum ReadResult {
     Retired,
     Failed(String),
 }
+
+fn record_battery_read(work: &DeviceWork, read: &Refresh, result: &ReadResult) {
+    if read.id != "battery"
+        || work
+            .native
+            .device()
+            .battery()
+            .is_none_or(|battery| read.binding != battery.property())
+    {
+        return;
+    }
+    match result {
+        ReadResult::Observed => work.set_battery_read_problem(None),
+        ReadResult::Failed(problem) => work.set_battery_read_problem(Some(problem.clone())),
+        ReadResult::Retired => {}
+    }
+}
+
+fn ordered_read(work: &DeviceWork, read: &Refresh) -> bool {
+    work.native
+        .device()
+        .battery()
+        .is_some_and(|battery| read.id == "battery" && read.binding == battery.property())
+        || work.native.device().functions().iter().any(|function| {
+            function.id() == read.id
+                && (function.lighting().is_some()
+                    || function.kind().is_read_only()
+                    || function.curtain().is_some()
+                    || function.fan().is_some()
+                    || function.air_conditioner().is_some())
+        })
+}
 #[derive(Clone, Copy)]
 enum ReadQueue {
     Local,

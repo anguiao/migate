@@ -19,19 +19,7 @@ pub(super) fn read_one(
     async move {
         let mut cleanup = cleanup;
         let did = work.key.id.clone();
-        let ordered = work
-            .native
-            .device()
-            .battery()
-            .is_some_and(|battery| read.id == "battery" && read.binding == battery.property())
-            || work.native.device().functions().iter().any(|function| {
-                function.id() == read.id
-                    && (function.lighting().is_some()
-                        || function.kind().is_read_only()
-                        || function.curtain().is_some()
-                        || function.fan().is_some()
-                        || function.air_conditioner().is_some())
-            });
+        let ordered = ordered_read(&work, &read);
         let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
         let reading = async {
             if flight.life.is_closed()
@@ -213,52 +201,7 @@ pub(super) fn read_one(
                         }
                     }
                 }
-                ControlPath::Cloud(credentials) => {
-                    match context
-                        .cloud
-                        .read_property_observation(&credentials.access_token, &did, read.binding)
-                        .await
-                    {
-                        Ok(reading) => {
-                            let mut validation = Ok(());
-                            if !work.life.is_closed() && flight.current(&context, &did, &read.id) {
-                                validation = work.observe_read_at(
-                                    &read.id,
-                                    read.binding,
-                                    &stamp,
-                                    &reading.value,
-                                    Observation {
-                                        source: super::super::model::PathKind::Cloud,
-                                        source_time: reading.update_time,
-                                        received_at: context.clock.unix_now(),
-                                    },
-                                );
-                                if validation.is_ok() {
-                                    context.refresh_group_states(&did);
-                                }
-                            }
-                            Ok(if flight.current(&context, &did, &read.id) {
-                                match validation {
-                                    Ok(()) => ReadResult::Observed,
-                                    Err(error) => ReadResult::Failed(work.problem(
-                                        "read",
-                                        read.binding,
-                                        &error,
-                                    )),
-                                }
-                            } else {
-                                ReadResult::Retired
-                            })
-                        }
-                        Err(error) => {
-                            context.cloud_error(&credentials.access_token, Some(&did), &error)?;
-                            Ok(ReadResult::Failed(format!(
-                                "{did} read {}.{}: {error}",
-                                read.binding.siid, read.binding.piid
-                            )))
-                        }
-                    }
-                }
+                ControlPath::Cloud(_) => unreachable!("cloud reads use the batch scheduler"),
             }
         };
         let result: Result<ReadResult, AdapterError> = future::or(
@@ -284,23 +227,8 @@ pub(super) fn read_one(
                 || work
                     .observations
                     .read_is_current(&work, &read.id, read.binding, &stamp);
-            if current
-                && read.id == "battery"
-                && work
-                    .native
-                    .device()
-                    .battery()
-                    .is_some_and(|battery| read.binding == battery.property())
-            {
-                match &result {
-                    ReadResult::Observed => work.set_battery_read_problem(None),
-                    ReadResult::Failed(problem) => {
-                        work.set_battery_read_problem(Some(problem.clone()))
-                    }
-                    ReadResult::Retired => {}
-                }
-            }
             if current {
+                record_battery_read(&work, &read, &result);
                 work.refresh
                     .borrow_mut()
                     .complete(read, result, context.clock.now());

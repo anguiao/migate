@@ -1,5 +1,7 @@
 use super::*;
 
+mod errors;
+
 #[test]
 fn published_cloud_only_device_is_refreshed_without_a_local_subscription() {
     let rig = Rig::new(true, &["one"]);

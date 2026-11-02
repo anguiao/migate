@@ -622,6 +622,7 @@ fn cloud_curtain_control_without_notifications_reads_one_snapshot() {
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             cloud.send(Packet::Disconnect(Disconnect::new()));
+            c.clock.advance(Duration::from_millis(201));
             until(|| {
                 work(&c).function_observer("curtain:2").is_none()
                     && [STATUS, CURRENT, TARGET]
@@ -640,6 +641,7 @@ fn cloud_curtain_control_without_notifications_reads_one_snapshot() {
                 .begin_curtain(CurtainCommand::Target(90.0))
                 .unwrap();
             action.accepted().await.unwrap();
+            c.clock.advance(Duration::from_millis(201));
             until(|| {
                 c.cloud.lock().unwrap().property_reads.len() == before + 3
                     && [STATUS, CURRENT, TARGET]

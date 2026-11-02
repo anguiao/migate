@@ -3,6 +3,80 @@
 use super::*;
 
 #[test]
+fn cloud_battery_read_failure_is_reported_and_success_clears_it() {
+    let rig = Rig::sensors(&["sensor"]);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.online.insert("sensor".into());
+        cloud
+            .raw_values
+            .insert(("sensor".into(), 2, 1003), json!(55));
+        cloud
+            .raw_values
+            .insert(("sensor".into(), 3, 1001), json!(21.0));
+        cloud
+            .raw_values
+            .insert(("sensor".into(), 3, 1008), json!(45.0));
+    }
+    block_on(rig.run(|c| async move {
+        until(|| {
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "sensor"))
+                .and_then(|device| device.battery_snapshot())
+                .and_then(|value| value.value)
+                == Some(55.0)
+                && !work(&c.context, "sensor")
+                    .refresh
+                    .borrow()
+                    .contains("battery", BATTERY)
+        })
+        .await;
+        c.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        c.cloud
+            .lock()
+            .unwrap()
+            .read_codes
+            .insert(("sensor".into(), BATTERY.siid, BATTERY.piid), -704_030_023);
+        let work = work(&c.context, "sensor");
+        work.refresh_property("battery", BATTERY);
+        work.refresh
+            .borrow_mut()
+            .exhaust_pending("battery", BATTERY);
+        c.clock.advance(Duration::from_millis(201));
+        until(|| {
+            battery_status(&c.context, "sensor")
+                .battery_problem
+                .is_some()
+        })
+        .await;
+        assert_eq!(battery(&c.context, "sensor").unwrap().value, Some(55.0));
+        assert!(!c.context.http_paused.get());
+
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud
+                .read_codes
+                .remove(&("sensor".into(), BATTERY.siid, BATTERY.piid));
+            cloud
+                .raw_values
+                .insert(("sensor".into(), 2, 1003), json!(56));
+        }
+        work.refresh_property("battery", BATTERY);
+        c.clock.advance(Duration::from_millis(201));
+        until(|| {
+            battery(&c.context, "sensor").unwrap().value == Some(56.0)
+                && battery_status(&c.context, "sensor")
+                    .battery_problem
+                    .is_none()
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn changed_battery_diagnostic_reuses_runtime_and_is_visible_immediately() {
     block_on(Rig::sensor_without_battery("sensor").run(|c| async move {
         c.announce();
@@ -461,6 +535,11 @@ fn cloud_battery_subscription_failure_keeps_active_measurements_and_retries_fini
                 cloud.count(battery_path) < 4,
                 "measurement readiness must not wait for battery retries"
             );
+            c.cloud
+                .lock()
+                .unwrap()
+                .raw_values
+                .insert(("sensor".into(), 3, 1001), json!(22.5));
             cloud.property_at("sensor", 3, 1001, json!(22.5));
             until(|| measurement(&c.context, "sensor", "temperature:3:1001").value == Some(22.5))
                 .await;

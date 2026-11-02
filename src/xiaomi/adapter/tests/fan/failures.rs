@@ -308,6 +308,7 @@ fn fan_partial_acceptance_then_timeout_reads_over_the_cloud_fallback() {
                 until(|| peer.count("rpcReq", "one", 0) == 2).await;
                 assert_eq!(control.cloud.lock().unwrap().property_reads.len(), before);
                 assert_eq!(action.accepted().await, Err(CommandError::Timeout));
+                control.clock.advance(Duration::from_millis(201));
                 future::or(
                     until(|| {
                         control.cloud.lock().unwrap().property_reads.len() >= before + 4

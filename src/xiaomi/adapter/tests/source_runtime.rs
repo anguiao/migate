@@ -246,6 +246,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
         .await;
         let new = function(&c.context.registry, "one", "outlet:2");
         assert!(new.snapshot().power() != Some(Power::On));
+        until(|| new.snapshot().power() == Some(Power::Off)).await;
 
         // The original HTTP future is still in flight after the consumer and
         // sink ended; releasing it must complete and settle that operation.

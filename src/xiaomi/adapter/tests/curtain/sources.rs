@@ -13,6 +13,7 @@ fn curtain_notification_recovery_settles_a_target_whose_movement_was_missed() {
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             cloud.send(Packet::Disconnect(Disconnect::new()));
+            c.clock.advance(Duration::from_millis(201));
             until(|| {
                 c.context.notifications.borrow().is_none()
                     && work(&c).function_observer("curtain:2").is_none()

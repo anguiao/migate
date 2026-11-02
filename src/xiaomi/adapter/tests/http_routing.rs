@@ -91,7 +91,7 @@ fn background_property_http_failure_keeps_both_cloud_controls_available() {
         errors.push(timeout);
         for error in errors {
             c.context
-                .cloud_background_property_error(&token, &work, &error)
+                .cloud_property_read_error(&token, &work, &error)
                 .unwrap();
             assert!(!c.context.http_paused.get());
             assert!(c.context.cloud_candidate("one", true).is_ok());
@@ -137,11 +137,11 @@ fn background_property_device_errors_revoke_only_current_device_access() {
             let error = background_property_error(200, code).await;
 
             c.context
-                .cloud_background_property_error("stale-token", &work, &error)
+                .cloud_property_read_error("stale-token", &work, &error)
                 .unwrap();
             assert!(c.context.cloud_candidate("one", true).is_ok());
             c.context
-                .cloud_background_property_error(&token, &work, &error)
+                .cloud_property_read_error(&token, &work, &error)
                 .unwrap();
             assert!(c.context.cloud_candidate("one", true).is_err());
             assert!(c.context.cloud_candidate("two", true).is_ok());
@@ -162,7 +162,7 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
         let unauthorized = background_property_error(401, 0).await;
         work.life.close();
         c.context
-            .cloud_background_property_error(&token, &work, &offline)
+            .cloud_property_read_error(&token, &work, &offline)
             .unwrap();
         assert!(c.context.live.borrow().devices["one"]
             .cloud_access
@@ -170,11 +170,11 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
             .unwrap()
             .online);
         c.context
-            .cloud_background_property_error("stale-token", &work, &unauthorized)
+            .cloud_property_read_error("stale-token", &work, &unauthorized)
             .unwrap();
         assert!(matches!(*c.context.cloud_sync.borrow(), super::super::cloud::CloudSync::Idle));
         c.context
-            .cloud_background_property_error(&token, &work, &unauthorized)
+            .cloud_property_read_error(&token, &work, &unauthorized)
             .unwrap();
         assert!(matches!(&*c.context.cloud_sync.borrow(), super::super::cloud::CloudSync::Rejected(rejected) if rejected == &token));
     }));
@@ -726,6 +726,8 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
                 future::yield_now().await;
             };
             let current = current_physical.function("light:2").unwrap();
+            // The replacement's cloud read waits for the device's next round.
+            c.clock.advance(Duration::from_millis(201));
             until(|| current.snapshot().power() == Some(Power::On)).await;
             assert!(c.context.cloud_candidate("one", true).is_ok());
             // The sent light receipt is still owned by the original request;
