@@ -28,7 +28,7 @@ type AfterWrite = fn(
     &super::CommandOperation,
 );
 
-fn cloud_command_error(error: &CloudError) -> CommandError {
+pub(super) fn cloud_command_error(error: &CloudError) -> CommandError {
     match error.kind() {
         CloudErrorKind::Timeout => CommandError::Timeout,
         CloudErrorKind::Business(code) | CloudErrorKind::PropertyRejected(code) => {

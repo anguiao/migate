@@ -69,6 +69,11 @@ impl Mapping {
         self.fields.iter().any(|field| field.binding == binding)
     }
 
+    pub(super) fn supports(&self, bindings: &[PropertyBinding]) -> bool {
+        bindings.len() == self.fields.len()
+            && bindings.iter().all(|binding| self.contains(*binding))
+    }
+
     pub(super) fn encode(
         &self,
         binding: PropertyBinding,

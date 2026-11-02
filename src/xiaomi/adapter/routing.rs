@@ -491,9 +491,7 @@ impl Context {
                 .find(|function| function.id() == id)?
                 .air_conditioner()?;
             let bindings = ac.bindings();
-            if bindings.len() != mapping.fields().len()
-                || !bindings.iter().all(|binding| mapping.contains(*binding))
-            {
+            if !mapping.supports(&bindings) {
                 return None;
             }
         }

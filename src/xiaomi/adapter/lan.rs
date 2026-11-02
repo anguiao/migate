@@ -187,9 +187,7 @@ impl Context {
                         if let Some(mapping) = mapping {
                             let ac = function.air_conditioner()?;
                             let bindings = ac.bindings();
-                            (bindings.len() == mapping.fields().len()
-                                && bindings.iter().all(|binding| mapping.contains(*binding)))
-                            .then(|| ac.power())
+                            mapping.supports(&bindings).then(|| ac.power())
                         } else {
                             function.fan().map(|fan| fan.power())
                         }
@@ -399,25 +397,7 @@ impl Context {
                     if !self.lan_current(&did, &candidate.scope, &life) {
                         return Ok(());
                     }
-                    self.store.lan().save(&candidate)?;
-                    let mut live = self.live.borrow_mut();
-                    let lan = &mut live.devices.get_mut(&did).unwrap().lan;
-                    lan.active = Some((candidate.clone(), client));
-                    lan.task = None;
-                    lan.status = Some(LanStatus {
-                        protocol: protocol(&candidate.model).unwrap(),
-                        state: LanState::Ready,
-                        address: Some(candidate.address),
-                        problem: None,
-                        recovery: RecoveryStatus::None,
-                    });
-                    drop(live);
-                    self.update_availability(&did);
-                    self.refresh_source(&did);
-                    self.update_routing("direct LAN authenticated");
-                    self.refresh_changed.notify(usize::MAX);
-                    self.status_changed.notify(usize::MAX);
-                    self.changed.notify(usize::MAX);
+                    self.activate_lan(&did, candidate, client, "direct LAN authenticated")?;
                     return Ok(());
                 }
                 Err(error) => {
@@ -459,25 +439,12 @@ impl Context {
                             if !self.lan_current(&did, &candidate.scope, &life) {
                                 return Ok(());
                             }
-                            self.store.lan().save(&moved)?;
-                            let mut live = self.live.borrow_mut();
-                            let lan = &mut live.devices.get_mut(&did).unwrap().lan;
-                            lan.active = Some((moved, client));
-                            lan.task = None;
-                            lan.status = Some(LanStatus {
-                                protocol: protocol(&candidate.model).unwrap(),
-                                state: LanState::Ready,
-                                address: Some(address),
-                                problem: None,
-                                recovery: RecoveryStatus::None,
-                            });
-                            drop(live);
-                            self.update_availability(&did);
-                            self.refresh_source(&did);
-                            self.update_routing("direct LAN authenticated after discovery");
-                            self.refresh_changed.notify(usize::MAX);
-                            self.status_changed.notify(usize::MAX);
-                            self.changed.notify(usize::MAX);
+                            self.activate_lan(
+                                &did,
+                                moved,
+                                client,
+                                "direct LAN authenticated after discovery",
+                            )?;
                             return Ok(());
                         }
                     }
@@ -528,6 +495,36 @@ impl Context {
                 }
             }
         }
+    }
+
+    fn activate_lan(
+        &self,
+        did: &str,
+        record: LanRecord,
+        client: Client,
+        reason: &str,
+    ) -> Result<(), AdapterError> {
+        self.store.lan().save(&record)?;
+        let status = LanStatus {
+            protocol: protocol(&record.model).unwrap(),
+            state: LanState::Ready,
+            address: Some(record.address),
+            problem: None,
+            recovery: RecoveryStatus::None,
+        };
+        let mut live = self.live.borrow_mut();
+        let lan = &mut live.devices.get_mut(did).unwrap().lan;
+        lan.active = Some((record, client));
+        lan.task = None;
+        lan.status = Some(status);
+        drop(live);
+        self.update_availability(did);
+        self.refresh_source(did);
+        self.update_routing(reason);
+        self.refresh_changed.notify(usize::MAX);
+        self.status_changed.notify(usize::MAX);
+        self.changed.notify(usize::MAX);
+        Ok(())
     }
 
     fn lan_current(&self, did: &str, scope: &Scope, life: &Rc<Lifetime>) -> bool {

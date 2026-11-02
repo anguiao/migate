@@ -1057,14 +1057,7 @@ async fn send_power(
                     }
                     Err(error) => {
                         command.0.receipts(vec![properties::cloud_receipt(&error)]);
-                        let command_error = match error.kind() {
-                            crate::xiaomi::cloud::CloudErrorKind::Timeout => CommandError::Timeout,
-                            crate::xiaomi::cloud::CloudErrorKind::Business(code)
-                            | crate::xiaomi::cloud::CloudErrorKind::PropertyRejected(code) => {
-                                CommandError::Rejected(format!("cloud code {code}"))
-                            }
-                            _ => CommandError::SendFailed(error.to_string()),
-                        };
+                        let command_error = properties::cloud_command_error(&error);
                         command.0.reject(request, command_error);
                         let current = !work.life.is_closed() && !sink.life.is_closed();
                         // Account failures remain relevant after a binding is replaced.
