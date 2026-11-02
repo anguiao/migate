@@ -3,11 +3,12 @@
 pub(super) mod cp7pd;
 pub(super) mod dmaker;
 pub(super) mod ls2307;
+pub(super) mod mcn02;
 pub(super) mod mcn04;
 
 use super::{AppliedPatch, ParsedDevice, RecognitionDiagnostic, description::Urn};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct BuiltinPatch {
     pub id: &'static str,
     pub stage: &'static str,

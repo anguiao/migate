@@ -300,7 +300,12 @@ fn invalid_legacy_write_is_rejected_before_any_udp_send() {
     let token = Token::parse("00112233445566778899aabbccddeeff").unwrap();
     let peer = LegacyDevice::new(token.clone(), 308540429);
     let client = Client::new(308540429, peer.address, token);
-    let mapping = super::super::super::legacy_miio::mapping("lumi.acpartner.mcn02").unwrap();
+    let source = crate::xiaomi::capability::tests::source::SourceFixture::new(
+        "308540429",
+        "lumi.acpartner.mcn02",
+        instance(),
+    );
+    let mapping = source.legacy_profile().unwrap().mapping();
     let error = block_on(super::super::super::legacy_miio::set_property(
         mapping,
         &client,
@@ -326,7 +331,12 @@ fn malformed_legacy_ack_is_an_uncertain_sent_response() {
     let peer = LegacyDevice::new(token.clone(), 308540429);
     *peer.ack.lock().unwrap() = json!(["unexpected"]);
     let client = Client::new(308540429, peer.address, token);
-    let mapping = super::super::super::legacy_miio::mapping("lumi.acpartner.mcn02").unwrap();
+    let source = crate::xiaomi::capability::tests::source::SourceFixture::new(
+        "308540429",
+        "lumi.acpartner.mcn02",
+        instance(),
+    );
+    let mapping = source.legacy_profile().unwrap().mapping();
     let sent = std::cell::Cell::new(false);
     let error = block_on(super::super::super::legacy_miio::set_property(
         mapping,

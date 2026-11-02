@@ -7,6 +7,7 @@ pub(crate) mod certificate;
 pub mod cloud;
 pub mod discovery;
 pub(crate) mod lan;
+mod legacy_miio;
 mod mqtt;
 pub(crate) mod property;
 

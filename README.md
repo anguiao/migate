@@ -8,7 +8,7 @@ MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（X
 
 控制与读取正常按中枢（`hub`）→ 直连（`direct`）→ 云端（`cloud`）选择可用路径；中枢业务降级时优先直连和云端，中枢恢复后重新获得优先级，用户控制保留原有中枢后备。通知独立选择可用的中枢或云端，直连读写成功不表示存在直连推送。可读状态同时通过实际可用路径周期读取，以补充通知；窗帘约 10 秒，风扇核心状态约 16 秒，其他状态约 60 秒。控制后的反馈读取和灯光、灯组及渐变已有回读继续沿用；控制回执不等待刷新，也不重放控制。详见[运行指南](docs/running.md)与[已知限制](docs/known-limitations.md)。
 
-能力描述样本包括插座 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3`，灯具 `devcea.light.ls2307`、`yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`lemesh.light.wy0c15`，窗帘 `xiaomi.curtain.acn010`，风扇 `dmaker.fan.p5c`，空调伴侣 `lumi.acpartner.mcn04`，以及温湿度传感器 `miaomiaoce.sensor_ht.t6`、`xiaomi.sensor_ht.new3pr` 和门窗、运动、存在等设备的公开描述。内置补丁处理已确认的差异：`ls2307` 的跨服务 RGB 和颜色模式、`cuco.plug.cp7pd` 的开关 1、开关 2、USB 三个独立通道与总控刷新，已支持 `dmaker` 风扇的直吹模式与风速行为，以及 `lumi.acpartner.mcn04` 的空调状态与控制范围。
+能力描述样本包括插座 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3`，灯具 `devcea.light.ls2307`、`yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`lemesh.light.wy0c15`，窗帘 `xiaomi.curtain.acn010`，风扇 `dmaker.fan.p5c`，空调伴侣 `lumi.acpartner.mcn04`，以及温湿度传感器 `miaomiaoce.sensor_ht.t6`、`xiaomi.sensor_ht.new3pr` 和门窗、运动、存在等设备的公开描述。内置补丁处理已确认的差异：`ls2307` 的跨服务 RGB 和颜色模式、`cuco.plug.cp7pd` 的开关 1、开关 2、USB 三个独立通道与总控刷新，已支持 `dmaker` 风扇的直吹模式与风速行为，`lumi.acpartner.mcn04` 的空调状态与控制范围，以及 `lumi.acpartner.mcn02` 的旧 miIO 直连映射。
 
 提供基础开关、灯具亮度与色温、设备支持的 RGB、软件渐变与连续控制、窗帘位置与停止、风扇调速与摇头、空调模式与温度及风速控制、只读测量与状态、可选整机电量、主动通知、断线恢复及持久化身份、名称和配对。风扇普通风速可使用有效范围、步长或有序离散挡位，Matter 百分比映射到实际可达挡位，不代表原生连续调速。`dmaker` 的既有策略在自然风下显示记忆的直吹设定，非零调速会切回直吹；一般风扇不要求直吹模式。更多能力边界见[已知限制](docs/known-limitations.md)。
 
@@ -18,7 +18,7 @@ MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（X
 
 终端使用 `list` 查询设备品类、功能标识、核心标记、能力、绑定、补丁与识别问题，再用 `on DID FUNCTION` 或 `off DID FUNCTION` 控制具体功能；单功能设备也须指定标识。核心标记只说明用途，可以有多项或没有，不决定控制目标或接入资格。`status DID` 还显示各功能的状态、路径和诊断，包括直连协议或映射、地址、身份确认、候选与恢复状态以及命令实际路径；灯组会说明原生能力与成员派生的来源。中国大陆服务区的 OAuth 令牌、客户端证书与设备直连凭据独立维护。已准备账号可以先运行空网桥，再等待设备接入；云端可能仍依赖物理网关。
 
-MiGate 在数据目录保存型号、实例 URN 与完整原始 MIoT 描述，以及已提交配置、身份和灯组关系；有效描述暂时没有可发布功能时也会保留，但不创建运行实例，可用 `list` 或 `status DID` 查看识别原因。每次启动会用当前内置规则和补丁重新识别缓存并重新派生灯组，在对外服务前尝试应用结果；正常缓存重算无需访问描述服务。缓存识别失败时，该设备保留上次完整描述与有效配置并显示原因，其他设备仍可更新；取得新描述或下次启动时再识别，不定时重试相同输入。结果等价时不增加配置版本，纯元数据变化不重建订阅或重启 Matter 服务，实际绑定或发布形状变化按需更新。
+MiGate 在数据目录保存型号、实例 URN 与完整原始 MIoT 描述，以及已提交配置、身份和灯组关系；有效描述暂时没有可发布功能时也会保留，但不创建运行实例，可用 `list` 或 `status DID` 查看识别原因。每次启动会用当前内置规则和补丁重新识别缓存并重新派生灯组，在对外服务前尝试应用结果；正常缓存重算无需访问描述服务。缓存识别失败时，该设备保留上次完整描述与有效配置并显示原因，其他设备仍可更新；取得新描述或下次启动时再识别，不定时重试相同输入。结果等价时不增加配置版本，不影响适配策略的纯元数据变化不重建订阅或重启 Matter 服务，实际绑定、适配策略或发布形状变化按需更新。
 
 运行时米家目录中的型号或实例 URN 变化后，MiGate 获取匹配的完整描述并重新识别；新版描述按兼容扩展处理，假设已有功能、属性及其标识保持稳定。描述获取失败或无效、配置保存失败时保留上次完整的配置、绑定、策略、组关系和订阅，显示原因并继续重试。已确认的设备移除与访问撤销仍生效，不会因缓存恢复；同一型号与 URN 下的静默修改不会主动检查，固件号变化本身也不触发获取。
 

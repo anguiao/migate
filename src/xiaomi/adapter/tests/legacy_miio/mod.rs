@@ -10,17 +10,10 @@ use crate::{
 use std::sync::atomic::Ordering;
 
 fn instance() -> Value {
-    json!({"type":"urn:miot-spec-v2:device:air-conditioner:0000A004:lumi-mcn02:1", "services":[
-        {"iid":2,"type":"urn:miot-spec-v2:service:air-conditioner:0000780F:lumi-mcn02:1", "properties":[
-            {"iid":1,"type":"urn:miot-spec-v2:property:on:00000006:lumi-mcn02:1","format":"bool","access":["read","write","notify"]},
-            {"iid":2,"type":"urn:miot-spec-v2:property:mode:00000008:lumi-mcn02:1","format":"uint8","access":["read","write","notify"],"value-list":[{"value":0,"description":"Auto"},{"value":1,"description":"Cool"},{"value":2,"description":"Dry"},{"value":3,"description":"Heat"},{"value":4,"description":"Fan"}]},
-            {"iid":3,"type":"urn:miot-spec-v2:property:target-temperature:00000021:lumi-mcn02:1","format":"float","access":["read","write","notify"],"unit":"celsius","value-range":[16,30,1]}
-        ]},
-        {"iid":3,"type":"urn:miot-spec-v2:service:fan-control:00007809:lumi-mcn02:1", "properties":[
-            {"iid":1,"type":"urn:miot-spec-v2:property:fan-level:00000016:lumi-mcn02:1","format":"uint8","access":["read","write","notify"],"value-list":[{"value":0,"description":"Auto"},{"value":1,"description":"Low"},{"value":2,"description":"Medium"},{"value":3,"description":"High"}]},
-            {"iid":2,"type":"urn:miot-spec-v2:property:vertical-swing:00000018:lumi-mcn02:1","format":"bool","access":["read","write","notify"]}
-        ]}
-    ]})
+    serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/miot/lumi-mcn02-synthetic.json"
+    ))
+    .unwrap()
 }
 
 fn setup(did: &str) -> (Rig, LegacyDevice) {

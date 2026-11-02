@@ -1,3 +1,4 @@
+mod mcn02;
 pub(crate) mod support;
 use support::{add_device, handle_line, next_power, rename, run_input, saved_description};
 

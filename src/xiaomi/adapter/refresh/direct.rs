@@ -123,7 +123,7 @@ fn read_legacy(
     work: Rc<DeviceWork>,
     reads: Vec<Refresh>,
     flight: Rc<ReadFlight>,
-    mapping: &'static super::super::legacy_miio::Mapping,
+    mapping: &'static crate::xiaomi::legacy_miio::Mapping,
     context: Rc<Context>,
 ) -> impl std::future::Future<Output = Result<(), AdapterError>> {
     let cleanups = reads

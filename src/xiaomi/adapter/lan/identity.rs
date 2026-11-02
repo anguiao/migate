@@ -1,9 +1,9 @@
-use super::super::legacy_miio;
 use crate::{
     storage::LanRecord,
     xiaomi::{
         capability::PropertyBinding,
         lan::{Client, Failure, RequestError, SendStage},
+        legacy_miio::Mapping,
     },
 };
 use serde_json::{Value, json};
@@ -16,6 +16,7 @@ pub(super) async fn probe(
     record: &LanRecord,
     address: SocketAddr,
     binding: PropertyBinding,
+    mapping: Option<&'static Mapping>,
     timeout: Duration,
 ) -> Result<Client, RequestError> {
     let client = Client::new(
@@ -46,7 +47,7 @@ pub(super) async fn probe(
                 failure: Failure::Timeout,
             });
         }
-        if let Some(mapping) = legacy_miio::mapping(&record.model) {
+        if let Some(mapping) = mapping {
             let result = Box::pin(client.request_with_timeout(
                 "get_prop",
                 json!(mapping.fields()),

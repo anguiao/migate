@@ -200,6 +200,7 @@ fn is_core(urn: &description::Urn<'_>, function: &ParsedFunction) -> bool {
         FunctionKind::Fan { .. } => urn.standard("device", "fan", 0xa005),
         FunctionKind::AirConditioner { .. } => {
             urn.standard("device", "air-condition-outlet", 0xa045)
+                || urn.standard("device", "air-conditioner", 0xa004)
         }
         FunctionKind::Curtain => urn.standard("device", "curtain", 0xa00c),
         FunctionKind::Outlet => urn.standard("device", "outlet", 0xa002),

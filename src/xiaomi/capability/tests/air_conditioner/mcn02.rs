@@ -1,5 +1,5 @@
-use super::*;
-use serde_json::json;
+use crate::xiaomi::capability::{PropertyBinding, tests::source::SourceFixture};
+use serde_json::{Value, json};
 
 const BINDINGS: [PropertyBinding; 5] = [
     PropertyBinding { siid: 2, piid: 1 },
@@ -9,10 +9,47 @@ const BINDINGS: [PropertyBinding; 5] = [
     PropertyBinding { siid: 3, piid: 2 },
 ];
 
+fn instance() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/miot/lumi-mcn02-synthetic.json"
+    ))
+    .unwrap()
+}
+
+#[test]
+fn mcn02_profile_is_derived_from_the_native_description_and_reported_as_core() {
+    let instance = instance();
+    let source = SourceFixture::new("one", "lumi.acpartner.mcn02", instance.clone());
+    let profile = source.legacy_profile().unwrap();
+    assert_eq!(profile.patch().id(), "lumi.mcn02.legacy-miio");
+    assert_eq!(profile.patch().target(), "air-conditioner:2");
+    assert_eq!(profile.patch().stage(), "direct transport");
+    assert_eq!(
+        source.device().recognition().unwrap().core(),
+        ["air-conditioner:2"]
+    );
+    assert!(source.device().recognition().unwrap().patches().is_empty());
+
+    let generic = SourceFixture::new("one", "other.air-conditioner", instance);
+    assert!(generic.legacy_profile().is_none());
+    assert_eq!(
+        generic.device().recognition().unwrap().core(),
+        ["air-conditioner:2"]
+    );
+}
+
+#[test]
+fn valid_device_urn_does_not_narrow_the_existing_mcn02_mapping() {
+    let mut instance = instance();
+    instance["type"] = json!("urn:miot-spec-v2:device:air-condition-outlet:0000A045:lumi-mcn02:1");
+    let source = SourceFixture::new("one", "lumi.acpartner.mcn02", instance);
+    assert!(source.legacy_profile().is_some());
+}
+
 #[test]
 fn mcn02_mapping_converts_all_fields_both_directions() {
-    let mapping = mapping("lumi.acpartner.mcn02").unwrap();
-    assert!(super::mapping("lumi.acpartner.mcn04").is_none());
+    let source = SourceFixture::new("one", "lumi.acpartner.mcn02", instance());
+    let mapping = source.legacy_profile().unwrap().mapping();
     assert_eq!(
         mapping.fields(),
         ["power", "mode", "tar_temp", "fan_level", "ver_swing"]
@@ -67,7 +104,8 @@ fn mcn02_mapping_converts_all_fields_both_directions() {
 
 #[test]
 fn invalid_shapes_types_enums_and_temperatures_are_not_defaulted() {
-    let mapping = mapping("lumi.acpartner.mcn02").unwrap();
+    let source = SourceFixture::new("one", "lumi.acpartner.mcn02", instance());
+    let mapping = source.legacy_profile().unwrap().mapping();
     for input in [
         json!(null),
         json!({}),

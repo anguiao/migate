@@ -1,6 +1,108 @@
 use super::*;
 
 #[test]
+fn uncommitted_profile_does_not_replace_the_running_direct_source() {
+    use crate::{configuration::OperationKind, xiaomi::capability::tests::source::SourceFixture};
+
+    let did = "308540429";
+    let (rig, peer) = setup(did);
+    block_on(rig.run_result_without_publication(|control| async move {
+        until(|| {
+            control.context.direct_candidate(did).is_ok()
+                && function(&control.context.registry, did, "air-conditioner:2")
+                    .snapshot()
+                    .air_conditioner()
+                    .is_some_and(|snapshot| snapshot.mode.value.is_some())
+        })
+        .await;
+        control.clock.automatic.store(false, Ordering::Relaxed);
+        let old_work = control.context.live.borrow().devices[did]
+            .admitted
+            .clone()
+            .unwrap();
+        let old_physical = old_work.physical();
+        let candidate = SourceFixture::new(did, "other.air-conditioner", instance());
+        assert!(candidate.legacy_profile().is_none());
+        {
+            let mut live = control.context.live.borrow_mut();
+            let slot = live.devices.get_mut(did).unwrap();
+            // There is no newer authoritative cloud model in this scenario.
+            slot.cloud_access = None;
+            slot.candidate = Some(candidate.into());
+        }
+        assert!(control.context.legacy_mapping(did).is_some());
+        let plan = control.publication.plan().unwrap().unwrap();
+        assert_eq!(plan.operations[0].kind, OperationKind::ReplacedNative);
+        let db = rusqlite::Connection::open(control.store.path()).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER reject_profile_commit BEFORE UPDATE ON bridge_configuration
+             BEGIN SELECT RAISE(ABORT, 'injected profile commit failure'); END;",
+        )
+        .unwrap();
+        let prepared = control.publication.prepare(plan);
+        assert!(control.publication.apply(prepared).is_err());
+        assert!(!old_work.life.is_closed());
+        assert!(control.context.legacy_mapping(did).is_some());
+        assert!(control.context.direct_candidate(did).is_ok());
+        old_physical
+            .function("air-conditioner:2")
+            .unwrap()
+            .begin_air_conditioner(AirConditionerCommand::Temperature(26))
+            .unwrap()
+            .accepted()
+            .await
+            .unwrap();
+        assert!(peer.requests.lock().unwrap().iter().any(|request| {
+            request["method"] == "set_tar_temp" && request["params"] == json!([26])
+        }));
+
+        db.execute_batch("DROP TRIGGER reject_profile_commit")
+            .unwrap();
+        let plan = control.publication.plan().unwrap().unwrap();
+        let prepared = control.publication.prepare(plan);
+        control.publication.apply(prepared).unwrap();
+        assert!(old_work.life.is_closed());
+        assert!(control.context.legacy_mapping(did).is_none());
+        let current = control.context.live.borrow().devices[did]
+            .admitted
+            .clone()
+            .unwrap();
+        assert!(!Rc::ptr_eq(&old_work, &current));
+    }))
+    .unwrap();
+}
+
+#[test]
+fn authoritative_cloud_model_mismatch_revokes_old_direct_access() {
+    let did = "308540429";
+    let (rig, _peer) = setup(did);
+    block_on(rig.run(|control| async move {
+        until(|| {
+            control.context.direct_candidate(did).is_ok()
+                && control.context.live.borrow().devices[did]
+                    .cloud_access
+                    .is_some()
+        })
+        .await;
+        control.clock.automatic.store(false, Ordering::Relaxed);
+        control
+            .context
+            .live
+            .borrow_mut()
+            .devices
+            .get_mut(did)
+            .unwrap()
+            .cloud_access
+            .as_mut()
+            .unwrap()
+            .model = "other.air-conditioner".into();
+        control.context.reconcile_lan(did).unwrap();
+        assert!(control.context.legacy_mapping(did).is_some());
+        assert!(control.context.direct_candidate(did).is_err());
+    }));
+}
+
+#[test]
 fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
     let did = "584519248";
     use crate::device::FunctionKey;
@@ -22,6 +124,67 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
     rig.store
         .devices()
         .commit_configuration(&before, &[])
+        .unwrap();
+    {
+        let db = rusqlite::Connection::open(rig.store.path()).unwrap();
+        let stored: String = db
+            .query_row(
+                "SELECT json FROM bridge_configuration WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut legacy: Value = serde_json::from_str(&stored).unwrap();
+        let device = legacy["devices"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|device| device["native"]["model"] == "lumi.acpartner.mcn02")
+            .unwrap();
+        device["native"]["recognition"]["core"] = json!([]);
+        db.execute(
+            "UPDATE bridge_configuration SET json=?1 WHERE id=1",
+            [legacy.to_string()],
+        )
+        .unwrap();
+    }
+    let legacy = rig.store.devices().load_configuration().unwrap();
+    assert!(
+        legacy
+            .device(&DeviceKey::new("xiaomi", did))
+            .unwrap()
+            .native
+            .as_ref()
+            .unwrap()
+            .device()
+            .recognition()
+            .unwrap()
+            .core()
+            .is_empty()
+    );
+    assert_eq!(
+        before
+            .device(&DeviceKey::new("xiaomi", did))
+            .unwrap()
+            .native
+            .as_ref()
+            .unwrap()
+            .device()
+            .recognition()
+            .unwrap()
+            .core(),
+        ["air-conditioner:2"]
+    );
+    rig.store
+        .matter()
+        .put(rs_matter::persist::FABRIC_KEYS_START + 1, b"fabric")
+        .unwrap();
+    rig.store
+        .matter()
+        .put(
+            rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START,
+            b"subscription",
+        )
         .unwrap();
     rig.store
         .lan()
@@ -81,9 +244,23 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
                     .iter()
                     .any(|r| r["method"] == "set_ver_swing" && r["params"] == json!(["on"]))
             );
+            let after = control.store.devices().load_configuration().unwrap();
+            assert_eq!(after, before);
             assert_eq!(
-                control.store.devices().load_configuration().unwrap(),
-                before
+                control
+                    .store
+                    .matter()
+                    .get(rs_matter::persist::FABRIC_KEYS_START + 1)
+                    .unwrap(),
+                Some(b"fabric".to_vec())
+            );
+            assert_eq!(
+                control
+                    .store
+                    .matter()
+                    .get(rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START)
+                    .unwrap(),
+                Some(b"subscription".to_vec())
             );
         })
     }));

@@ -66,7 +66,8 @@ impl Context {
         if slot
             .committed
             .as_ref()
-            .is_some_and(|source| super::lan::protocol(&source.raw.model).is_none())
+            .and_then(|source| source.native.as_ref())
+            .is_none_or(|native| super::lan::protocol(native).is_none())
         {
             return Err("device model not supported".into());
         }
@@ -290,21 +291,13 @@ impl Context {
         self.control_path_with_direct(did, self.direct_function_candidate(did, id))
     }
     fn direct_function_candidate(&self, did: &str, id: &str) -> Option<Client> {
-        if let Some(mapping) = self.legacy_mapping(did) {
+        {
             let live = self.live.borrow();
-            let ac = live
-                .devices
-                .get(did)?
-                .admitted
-                .as_ref()?
-                .native
-                .device()
-                .functions()
-                .iter()
-                .find(|function| function.id() == id)?
-                .air_conditioner()?;
-            let bindings = ac.bindings();
-            if !mapping.supports(&bindings) {
+            let native = live.devices.get(did)?.committed.as_ref()?.native.as_ref()?;
+            if native
+                .legacy_profile()
+                .is_some_and(|profile| profile.target() != id)
+            {
                 return None;
             }
         }

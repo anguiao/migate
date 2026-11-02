@@ -6,9 +6,10 @@ use crate::{
     configuration::Scope,
     storage::LanRecord,
     xiaomi::{
-        capability::PropertyBinding,
+        capability::{NativeDescription, PropertyBinding},
         cloud::{LanCandidate, LanCredentials},
         lan::{Client, Failure, RequestError, SendStage},
+        legacy_miio::Mapping,
     },
 };
 use futures_lite::future;
@@ -26,14 +27,21 @@ pub(super) use properties::{read_property, set_properties};
 
 pub(super) const MODEL: &str = "dmaker.fan.p5c";
 
-pub(super) fn protocol(model: &str) -> Option<LanProtocol> {
-    if model == MODEL {
+pub(super) fn protocol(native: &NativeDescription) -> Option<LanProtocol> {
+    if native.model() == MODEL {
         Some(LanProtocol::Miot)
-    } else if super::legacy_miio::mapping(model).is_some() {
+    } else if native.legacy_profile().is_some() {
         Some(LanProtocol::LegacyMcn02)
     } else {
         None
     }
+}
+
+#[derive(Clone, Copy)]
+struct LanProfile {
+    binding: PropertyBinding,
+    protocol: LanProtocol,
+    mapping: Option<&'static Mapping>,
 }
 #[cfg(not(test))]
 const PORT: u16 = 54321;
@@ -102,10 +110,16 @@ impl Context {
             Duration::from_secs(10)
         }
     }
-    pub(super) fn legacy_mapping(&self, did: &str) -> Option<&'static super::legacy_miio::Mapping> {
+    pub(super) fn legacy_mapping(&self, did: &str) -> Option<&'static Mapping> {
         let live = self.live.borrow();
-        let model = &live.devices.get(did)?.committed.as_ref()?.raw.model;
-        super::legacy_miio::mapping(model)
+        live.devices
+            .get(did)?
+            .committed
+            .as_ref()?
+            .native
+            .as_ref()?
+            .legacy_profile()
+            .map(|profile| profile.mapping())
     }
 
     pub(super) fn invalidate_lan_scope(&self) -> Result<(), AdapterError> {
@@ -169,10 +183,11 @@ impl Context {
             let Some(source) = &slot.committed else {
                 return Ok(());
             };
+            let native = source.native.as_ref();
             if self.lan_scope_invalid.get()
                 || slot.group
                 || work.life.is_closed()
-                || protocol(&source.raw.model).is_none()
+                || native.and_then(protocol).is_none()
                 || slot
                     .cloud_access
                     .as_ref()
@@ -181,30 +196,36 @@ impl Context {
                 None
             } else {
                 let model = &source.raw.model;
-                let mapping = super::legacy_miio::mapping(model);
-                let binding = work
-                    .native
-                    .device()
-                    .functions()
-                    .iter()
-                    .find_map(|function| {
-                        if let Some(mapping) = mapping {
-                            let ac = function.air_conditioner()?;
-                            let bindings = ac.bindings();
-                            mapping.supports(&bindings).then(|| ac.power())
-                        } else {
-                            function.fan().map(|fan| fan.power())
-                        }
-                    });
+                let native = native.unwrap();
+                let legacy = native.legacy_profile();
+                let binding = native.device().functions().iter().find_map(|function| {
+                    if let Some(profile) = legacy {
+                        (function.id() == profile.target())
+                            .then(|| function.air_conditioner().unwrap().power())
+                    } else {
+                        function.fan().map(|fan| fan.power())
+                    }
+                });
                 let cloud = slot
                     .cloud_access
                     .as_ref()
                     .filter(|info| info.model == *model)
                     .map(|info| info.lan.clone());
-                binding.map(|binding| (scope, binding, cloud, model.clone()))
+                binding.map(|binding| {
+                    (
+                        scope,
+                        LanProfile {
+                            binding,
+                            protocol: protocol(native).unwrap(),
+                            mapping: legacy.map(|profile| profile.mapping()),
+                        },
+                        cloud,
+                        model.clone(),
+                    )
+                })
             }
         };
-        let Some((scope, binding, cloud, model)) = eligible else {
+        let Some((scope, profile, cloud, model)) = eligible else {
             if self.stop_lan(did) {
                 self.update_availability(did);
                 self.update_routing("direct LAN eligibility ended");
@@ -230,7 +251,7 @@ impl Context {
                 .unwrap()
                 .lan
                 .status = Some(LanStatus {
-                protocol: protocol(&model).unwrap(),
+                protocol: profile.protocol,
                 state: LanState::Ineligible,
                 address: None,
                 problem: None,
@@ -272,7 +293,7 @@ impl Context {
             lan.active = None;
             lan.desired = None;
             lan.status = Some(LanStatus {
-                protocol: protocol(&model).unwrap(),
+                protocol: profile.protocol,
                 state,
                 address: None,
                 problem: None,
@@ -312,7 +333,7 @@ impl Context {
             let active = lan.active.is_some();
             if !active {
                 lan.status = Some(LanStatus {
-                    protocol: protocol(&model).unwrap(),
+                    protocol: profile.protocol,
                     state: LanState::Authenticating,
                     address: Some(candidate.address),
                     problem: None,
@@ -335,7 +356,7 @@ impl Context {
                             did,
                             candidate,
                             stored,
-                            binding,
+                            profile,
                             life.clone(),
                             (active, failure),
                         )
@@ -353,7 +374,7 @@ impl Context {
         did: String,
         mut candidate: LanRecord,
         stored: Option<LanRecord>,
-        binding: PropertyBinding,
+        profile: LanProfile,
         life: Rc<Lifetime>,
         start: (bool, Option<RequestError>),
     ) -> Result<(), AdapterError> {
@@ -392,7 +413,8 @@ impl Context {
             let result = Box::pin(probe(
                 &candidate,
                 self.lan_endpoint(candidate.address),
-                binding,
+                profile.binding,
+                profile.mapping,
                 self.lan_timeout(),
             ))
             .await;
@@ -401,7 +423,13 @@ impl Context {
                     if !self.lan_current(&did, &candidate.scope, &life) {
                         return Ok(());
                     }
-                    self.activate_lan(&did, candidate, client, "direct LAN authenticated")?;
+                    self.activate_lan(
+                        &did,
+                        candidate,
+                        client,
+                        profile.protocol,
+                        "direct LAN authenticated",
+                    )?;
                     return Ok(());
                 }
                 Err(error) => {
@@ -435,7 +463,8 @@ impl Context {
                         if let Ok(client) = Box::pin(probe(
                             &moved,
                             self.lan_endpoint(address),
-                            binding,
+                            profile.binding,
+                            profile.mapping,
                             self.lan_timeout(),
                         ))
                         .await
@@ -447,6 +476,7 @@ impl Context {
                                 &did,
                                 moved,
                                 client,
+                                profile.protocol,
                                 "direct LAN authenticated after discovery",
                             )?;
                             return Ok(());
@@ -506,11 +536,12 @@ impl Context {
         did: &str,
         record: LanRecord,
         client: Client,
+        protocol: LanProtocol,
         reason: &str,
     ) -> Result<(), AdapterError> {
         self.store.lan().save(&record)?;
         let status = LanStatus {
-            protocol: protocol(&record.model).unwrap(),
+            protocol,
             state: LanState::Ready,
             address: Some(record.address),
             problem: None,

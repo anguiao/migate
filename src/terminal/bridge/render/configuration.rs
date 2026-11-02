@@ -102,6 +102,15 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
                     ));
                 }
             }
+            if let Some(profile) = native.legacy_profile() {
+                let patch = profile.patch();
+                lines.push(format!(
+                    "  Patch {}: {} ({}).",
+                    patch.id(),
+                    patch.target(),
+                    patch.stage()
+                ));
+            }
         }
     }
     // The terminal lists every confirmed membership from the effective

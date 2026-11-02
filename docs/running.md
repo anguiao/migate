@@ -160,7 +160,7 @@ status 234567890
 unbind-sensor 234567890 air-conditioner:3
 ```
 
-`list` 和 `status DID` 显示设备品类、功能能力、绑定与生效补丁。`core` 是用途说明，可有多个或没有，不影响功能接入和控制；必须明确指定控制目标。`Recognition issue` 提示候选功能、可选能力或补丁的识别问题，需与已接入功能的连接、读取和通知故障区分。灯组的 `Native capabilities`、`Repaired` 和 `State source` 分别说明原生能力、成员派生的增强和状态来源，`Member relation` 提示成员定位问题。
+`list` 和 `status DID` 显示设备品类、功能能力、绑定与生效补丁；其中 `mcn02` 的直连适配说明可用于检查型号映射，实际路径及是否可用以 `status DID` 为准。`core` 是用途说明，可有多个或没有，不影响功能接入和控制；必须明确指定控制目标。`Recognition issue` 提示候选功能、可选能力或补丁的识别问题，需与已接入功能的连接、读取和通知故障区分。灯组的 `Native capabilities`、`Repaired` 和 `State source` 分别说明原生能力、成员派生的增强和状态来源，`Member relation` 提示成员定位问题。
 
 终端输出使用英文，设备名称原样显示。`unknown` 表示尚无确定状态，可能是尚未取得有效输入，也可能是设备明确上报未知。`on`／`off` 可控制受支持的插座、灯光、风扇和空调开关；窗帘、测量与状态功能不支持 `on`／`off`，同机其他受支持的控制功能仍可操作。`upstream time` 是来源提供的时间，缺失时为 `unknown`；`received at` 是 MiGate 收到数据的时间。门窗、运动与存在功能显示的最近观测来源与时间仍对应保留状态，来源切换后可能与当前读取路径或通知来源不同。
 

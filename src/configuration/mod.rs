@@ -225,11 +225,12 @@ impl CommittedConfiguration {
     }
 }
 
-/// True when two native descriptions use the same bindings and input semantics.
-/// Model and instance type are metadata: a URN-only change reuses the served
-/// instance.
+/// True when two native descriptions use the same bindings and source semantics.
+/// Metadata-only changes reuse the served instance; a different derived direct
+/// profile changes transport semantics and requires a new source runtime.
 pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescription) -> bool {
-    a.device().refresh_trigger() == b.device().refresh_trigger()
+    a.legacy_profile() == b.legacy_profile()
+        && a.device().refresh_trigger() == b.device().refresh_trigger()
         && a.device().battery() == b.device().battery()
         && a.device().functions().len() == b.device().functions().len()
         && a.device()

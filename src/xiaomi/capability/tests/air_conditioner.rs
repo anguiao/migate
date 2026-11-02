@@ -1,3 +1,5 @@
+mod mcn02;
+
 use crate::{
     device::air_conditioner::{AirConditionerFanSpeed, AirConditionerMode},
     xiaomi::capability::{

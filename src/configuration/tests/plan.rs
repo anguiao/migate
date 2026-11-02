@@ -1108,3 +1108,70 @@ fn native_state_semantics_event_arguments_change_replaces_runtime_without_changi
         state_native_from_instance("xiaomi.motion.pir1", &after),
     );
 }
+
+#[test]
+fn changed_mcn02_direct_profile_replaces_source_without_changing_identity() {
+    let instance: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/miot/lumi-mcn02-synthetic.json"
+    ))
+    .unwrap();
+    let original = SourceFixture::new("ac", "lumi.acpartner.mcn02", instance.clone());
+    let initial = plan(
+        CommittedConfiguration::empty(),
+        facts(scope(), vec![source("ac", original, None)], Vec::new()),
+        BTreeMap::from([(key("ac"), unique("ac"))]),
+    )
+    .unwrap()
+    .configuration;
+    let generic = SourceFixture::new("ac", "other.air-conditioner", instance);
+    let updated = plan(
+        initial.clone(),
+        facts(scope(), vec![source("ac", generic, None)], Vec::new()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(updated.operations[0].kind, OperationKind::ReplacedNative);
+    assert!(updated.rebuild);
+    assert_eq!(updated.configuration.root_version, initial.root_version);
+    let before = initial.device(&key("ac")).unwrap();
+    let after = updated.configuration.device(&key("ac")).unwrap();
+    assert_eq!(after.unique_id, before.unique_id);
+    assert_eq!(after.endpoint, before.endpoint);
+    assert_eq!(after.functions, before.functions);
+    assert_eq!(after.configuration_version, before.configuration_version);
+}
+
+#[test]
+fn mcn02_urn_metadata_change_keeps_the_same_direct_profile_and_runtime() {
+    let mut instance: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/miot/lumi-mcn02-synthetic.json"
+    ))
+    .unwrap();
+    let original = SourceFixture::new("ac", "lumi.acpartner.mcn02", instance.clone());
+    let initial = plan(
+        CommittedConfiguration::empty(),
+        facts(scope(), vec![source("ac", original, None)], Vec::new()),
+        BTreeMap::from([(key("ac"), unique("ac"))]),
+    )
+    .unwrap()
+    .configuration;
+    instance["type"] = json!("urn:miot-spec-v2:device:air-conditioner:0000A004:lumi-mcn02:2");
+    let updated = plan(
+        initial.clone(),
+        facts(
+            scope(),
+            vec![source(
+                "ac",
+                SourceFixture::new("ac", "lumi.acpartner.mcn02", instance),
+                None,
+            )],
+            Vec::new(),
+        ),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(updated.changed);
+    assert_eq!(updated.operations[0].kind, OperationKind::Reused);
+    assert!(!updated.rebuild);
+    assert_eq!(updated.configuration.root_version, initial.root_version);
+}
