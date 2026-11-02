@@ -285,7 +285,16 @@ impl LegacyDevice {
         let holding = hold_read.clone();
         let thread = thread::spawn(move || {
             let mut buffer = [0; 4096];
+            let mut held_reads = Vec::new();
             while !stopped.load(Ordering::Relaxed) {
+                if !holding.load(Ordering::Relaxed) {
+                    for (did, source, id) in held_reads.drain(..) {
+                        let response = json!({"id":id,"result":*feedback.lock().unwrap()});
+                        let packet =
+                            wire::encode(did, 43, &token, &serde_json::to_vec(&response).unwrap());
+                        socket.send_to(&packet, source).unwrap();
+                    }
+                }
                 let Ok((length, source)) = socket.recv_from(&mut buffer) else {
                     continue;
                 };
@@ -303,22 +312,16 @@ impl LegacyDevice {
                 let request: Value = serde_json::from_slice(&decoded.2).unwrap();
                 observed.lock().unwrap().push(request.clone());
                 let method = request["method"].as_str().unwrap();
+                if method == "get_prop" && holding.load(Ordering::Relaxed) {
+                    held_reads.push((decoded.0, source, request["id"].clone()));
+                    continue;
+                }
                 let response = if let Some(code) = rejections.lock().unwrap().get(method).copied() {
                     json!({"id":request["id"], "error":{"code":code,"message":"rejected"}})
                 } else {
                     let result = match method {
                         "miIO.info" => json!({"model":"lumi.acpartner.mcn02"}),
-                        "get_prop" => {
-                            while holding.load(Ordering::Relaxed)
-                                && !stopped.load(Ordering::Relaxed)
-                            {
-                                thread::sleep(Duration::from_millis(1));
-                            }
-                            if stopped.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            json!(*feedback.lock().unwrap())
-                        }
+                        "get_prop" => json!(*feedback.lock().unwrap()),
                         "set_power" | "set_mode" | "set_tar_temp" | "set_fan_level"
                         | "set_ver_swing" => {
                             if dropping.load(Ordering::Relaxed) {

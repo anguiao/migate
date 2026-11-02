@@ -20,6 +20,7 @@ use std::{
 const ROUND_DELAY: Duration = Duration::from_millis(200);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
 const DIRECT_READ_LIMIT: usize = 8;
+const LEGACY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(super) struct Refresh {
@@ -27,6 +28,7 @@ pub(super) struct Refresh {
     pub(super) binding: PropertyBinding,
     pub(super) attempts: u8,
     pub(super) ready_at: Duration,
+    legacy_poll: bool,
     // Reserved reads and cleanup leases retain the notification baseline generation.
     baseline: Option<u64>,
 }
@@ -79,6 +81,7 @@ impl RefreshState {
             .iter_mut()
             .find(|read| read.id == id && read.binding == binding)
         {
+            pending.legacy_poll = false;
             if pending.baseline.is_some() {
                 pending.baseline = baseline;
             }
@@ -88,9 +91,26 @@ impl RefreshState {
                 binding,
                 attempts: 0,
                 ready_at: Duration::ZERO,
+                legacy_poll: false,
                 baseline,
             });
         }
+    }
+    fn request_legacy_poll(&mut self, id: &str, bindings: &[PropertyBinding]) -> bool {
+        if bindings.iter().any(|binding| self.contains(id, *binding)) {
+            return false;
+        }
+        for binding in bindings {
+            self.pending.push_back(Refresh {
+                id: id.into(),
+                binding: *binding,
+                attempts: 0,
+                ready_at: Duration::ZERO,
+                legacy_poll: true,
+                baseline: None,
+            });
+        }
+        true
     }
     pub(super) fn satisfy_baseline(&mut self, id: &str, binding: PropertyBinding) {
         let generation = self
@@ -133,10 +153,14 @@ impl RefreshState {
             false
         }
     }
-    fn next_due(&self, eligible: impl Fn(&str) -> bool) -> Option<Duration> {
+    fn next_due(&self, queue: ReadQueue, eligible: impl Fn(&str) -> bool) -> Option<Duration> {
         self.pending
             .iter()
-            .filter(|read| !self.inflight.contains_key(&read.key()) && eligible(&read.id))
+            .filter(|read| {
+                (!read.legacy_poll || matches!(queue, ReadQueue::Direct))
+                    && !self.inflight.contains_key(&read.key())
+                    && eligible(&read.id)
+            })
             .map(|read| read.ready_at)
             .min()
     }
@@ -147,7 +171,10 @@ impl RefreshState {
         queue: ReadQueue,
     ) -> Option<(Refresh, Rc<ReadFlight>)> {
         let (index, path) = self.pending.iter().enumerate().find_map(|(index, read)| {
-            if read.ready_at > now || self.inflight.contains_key(&read.key()) {
+            if read.ready_at > now
+                || self.inflight.contains_key(&read.key())
+                || read.legacy_poll && !matches!(queue, ReadQueue::Direct)
+            {
                 return None;
             }
             let path = path_for(&read.id)?;
@@ -185,9 +212,13 @@ impl RefreshState {
             ReadResult::Observed => {
                 self.problems.remove(&read.key());
             }
+            ReadResult::Retired if read.legacy_poll => {}
             ReadResult::Retired => self.requeue(read),
             ReadResult::Failed(problem) => {
                 self.problems.insert(read.key(), problem);
+                if read.legacy_poll {
+                    return;
+                }
                 if read.attempts == 3 {
                     self.pending.retain(|queued| queued.key() != read.key());
                 } else {
@@ -346,9 +377,9 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
             .iter()
             .filter(|work| context.local_reads_allowed(&work.key.id, &handle))
             .filter_map(|work| {
-                work.refresh
-                    .borrow()
-                    .next_due(|id| context.local_function_reads_allowed(&work.key.id, id, &handle))
+                work.refresh.borrow().next_due(ReadQueue::Local, |id| {
+                    context.local_function_reads_allowed(&work.key.id, id, &handle)
+                })
             })
             .min();
         let Some(ready) = ready else {
@@ -384,8 +415,77 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
         next_round = Some(context.clock.now() + ROUND_DELAY);
     }
 }
+
+struct LegacyPoll {
+    work: Rc<DeviceWork>,
+    due: Duration,
+}
+
+fn schedule_legacy_polls(
+    context: &Context,
+    candidates: &[Rc<DeviceWork>],
+    polls: &mut BTreeMap<(String, String), LegacyPoll>,
+    now: Duration,
+) -> Option<Duration> {
+    let mut eligible = BTreeSet::new();
+    for work in candidates {
+        let did = &work.key.id;
+        let Some(mapping) = context.legacy_mapping(did) else {
+            continue;
+        };
+        for function in work.native.device().functions() {
+            let bindings = function.observation_bindings();
+            if !mapping.supports(&bindings)
+                || !matches!(
+                    context.read_path_for(did, function.id()),
+                    Some(ControlPath::Direct(_))
+                )
+            {
+                continue;
+            }
+            let key = (did.clone(), function.id().to_owned());
+            eligible.insert(key.clone());
+            let poll = polls.entry(key).or_insert_with(|| LegacyPoll {
+                work: work.clone(),
+                due: now + legacy_poll_phase(did),
+            });
+            if !Rc::ptr_eq(&poll.work, work) {
+                *poll = LegacyPoll {
+                    work: work.clone(),
+                    due: now + legacy_poll_phase(did),
+                };
+            }
+            if now >= poll.due {
+                if work
+                    .refresh
+                    .borrow_mut()
+                    .request_legacy_poll(function.id(), &bindings)
+                {
+                    for binding in bindings {
+                        work.observations.refresh(function.id(), binding);
+                    }
+                }
+                poll.due = now + LEGACY_POLL_INTERVAL;
+            }
+        }
+    }
+    polls.retain(|key, _| eligible.contains(key));
+    for work in candidates {
+        work.refresh.borrow_mut().pending.retain(|read| {
+            !read.legacy_poll || eligible.contains(&(work.key.id.clone(), read.id.clone()))
+        });
+    }
+    polls.values().map(|poll| poll.due).min()
+}
+
+fn legacy_poll_phase(did: &str) -> Duration {
+    let did = did.parse::<u64>().expect("direct device DID is numeric");
+    Duration::from_millis(1 + did % LEGACY_POLL_INTERVAL.as_millis() as u64)
+}
+
 pub(super) async fn direct(context: Rc<Context>) -> Result<(), AdapterError> {
     let mut next_round = BTreeMap::<String, Duration>::new();
+    let mut legacy_polls = BTreeMap::new();
     loop {
         let listener = context.refresh_changed.listen();
         let changed = context.changed.listen();
@@ -405,7 +505,7 @@ pub(super) async fn direct(context: Rc<Context>) -> Result<(), AdapterError> {
             })
             .sum::<usize>();
         let now = context.clock.now();
-        let mut due_at = None;
+        let mut due_at = schedule_legacy_polls(&context, &candidates, &mut legacy_polls, now);
         for work in candidates {
             if in_flight == DIRECT_READ_LIMIT {
                 break;
@@ -418,7 +518,7 @@ pub(super) async fn direct(context: Rc<Context>) -> Result<(), AdapterError> {
             {
                 continue;
             }
-            let due = refresh.next_due(|id| {
+            let due = refresh.next_due(ReadQueue::Direct, |id| {
                 matches!(
                     context.read_path_for(&work.key.id, id),
                     Some(ControlPath::Direct(_))
@@ -500,7 +600,7 @@ pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
         let due = works(&context)
             .iter()
             .filter_map(|work| {
-                work.refresh.borrow().next_due(|id| {
+                work.refresh.borrow().next_due(ReadQueue::Cloud, |id| {
                     matches!(
                         context.read_path_for(&work.key.id, id),
                         Some(ControlPath::Cloud(_))
@@ -546,7 +646,7 @@ impl Drop for ReadCleanup {
             state.inflight.remove(&self.read.key());
         }
         let dirty = state.finish_dirty(&self.read.id, self.read.binding);
-        if self.retry && !self.work.life.is_closed() {
+        if self.retry && !self.read.legacy_poll && !self.work.life.is_closed() {
             state.requeue(self.read.clone());
         }
         drop(state);

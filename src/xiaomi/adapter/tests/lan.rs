@@ -134,6 +134,64 @@ fn direct_property_batches_correlate_results_and_preserve_each_rejection() {
 }
 
 #[test]
+fn standard_miot_direct_does_not_poll_while_idle() {
+    use std::sync::atomic::Ordering;
+
+    let did = "656878122";
+    let instance = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/dmaker-p5c.json"
+    ))
+    .unwrap();
+    let rig = Rig::custom_lights(&[(did, "dmaker.fan.p5c", instance)]);
+    let scope = rig
+        .store
+        .devices()
+        .load_configuration()
+        .unwrap()
+        .scope
+        .unwrap();
+    let token = Token::parse("00112233445566778899aabbccddeeff").unwrap();
+    let peer = FakeDevice::new(token.clone(), token.clone());
+    rig.store
+        .lan()
+        .save(&LanRecord {
+            scope,
+            did: did.into(),
+            model: "dmaker.fan.p5c".into(),
+            address: "127.0.0.1".parse().unwrap(),
+            token,
+        })
+        .unwrap();
+    rig.source.context.lan_port.set(peer.address.port());
+    block_on(rig.run(|control| async move {
+        let work = control.context.live.borrow().devices[did]
+            .admitted
+            .clone()
+            .unwrap();
+        let bindings = work.native.device().functions()[0].observation_bindings();
+        until(|| {
+            control.context.direct_candidate(did).is_ok()
+                && bindings
+                    .iter()
+                    .all(|binding| !work.refresh.borrow().contains("fan:2", *binding))
+                && function(&control.context.registry, did, "fan:2")
+                    .snapshot()
+                    .fan()
+                    .unwrap()
+                    .speed
+                    .value
+                    .is_some()
+        })
+        .await;
+        control.clock.automatic.store(false, Ordering::Relaxed);
+        let before = peer.reads.load(Ordering::Relaxed);
+        control.clock.advance(Duration::from_secs(120));
+        async_io::Timer::after(Duration::from_millis(30)).await;
+        assert_eq!(peer.reads.load(Ordering::Relaxed), before);
+    }));
+}
+
+#[test]
 fn offline_p5c_reads_and_controls_existing_fan_bindings_and_preserves_rejection() {
     use crate::device::{CommandError, FanCommand};
     use std::sync::atomic::Ordering;

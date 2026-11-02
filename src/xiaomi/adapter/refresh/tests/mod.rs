@@ -14,6 +14,54 @@ fn dirty_again_produces_exactly_one_follow_up_read() {
 }
 
 #[test]
+fn legacy_poll_does_not_move_to_cloud_unless_an_ordinary_read_is_requested() {
+    let mut state = RefreshState::default();
+    let binding = PropertyBinding { siid: 2, piid: 1 };
+    assert!(state.request_legacy_poll("main", &[binding]));
+
+    assert!(state.next_due(ReadQueue::Cloud, |_| true).is_none());
+    assert!(
+        state
+            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+            .is_none()
+    );
+
+    state.request("main", binding);
+    assert!(
+        state
+            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+            .is_some()
+    );
+}
+
+#[test]
+fn failed_legacy_poll_waits_for_the_next_period() {
+    use crate::xiaomi::lan::{Client, Token};
+
+    let mut state = RefreshState::default();
+    let binding = PropertyBinding { siid: 2, piid: 1 };
+    assert!(state.request_legacy_poll("main", &[binding]));
+    let path = ControlPath::Direct(Client::new(
+        1,
+        "127.0.0.1:54321".parse().unwrap(),
+        Token::parse("00112233445566778899aabbccddeeff").unwrap(),
+    ));
+    let (read, _) = state
+        .reserve(Duration::ZERO, |_| Some(path.clone()), ReadQueue::Direct)
+        .unwrap();
+    state.complete(
+        read,
+        ReadResult::Failed("read failed".into()),
+        Duration::ZERO,
+    );
+    assert!(state.pending.is_empty());
+    assert_eq!(
+        state.property_problem("main", binding).as_deref(),
+        Some("read failed")
+    );
+}
+
+#[test]
 fn satisfying_one_property_baseline_preserves_the_others() {
     let mut state = RefreshState::default();
     let bindings = [
