@@ -282,7 +282,6 @@ impl DeviceWork {
                     ))?;
             self.observations.observe_read(self, id, stamp, value);
         }
-        self.observations.record_read(id, binding, stamp);
         Ok(())
     }
 

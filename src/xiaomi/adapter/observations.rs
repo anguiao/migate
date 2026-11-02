@@ -27,9 +27,6 @@ struct Counts {
     observed: u64,
     notified: u64,
     refresh: u64,
-    // Orders read starts and write boundaries without invalidating observations.
-    order: u64,
-    last_read: Option<ReadStamp>,
     // A completed write can make the displayed feedback too old for deduplication.
     unconfirmed_write: bool,
 }
@@ -42,38 +39,21 @@ pub(super) struct ReadStamp {
     channel_source: u64,
     observed: u64,
     refresh: u64,
-    order: u64,
-}
-impl ReadStamp {
-    pub(super) fn at_or_after(&self, write: &Self) -> bool {
-        self.order >= write.order
-    }
 }
 #[derive(Clone)]
 pub(super) struct WriteStamp {
-    notified: u64,
+    source: u64,
     observed: u64,
+    notified: u64,
+    read_pending: bool,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum WriteFeedback {
-    Ordinary,
-    Observed,
-    InFlight,
-}
 impl Observations {
     pub(super) fn invalidate_write(&self, id: &str, binding: PropertyBinding) {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         counts.observed += 1;
         counts.unconfirmed_write = true;
-    }
-    pub(super) fn mark_unconfirmed_write(&self, id: &str, binding: PropertyBinding) {
-        self.channels
-            .borrow_mut()
-            .entry(key(id, binding))
-            .or_default()
-            .unconfirmed_write = true;
     }
     pub(super) fn has_unconfirmed_write(&self, id: &str, binding: PropertyBinding) -> bool {
         self.channels
@@ -98,30 +78,11 @@ impl Observations {
     pub(super) fn read_stamp(&self, id: &str, binding: PropertyBinding) -> ReadStamp {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
-        counts.order += 1;
         ReadStamp {
             channel_source: counts.source,
             observed: counts.observed,
             refresh: counts.refresh,
-            order: counts.order,
         }
-    }
-    pub(super) fn record_read(&self, id: &str, binding: PropertyBinding, stamp: &ReadStamp) {
-        self.channels
-            .borrow_mut()
-            .entry(key(id, binding))
-            .or_default()
-            .last_read = Some(stamp.clone());
-    }
-    pub(super) fn read_after(&self, id: &str, binding: PropertyBinding, write: &ReadStamp) -> bool {
-        self.channels
-            .borrow()
-            .get(&key(id, binding))
-            .is_some_and(|counts| {
-                counts.last_read.as_ref().is_some_and(|read| {
-                    read.channel_source == counts.source && read.at_or_after(write)
-                })
-            })
     }
     pub(super) fn observe_read(&self, work: &DeviceWork, id: &str, stamp: &ReadStamp, value: bool) {
         let binding = work.binding(id);
@@ -157,12 +118,19 @@ impl Observations {
         counts.notified += 1;
         work.physical().function(id).unwrap().observe(value);
     }
-    pub(super) fn write_stamp(&self, id: &str, binding: PropertyBinding) -> WriteStamp {
+    pub(super) fn write_stamp(
+        &self,
+        id: &str,
+        binding: PropertyBinding,
+        read_pending: bool,
+    ) -> WriteStamp {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         WriteStamp {
-            notified: counts.notified,
+            source: counts.source,
             observed: counts.observed,
+            notified: counts.notified,
+            read_pending,
         }
     }
     pub(super) fn accept_write(
@@ -171,7 +139,7 @@ impl Observations {
         sink: &super::state::LogicalSink,
         id: &str,
         stamp: &WriteStamp,
-        feedback: WriteFeedback,
+        preserve_read: bool,
         request: CommandRequest,
     ) -> Result<(), CommandError> {
         let binding = work.binding(id);
@@ -189,10 +157,11 @@ impl Observations {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         let unchanged = counts.notified == stamp.notified
-            && (!matches!(feedback, WriteFeedback::Observed) || counts.observed == stamp.observed);
-        if !matches!(feedback, WriteFeedback::InFlight) {
-            counts.observed += 1;
-        }
+            && (!preserve_read
+                || stamp.read_pending
+                || counts.source != stamp.source
+                || counts.observed == stamp.observed);
+        counts.observed += 1;
         if unchanged {
             sink.physical.function(id).unwrap().observe(target);
         }

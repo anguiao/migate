@@ -1699,7 +1699,7 @@ fn identity_mismatch_without_discovery_stops_without_retries() {
 #[test]
 fn p5c_direct_fan_command_reads_feedback_once_after_all_steps() {
     use crate::device::FanCommand;
-    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    use crate::xiaomi::adapter::StepReceipt;
     use std::sync::atomic::Ordering;
     let did = "656878122";
     let instance = serde_json::from_str(include_str!(
@@ -1755,14 +1755,9 @@ fn p5c_direct_fan_command_reads_feedback_once_after_all_steps() {
             assert_eq!(fan.snapshot().fan().unwrap().power.value, Some(false));
             peer.hold_read.store(false, Ordering::Relaxed);
             until(|| {
-                control
-                    .context
-                    .diagnostics()
-                    .devices
+                bindings
                     .iter()
-                    .find(|device| device.did == did)
-                    .and_then(|device| device.commands[0].last.as_ref())
-                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+                    .all(|binding| !work.refresh.borrow().contains("fan:2", *binding))
             })
             .await;
             assert_eq!(peer.reads.load(Ordering::Relaxed), before + 4);

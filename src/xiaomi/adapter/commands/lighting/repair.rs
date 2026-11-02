@@ -24,13 +24,6 @@ struct MemberResults {
     accepted: Cell<bool>,
     done: Cell<usize>,
     changed: Event,
-    feedback: RefCell<Vec<(Rc<super::super::CommandOperation>, SourceRef)>>,
-}
-
-struct Frame {
-    epoch: u64,
-    final_frame: bool,
-    feedback: Rc<super::super::FeedbackScope>,
 }
 
 pub(super) async fn send(
@@ -47,7 +40,6 @@ pub(super) async fn send(
         return Ok(());
     }
     let token = request.token;
-    let final_frame = request.final_frame;
     let (epoch, members) = work
         .light_frames
         .borrow_mut()
@@ -57,71 +49,21 @@ pub(super) async fn send(
         work: work.clone(),
         sink: sink.clone(),
     };
-    let frame = Rc::new(Frame {
-        epoch,
-        final_frame,
-        feedback: Rc::new(super::super::FeedbackScope {
-            group: group.clone(),
-            targets: members
-                .iter()
-                .map(|member| (member.work.clone(), member.id.clone()))
-                .collect(),
-            stamps: RefCell::new(Vec::new()),
-        }),
-    });
     let pending = Rc::new(RefCell::new(Some(request)));
     let results = Rc::new(MemberResults::default());
     for member in members.iter() {
         let context = context.clone();
         let member = member.clone();
-        let completion_member = member.clone();
         let group = group.clone();
         let pending = pending.clone();
         let results = results.clone();
-        let frame = frame.clone();
-        let count = members.len();
         context.clone().tasks.spawn(async move {
-            let (result, maintenance, operation) =
-                member_task(&context, member, group, rgb, token, frame, pending).await;
-            if let Some(operation) = operation {
-                results
-                    .feedback
-                    .borrow_mut()
-                    .push((operation, completion_member));
-            }
+            let (result, maintenance) =
+                member_task(&context, member, group, rgb, token, epoch, pending).await;
             if result.is_ok() {
                 results.accepted.set(true);
             }
             results.done.set(results.done.get() + 1);
-            if results.done.get() == count {
-                let feedback = results.feedback.borrow();
-                let accepted = feedback
-                    .iter()
-                    .any(|(operation, _)| operation.has_accepted());
-                let group_owner = feedback
-                    .iter()
-                    .position(|(_, member)| {
-                        !member.work.life.is_closed()
-                            && !member.sink.life.is_closed()
-                            && context
-                                .live
-                                .borrow()
-                                .devices
-                                .get(&member.work.key.id)
-                                .and_then(|slot| slot.admitted.as_ref())
-                                .is_some_and(|work| Rc::ptr_eq(work, &member.work))
-                    })
-                    .or_else(|| (!feedback.is_empty()).then_some(0));
-                for (index, (operation, member)) in feedback.iter().enumerate() {
-                    operation.schedule_feedback_if(
-                        &context,
-                        &member.work,
-                        &member.sink,
-                        accepted,
-                        group_owner == Some(index),
-                    );
-                }
-            }
             results.changed.notify(usize::MAX);
             maintenance.map_or(Ok(()), Err)
         });
@@ -172,14 +114,9 @@ async fn member_task(
     group: SourceRef,
     rgb: Rgb,
     token: ActionToken,
-    frame: Rc<Frame>,
+    epoch: u64,
     pending: Rc<RefCell<Option<LightRequest>>>,
-) -> (
-    Result<(), CommandError>,
-    Option<AdapterError>,
-    Option<Rc<super::super::CommandOperation>>,
-) {
-    let epoch = frame.epoch;
+) -> (Result<(), CommandError>, Option<AdapterError>) {
     let member_id = member.id.clone();
     let group_id = group.id.clone();
     let gate = context
@@ -228,7 +165,7 @@ async fn member_task(
         })
     };
     if let Err(error) = current() {
-        return (Err(error), None, None);
+        return (Err(error), None);
     }
     let target = LightTarget::rgb(None, rgb);
     let properties = match super::super::super::lighting::encode(
@@ -239,7 +176,7 @@ async fn member_task(
         true,
     ) {
         Ok(properties) => properties,
-        Err(error) => return (Err(error), None, None),
+        Err(error) => return (Err(error), None),
     };
     let operation = context.commands.begin_operation(
         &member.work.key.id,
@@ -249,10 +186,6 @@ async fn member_task(
         properties.clone(),
         std::time::Instant::now(),
     );
-    operation.0.feedback_enabled.set(frame.final_frame);
-    if frame.final_frame {
-        *operation.0.shared_feedback.borrow_mut() = Some(frame.feedback.clone());
-    }
     let mark: Rc<dyn Fn() -> Result<(), CommandError>> = Rc::new(move || {
         pending
             .borrow()
@@ -283,11 +216,7 @@ async fn member_task(
         }
     };
     operation.0.finish(receipt.result.clone());
-    (
-        receipt.result,
-        receipt.maintenance,
-        Some(operation.0.clone()),
-    )
+    (receipt.result, receipt.maintenance)
 }
 
 /// Automatic mode changes still need real feedback when no notification arrives.

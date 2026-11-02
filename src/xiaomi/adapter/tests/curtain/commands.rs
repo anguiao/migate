@@ -314,9 +314,9 @@ fn curtain_without_ready_notifications_reads_a_single_post_command_snapshot() {
 }
 
 #[test]
-fn one_shot_read_failure_is_reported_without_retry_or_changing_acceptance() {
+fn post_command_read_failure_retries_without_changing_acceptance() {
     use crate::device::CurtainCommand;
-    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    use crate::xiaomi::adapter::StepReceipt;
     block_on(rig().run(|c| async move {
         c.announce();
         let peer = peer();
@@ -339,6 +339,10 @@ fn one_shot_read_failure_is_reported_without_retry_or_changing_acceptance() {
                     })
             })
             .await;
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             peer.state
                 .borrow_mut()
                 .read_fail
@@ -349,10 +353,15 @@ fn one_shot_read_failure_is_reported_without_retry_or_changing_acceptance() {
                 .unwrap();
             action.accepted().await.unwrap();
             until(|| {
-                control.context.diagnostics().devices[0].commands[0]
-                    .last
-                    .as_ref()
-                    .is_some_and(|last| matches!(last.feedback, Some(CommandFeedback::Failed(_))))
+                let failed = work(control)
+                    .refresh
+                    .borrow()
+                    .property_problem("curtain:2", CURRENT)
+                    .is_some();
+                if !failed {
+                    control.clock.advance(Duration::from_millis(200));
+                }
+                failed
             })
             .await;
             let last = control.context.diagnostics().devices[0].commands[0]
@@ -361,20 +370,33 @@ fn one_shot_read_failure_is_reported_without_retry_or_changing_acceptance() {
                 .unwrap();
             assert_eq!(last.result, Some(Ok(())));
             assert_eq!(last.steps[0].receipt, StepReceipt::Accepted);
-            assert_eq!(peer.count("get", "one", 0), before + 3);
-            control
-                .clock
-                .automatic
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            control.clock.advance(Duration::from_secs(30));
-            async_io::Timer::after(Duration::from_millis(100)).await;
-            assert_eq!(peer.count("get", "one", 0), before + 3);
-            assert!([STATUS, CURRENT, TARGET].iter().all(|binding| {
-                !work(control)
+            peer.state
+                .borrow_mut()
+                .read_fail
+                .remove(&("one".into(), 2, 3));
+            control.clock.advance(Duration::from_secs(3));
+            until(|| {
+                let finished = [STATUS, CURRENT, TARGET].iter().all(|binding| {
+                    !work(control)
+                        .refresh
+                        .borrow()
+                        .contains("curtain:2", *binding)
+                });
+                if !finished {
+                    control.clock.advance(Duration::from_millis(200));
+                }
+                finished
+            })
+            .await;
+            assert!(peer.count("get", "one", 0) >= before + 4);
+            assert!(
+                work(control)
                     .refresh
                     .borrow()
-                    .contains("curtain:2", *binding)
-            }));
+                    .property_problem("curtain:2", CURRENT)
+                    .is_none()
+            );
+            assert_eq!(peer.count("rpcReq", "one", 0), 1);
         })
         .await;
     }));
@@ -426,7 +448,6 @@ fn rejected_curtain_write_does_not_request_a_one_shot_read() {
                 .clone()
                 .unwrap();
             assert!(matches!(last.steps[0].receipt, StepReceipt::Rejected(_)));
-            assert!(last.feedback.is_none());
         })
         .await;
     }));
@@ -435,7 +456,6 @@ fn rejected_curtain_write_does_not_request_a_one_shot_read() {
 #[test]
 fn old_inflight_read_cannot_satisfy_or_overwrite_the_post_write_snapshot() {
     use crate::device::CurtainCommand;
-    use crate::xiaomi::adapter::CommandFeedback;
     block_on(rig().run(|c| async move {
         c.announce();
         let peer = peer();
@@ -473,10 +493,12 @@ fn old_inflight_read_cannot_satisfy_or_overwrite_the_post_write_snapshot() {
             peer.release_property("one", CURRENT, json!({"value":10}))
                 .await;
             until(|| {
-                control.context.diagnostics().devices[0].commands[0]
-                    .last
-                    .as_ref()
-                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+                [STATUS, CURRENT, TARGET].iter().all(|binding| {
+                    !work(control)
+                        .refresh
+                        .borrow()
+                        .contains("curtain:2", *binding)
+                })
             })
             .await;
             assert_eq!(curtain(control).current_position.value, Some(48));
@@ -487,215 +509,9 @@ fn old_inflight_read_cannot_satisfy_or_overwrite_the_post_write_snapshot() {
 }
 
 #[test]
-fn post_write_inflight_and_pending_reads_satisfy_the_same_feedback_without_duplicates() {
+fn accepted_command_without_a_read_route_refreshes_after_recovery() {
     use crate::device::CurtainCommand;
-    use crate::xiaomi::adapter::CommandFeedback;
-    block_on(rig().run(|c| async move {
-        c.announce();
-        let peer = peer();
-        peer.state
-            .borrow_mut()
-            .sub_reject
-            .insert(("one".into(), 2, 3));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| {
-                curtain(control).current_position.value == Some(37)
-                    && work(control)
-                        .function_subscription_problem("curtain:2")
-                        .is_some()
-                    && [STATUS, CURRENT, TARGET].iter().all(|binding| {
-                        !work(control)
-                            .refresh
-                            .borrow()
-                            .contains("curtain:2", *binding)
-                    })
-            })
-            .await;
-            peer.state.borrow_mut().hold_writes = true;
-            peer.state.borrow_mut().hold_reads = true;
-            let before = peer.count("get", "one", 0);
-            let action = function(&control.context.registry, "one", "curtain:2")
-                .begin_curtain(CurtainCommand::Target(90.0))
-                .unwrap();
-            until(|| peer.count("rpcReq", "one", 0) == 1).await;
-            for binding in [CURRENT, STATUS, TARGET] {
-                work(control).refresh_property("curtain:2", binding);
-            }
-            until(|| peer.count("get", "one", 0) == before + 1).await;
-            peer.release_property(
-                "one",
-                TARGET,
-                json!({"result":[{"did":"one","siid":2,"piid":4,"code":0}]}),
-            )
-            .await;
-            action.accepted().await.unwrap();
-            peer.state.borrow_mut().hold_reads = false;
-            peer.release_property("one", CURRENT, json!({"value":48}))
-                .await;
-            until(|| {
-                control.context.diagnostics().devices[0].commands[0]
-                    .last
-                    .as_ref()
-                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
-            })
-            .await;
-            assert_eq!(peer.count("get", "one", 0), before + 3);
-            assert_eq!(curtain(control).current_position.value, Some(48));
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn completed_post_write_reads_before_the_receipt_are_not_repeated() {
-    use crate::device::CurtainCommand;
-    use crate::xiaomi::adapter::CommandFeedback;
-    block_on(rig().run(|c| async move {
-        c.announce();
-        let peer = peer();
-        peer.state
-            .borrow_mut()
-            .sub_reject
-            .insert(("one".into(), 2, 3));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| {
-                curtain(control).current_position.value == Some(37)
-                    && work(control)
-                        .function_subscription_problem("curtain:2")
-                        .is_some()
-                    && [STATUS, CURRENT, TARGET].iter().all(|binding| {
-                        !work(control)
-                            .refresh
-                            .borrow()
-                            .contains("curtain:2", *binding)
-                    })
-            })
-            .await;
-            peer.state.borrow_mut().hold_writes = true;
-            let before = peer.count("get", "one", 0);
-            let action = function(&control.context.registry, "one", "curtain:2")
-                .begin_curtain(CurtainCommand::Target(90.0))
-                .unwrap();
-            until(|| peer.count("rpcReq", "one", 0) == 1).await;
-            for binding in [STATUS, CURRENT, TARGET] {
-                work(control).refresh_property("curtain:2", binding);
-            }
-            until(|| {
-                peer.count("get", "one", 0) == before + 3
-                    && [STATUS, CURRENT, TARGET].iter().all(|binding| {
-                        !work(control)
-                            .refresh
-                            .borrow()
-                            .contains("curtain:2", *binding)
-                    })
-            })
-            .await;
-            peer.release_property(
-                "one",
-                TARGET,
-                json!({"result":[{"did":"one","siid":2,"piid":4,"code":0}]}),
-            )
-            .await;
-            action.accepted().await.unwrap();
-            async_io::Timer::after(Duration::from_millis(80)).await;
-            assert_eq!(peer.count("get", "one", 0), before + 3);
-            let last = control.context.diagnostics().devices[0].commands[0]
-                .last
-                .clone()
-                .unwrap();
-            assert_eq!(last.feedback, Some(CommandFeedback::Complete));
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn merged_existing_read_keeps_its_retry_without_retrying_the_one_shot_reason() {
-    use crate::device::CurtainCommand;
-    use crate::xiaomi::adapter::CommandFeedback;
-    block_on(rig().run(|c| async move {
-        c.announce();
-        let peer = peer();
-        peer.state
-            .borrow_mut()
-            .sub_reject
-            .insert(("one".into(), 2, 3));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| {
-                curtain(control).current_position.value == Some(37)
-                    && work(control)
-                        .function_subscription_problem("curtain:2")
-                        .is_some()
-                    && [STATUS, CURRENT, TARGET].iter().all(|binding| {
-                        !work(control)
-                            .refresh
-                            .borrow()
-                            .contains("curtain:2", *binding)
-                    })
-            })
-            .await;
-            peer.state.borrow_mut().hold_writes = true;
-            peer.state.borrow_mut().hold_reads = true;
-            let before = peer.count("get", "one", 0);
-            let action = function(&control.context.registry, "one", "curtain:2")
-                .begin_curtain(CurtainCommand::Target(90.0))
-                .unwrap();
-            until(|| peer.count("rpcReq", "one", 0) == 1).await;
-            work(control).refresh_property("curtain:2", CURRENT);
-            until(|| peer.count("get", "one", 0) == before + 1).await;
-            peer.release_property(
-                "one",
-                TARGET,
-                json!({"result":[{"did":"one","siid":2,"piid":4,"code":0}]}),
-            )
-            .await;
-            action.accepted().await.unwrap();
-            peer.state.borrow_mut().hold_reads = false;
-            peer.release_property("one", CURRENT, json!({"code":-7}))
-                .await;
-            until(|| {
-                control.context.diagnostics().devices[0].commands[0]
-                    .last
-                    .as_ref()
-                    .is_some_and(|last| matches!(last.feedback, Some(CommandFeedback::Failed(_))))
-            })
-            .await;
-            assert_eq!(
-                control.context.diagnostics().devices[0].commands[0]
-                    .last
-                    .as_ref()
-                    .unwrap()
-                    .result,
-                Some(Ok(()))
-            );
-            until(|| {
-                !work(control)
-                    .refresh
-                    .borrow()
-                    .contains("curtain:2", CURRENT)
-            })
-            .await;
-            assert_eq!(peer.count("get", "one", 0), before + 4);
-            assert!(matches!(
-                control.context.diagnostics().devices[0].commands[0]
-                    .last
-                    .as_ref()
-                    .unwrap()
-                    .feedback,
-                Some(CommandFeedback::Failed(_))
-            ));
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn accepted_command_without_a_read_route_reports_failure_without_later_queued_work() {
-    use crate::device::CurtainCommand;
-    use crate::xiaomi::adapter::{CommandFeedback, PathPriority};
+    use crate::xiaomi::adapter::PathPriority;
     block_on(rig().run(|c| async move {
         c.announce();
         let peer = peer();
@@ -738,20 +554,15 @@ fn accepted_command_without_a_read_route_reports_failure_without_later_queued_wo
                 .clone()
                 .unwrap();
             assert_eq!(last.result, Some(Ok(())));
-            assert_eq!(
-                last.feedback,
-                Some(CommandFeedback::Failed("no usable read path".into()))
-            );
             assert!([STATUS, CURRENT, TARGET].iter().all(|binding| {
-                !work(control)
+                work(control)
                     .refresh
                     .borrow()
                     .contains("curtain:2", *binding)
             }));
             control.context.priority.set(PathPriority::LocalFirst);
             work(control).refresh_changed.notify(usize::MAX);
-            async_io::Timer::after(Duration::from_millis(80)).await;
-            assert_eq!(peer.count("get", "one", 0), before);
+            until(|| peer.count("get", "one", 0) == before + 3).await;
         })
         .await;
     }));
@@ -760,7 +571,7 @@ fn accepted_command_without_a_read_route_reports_failure_without_later_queued_wo
 #[test]
 fn cloud_curtain_control_without_notifications_reads_one_snapshot() {
     use crate::device::CurtainCommand;
-    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    use crate::xiaomi::adapter::StepReceipt;
     let (rig, listener, cloud) = cloud_rig();
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
@@ -788,10 +599,10 @@ fn cloud_curtain_control_without_notifications_reads_one_snapshot() {
                 .unwrap();
             action.accepted().await.unwrap();
             until(|| {
-                c.context.diagnostics().devices[0].commands[0]
-                    .last
-                    .as_ref()
-                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+                c.cloud.lock().unwrap().property_reads.len() == before + 3
+                    && [STATUS, CURRENT, TARGET]
+                        .iter()
+                        .all(|binding| !work(&c).refresh.borrow().contains("curtain:2", *binding))
             })
             .await;
             assert_eq!(c.cloud.lock().unwrap().property_reads.len(), before + 3);
@@ -806,72 +617,6 @@ fn cloud_curtain_control_without_notifications_reads_one_snapshot() {
                 future::yield_now().await;
             }
             assert_eq!(c.cloud.lock().unwrap().property_reads.len(), before + 3);
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn current_source_reads_started_after_the_write_satisfy_feedback_after_a_source_change() {
-    use crate::device::CurtainCommand;
-    use crate::xiaomi::adapter::CommandFeedback;
-    block_on(rig().run(|c| async move {
-        c.announce();
-        let peer = peer();
-        peer.state
-            .borrow_mut()
-            .sub_reject
-            .insert(("one".into(), 2, 3));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| {
-                curtain(control).current_position.value == Some(37)
-                    && work(control)
-                        .function_subscription_problem("curtain:2")
-                        .is_some()
-                    && [STATUS, CURRENT, TARGET].iter().all(|binding| {
-                        !work(control)
-                            .refresh
-                            .borrow()
-                            .contains("curtain:2", *binding)
-                    })
-            })
-            .await;
-            peer.state.borrow_mut().hold_writes = true;
-            let before = peer.count("get", "one", 0);
-            let action = function(&control.context.registry, "one", "curtain:2")
-                .begin_curtain(CurtainCommand::Target(90.0))
-                .unwrap();
-            until(|| peer.count("rpcReq", "one", 0) == 1).await;
-            work(control).test_source_changed();
-            for binding in [STATUS, CURRENT, TARGET] {
-                work(control).refresh_property("curtain:2", binding);
-            }
-            until(|| {
-                peer.count("get", "one", 0) == before + 3
-                    && [STATUS, CURRENT, TARGET].iter().all(|binding| {
-                        !work(control)
-                            .refresh
-                            .borrow()
-                            .contains("curtain:2", *binding)
-                    })
-            })
-            .await;
-            peer.release_property(
-                "one",
-                TARGET,
-                json!({"result":[{"did":"one","siid":2,"piid":4,"code":0}]}),
-            )
-            .await;
-            action.accepted().await.unwrap();
-            until(|| {
-                control.context.diagnostics().devices[0].commands[0]
-                    .last
-                    .as_ref()
-                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
-            })
-            .await;
-            assert_eq!(peer.count("get", "one", 0), before + 3);
         })
         .await;
     }));

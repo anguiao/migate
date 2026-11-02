@@ -54,6 +54,73 @@ fn setup_with_description(did: &str, description: Value) -> (Rig, LegacyDevice) 
 }
 
 #[test]
+fn direct_command_refreshes_even_when_cloud_notifications_are_ready() {
+    let did = "308540429";
+    let (rig, peer) = setup(did);
+    let (rig, listener, cloud) = with_cloud_rig(rig);
+    block_on(rig.run(|control| async move {
+        future::or(cloud.run(&listener), async {
+            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let work = control.context.live.borrow().devices[did]
+                .admitted
+                .clone()
+                .unwrap();
+            let bindings = work.native.device().functions()[0].observation_bindings();
+            until(|| {
+                work.function_observer("air-conditioner:2")
+                    .is_some_and(|source| work.source_ready("air-conditioner:2", &source))
+                    && control.context.direct_candidate(did).is_ok()
+                    && bindings.iter().all(|binding| {
+                        !work
+                            .refresh
+                            .borrow()
+                            .contains("air-conditioner:2", *binding)
+                    })
+                    && ac.snapshot().air_conditioner().unwrap().temperature.value == Some(24)
+            })
+            .await;
+            let before = peer
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request["method"] == "get_prop")
+                .count();
+            ac.begin_air_conditioner(AirConditionerCommand::Temperature(26))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(26)).await;
+            assert_eq!(
+                peer.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request["method"] == "get_prop")
+                    .count(),
+                before + 1
+            );
+            let status = control.context.diagnostics();
+            let device = status
+                .devices
+                .iter()
+                .find(|device| device.did == did)
+                .unwrap();
+            assert_eq!(
+                device.functions[0].notification_source,
+                Some(PathKind::Cloud)
+            );
+            assert_eq!(
+                device.commands[0].last.as_ref().unwrap().actual_path,
+                Some(PathKind::Direct)
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn mcn02_offline_direct_batches_feedback_and_uses_legacy_commands() {
     let did = "308540429";
     let (rig, peer) = setup(did);
@@ -786,7 +853,6 @@ fn invalid_legacy_ack_is_shown_as_uncertain_by_the_command_diagnostics() {
             let last = device.commands[0].last.as_ref().unwrap();
             assert_eq!(last.actual_path, Some(PathKind::Direct));
             assert!(matches!(last.steps[0].receipt, StepReceipt::Uncertain(_)));
-            assert!(last.feedback.is_none());
             let auth = crate::terminal::AuthStatus::new(
                 control.context.status.borrow().authentication.clone(),
                 "/bin/migate".into(),
@@ -816,7 +882,7 @@ fn invalid_legacy_ack_is_shown_as_uncertain_by_the_command_diagnostics() {
 
 #[test]
 fn mcn02_partial_acceptance_reads_once_after_all_sent_steps() {
-    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    use crate::xiaomi::adapter::StepReceipt;
     let did = "308540429";
     let (rig, peer) = setup(did);
     block_on(rig.run(|control| {
@@ -892,14 +958,12 @@ fn mcn02_partial_acceptance_reads_once_after_all_sent_steps() {
             );
             peer.hold_read.store(false, Ordering::Relaxed);
             until(|| {
-                control
-                    .context
-                    .diagnostics()
-                    .devices
-                    .iter()
-                    .find(|device| device.did == did)
-                    .and_then(|device| device.commands[0].last.as_ref())
-                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+                bindings.iter().all(|binding| {
+                    !work
+                        .refresh
+                        .borrow()
+                        .contains("air-conditioner:2", *binding)
+                })
             })
             .await;
             assert_eq!(

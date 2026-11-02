@@ -70,7 +70,6 @@ fn refresh_after_write(
     properties: &[(PropertyBinding, Value)],
     gate: &super::DeviceWriteGate,
     authority: u64,
-    operation: &super::CommandOperation,
 ) {
     if gate.authority() != authority {
         return;
@@ -157,7 +156,8 @@ fn refresh_after_write(
                     .collect()
                 };
                 for binding in bindings {
-                    refresh_written_property(context, &member, function.id(), binding, operation);
+                    member.observations.invalidate_write(function.id(), binding);
+                    member.request_dirty_read(function.id(), binding);
                 }
             }
             return;
@@ -182,33 +182,9 @@ fn refresh_after_write(
             .map(|mode| mode.property())
     };
     for binding in properties.iter().map(|(binding, _)| *binding).chain(mode) {
-        refresh_written_property(context, &work, id, binding, operation);
+        work.observations.invalidate_write(id, binding);
+        work.request_dirty_read(id, binding);
     }
-}
-
-fn refresh_written_property(
-    context: &Context,
-    work: &DeviceWork,
-    id: &str,
-    binding: PropertyBinding,
-    operation: &super::CommandOperation,
-) {
-    if let Some(stamp) = operation.feedback_stamp(work, id, binding) {
-        if work.observations.read_after(id, binding, &stamp) {
-            return;
-        }
-        if work
-            .refresh
-            .borrow()
-            .inflight_after(context, work, id, binding, &stamp)
-        {
-            work.refresh.borrow_mut().retain_inflight_retry(id, binding);
-            work.observations.mark_unconfirmed_write(id, binding);
-            return;
-        }
-    }
-    work.observations.invalidate_write(id, binding);
-    work.request_dirty_read(id, binding);
 }
 
 pub(super) async fn send(
@@ -279,9 +255,6 @@ pub(super) async fn send(
         properties.clone(),
         request.queued_at(),
     );
-    if matches!(&request, DeviceRequest::Light(frame) if !frame.final_frame) {
-        operation.0.feedback_enabled.set(false);
-    }
 
     let mut request = request;
     loop {
@@ -368,7 +341,6 @@ pub(super) async fn send(
                         Err(error)
                     }
                 };
-                operation.0.schedule_feedback(&context, &work, &sink);
                 operation.0.finish(result);
                 if let Some(error) = receipt.maintenance {
                     return Err(error);

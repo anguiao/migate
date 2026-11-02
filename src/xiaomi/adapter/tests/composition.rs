@@ -381,7 +381,6 @@ fn core_metadata_can_change_without_rebuilding_source_or_matter() {
 #[test]
 fn another_functions_ready_notification_does_not_suppress_fan_feedback() {
     use crate::device::FanCommand;
-    use crate::xiaomi::adapter::CommandFeedback;
     let mut description = instance();
     let mut second_fan = description["services"][1].clone();
     second_fan["iid"] = json!(5);
@@ -439,15 +438,7 @@ fn another_functions_ready_notification_does_not_suppress_fan_feedback() {
                 .accepted()
                 .await
                 .unwrap();
-            until(|| {
-                control.context.diagnostics().devices[0]
-                    .commands
-                    .iter()
-                    .find(|command| command.channel == "fan:5")
-                    .and_then(|command| command.last.as_ref())
-                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
-            })
-            .await;
+            until(|| peer.count("get", "one", 5) == before + 2).await;
             assert_eq!(peer.count("get", "one", 5), before + 2);
         })
         .await;

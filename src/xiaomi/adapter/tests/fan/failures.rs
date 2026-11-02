@@ -182,7 +182,7 @@ fn each_cloud_step_failure_or_timeout_stops_the_sequence() {
 
 #[test]
 fn partial_fan_acceptance_reads_only_after_the_last_step_and_keeps_each_receipt() {
-    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    use crate::xiaomi::adapter::StepReceipt;
     block_on(rig().run(|c| async move {
         c.announce();
         let peer = peer();
@@ -229,10 +229,10 @@ fn partial_fan_acceptance_reads_only_after_the_last_step_and_keeps_each_receipt(
                 Err(CommandError::Rejected(_))
             ));
             until(|| {
-                control.context.diagnostics().devices[0].commands[0]
-                    .last
-                    .as_ref()
-                    .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
+                peer.count("get", "one", 0) == before + 4
+                    && [POWER, MODE, SPEED, SWING]
+                        .iter()
+                        .all(|binding| !work(control).refresh.borrow().contains("fan:2", *binding))
             })
             .await;
             assert_eq!(peer.count("get", "one", 0), before + 4);
@@ -262,7 +262,7 @@ fn partial_fan_acceptance_reads_only_after_the_last_step_and_keeps_each_receipt(
 
 #[test]
 fn fan_partial_acceptance_then_timeout_reads_over_the_cloud_fallback() {
-    use crate::xiaomi::adapter::{CommandFeedback, StepReceipt};
+    use crate::xiaomi::adapter::StepReceipt;
     let (rig, listener, cloud) = cloud_rig();
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
@@ -308,17 +308,38 @@ fn fan_partial_acceptance_then_timeout_reads_over_the_cloud_fallback() {
                 until(|| peer.count("rpcReq", "one", 0) == 2).await;
                 assert_eq!(control.cloud.lock().unwrap().property_reads.len(), before);
                 assert_eq!(action.accepted().await, Err(CommandError::Timeout));
-                until(|| {
-                    control.context.diagnostics().devices[0].commands[0]
-                        .last
-                        .as_ref()
-                        .is_some_and(|last| last.feedback == Some(CommandFeedback::Complete))
-                })
+                future::or(
+                    until(|| {
+                        control.cloud.lock().unwrap().property_reads.len() >= before + 4
+                            && [POWER, MODE, SPEED, SWING].iter().all(|binding| {
+                                !work(control).refresh.borrow().contains("fan:2", *binding)
+                            })
+                    }),
+                    async {
+                        async_io::Timer::after(Duration::from_secs(2)).await;
+                        let state = work(control).refresh.borrow().snapshot();
+                        panic!(
+                            "cloud reads: {:?}, pending: {:?}, inflight: {:?}, problems: {:?}",
+                            control.cloud.lock().unwrap().property_reads,
+                            state
+                                .pending
+                                .iter()
+                                .map(|read| (&read.id, read.binding, read.attempts))
+                                .collect::<Vec<_>>(),
+                            state.inflight,
+                            state.problems
+                        );
+                    },
+                )
                 .await;
-                assert_eq!(
-                    control.cloud.lock().unwrap().property_reads.len(),
-                    before + 4
-                );
+                let reads = control.cloud.lock().unwrap().property_reads.clone();
+                for binding in [POWER, MODE, SPEED, SWING] {
+                    assert!(reads[before..].contains(&(
+                        "one".to_owned(),
+                        binding.siid,
+                        binding.piid,
+                    )));
+                }
                 let status = control.context.diagnostics();
                 let last = status.devices[0].commands[0].last.as_ref().unwrap();
                 assert_eq!(last.steps[0].receipt, StepReceipt::Accepted);

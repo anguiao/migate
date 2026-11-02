@@ -549,14 +549,6 @@ fn format_command(channel: &str, state: &str, command: &CommandStatus) -> String
             .join(", ");
         text.push_str(&format!(" Steps: {steps}."));
     }
-    if let Some(feedback) = &command.feedback {
-        let value = match feedback {
-            crate::xiaomi::adapter::CommandFeedback::Pending => "pending".into(),
-            crate::xiaomi::adapter::CommandFeedback::Complete => "complete".into(),
-            crate::xiaomi::adapter::CommandFeedback::Failed(reason) => format!("failed: {reason}"),
-        };
-        text.push_str(&format!(" One-shot feedback: {value}."));
-    }
     text
 }
 

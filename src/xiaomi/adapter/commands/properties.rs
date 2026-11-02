@@ -18,15 +18,8 @@ use crate::{
 use serde_json::Value;
 use std::{cell::RefCell, rc::Rc};
 
-type AfterWrite = fn(
-    &Context,
-    &DeviceWork,
-    &str,
-    &[(PropertyBinding, Value)],
-    &DeviceWriteGate,
-    u64,
-    &super::CommandOperation,
-);
+type AfterWrite =
+    fn(&Context, &DeviceWork, &str, &[(PropertyBinding, Value)], &DeviceWriteGate, u64);
 
 pub(super) fn cloud_command_error(error: &CloudError) -> CommandError {
     match error.kind() {
@@ -150,10 +143,8 @@ pub(super) async fn submit_properties(
         ControlPath::Local(handle) => {
             let slot = Rc::new(RefCell::new(None::<BatchReceipt>));
             let guard_work = work.clone();
-            let sent_work = work.clone();
             let guard_sink = sink.clone();
             let guard_context = context.clone();
-            let sent_context = context.clone();
             let guard_handle = handle.clone();
             let guard_did = did.clone();
             let guard_function_id = function_id.to_owned();
@@ -195,7 +186,6 @@ pub(super) async fn submit_properties(
                     // The synchronous guard proved the request current; a
                     // failed mark can only mean the frame was retired.
                     let _ = guard_mark();
-                    guard_operation.mark_write(&sent_context, &sent_work);
                     guard_operation.submitted(PathKind::Local);
                     if retain_feedback {
                         guard_gate.register_feedback_for(authority, &guard_properties);
@@ -219,7 +209,6 @@ pub(super) async fn submit_properties(
                             &result_properties,
                             &result_gate,
                             authority,
-                            &result_operation,
                         );
                     }
                     result_context.local_device_outcome(&result_handle, &result_work, &outcome);
@@ -304,7 +293,6 @@ pub(super) async fn submit_properties(
             };
             let on_sent = || {
                 let _ = mark();
-                operation.mark_write(context, work);
                 operation.submitted(PathKind::Direct);
                 if retain_feedback {
                     gate.register_feedback_for(authority, &properties);
@@ -353,15 +341,7 @@ pub(super) async fn submit_properties(
                 .as_ref()
                 .is_err_and(|error| error.stage == SendStage::BeforeSend);
             if sent && let Some(after_write) = after_write {
-                after_write(
-                    context,
-                    work,
-                    function_id,
-                    &properties,
-                    gate,
-                    authority,
-                    operation,
-                );
+                after_write(context, work, function_id, &properties, gate, authority);
             }
             match result {
                 Ok(results) => {
@@ -431,22 +411,13 @@ pub(super) async fn submit_properties(
             if retain_feedback {
                 gate.register_feedback_for(authority, &properties);
             }
-            operation.mark_write(context, work);
             operation.submitted(PathKind::Cloud);
             let result = context
                 .cloud
                 .set_properties(&credentials.access_token, &did, &properties)
                 .await;
             if let Some(after_write) = after_write {
-                after_write(
-                    context,
-                    work,
-                    function_id,
-                    &properties,
-                    gate,
-                    authority,
-                    operation,
-                );
+                after_write(context, work, function_id, &properties, gate, authority);
             }
             let receipt = match &result {
                 Ok(results) => {

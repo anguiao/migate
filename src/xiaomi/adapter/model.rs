@@ -203,7 +203,6 @@ pub struct CommandStatus {
     pub actual_path: Option<PathKind>,
     pub result: Option<Result<(), CommandError>>,
     pub steps: Vec<CommandStep>,
-    pub feedback: Option<CommandFeedback>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -221,12 +220,6 @@ pub enum StepReceipt {
     Uncertain(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum CommandFeedback {
-    Pending,
-    Complete,
-    Failed(String),
-}
 impl CommandStatus {
     pub(crate) fn properties_text(&self) -> String {
         if self.properties.is_empty() {
