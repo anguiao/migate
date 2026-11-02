@@ -89,6 +89,7 @@ impl DeviceWork {
         native: NativeDescription,
         sink: Rc<LogicalSink>,
         refresh_changed: Rc<Event>,
+        initial_reads_changed: Rc<Event>,
         light_write: Option<Rc<DeviceWriteGate>>,
     ) -> Self {
         for function in native.device().functions() {
@@ -121,7 +122,7 @@ impl DeviceWork {
             fan_modes: RefCell::new(BTreeMap::new()),
             state_read_paths: RefCell::new(BTreeMap::new()),
             condition_generation: Cell::new(0),
-            refresh: RefCell::new(RefreshState::default()),
+            refresh: RefCell::new(RefreshState::new(initial_reads_changed)),
             refresh_changed,
             light_frames: RefCell::new(LightFrames::default()),
             committed_battery_issue: RefCell::new(battery_issue),
@@ -151,6 +152,7 @@ impl DeviceWork {
             }
         }
         let old = std::mem::replace(&mut *self.sink.borrow_mut(), sink);
+        self.refresh.borrow_mut().reset_initial();
         for function in self.native.device().functions() {
             if function
                 .air_conditioner()
@@ -163,6 +165,11 @@ impl DeviceWork {
     }
     pub(super) fn physical(&self) -> PhysicalDevice {
         self.current_sink().physical.clone()
+    }
+    pub(super) fn resolve_initial(&self, id: &str, binding: PropertyBinding) {
+        if !self.life.is_closed() {
+            self.refresh.borrow_mut().resolve_initial(id, binding);
+        }
     }
     pub(super) fn binding(&self, id: &str) -> PropertyBinding {
         if id == BATTERY_CHANNEL {
@@ -331,6 +338,7 @@ impl DeviceWork {
     /// notification handshakes are retired.
     pub(super) fn retire(&self) {
         self.life.close();
+        self.refresh.borrow().notify_initial_changed();
         self.current_sink().close();
         let local = self.local.borrow_mut().connection.take();
         if let Some(local) = local {

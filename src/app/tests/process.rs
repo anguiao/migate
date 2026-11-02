@@ -12,22 +12,58 @@ impl TestProcess {
         if gate.exists() {
             fs::remove_file(&gate).unwrap();
         }
-        let mut process = Self::spawn(helper_command(directory).env(
-            "MIGATE_TEST_INITIAL_POWER",
-            if initial { "on" } else { "off" },
-        ));
+        let mut address = rs_matter::transport::MATTER_SOCKET_BIND_ADDR;
+        address.set_port(0);
+        let reserved = UdpSocket::bind(address).unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        address.set_port(port);
+        let mut process = Self::spawn(
+            helper_command(directory)
+                .env(
+                    "MIGATE_TEST_INITIAL_POWER",
+                    if initial { "on" } else { "off" },
+                )
+                .env("MIGATE_TEST_MATTER_PORT", port.to_string()),
+        );
+
+        // The source and terminal must make progress while Matter is gated.
+        process.wait_for_output(Stream::Stderr, "Fake source awaiting initial read");
+        process.send("status\n");
+        process.wait_for_output(Stream::Stdout, "test-outlet (Test Outlet): initializing\n");
+        process.wait_for_output(Stream::Stdout, "  outlet:2 (主电源): unknown");
+        let (_, stderr) = process.output();
+        assert!(
+            !stderr.contains("Matter UDP listening on port "),
+            "{stderr}"
+        );
+        // Retaining the port prevents any unrelated process from acquiring it;
+        // an early Matter bind would cause the child to exit with an error.
+        assert!(process.child.try_wait().unwrap().is_none(), "{stderr}");
+
+        drop(reserved);
+        fs::write(&gate, b"ready").unwrap();
+        process.wait_for_output(
+            Stream::Stderr,
+            &format!(
+                "Fake source initial read: {}",
+                if initial { "on" } else { "off" }
+            ),
+        );
         process.wait_for_output(Stream::Stderr, "mDNS services updated");
         let (_, stderr) = process.output();
-        let port: u16 = stderr
+        assert!(
+            stderr.find("Fake source initial read:").unwrap()
+                < stderr.find("Matter UDP listening on port ").unwrap(),
+            "{stderr}"
+        );
+        let listening_port: u16 = stderr
             .lines()
             .find_map(|line| line.split_once("Matter UDP listening on port "))
             .unwrap()
             .1
             .parse()
             .unwrap();
-        assert_ne!(port, 0);
-        let mut address = rs_matter::transport::MATTER_SOCKET_BIND_ADDR;
-        address.set_port(port);
+        assert_eq!(listening_port, port);
         assert_eq!(
             UdpSocket::bind(address).unwrap_err().kind(),
             std::io::ErrorKind::AddrInUse,
@@ -51,17 +87,6 @@ impl TestProcess {
             "local.",
         ]));
         lookup.wait_for_output(Stream::Stdout, &format!(":{port} (interface"));
-        process.send("status\n");
-        process.wait_for_output(Stream::Stdout, "test-outlet (Test Outlet): initializing\n");
-        process.wait_for_output(Stream::Stdout, "  outlet:2 (主电源): unknown");
-        fs::write(&gate, b"ready").unwrap();
-        process.wait_for_output(
-            Stream::Stderr,
-            &format!(
-                "Fake source initial read: {}",
-                if initial { "on" } else { "off" }
-            ),
-        );
         (process, port)
     }
 }
@@ -196,7 +221,9 @@ fn bridge_helper_child() {
                 .target(env_logger::Target::Stderr)
                 .init();
             let directory = std::path::PathBuf::from(directory);
+            log::info!("Fake source process starting");
             let _instance = crate::storage::InstanceLock::acquire(&directory).unwrap();
+            log::info!("Fake source directory locked");
             let store = crate::storage::Store::open(&directory).unwrap();
             let identity = store.load_identity().unwrap();
             log::info!("Data directory: {}", directory.display());
@@ -204,17 +231,17 @@ fn bridge_helper_child() {
                 .local_status()
                 .unwrap();
             let status = AuthStatus::new(report, "/bin/migate".into(), directory.clone());
-            let AppSource {
-                adapter,
-                handle,
-                physical,
-                mut receivers,
-            } = AppSource::new(&store, Some(outlet()));
-            let source_device = physical.unwrap();
-            let mut receiver = receivers.remove(0);
+            let mut source = AppSource::new(&store, Some(outlet()));
+            let handle = source.handle.clone();
+            let source_device = source.physical.as_ref().unwrap().clone();
+            let mut receiver = source.receivers.remove(0);
             let gate = directory.join("source-ready");
             let initial =
                 std::env::var("MIGATE_TEST_INITIAL_POWER").is_ok_and(|value| value == "on");
+            let port = std::env::var("MIGATE_TEST_MATTER_PORT")
+                .unwrap()
+                .parse()
+                .unwrap();
             struct Guard;
             impl Drop for Guard {
                 fn drop(&mut self) {
@@ -223,11 +250,11 @@ fn bridge_helper_child() {
             }
             let source = async move {
                 let _guard = Guard;
-                let _adapter = adapter;
+                log::info!("Fake source awaiting initial read");
                 while !gate.try_exists()? {
                     async_io::Timer::after(Duration::from_millis(10)).await;
                 }
-                source_device.functions()[0].observe(initial);
+                source.read_power(initial);
                 source_device.set_availability(Availability::Available);
                 log::info!(
                     "Fake source initial read: {}",
@@ -251,7 +278,7 @@ fn bridge_helper_child() {
                     store: &store,
                     identity: &identity,
                     status: &status,
-                    port: 0,
+                    port,
                 },
                 async { Ok(handle) },
                 source,

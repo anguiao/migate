@@ -88,6 +88,7 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
         let terminal = Context::committed(app.clone(), &status);
         let before = app.current().configuration.clone();
         let source_event = app.listen();
+        let committed_event = app.committed.listen();
         let published = app
             .frozen()
             .into_iter()
@@ -154,6 +155,11 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
             .unwrap()
             .unwrap();
         assert!(output.contains("bound"), "{output}");
+        assert!(
+            futures_lite::future::poll_once(committed_event)
+                .await
+                .is_some()
+        );
         let output = terminal.handle_line("status ac", 0).await.unwrap().unwrap();
         assert!(output.contains("Target temperature"), "{output}");
         assert!(output.contains("Ambient temperature: 21.50 °C"), "{output}");

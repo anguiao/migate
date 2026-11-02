@@ -185,6 +185,9 @@ fn read_legacy(
         if let Some(Err(error)) = &result
             && !(error.stage == SendStage::BeforeSend && error.failure == Failure::Withdrawn)
         {
+            for (read, stamp) in reads.iter().zip(&stamps) {
+                resolve_initial_failure(&context, &work, read, &flight, stamp);
+            }
             context.lan_business_failure(did, client, error)?;
         }
         for (read, stamp) in reads.into_iter().zip(stamps) {

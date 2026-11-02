@@ -1,5 +1,26 @@
 use super::*;
 
+impl RefreshState {
+    pub(in crate::xiaomi::adapter) fn fail_initial_for_test(
+        &mut self,
+        id: &str,
+        binding: PropertyBinding,
+    ) {
+        self.complete(
+            Refresh {
+                id: id.to_owned(),
+                binding,
+                attempts: 0,
+                ready_at: Duration::ZERO,
+                periodic: false,
+                baseline: None,
+            },
+            ReadResult::Failed("test read failed".into()),
+            Duration::ZERO,
+        );
+    }
+}
+
 #[test]
 fn dirty_again_produces_exactly_one_follow_up_read() {
     let mut state = RefreshState::default();
@@ -154,6 +175,7 @@ fn motion_work() -> Rc<DeviceWork> {
     Rc::new(DeviceWork::new(
         native,
         Rc::new(super::super::state::LogicalSink::new(physical)),
+        Rc::new(event_listener::Event::new()),
         Rc::new(event_listener::Event::new()),
         None,
     ))

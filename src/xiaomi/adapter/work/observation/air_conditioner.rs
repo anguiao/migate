@@ -92,6 +92,7 @@ impl DeviceWork {
                 observation.source_time,
                 observation.received_at,
             );
+            self.resolve_initial(id, binding);
         } else {
             self.observations.observed(self, id, binding, origin);
             if matches!(origin, Origin::Notification) {

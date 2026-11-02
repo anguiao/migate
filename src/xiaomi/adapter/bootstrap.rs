@@ -157,6 +157,7 @@ impl XiaomiAdapter {
             sync_not_before: Cell::new(None),
             sync_backoff: RefCell::new(Backoff::new(1, 30)),
             refresh_changed: Rc::new(Event::new()),
+            initial_reads_changed: Rc::new(Event::new()),
             live: RefCell::new(Live {
                 credentials,
                 scope,
@@ -201,6 +202,7 @@ impl XiaomiAdapter {
                 native,
                 sink.clone(),
                 context.refresh_changed.clone(),
+                context.initial_reads_changed.clone(),
                 light_write,
             ));
             context.registry.insert(sink.physical.clone());

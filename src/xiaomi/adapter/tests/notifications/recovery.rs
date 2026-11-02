@@ -52,11 +52,38 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
             c.clock.advance(Duration::from_secs(10));
             until(|| cloud_active(&c, "one")).await;
             let one = function(&c.context.registry, "one", "outlet:2");
-            until(|| one.snapshot().power() == Some(Power::Off)).await;
+            let binding = crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 };
+            let work = c.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let read_due = c.clock.now() + Duration::from_millis(200);
+            // A reconnect can queue a fresh read behind the per-device round
+            // spacing. The manually controlled clock must reach that deadline.
+            until(|| {
+                let refresh = work.refresh.borrow().snapshot();
+                one.snapshot().power() == Some(Power::Off)
+                    || refresh.inflight.is_empty()
+                        && refresh
+                            .pending
+                            .iter()
+                            .any(|read| read.id == "outlet:2" && read.binding == binding)
+                        && c.clock.deadlines.lock().unwrap().contains(&read_due)
+            })
+            .await;
+            if one.snapshot().power() != Some(Power::Off) {
+                let reads_before = c.cloud.lock().unwrap().property_reads.len();
+                c.clock.advance(Duration::from_millis(201));
+                until(|| {
+                    c.cloud.lock().unwrap().property_reads.len() > reads_before
+                        && one.snapshot().power() == Some(Power::Off)
+                })
+                .await;
+            }
             c.context.property_value_event(
                 &super::super::super::notifications::NotificationSource::Cloud(old),
                 "one",
-                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                binding,
                 &json!(true),
                 None,
                 false,

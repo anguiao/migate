@@ -45,6 +45,7 @@ pub(super) fn read_one(
                     let result_context = context.clone();
                     let result_handle = handle.clone();
                     let result_flight = flight.clone();
+                    let result_read = read.clone();
                     let periodic = read.periodic;
                     let outcome = handle
                         .read_property_observation_with_timeout_guarded(
@@ -77,6 +78,21 @@ pub(super) fn read_one(
                             ),
                             move |outcome| {
                                 // Observation counters only gate values; access failures still affect routing.
+                                if let Err(error) = &outcome.result
+                                    && !(outcome.stage == RequestStage::NotSent
+                                        && matches!(
+                                            error,
+                                            CentralError::Withdrawn | CentralError::Cancelled
+                                        ))
+                                {
+                                    resolve_initial_failure(
+                                        &result_context,
+                                        &observing,
+                                        &result_read,
+                                        &result_flight,
+                                        &observed_stamp,
+                                    );
+                                }
                                 if !result_flight.life.is_closed() {
                                     if periodic {
                                         result_context.local_background_property_outcome(
@@ -192,6 +208,7 @@ pub(super) fn read_one(
                             Ok(ReadResult::Retired)
                         }
                         Err(error) => {
+                            resolve_initial_failure(&context, &work, &read, &flight, &stamp);
                             context.lan_business_failure(&did, client, &error)?;
                             Ok(ReadResult::Failed(work.problem(
                                 "read",

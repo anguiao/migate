@@ -309,6 +309,7 @@ pub(super) struct Context {
     pub(super) sync_not_before: Cell<Option<Duration>>,
     pub(super) sync_backoff: RefCell<Backoff>,
     pub(super) refresh_changed: Rc<Event>,
+    pub(super) initial_reads_changed: Rc<Event>,
     pub(super) live: RefCell<Live>,
     /// The one committed group graph installed with the serving configuration.
     pub(super) graph: RefCell<Rc<DerivedConfiguration>>,

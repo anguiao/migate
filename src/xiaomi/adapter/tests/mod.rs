@@ -12,6 +12,7 @@ mod fan;
 mod group_composition;
 mod groups;
 mod http_routing;
+mod initial_reads;
 mod lan;
 mod legacy_miio;
 mod lighting;

@@ -182,7 +182,11 @@ impl Observations {
         binding: PropertyBinding,
         origin: Origin,
     ) {
-        if work.life.is_closed() || matches!(origin, Origin::Cache) {
+        if work.life.is_closed() {
+            return;
+        }
+        work.resolve_initial(id, binding);
+        if matches!(origin, Origin::Cache) {
             return;
         }
         let mut channels = self.channels.borrow_mut();

@@ -83,6 +83,7 @@ impl App {
             entries: current.entries.clone(),
             published: current.published.clone(),
         });
+        self.committed.notify(usize::MAX);
         Ok(())
     }
 

@@ -5,6 +5,7 @@ mod credentials;
 mod diagnostics;
 mod group_rules;
 mod groups;
+mod initial_reads;
 mod lan;
 mod legacy_miio;
 mod lighting;

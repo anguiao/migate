@@ -50,6 +50,16 @@ pub(crate) struct PreparedSources {
 }
 
 impl SourceHandle {
+    /// Whether every initial observation needed by the committed publication has a result.
+    pub(crate) fn initial_reads_ready(&self, configuration: &CommittedConfiguration) -> bool {
+        super::initial_reads::ready(&self.0, configuration)
+    }
+
+    /// Register before checking `initial_reads_ready` to avoid missing an update.
+    pub(crate) fn listen_initial_reads(&self) -> event_listener::EventListener {
+        self.0.initial_reads_changed.listen()
+    }
+
     pub(crate) fn listen(&self) -> event_listener::EventListener {
         self.0.configuration_changed.listen()
     }
@@ -275,6 +285,7 @@ impl SourceHandle {
                         native.clone(),
                         sink.clone(),
                         self.0.refresh_changed.clone(),
+                        self.0.initial_reads_changed.clone(),
                         light_write,
                     ));
                     installed.push(PreparedSource {

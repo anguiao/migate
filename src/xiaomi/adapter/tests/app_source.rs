@@ -33,6 +33,60 @@ pub(crate) struct AppSource {
 }
 
 impl AppSource {
+    pub(crate) fn stage(&self) {
+        self.handle.0.stage();
+    }
+
+    fn power_binding(
+        &self,
+    ) -> (
+        Rc<DeviceWork>,
+        String,
+        crate::xiaomi::capability::PropertyBinding,
+    ) {
+        let physical = self.physical.as_ref().expect("test source has a device");
+        let work = self.handle.0.live.borrow().devices[&physical.key().id]
+            .admitted
+            .clone()
+            .expect("test device has a source");
+        let function = work
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.power().is_some())
+            .expect("test device has a power function");
+        let id = function.id().to_owned();
+        let binding = function.power().unwrap();
+        (work, id, binding)
+    }
+
+    /// Deliver a source read through the real observation ordering boundary.
+    pub(crate) fn read_power(&self, value: bool) {
+        let (work, id, binding) = self.power_binding();
+        let stamp = work.observations.read_stamp(&id, binding);
+        work.observe_read_at(
+            &id,
+            binding,
+            &stamp,
+            &serde_json::json!(value),
+            super::super::observations::Observation {
+                source: super::super::model::PathKind::Cloud,
+                source_time: None,
+                received_at: 1,
+            },
+        )
+        .expect("test power is a valid source value");
+    }
+
+    /// Settle the first power read through the refresh failure path.
+    pub(crate) fn fail_initial_read(&self) {
+        let (work, id, binding) = self.power_binding();
+        work.refresh
+            .borrow_mut()
+            .fail_initial_for_test(&id, binding);
+    }
+
     /// Restore a saved configuration, creating the requested initial identity
     /// only for a new database. No discovery or external transport is run.
     pub(crate) fn new(store: &Store, description: Option<PhysicalDeviceDescription>) -> Self {
@@ -100,6 +154,7 @@ impl AppSource {
                     native,
                     sink,
                     adapter.context.refresh_changed.clone(),
+                    adapter.context.initial_reads_changed.clone(),
                     light_write,
                 ));
                 let candidate = crate::xiaomi::capability::SourceDescription {

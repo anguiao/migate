@@ -7,6 +7,7 @@
 mod lifecycle;
 mod sensor_binding;
 mod shutdown;
+mod startup;
 
 pub use lifecycle::run_xiaomi_bridge;
 pub use shutdown::shutdown_signal;
@@ -66,6 +67,7 @@ pub(crate) struct App {
     source: SourceHandle,
     store: Store,
     current: RefCell<Rc<EffectiveConfiguration>>,
+    committed: event_listener::Event,
     failure: RefCell<Option<String>>,
     pending: Cell<bool>,
 }
@@ -89,6 +91,7 @@ impl App {
                 entries,
                 published,
             })),
+            committed: event_listener::Event::new(),
             failure: RefCell::new(None),
             pending: Cell::new(false),
         })
@@ -263,6 +266,7 @@ impl App {
             entries,
             published,
         });
+        self.committed.notify(usize::MAX);
         self.failure.borrow_mut().take();
         self.pending.set(false);
         log::info!("Bridge configuration committed at root version {root_version}");
@@ -303,6 +307,7 @@ impl App {
             entries: current.entries.clone(),
             published: current.published.clone(),
         });
+        self.committed.notify(usize::MAX);
         Ok(())
     }
 }

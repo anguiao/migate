@@ -112,15 +112,16 @@ fn source_completion_after_matter_startup_stops_serving_and_drops_commands() {
                     let store = Store::open(directory.path()).unwrap();
                     let identity = store.load_identity().unwrap();
                     let status = status(&store);
+                    let source = AppSource::new(&store, Some(outlet()));
+                    source.read_power(false);
                     let AppSource {
                         adapter,
                         handle,
                         physical,
                         mut receivers,
-                    } = AppSource::new(&store, Some(outlet()));
+                    } = source;
                     let device = physical.unwrap();
                     let receiver = receivers.remove(0);
-                    device.functions()[0].observe(false);
                     device.set_availability(crate::device::Availability::Available);
                     let mut command =
                         Box::pin(device.functions()[0].execute(crate::device::Command::On));
@@ -194,15 +195,16 @@ fn serving_interrupt_cancels_active_and_queued_commands_without_changing_power()
                 let store = Store::open(directory.path()).unwrap();
                 let identity = store.load_identity().unwrap();
                 let status = status(&store);
+                let source = AppSource::new(&store, Some(outlet()));
+                source.read_power(false);
                 let AppSource {
                     adapter,
                     handle,
                     physical,
                     mut receivers,
-                } = AppSource::new(&store, Some(outlet()));
+                } = source;
                 let device = physical.unwrap();
                 let mut receiver = receivers.remove(0);
-                device.functions()[0].observe(false);
                 device.set_availability(crate::device::Availability::Available);
                 let before = device.functions()[0].snapshot();
                 let mut active =
@@ -371,6 +373,87 @@ fn empty_registry_starts_the_bridge_and_eof_keeps_the_source_running() {
                 .await
                 .unwrap();
                 assert!(paired.get());
+            })
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let store = Store::open(directory.path()).unwrap();
+                let identity = store.load_identity().unwrap();
+                let status = status(&store);
+                let source = AppSource::new(&store, Some(outlet()));
+                source.confirm_all();
+                let app =
+                    Rc::new(crate::app::App::open(source.handle.clone(), store.clone()).unwrap());
+                let committed = app.clone();
+                let updates = Rc::new(Cell::new(0));
+                let source_updates = updates.clone();
+                let flood_started = std::time::Instant::now();
+                let source = async move {
+                    future::yield_now().await;
+                    source.describe(
+                        crate::device::PhysicalDeviceDescription::new(
+                            crate::device::DeviceKey::new("xiaomi", "new-outlet"),
+                            "New outlet",
+                            outlet().functions().to_vec(),
+                        )
+                        .unwrap(),
+                    );
+                    source.read_power(false);
+                    while flood_started.elapsed() < std::time::Duration::from_secs(5) {
+                        source.stage();
+                        source_updates.set(source_updates.get() + 1);
+                        future::yield_now().await;
+                    }
+                    future::pending::<Result<(), crate::RuntimeError>>().await
+                };
+                let started = event_listener::Event::new();
+                let listening = started.listen();
+                let began = std::time::Instant::now();
+                let started_at = Cell::new(None);
+                let published_at_start = Cell::new(0);
+                let bridge = super::super::run_lifecycle(
+                    BridgeOptions {
+                        store: &store,
+                        identity: &identity,
+                        status: &status,
+                        port: 0,
+                    },
+                    async { Ok((app, std::time::Duration::from_millis(50))) },
+                    source,
+                    Cursor::new([]),
+                    Vec::new(),
+                    async {
+                        listening.await;
+                        Ok(())
+                    },
+                    |_| {
+                        started_at.set(Some(std::time::Instant::now()));
+                        published_at_start.set(committed.frozen().len());
+                        started.notify(usize::MAX);
+                        Ok(())
+                    },
+                );
+                future::or(bridge, async {
+                    async_io::Timer::after(std::time::Duration::from_secs(5)).await;
+                    panic!("configuration changes postponed Matter startup")
+                })
+                .await
+                .unwrap();
+                assert!(updates.get() > 1);
+                assert_eq!(published_at_start.get(), 2);
+                let elapsed = started_at.get().unwrap().duration_since(began);
+                assert!(elapsed >= std::time::Duration::from_millis(50));
+                assert!(elapsed < std::time::Duration::from_secs(5));
             })
         })
         .unwrap()

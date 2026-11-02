@@ -6,6 +6,7 @@ use super::{
     work::DeviceWork,
 };
 use crate::xiaomi::capability::PropertyBinding;
+use event_listener::Event;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     rc::Rc,
@@ -74,6 +75,38 @@ fn ordered_read(work: &DeviceWork, read: &Refresh) -> bool {
                     || function.air_conditioner().is_some())
         })
 }
+
+// A real error may itself invalidate the selected route. Record it while the
+// responding flight is still current, before the existing routing transition.
+fn resolve_initial_failure(
+    context: &Context,
+    work: &DeviceWork,
+    read: &Refresh,
+    flight: &ReadFlight,
+    stamp: &super::observations::ReadStamp,
+) {
+    if work.life.is_closed()
+        || flight.life.is_closed()
+        || !flight.current(context, &work.key.id, &read.id)
+        || !work.contains(&read.id, read.binding)
+        || !work.refresh.borrow().required(read)
+        || !work
+            .observations
+            .read_is_current(work, &read.id, read.binding, stamp)
+    {
+        return;
+    }
+    let current_work = context
+        .live
+        .borrow()
+        .devices
+        .get(&work.key.id)
+        .and_then(|slot| slot.admitted.as_deref())
+        .is_some_and(|current| std::ptr::eq(current, work));
+    if current_work {
+        work.resolve_initial(&read.id, read.binding);
+    }
+}
 #[derive(Clone, Copy)]
 enum ReadQueue {
     Local,
@@ -113,8 +146,31 @@ pub(super) struct RefreshState {
     dirty_again: BTreeSet<PropertyKey>,
     problems: BTreeMap<PropertyKey, String>,
     baseline_generations: BTreeMap<PropertyKey, u64>,
+    initial_results: BTreeSet<PropertyKey>,
+    initial_changed: Rc<Event>,
 }
 impl RefreshState {
+    pub(super) fn new(initial_changed: Rc<Event>) -> Self {
+        Self {
+            initial_changed,
+            ..Self::default()
+        }
+    }
+    pub(super) fn initial_complete(&self, id: &str, binding: PropertyBinding) -> bool {
+        self.initial_results.contains(&key(id, binding))
+    }
+    pub(super) fn resolve_initial(&mut self, id: &str, binding: PropertyBinding) {
+        if self.initial_results.insert(key(id, binding)) {
+            self.initial_changed.notify(usize::MAX);
+        }
+    }
+    pub(super) fn reset_initial(&mut self) {
+        self.initial_results.clear();
+        self.notify_initial_changed();
+    }
+    pub(super) fn notify_initial_changed(&self) {
+        self.initial_changed.notify(usize::MAX);
+    }
     pub(super) fn request(&mut self, id: &str, binding: PropertyBinding) {
         self.queue(id, binding, false);
     }
@@ -271,6 +327,7 @@ impl RefreshState {
             ReadResult::Retired if read.periodic => {}
             ReadResult::Retired => self.requeue(read),
             ReadResult::Failed(problem) => {
+                self.resolve_initial(&read.id, read.binding);
                 self.problems.insert(read.key(), problem);
                 if read.periodic {
                     return;

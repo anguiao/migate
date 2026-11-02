@@ -1,7 +1,7 @@
 use super::super::super::{model::PathKind, observations::Observation, state::Backoff};
 use super::super::{
     AdapterError, Context, ControlPath, DeviceWork, ReadCleanup, ReadFlight, ReadResult, Refresh,
-    ordered_read, record_battery_read,
+    ordered_read, record_battery_read, resolve_initial_failure,
 };
 use super::CloudPoll;
 use futures_lite::future;
@@ -113,6 +113,17 @@ pub(super) fn read_cloud_batch(
                 if response.protocol_error {
                     log::warn!("Cloud property batch contained invalid or unrequested results");
                 }
+                for (index, result) in selected.iter().copied().zip(&response.items) {
+                    if result.is_err() || response.protocol_error && selected.len() == 1 {
+                        resolve_initial_failure(
+                            &context,
+                            &work,
+                            &reads[index],
+                            &flight,
+                            &stamps[index],
+                        );
+                    }
+                }
                 if response.protocol_error && selected.len() == 1 {
                     // Reject a value from a malformed single-item response,
                     // but retain a correlated access failure for routing.
@@ -131,6 +142,15 @@ pub(super) fn read_cloud_batch(
                 false
             }
             Some(Err(error)) => {
+                for index in selected.iter().copied() {
+                    resolve_initial_failure(
+                        &context,
+                        &work,
+                        &reads[index],
+                        &flight,
+                        &stamps[index],
+                    );
+                }
                 context.cloud_property_read_error(&credentials.access_token, &work, &error)?;
                 for index in selected {
                     results[index] = Some(Err(error.clone()));

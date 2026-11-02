@@ -188,6 +188,24 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         assert!(recovered_view.current().published.get(&group).is_none());
         assert!(recovered_view.current().published.get(&one).is_some());
         assert!(!failing.context.graph.borrow().rules.contains_key("group-1"));
+        // The source below is intentionally not running. Settle the restored
+        // member's first read as a failure so this test can exercise Matter
+        // startup without waiting for the bounded offline deadline.
+        let member_work = failing.context.live.borrow().devices["one"]
+            .admitted
+            .clone()
+            .unwrap();
+        let member_function = &member_work.native.device().functions()[0];
+        let member_id = member_function.id();
+        let binding = member_function.power().unwrap();
+        member_work
+            .refresh
+            .borrow_mut()
+            .fail_initial_for_test(member_id, binding);
+        assert_eq!(
+            member_work.physical().functions()[0].snapshot().power(),
+            Some(Power::Unknown)
+        );
         let started = Rc::new(event_listener::Event::new());
         let listening = started.listen();
         let ready_signal = started.clone();

@@ -1,4 +1,7 @@
-use super::{App, BridgeOptions};
+use super::{
+    App, BridgeOptions,
+    startup::{INITIAL_READ_LIMIT, StartupGate},
+};
 use crate::{
     RuntimeError,
     matter::{Advertisement, Bridge, PairingEvent},
@@ -55,7 +58,7 @@ pub async fn run_xiaomi_bridge(
                 app.fail(error.to_string());
             }
         }
-        Ok::<_, RuntimeError>(app)
+        Ok::<_, RuntimeError>((app, INITIAL_READ_LIMIT))
     };
     run_lifecycle(options, prepare, source, input, output, interrupt, pairing).await
 }
@@ -64,7 +67,7 @@ pub async fn run_xiaomi_bridge(
 /// source, terminal input, interrupt and the real Matter runner.
 async fn run_lifecycle(
     options: BridgeOptions<'_>,
-    prepare: impl Future<Output = Result<Rc<App>, RuntimeError>>,
+    prepare: impl Future<Output = Result<(Rc<App>, Duration), RuntimeError>>,
     source: impl Future<Output = Result<(), RuntimeError>>,
     input: impl AsyncBufRead + Unpin,
     output: impl AsyncWrite + Unpin,
@@ -90,7 +93,7 @@ async fn run_lifecycle(
         ),
     )
     .await?;
-    let Some(app) = app else {
+    let Some((app, startup_limit)) = app else {
         return Ok(());
     };
     let terminal = terminal::bridge::Context::committed(app.clone(), options.status);
@@ -111,6 +114,7 @@ async fn run_lifecycle(
     // astro-dnssd unregisters asynchronously, so immediate re-registration of
     // the same name can otherwise overlap its previous registration.
     let mut advertisement = Advertisement::new(options.port);
+    let startup = StartupGate::new(startup_limit);
     loop {
         let renamer: Rc<dyn crate::matter::LabelWriter> = app.clone();
         let bridge = Bridge::new(
@@ -120,7 +124,12 @@ async fn run_lifecycle(
             options.identity,
             renamer,
         );
-        let mut runner = Box::pin(bridge.run_with_advertisement(&mut advertisement, &pairing));
+        let mut runner = Box::pin(async {
+            startup.wait(&app).await;
+            bridge
+                .run_with_advertisement(&mut advertisement, &pairing)
+                .await
+        });
         loop {
             let changed = app.listen();
             let retry = async {
@@ -135,6 +144,7 @@ async fn run_lifecycle(
                 Configuration,
                 Retry,
             }
+            let prefer_runner = startup.prefer_runner();
             let wake = future::or(
                 async {
                     interrupt.as_mut().await?;
@@ -150,22 +160,25 @@ async fn run_lifecycle(
                             input.as_mut().await?;
                             Ok(Wake::Stop)
                         },
-                        future::or(
-                            async {
+                        async {
+                            let configuration = async {
+                                changed.await;
+                                Ok(Wake::Configuration)
+                            };
+                            let protocol = async {
                                 runner.as_mut().await?;
                                 Err("Matter instance ended unexpectedly".into())
-                            },
-                            future::or(
-                                async {
-                                    changed.await;
-                                    Ok(Wake::Configuration)
-                                },
-                                async {
-                                    retry.await;
-                                    Ok(Wake::Retry)
-                                },
-                            ),
-                        ),
+                            };
+                            let retry = async {
+                                retry.await;
+                                Ok(Wake::Retry)
+                            };
+                            if prefer_runner {
+                                future::or(protocol, future::or(configuration, retry)).await
+                            } else {
+                                future::or(configuration, future::or(protocol, retry)).await
+                            }
+                        },
                     ),
                 ),
             )
