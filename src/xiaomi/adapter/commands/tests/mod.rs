@@ -1,4 +1,6 @@
 use super::*;
+use crate::xiaomi::capability::PropertyBinding;
+use std::time::Instant;
 
 #[test]
 fn dropping_the_consumer_scope_closes_the_operation_and_late_results_do_not_replace_last() {
