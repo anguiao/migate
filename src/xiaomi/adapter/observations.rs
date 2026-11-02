@@ -27,6 +27,7 @@ struct Counts {
     observed: u64,
     notified: u64,
     refresh: u64,
+    fresh: bool,
     // A completed write can make the displayed feedback too old for deduplication.
     unconfirmed_write: bool,
 }
@@ -49,6 +50,17 @@ pub(super) struct WriteStamp {
 }
 
 impl Observations {
+    /// Retained snapshots may seed an unknown property, but never replace a
+    /// real read or notification already accepted for this runtime.
+    pub(super) fn permits(&self, id: &str, binding: PropertyBinding, origin: Origin) -> bool {
+        !matches!(origin, Origin::Cache)
+            || !self
+                .channels
+                .borrow()
+                .get(&key(id, binding))
+                .is_some_and(|counts| counts.fresh)
+    }
+
     pub(super) fn invalidate_write(&self, id: &str, binding: PropertyBinding) {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
@@ -87,9 +99,7 @@ impl Observations {
     pub(super) fn observe_read(&self, work: &DeviceWork, id: &str, stamp: &ReadStamp, value: bool) {
         let binding = work.binding(id);
         if self.read_is_current(work, id, binding, stamp) {
-            let mut channels = self.channels.borrow_mut();
-            let counts = channels.entry(key(id, binding)).or_default();
-            counts.observed += 1;
+            self.observed(work, id, binding, Origin::Read);
             work.physical().function(id).unwrap().observe(value);
         }
     }
@@ -107,15 +117,12 @@ impl Observations {
             && counts.observed == stamp.observed
             && counts.refresh == stamp.refresh
     }
-    pub(super) fn notify(&self, work: &DeviceWork, id: &str, value: bool) {
+    pub(super) fn notify(&self, work: &DeviceWork, id: &str, value: bool, origin: Origin) {
         let binding = work.binding(id);
-        if work.life.is_closed() {
+        if work.life.is_closed() || !self.permits(id, binding, origin) {
             return;
         }
-        let mut channels = self.channels.borrow_mut();
-        let counts = channels.entry(key(id, binding)).or_default();
-        counts.observed += 1;
-        counts.notified += 1;
+        self.observed(work, id, binding, origin);
         work.physical().function(id).unwrap().observe(value);
     }
     pub(super) fn write_stamp(
@@ -175,15 +182,14 @@ impl Observations {
         binding: PropertyBinding,
         origin: Origin,
     ) {
-        if work.life.is_closed() {
+        if work.life.is_closed() || matches!(origin, Origin::Cache) {
             return;
         }
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(key(id, binding)).or_default();
         counts.observed += 1;
         counts.notified += u64::from(matches!(origin, Origin::Notification));
-        if !matches!(origin, Origin::Cache) {
-            counts.unconfirmed_write = false;
-        }
+        counts.fresh = true;
+        counts.unconfirmed_write = false;
     }
 }

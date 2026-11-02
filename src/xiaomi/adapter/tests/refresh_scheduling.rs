@@ -18,6 +18,14 @@ async fn settle_wire() {
     async_io::Timer::after(Duration::from_millis(20)).await;
 }
 
+fn reads_since(peer: &Peer, start: usize) -> Vec<String> {
+    peer.state.borrow().seen[start..]
+        .iter()
+        .filter(|(operation, _)| operation == "get")
+        .map(|(_, payload)| payload["did"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 async fn subscriptions_ready(c: &Control, dids: &[&str]) {
     advance_to(&c.clock, Duration::from_millis(10)).await;
     until(|| {
@@ -47,6 +55,119 @@ async fn trigger_burst(c: &Control, peer: &Peer) {
     let value = outlet.snapshot().power() != Some(Power::On);
     peer.notify("multi", 4, value);
     until(|| outlet.snapshot().power() == Some(if value { Power::On } else { Power::Off })).await;
+}
+
+#[test]
+fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
+    let dids = [
+        "device00", "device01", "device02", "device03", "device04", "device05", "device06",
+        "device07", "device08", "device09", "device10", "device11", "device12", "device13",
+        "device14", "device15", "device16",
+    ];
+    let mut rig = Rig::new(true, &dids).with_stall_timeout(Duration::from_secs(10));
+    rig.source.request_timeout = Duration::from_secs(2);
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        // Without push, a successful local command schedules a feedback read.
+        peer.state
+            .borrow_mut()
+            .pushless
+            .extend(dids.iter().map(|did| (*did).to_owned()));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            // Finish all startup reads before the clock jump, so every held
+            // request below was caused by the periodic scheduler.
+            until(|| {
+                dids.iter().all(|did| {
+                    peer.count("get", did, 2) > 0
+                        && control.context.local_candidate(did, false).is_ok()
+                        && function(&control.context.registry, did, "outlet:2")
+                            .snapshot()
+                            .power()
+                            == Some(Power::Off)
+                        && control.context.live.borrow().devices[*did]
+                            .admitted
+                            .as_ref()
+                            .is_some_and(|work| {
+                                let refresh = work.refresh.borrow().snapshot();
+                                refresh.pending.is_empty() && refresh.inflight.is_empty()
+                            })
+                })
+            })
+            .await;
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            settle_wire().await;
+            let start = peer.state.borrow().seen.len();
+            peer.state.borrow_mut().hold_reads = true;
+
+            control.clock.advance(Duration::from_secs(61));
+            let due = control.clock.now() + Duration::from_millis(200);
+            advance_to(&control.clock, due).await;
+            until(|| reads_since(&peer, start).len() >= 8).await;
+            settle_wire().await;
+            let first = reads_since(&peer, start);
+            assert_eq!(first.len(), 8);
+            assert_eq!(first.iter().collect::<BTreeSet<_>>().len(), 8);
+            assert_eq!(peer.state.borrow().held.len(), 8);
+
+            let feedback_did = &first[0];
+            assert!(
+                control.context.live.borrow().devices[feedback_did]
+                    .admitted
+                    .as_ref()
+                    .unwrap()
+                    .function_observer("outlet:2")
+                    .is_none()
+            );
+            function(&control.context.registry, feedback_did, "outlet:2")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert_eq!(reads_since(&peer, start).len(), 8);
+            for did in &first {
+                peer.release(did, 2, json!({"value":true})).await;
+            }
+
+            let due = control.clock.now() + Duration::from_millis(200);
+            advance_to(&control.clock, due).await;
+            until(|| reads_since(&peer, start).len() >= 16).await;
+            settle_wire().await;
+            let reads = reads_since(&peer, start);
+            assert_eq!(reads.len(), 16);
+            let second = &reads[8..];
+            assert!(second.contains(feedback_did));
+            assert_eq!(peer.state.borrow().held.len(), 8);
+            for did in second {
+                peer.release(did, 2, json!({"value":true})).await;
+            }
+
+            let due = control.clock.now() + Duration::from_millis(200);
+            advance_to(&control.clock, due).await;
+            until(|| reads_since(&peer, start).len() >= 18).await;
+            settle_wire().await;
+            let reads = reads_since(&peer, start);
+            assert_eq!(reads.len(), 18);
+            assert_eq!(reads.iter().collect::<BTreeSet<_>>().len(), dids.len());
+            assert_eq!(peer.state.borrow().held.len(), 2);
+            for did in &reads[16..] {
+                peer.release(did, 2, json!({"value":true})).await;
+            }
+            until(|| {
+                dids.iter().all(|did| {
+                    function(&control.context.registry, did, "outlet:2")
+                        .snapshot()
+                        .power()
+                        == Some(Power::On)
+                })
+            })
+            .await;
+        })
+        .await;
+    }));
 }
 
 #[test]

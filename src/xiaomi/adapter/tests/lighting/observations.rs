@@ -203,7 +203,7 @@ fn inactive_color_cache_does_not_take_over_until_mode_changes_and_external_off_c
                 )
                 .unwrap();
             color.accepted().await.unwrap();
-            peer.notify_value("one", MODE, json!(1), true);
+            peer.notify_value("one", MODE, json!(1), false);
             until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Rgb)).await;
             peer.notify_value("one", TEMPERATURE, json!(4000), false);
             until(|| light.snapshot().lighting().unwrap().temperature_kelvin == Some(4000)).await;

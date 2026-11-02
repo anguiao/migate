@@ -287,6 +287,32 @@ fn curtain_without_ready_notifications_reads_a_single_post_command_snapshot() {
             })
             .await;
             assert!(work(control).function_observer("curtain:2").is_none());
+            // Start immediately after a completed periodic round so the three
+            // reads below can be attributed to this command's feedback.
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let previous = peer.count("get", "one", 0);
+            control.clock.advance(Duration::from_secs(11));
+            control
+                .clock
+                .automatic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            until(|| {
+                peer.count("get", "one", 0) >= previous + 3
+                    && [STATUS, CURRENT, TARGET].iter().all(|binding| {
+                        !work(control)
+                            .refresh
+                            .borrow()
+                            .contains("curtain:2", *binding)
+                    })
+            })
+            .await;
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             peer.value("one", STATUS, json!(1));
             peer.value("one", CURRENT, json!(48));
             peer.value("one", TARGET, json!(90));
@@ -304,7 +330,23 @@ fn curtain_without_ready_notifications_reads_a_single_post_command_snapshot() {
             )
             .await;
             action.accepted().await.unwrap();
-            async_io::Timer::after(Duration::from_millis(500)).await;
+            control
+                .clock
+                .automatic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            until(|| {
+                [STATUS, CURRENT, TARGET].iter().all(|binding| {
+                    !work(control)
+                        .refresh
+                        .borrow()
+                        .contains("curtain:2", *binding)
+                })
+            })
+            .await;
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             assert_eq!(peer.count("get", "one", 0), before + 3);
             assert_eq!(curtain(control).current_position.value, Some(48));
             assert_eq!(curtain(control).status.value, Some(CurtainMotion::Closing));

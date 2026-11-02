@@ -216,7 +216,7 @@ fn cloud_members_wait_for_local_discovery_to_select_the_first_home() {
 }
 
 #[test]
-fn five_minute_member_sync_does_not_poll_healthy_channel_power() {
+fn five_minute_member_sync_preserves_normal_periodic_channel_reads() {
     block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());
@@ -273,6 +273,11 @@ fn five_minute_member_sync_does_not_poll_healthy_channel_power() {
             })
             .await;
             control.clock.advance(Duration::from_secs(3));
+            peer.value(
+                "one",
+                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                json!(true),
+            );
             peer.notify("one", 2, true);
             until(|| {
                 function(&control.context.registry, "one", "outlet:2")
@@ -281,19 +286,21 @@ fn five_minute_member_sync_does_not_poll_healthy_channel_power() {
                     == Some(Power::On)
             })
             .await;
-            for _ in 0..10 {
-                future::yield_now().await;
-            }
-            assert_eq!(peer.lists(), lists);
-            assert_eq!(
+            control
+                .clock
+                .automatic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            until(|| {
                 peer.state
                     .borrow()
                     .seen
                     .iter()
                     .filter(|(op, _)| op == "get")
-                    .count(),
-                reads
-            );
+                    .count()
+                    > reads
+            })
+            .await;
+            assert_eq!(peer.lists(), lists);
         })
         .await;
     }));

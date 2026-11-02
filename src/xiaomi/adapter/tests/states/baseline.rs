@@ -142,6 +142,57 @@ fn native_state_notification_in_the_suback_batch_establishes_the_baseline_withou
 }
 
 #[test]
+fn retained_state_cannot_replace_the_last_observation_or_cancel_recovery_baseline() {
+    block_on(held_contact_rig().run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(held_contact_peer(), |peer| async move {
+            until(|| {
+                state(control, "contact:2:2").active == Some(false)
+                    && !peer.state.borrow().held_subs.is_empty()
+            })
+            .await;
+            peer.state
+                .borrow_mut()
+                .read_timeout
+                .insert(("one".into(), CONTACT.siid, CONTACT.piid));
+            accept_contact(&peer);
+            until(|| {
+                work(control).function_observer("contact:2:2").is_some()
+                    && peer.state.borrow().held.iter().any(|(publish, _)| {
+                        let payload = decode_mips(&publish.payload).unwrap().payload;
+                        payload["siid"] == CONTACT.siid && payload["piid"] == CONTACT.piid
+                    })
+            })
+            .await;
+            let before = state(control, "contact:2:2");
+            let source = work(control).function_observer("contact:2:2").unwrap();
+            control.context.property_value_event(
+                &source,
+                "one",
+                CONTACT,
+                &json!(false),
+                Some(100),
+                true,
+            );
+            assert_eq!(state(control, "contact:2:2"), before);
+            assert!(
+                work(control)
+                    .refresh
+                    .borrow()
+                    .contains("contact:2:2", CONTACT)
+            );
+
+            peer.release_property("one", CONTACT, json!({"value": false, "updateTime": 101}))
+                .await;
+            until(|| state(control, "contact:2:2").active == Some(true)).await;
+            assert_eq!(state(control, "contact:2:2").source_time, Some(101));
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn native_cloud_unknown_notification_in_the_suback_batch_is_a_complete_baseline() {
     let (rig, listener, cloud) = cloud_rig(occupancy_rig());
     rig.cloud

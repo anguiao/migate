@@ -2,7 +2,7 @@ use super::{
     model::AdapterError,
     observations::{Observation, PropertyKey, key},
     routing::ControlPath,
-    state::{Context, Lifetime},
+    state::{Backoff, Context, Lifetime},
     work::DeviceWork,
 };
 use crate::xiaomi::{
@@ -12,7 +12,9 @@ use crate::xiaomi::{
 use futures_lite::future;
 use futures_util::future::join_all;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
+    hash::{DefaultHasher, Hash, Hasher},
     rc::Rc,
     time::Duration,
 };
@@ -20,7 +22,10 @@ use std::{
 const ROUND_DELAY: Duration = Duration::from_millis(200);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
 const DIRECT_READ_LIMIT: usize = 8;
-const LEGACY_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const LOCAL_READ_LIMIT: usize = 8;
+const CURTAIN_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const FAN_POLL_INTERVAL: Duration = Duration::from_secs(16);
+const POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub(super) struct Refresh {
@@ -28,7 +33,7 @@ pub(super) struct Refresh {
     pub(super) binding: PropertyBinding,
     pub(super) attempts: u8,
     pub(super) ready_at: Duration,
-    legacy_poll: bool,
+    periodic: bool,
     // Reserved reads and cleanup leases retain the notification baseline generation.
     baseline: Option<u64>,
 }
@@ -42,6 +47,21 @@ enum ReadQueue {
     Local,
     Direct,
     Cloud,
+}
+#[derive(Clone, Copy)]
+enum ReadKind {
+    Any,
+    Foreground,
+    Periodic,
+}
+impl ReadKind {
+    fn accepts(self, periodic: bool) -> bool {
+        matches!(self, Self::Any)
+            || matches!(
+                (self, periodic),
+                (Self::Foreground, false) | (Self::Periodic, true)
+            )
+    }
 }
 impl ReadQueue {
     fn accepts(self, path: &ControlPath) -> bool {
@@ -81,7 +101,7 @@ impl RefreshState {
             .iter_mut()
             .find(|read| read.id == id && read.binding == binding)
         {
-            pending.legacy_poll = false;
+            pending.periodic = false;
             if pending.baseline.is_some() {
                 pending.baseline = baseline;
             }
@@ -91,25 +111,23 @@ impl RefreshState {
                 binding,
                 attempts: 0,
                 ready_at: Duration::ZERO,
-                legacy_poll: false,
+                periodic: false,
                 baseline,
             });
         }
     }
-    fn request_legacy_poll(&mut self, id: &str, bindings: &[PropertyBinding]) -> bool {
-        if bindings.iter().any(|binding| self.contains(id, *binding)) {
+    fn request_poll(&mut self, id: &str, binding: PropertyBinding) -> bool {
+        if self.contains(id, binding) {
             return false;
         }
-        for binding in bindings {
-            self.pending.push_back(Refresh {
-                id: id.into(),
-                binding: *binding,
-                attempts: 0,
-                ready_at: Duration::ZERO,
-                legacy_poll: true,
-                baseline: None,
-            });
-        }
+        self.pending.push_back(Refresh {
+            id: id.into(),
+            binding,
+            attempts: 0,
+            ready_at: Duration::ZERO,
+            periodic: true,
+            baseline: None,
+        });
         true
     }
     pub(super) fn satisfy_baseline(&mut self, id: &str, binding: PropertyBinding) {
@@ -153,11 +171,11 @@ impl RefreshState {
             false
         }
     }
-    fn next_due(&self, queue: ReadQueue, eligible: impl Fn(&str) -> bool) -> Option<Duration> {
+    fn next_due(&self, kind: ReadKind, eligible: impl Fn(&str) -> bool) -> Option<Duration> {
         self.pending
             .iter()
             .filter(|read| {
-                (!read.legacy_poll || matches!(queue, ReadQueue::Direct))
+                kind.accepts(read.periodic)
                     && !self.inflight.contains_key(&read.key())
                     && eligible(&read.id)
             })
@@ -169,17 +187,23 @@ impl RefreshState {
         now: Duration,
         path_for: impl Fn(&str) -> Option<ControlPath>,
         queue: ReadQueue,
+        kind: ReadKind,
     ) -> Option<(Refresh, Rc<ReadFlight>)> {
-        let (index, path) = self.pending.iter().enumerate().find_map(|(index, read)| {
-            if read.ready_at > now
-                || self.inflight.contains_key(&read.key())
-                || read.legacy_poll && !matches!(queue, ReadQueue::Direct)
-            {
-                return None;
-            }
-            let path = path_for(&read.id)?;
-            queue.accepts(&path).then_some((index, path))
-        })?;
+        let find = |periodic| {
+            self.pending.iter().enumerate().find_map(|(index, read)| {
+                if read.periodic != periodic
+                    || !kind.accepts(read.periodic)
+                    || read.ready_at > now
+                    || self.inflight.contains_key(&read.key())
+                {
+                    return None;
+                }
+                let path = path_for(&read.id)?;
+                queue.accepts(&path).then_some((index, path))
+            })
+        };
+        // Baselines and command feedback take precedence over background polls.
+        let (index, path) = find(false).or_else(|| find(true))?;
         let read = self.pending.remove(index).unwrap();
         let flight = Rc::new(ReadFlight {
             life: Lifetime::default(),
@@ -212,11 +236,11 @@ impl RefreshState {
             ReadResult::Observed => {
                 self.problems.remove(&read.key());
             }
-            ReadResult::Retired if read.legacy_poll => {}
+            ReadResult::Retired if read.periodic => {}
             ReadResult::Retired => self.requeue(read),
             ReadResult::Failed(problem) => {
                 self.problems.insert(read.key(), problem);
-                if read.legacy_poll {
+                if read.periodic {
                     return;
                 }
                 if read.attempts == 3 {
@@ -356,28 +380,39 @@ fn reserve(
     work: &Rc<DeviceWork>,
     context: &Context,
     queue: ReadQueue,
+    kind: ReadKind,
 ) -> Option<(Refresh, Rc<ReadFlight>)> {
     if work.life.is_closed() {
         return None;
     }
     work.refresh.borrow_mut().reserve(
         context.clock.now(),
-        |id| context.read_path_for(&work.key.id, id),
+        |id| {
+            let path = context.read_path_for(&work.key.id, id)?;
+            if let ControlPath::Local(handle) = &path
+                && !context.local_function_reads_allowed(&work.key.id, id, handle)
+            {
+                None
+            } else {
+                Some(path)
+            }
+        },
         queue,
+        kind,
     )
 }
 
 pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result<(), AdapterError> {
     let mut next_round = None;
+    let mut last_did: Option<String> = None;
     loop {
         let listener = context.refresh_changed.listen();
         retire(&context);
         let candidates = works(&context);
         let ready = candidates
             .iter()
-            .filter(|work| context.local_reads_allowed(&work.key.id, &handle))
             .filter_map(|work| {
-                work.refresh.borrow().next_due(ReadQueue::Local, |id| {
+                work.refresh.borrow().next_due(ReadKind::Any, |id| {
                     context.local_function_reads_allowed(&work.key.id, id, &handle)
                 })
             })
@@ -400,14 +435,36 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
         if context.clock.now() < deadline {
             continue;
         }
-        let round = works(&context).into_iter().filter_map(|work| {
-            if !context.current_local(&handle) {
-                return None;
+        let mut candidates = works(&context);
+        if let Some(last) = &last_did {
+            let next = candidates
+                .iter()
+                .position(|work| work.key.id > *last)
+                .unwrap_or(0);
+            candidates.rotate_left(next);
+        }
+        let mut last = None;
+        let mut selected = BTreeSet::new();
+        let mut round = Vec::new();
+        for kind in [ReadKind::Foreground, ReadKind::Periodic] {
+            for work in &candidates {
+                if round.len() == LOCAL_READ_LIMIT || !context.current_local(&handle) {
+                    break;
+                }
+                if selected.contains(&work.key.id) {
+                    continue;
+                }
+                if let Some((read, flight)) = reserve(work, &context, ReadQueue::Local, kind) {
+                    last = Some(work.key.id.clone());
+                    selected.insert(work.key.id.clone());
+                    round.push(read_one(work.clone(), read, flight, context.clone()));
+                }
             }
-            reserve(&work, &context, ReadQueue::Local)
-                .map(|(read, flight)| read_one(work, read, flight, context.clone()))
-        });
-        // Keep the local round barrier: one property per DID, concurrent DIDs.
+        }
+        if last.is_some() {
+            last_did = last;
+        }
+        // Keep one property per DID and a fair, bounded shared gateway round.
         join_all(round)
             .await
             .into_iter()
@@ -416,81 +473,127 @@ pub(super) async fn local(context: Rc<Context>, handle: SessionHandle) -> Result
     }
 }
 
-struct LegacyPoll {
+struct Poll {
     work: Rc<DeviceWork>,
     due: Duration,
 }
 
-fn schedule_legacy_polls(
+type PollKey = (String, String, Duration);
+
+fn schedule_polls(
     context: &Context,
     candidates: &[Rc<DeviceWork>],
-    polls: &mut BTreeMap<(String, String), LegacyPoll>,
+    polls: &mut BTreeMap<PollKey, Poll>,
     now: Duration,
 ) -> Option<Duration> {
     let mut eligible = BTreeSet::new();
     for work in candidates {
         let did = &work.key.id;
-        let Some(mapping) = context.legacy_mapping(did) else {
+        if work.life.is_closed() || context.is_virtual_group(did) {
             continue;
-        };
+        }
+        let mut groups = BTreeMap::<(String, Duration), Vec<PropertyBinding>>::new();
         for function in work.native.device().functions() {
-            let bindings = function.observation_bindings();
-            if !mapping.supports(&bindings)
-                || !matches!(
-                    context.read_path_for(did, function.id()),
-                    Some(ControlPath::Direct(_))
-                )
-            {
+            if context.read_path_for(did, function.id()).is_none() {
                 continue;
             }
-            let key = (did.clone(), function.id().to_owned());
+            for binding in function.observation_bindings() {
+                let interval = if function.curtain().is_some() {
+                    CURTAIN_POLL_INTERVAL
+                } else if let Some(fan) = function.fan()
+                    && (binding == fan.power()
+                        || binding == fan.speed().property()
+                        || fan.mode().is_some_and(|mode| binding == mode.property()))
+                {
+                    FAN_POLL_INTERVAL
+                } else {
+                    POLL_INTERVAL
+                };
+                groups
+                    .entry((function.id().to_owned(), interval))
+                    .or_default()
+                    .push(binding);
+            }
+        }
+        if let Some(battery) = work.native.device().battery()
+            && context.read_path_for(did, "battery").is_some()
+        {
+            groups
+                .entry(("battery".into(), POLL_INTERVAL))
+                .or_default()
+                .push(battery.property());
+        }
+        for ((id, interval), bindings) in groups {
+            let key = (did.clone(), id.clone(), interval);
             eligible.insert(key.clone());
-            let poll = polls.entry(key).or_insert_with(|| LegacyPoll {
+            let poll = polls.entry(key).or_insert_with(|| Poll {
                 work: work.clone(),
-                due: now + legacy_poll_phase(did),
+                due: now + poll_phase(did, interval),
             });
             if !Rc::ptr_eq(&poll.work, work) {
-                *poll = LegacyPoll {
+                *poll = Poll {
                     work: work.clone(),
-                    due: now + legacy_poll_phase(did),
+                    due: now + poll_phase(did, interval),
                 };
             }
             if now >= poll.due {
-                if work
-                    .refresh
-                    .borrow_mut()
-                    .request_legacy_poll(function.id(), &bindings)
-                {
-                    for binding in bindings {
-                        work.observations.refresh(function.id(), binding);
+                for binding in bindings {
+                    if work.refresh.borrow_mut().request_poll(&id, binding) {
+                        work.observations.refresh(&id, binding);
+                        work.refresh_changed.notify(usize::MAX);
                     }
                 }
-                poll.due = now + LEGACY_POLL_INTERVAL;
+                poll.due = now + interval;
             }
         }
     }
     polls.retain(|key, _| eligible.contains(key));
     for work in candidates {
         work.refresh.borrow_mut().pending.retain(|read| {
-            !read.legacy_poll || eligible.contains(&(work.key.id.clone(), read.id.clone()))
+            !read.periodic
+                || !work.life.is_closed()
+                    && !context.is_virtual_group(&work.key.id)
+                    && work.contains(&read.id, read.binding)
+                    && context.read_path_for(&work.key.id, &read.id).is_some()
         });
     }
     polls.values().map(|poll| poll.due).min()
 }
 
-fn legacy_poll_phase(did: &str) -> Duration {
-    let did = did.parse::<u64>().expect("direct device DID is numeric");
-    Duration::from_millis(1 + did % LEGACY_POLL_INTERVAL.as_millis() as u64)
+fn poll_phase(did: &str, interval: Duration) -> Duration {
+    let mut hash = DefaultHasher::new();
+    did.hash(&mut hash);
+    Duration::from_millis(1 + hash.finish() % interval.as_millis() as u64)
+}
+
+pub(super) async fn polling(context: Rc<Context>) -> Result<(), AdapterError> {
+    let mut polls = BTreeMap::new();
+    loop {
+        let changed = context.changed.listen();
+        let due = schedule_polls(&context, &works(&context), &mut polls, context.clock.now());
+        if let Some(due) = due {
+            future::or(changed, context.clock.wait_until(due)).await;
+        } else {
+            changed.await;
+        }
+    }
 }
 
 pub(super) async fn direct(context: Rc<Context>) -> Result<(), AdapterError> {
     let mut next_round = BTreeMap::<String, Duration>::new();
-    let mut legacy_polls = BTreeMap::new();
+    let mut last_did: Option<String> = None;
     loop {
         let listener = context.refresh_changed.listen();
         let changed = context.changed.listen();
         retire(&context);
-        let candidates = works(&context);
+        let mut candidates = works(&context);
+        if let Some(last) = &last_did {
+            let next = candidates
+                .iter()
+                .position(|work| work.key.id > *last)
+                .unwrap_or(0);
+            candidates.rotate_left(next);
+        }
         next_round.retain(|did, _| candidates.iter().any(|work| &work.key.id == did));
         let mut in_flight = candidates
             .iter()
@@ -505,69 +608,76 @@ pub(super) async fn direct(context: Rc<Context>) -> Result<(), AdapterError> {
             })
             .sum::<usize>();
         let now = context.clock.now();
-        let mut due_at = schedule_legacy_polls(&context, &candidates, &mut legacy_polls, now);
-        for work in candidates {
-            if in_flight == DIRECT_READ_LIMIT {
-                break;
-            }
-            let refresh = work.refresh.borrow();
-            if refresh
-                .inflight
-                .values()
-                .any(|flight| matches!(flight.path, ControlPath::Direct(_)))
-            {
-                continue;
-            }
-            let due = refresh.next_due(ReadQueue::Direct, |id| {
-                matches!(
-                    context.read_path_for(&work.key.id, id),
-                    Some(ControlPath::Direct(_))
-                )
-            });
-            drop(refresh);
-            let Some(due) = due else {
-                continue;
-            };
-            let next = next_round
-                .entry(work.key.id.clone())
-                .or_insert(now + ROUND_DELAY);
-            let due = due.max(*next);
-            if due > now {
-                due_at = Some(due_at.map_or(due, |previous: Duration| previous.min(due)));
-                continue;
-            }
-            if let Some((read, flight)) = reserve(&work, &context, ReadQueue::Direct) {
-                *next = now + ROUND_DELAY;
-                in_flight += 1;
-                if let Some(mapping) = context.legacy_mapping(&work.key.id)
-                    && mapping.contains(read.binding)
+        let mut due_at = None;
+        for kind in [ReadKind::Foreground, ReadKind::Periodic] {
+            for work in candidates.iter().cloned() {
+                if in_flight == DIRECT_READ_LIMIT {
+                    break;
+                }
+                let refresh = work.refresh.borrow();
+                if refresh
+                    .inflight
+                    .values()
+                    .any(|flight| matches!(flight.path, ControlPath::Direct(_)))
                 {
-                    let mut reads = vec![read];
+                    continue;
+                }
+                let due = refresh.next_due(kind, |id| {
+                    matches!(
+                        context.read_path_for(&work.key.id, id),
+                        Some(ControlPath::Direct(_))
+                    )
+                });
+                drop(refresh);
+                let Some(due) = due else {
+                    continue;
+                };
+                let next = next_round
+                    .entry(work.key.id.clone())
+                    .or_insert(now + ROUND_DELAY);
+                let due = due.max(*next);
+                if due > now {
+                    due_at = Some(due_at.map_or(due, |previous: Duration| previous.min(due)));
+                    continue;
+                }
+                if let Some((read, flight)) = reserve(&work, &context, ReadQueue::Direct, kind) {
+                    *next = now + ROUND_DELAY;
+                    in_flight += 1;
+                    last_did = Some(work.key.id.clone());
+                    if let Some(mapping) = context.legacy_mapping(&work.key.id)
+                        && mapping.contains(read.binding)
                     {
-                        let mut refresh = work.refresh.borrow_mut();
-                        let mut index = 0;
-                        while index < refresh.pending.len() {
-                            let candidate = &refresh.pending[index];
-                            if candidate.id == reads[0].id
-                                && candidate.ready_at <= now
-                                && mapping.contains(candidate.binding)
-                                && !refresh.inflight.contains_key(&candidate.key())
-                            {
-                                let candidate = refresh.pending.remove(index).unwrap();
-                                refresh.inflight.insert(candidate.key(), flight.clone());
-                                reads.push(candidate);
-                            } else {
-                                index += 1;
+                        let mut reads = vec![read];
+                        {
+                            let mut refresh = work.refresh.borrow_mut();
+                            let mut index = 0;
+                            while index < refresh.pending.len() {
+                                let candidate = &refresh.pending[index];
+                                if candidate.id == reads[0].id
+                                    && candidate.ready_at <= now
+                                    && mapping.contains(candidate.binding)
+                                    && !refresh.inflight.contains_key(&candidate.key())
+                                {
+                                    let candidate = refresh.pending.remove(index).unwrap();
+                                    refresh.inflight.insert(candidate.key(), flight.clone());
+                                    reads.push(candidate);
+                                } else {
+                                    index += 1;
+                                }
                             }
                         }
+                        context.tasks.spawn(read_legacy(
+                            work,
+                            reads,
+                            flight,
+                            mapping,
+                            context.clone(),
+                        ));
+                    } else {
+                        context
+                            .tasks
+                            .spawn(read_one(work, read, flight, context.clone()));
                     }
-                    context
-                        .tasks
-                        .spawn(read_legacy(work, reads, flight, mapping, context.clone()));
-                } else {
-                    context
-                        .tasks
-                        .spawn(read_one(work, read, flight, context.clone()));
                 }
             }
         }
@@ -585,22 +695,98 @@ pub(super) async fn direct(context: Rc<Context>) -> Result<(), AdapterError> {
 }
 
 pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
+    let poll = Rc::new(RefCell::new(CloudPoll::default()));
     loop {
         let listener = context.refresh_changed.listen();
         let changed = context.changed.listen();
         let credentials = context.credentials_changed.listen();
         retire(&context);
+        let identity = context
+            .live
+            .borrow()
+            .credentials
+            .as_ref()
+            .map(|credentials| {
+                (
+                    credentials.uid.clone(),
+                    credentials.tokens.access_token.clone(),
+                )
+            });
+        {
+            let mut poll = poll.borrow_mut();
+            if poll.identity != identity {
+                poll.identity = identity;
+                poll.next = Duration::ZERO;
+                poll.backoff = Backoff::new(30, 300);
+            }
+        }
         for work in works(&context) {
-            while let Some((read, flight)) = reserve(&work, &context, ReadQueue::Cloud) {
+            while let Some((read, flight)) =
+                reserve(&work, &context, ReadQueue::Cloud, ReadKind::Foreground)
+            {
                 context
                     .tasks
                     .spawn(read_one(work.clone(), read, flight, context.clone()));
             }
         }
-        let due = works(&context)
+        let ready = {
+            let poll = poll.borrow();
+            !poll.running && context.clock.now() >= poll.next
+        };
+        if ready {
+            let mut candidates = works(&context);
+            if let Some(last) = &poll.borrow().last_did {
+                let next = candidates
+                    .iter()
+                    .position(|work| work.key.id > *last)
+                    .unwrap_or(0);
+                candidates.rotate_left(next);
+            }
+            for work in candidates {
+                let Some((read, flight)) =
+                    reserve(&work, &context, ReadQueue::Cloud, ReadKind::Periodic)
+                else {
+                    continue;
+                };
+                let mut reads = vec![read];
+                {
+                    let mut state = work.refresh.borrow_mut();
+                    let mut index = 0;
+                    while index < state.pending.len() {
+                        let candidate = &state.pending[index];
+                        if candidate.periodic
+                            && candidate.id == reads[0].id
+                            && candidate.ready_at <= context.clock.now()
+                            && !state.inflight.contains_key(&candidate.key())
+                        {
+                            let candidate = state.pending.remove(index).unwrap();
+                            state.inflight.insert(candidate.key(), flight.clone());
+                            reads.push(candidate);
+                        } else {
+                            index += 1;
+                        }
+                    }
+                }
+                {
+                    let mut poll = poll.borrow_mut();
+                    poll.running = true;
+                    poll.next = context.clock.now() + ROUND_DELAY;
+                    poll.last_did = Some(work.key.id.clone());
+                }
+                context.tasks.spawn(read_cloud_poll(
+                    work,
+                    reads,
+                    flight,
+                    context.clone(),
+                    poll.clone(),
+                ));
+                break;
+            }
+        }
+        let due_foreground = works(&context)
             .iter()
             .filter_map(|work| {
-                work.refresh.borrow().next_due(ReadQueue::Cloud, |id| {
+                work.refresh.borrow().next_due(ReadKind::Foreground, |id| {
                     matches!(
                         context.read_path_for(&work.key.id, id),
                         Some(ControlPath::Cloud(_))
@@ -608,6 +794,23 @@ pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
                 })
             })
             .min();
+        let due_poll = if poll.borrow().running {
+            None
+        } else {
+            works(&context)
+                .iter()
+                .filter_map(|work| {
+                    work.refresh.borrow().next_due(ReadKind::Periodic, |id| {
+                        matches!(
+                            context.read_path_for(&work.key.id, id),
+                            Some(ControlPath::Cloud(_))
+                        )
+                    })
+                })
+                .min()
+                .map(|due| due.max(poll.borrow().next))
+        };
+        let due = due_foreground.into_iter().chain(due_poll).min();
         let wake = future::or(
             async {
                 listener.await;
@@ -628,6 +831,35 @@ pub(super) async fn cloud(context: Rc<Context>) -> Result<(), AdapterError> {
         }
     }
 }
+
+struct CloudPoll {
+    running: bool,
+    next: Duration,
+    backoff: Backoff,
+    identity: Option<(String, String)>,
+    last_did: Option<String>,
+}
+impl Default for CloudPoll {
+    fn default() -> Self {
+        Self {
+            running: false,
+            next: Duration::ZERO,
+            backoff: Backoff::new(30, 300),
+            identity: None,
+            last_did: None,
+        }
+    }
+}
+struct CloudPollLease {
+    poll: Rc<RefCell<CloudPoll>>,
+    context: Rc<Context>,
+}
+impl Drop for CloudPollLease {
+    fn drop(&mut self) {
+        self.poll.borrow_mut().running = false;
+        self.context.refresh_changed.notify(usize::MAX);
+    }
+}
 struct ReadCleanup {
     work: Rc<DeviceWork>,
     flight: Rc<ReadFlight>,
@@ -646,7 +878,7 @@ impl Drop for ReadCleanup {
             state.inflight.remove(&self.read.key());
         }
         let dirty = state.finish_dirty(&self.read.id, self.read.binding);
-        if self.retry && !self.read.legacy_poll && !self.work.life.is_closed() {
+        if self.retry && !self.read.periodic && !self.work.life.is_closed() {
             state.requeue(self.read.clone());
         }
         drop(state);
@@ -658,6 +890,143 @@ impl Drop for ReadCleanup {
         self.work.refresh_changed.notify(usize::MAX);
     }
 }
+
+fn read_cloud_poll(
+    work: Rc<DeviceWork>,
+    reads: Vec<Refresh>,
+    flight: Rc<ReadFlight>,
+    context: Rc<Context>,
+    poll: Rc<RefCell<CloudPoll>>,
+) -> impl std::future::Future<Output = Result<(), AdapterError>> {
+    let cleanups = reads
+        .iter()
+        .map(|read| ReadCleanup {
+            work: work.clone(),
+            flight: flight.clone(),
+            read: read.clone(),
+            retry: true,
+        })
+        .collect::<Vec<_>>();
+    // Construct leases before the future can be dropped without being polled.
+    let lease = CloudPollLease {
+        poll: poll.clone(),
+        context: context.clone(),
+    };
+    async move {
+        let _lease = lease;
+        let mut cleanups = cleanups;
+        let did = &work.key.id;
+        let ControlPath::Cloud(credentials) = &flight.path else {
+            unreachable!()
+        };
+        let stamps = reads
+            .iter()
+            .map(|read| work.observations.read_stamp(&read.id, read.binding))
+            .collect::<Vec<_>>();
+        let bindings = reads.iter().map(|read| read.binding).collect::<Vec<_>>();
+        let result = if flight.life.is_closed()
+            || work.life.is_closed()
+            || !flight.current(&context, did, &reads[0].id)
+        {
+            None
+        } else {
+            future::or(
+                async {
+                    work.life.ended().await;
+                    None
+                },
+                future::or(
+                    async {
+                        flight.life.ended().await;
+                        None
+                    },
+                    async {
+                        Some(
+                            context
+                                .cloud
+                                .read_properties(&credentials.access_token, did, &bindings)
+                                .await,
+                        )
+                    },
+                ),
+            )
+            .await
+        };
+        for cleanup in &mut cleanups {
+            cleanup.retry = false;
+        }
+        let current = !flight.life.is_closed()
+            && !work.life.is_closed()
+            && flight.current(&context, did, &reads[0].id);
+        match &result {
+            Some(Err(error)) if current && error.is_temporary() => {
+                let mut poll = poll.borrow_mut();
+                let delay = poll.backoff.failed();
+                poll.next = poll.next.max(context.clock.now() + delay);
+            }
+            Some(Ok(_)) if current => poll.borrow_mut().backoff = Backoff::new(30, 300),
+            _ => {}
+        }
+        let (results, batch_error) = match result {
+            None => (vec![None; reads.len()], false),
+            Some(Ok(results)) => (results.items.into_iter().map(Some).collect(), false),
+            Some(Err(error)) => {
+                context.cloud_background_property_error(
+                    &credentials.access_token,
+                    &work,
+                    &error,
+                )?;
+                (vec![Some(Err(error)); reads.len()], true)
+            }
+        };
+        for ((read, stamp), result) in reads.into_iter().zip(stamps).zip(results) {
+            if !batch_error && let Some(Err(error)) = &result {
+                context.cloud_background_property_error(&credentials.access_token, &work, error)?;
+            }
+            if work.life.is_closed() || !work.contains(&read.id, read.binding) {
+                continue;
+            }
+            let outcome = match result {
+                None => ReadResult::Retired,
+                Some(_) if flight.life.is_closed() || !flight.current(&context, did, &read.id) => {
+                    ReadResult::Retired
+                }
+                Some(Ok(reading)) => match work.observe_read_at(
+                    &read.id,
+                    read.binding,
+                    &stamp,
+                    &reading.value,
+                    Observation {
+                        source: super::model::PathKind::Cloud,
+                        source_time: reading.update_time,
+                        received_at: context.clock.unix_now(),
+                    },
+                ) {
+                    Ok(()) => {
+                        context.refresh_group_states(did);
+                        ReadResult::Observed
+                    }
+                    Err(error) => ReadResult::Failed(work.problem("read", read.binding, &error)),
+                },
+                Some(Err(error)) => ReadResult::Failed(work.problem("read", read.binding, &error)),
+            };
+            let current = !matches!(outcome, ReadResult::Failed(_))
+                || work
+                    .observations
+                    .read_is_current(&work, &read.id, read.binding, &stamp);
+            if current {
+                work.refresh
+                    .borrow_mut()
+                    .complete(read, outcome, context.clock.now());
+            }
+        }
+        if !work.life.is_closed() {
+            work.report(&context, did);
+        }
+        Ok(())
+    }
+}
+
 fn read_legacy(
     work: Rc<DeviceWork>,
     reads: Vec<Refresh>,
@@ -839,6 +1208,7 @@ fn read_one(
                     let result_context = context.clone();
                     let result_handle = handle.clone();
                     let result_flight = flight.clone();
+                    let periodic = read.periodic;
                     let outcome = handle
                         .read_property_observation_with_timeout_guarded(
                             &did,
@@ -871,11 +1241,19 @@ fn read_one(
                             move |outcome| {
                                 // Observation counters only gate values; access failures still affect routing.
                                 if !result_flight.life.is_closed() {
-                                    result_context.local_device_outcome(
-                                        &result_handle,
-                                        &observing,
-                                        &outcome,
-                                    );
+                                    if periodic {
+                                        result_context.local_background_property_outcome(
+                                            &result_handle,
+                                            &observing,
+                                            &outcome,
+                                        );
+                                    } else {
+                                        result_context.local_device_outcome(
+                                            &result_handle,
+                                            &observing,
+                                            &outcome,
+                                        );
+                                    }
                                 }
                                 if !result_flight.life.is_closed()
                                     && !observing.life.is_closed()

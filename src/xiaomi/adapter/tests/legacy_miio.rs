@@ -157,11 +157,11 @@ fn legacy_poll_reads_external_changes_with_cloud_notifications_ready() {
             };
             let before = reads();
             peer.values.lock().unwrap()[2] = json!(27);
-            control.clock.advance(Duration::from_secs(31));
+            control.clock.advance(Duration::from_secs(61));
             until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(27)).await;
             assert_eq!(reads(), before + 1);
 
-            control.clock.advance(Duration::from_secs(29));
+            control.clock.advance(Duration::from_secs(59));
             async_io::Timer::after(Duration::from_millis(30)).await;
             assert_eq!(reads(), before + 1);
             control.clock.advance(Duration::from_secs(1));
@@ -184,7 +184,7 @@ fn legacy_poll_reads_external_changes_with_cloud_notifications_ready() {
             );
 
             peer.hold_read.store(true, Ordering::Relaxed);
-            control.clock.advance(Duration::from_secs(30));
+            control.clock.advance(Duration::from_secs(60));
             until(|| reads() == before + 3).await;
             assert!(control.context.stop_lan(did));
             assert!(matches!(
@@ -201,13 +201,9 @@ fn legacy_poll_reads_external_changes_with_cloud_notifications_ready() {
             })
             .await;
             let cloud_reads = control.cloud.lock().unwrap().property_reads.len();
-            control.clock.advance(Duration::from_secs(90));
-            async_io::Timer::after(Duration::from_millis(30)).await;
+            control.clock.advance(Duration::from_secs(61));
+            until(|| control.cloud.lock().unwrap().property_reads.len() > cloud_reads).await;
             assert_eq!(reads(), before + 3);
-            assert_eq!(
-                control.cloud.lock().unwrap().property_reads.len(),
-                cloud_reads
-            );
             peer.hold_read.store(false, Ordering::Relaxed);
         })
         .await;
@@ -247,9 +243,9 @@ fn slow_legacy_poll_does_not_accumulate_or_block_user_control() {
         };
         let before = reads();
         peer.hold_read.store(true, Ordering::Relaxed);
-        control.clock.advance(Duration::from_secs(31));
+        control.clock.advance(Duration::from_secs(61));
         until(|| reads() == before + 1).await;
-        control.clock.advance(Duration::from_secs(90));
+        control.clock.advance(Duration::from_secs(180));
         async_io::Timer::after(Duration::from_millis(30)).await;
         assert_eq!(reads(), before + 1);
 

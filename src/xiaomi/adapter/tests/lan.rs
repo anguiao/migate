@@ -134,7 +134,7 @@ fn direct_property_batches_correlate_results_and_preserve_each_rejection() {
 }
 
 #[test]
-fn standard_miot_direct_does_not_poll_while_idle() {
+fn standard_miot_direct_poll_recovers_an_external_fan_change() {
     use std::sync::atomic::Ordering;
 
     let did = "656878122";
@@ -185,9 +185,20 @@ fn standard_miot_direct_does_not_poll_while_idle() {
         .await;
         control.clock.automatic.store(false, Ordering::Relaxed);
         let before = peer.reads.load(Ordering::Relaxed);
-        control.clock.advance(Duration::from_secs(120));
-        async_io::Timer::after(Duration::from_millis(30)).await;
-        assert_eq!(peer.reads.load(Ordering::Relaxed), before);
+        peer.values.lock().unwrap().insert((8, 1), json!(72));
+        control.clock.advance(Duration::from_secs(17));
+        control.clock.automatic.store(true, Ordering::Relaxed);
+        until(|| {
+            function(&control.context.registry, did, "fan:2")
+                .snapshot()
+                .fan()
+                .unwrap()
+                .speed
+                .value
+                == Some(72)
+        })
+        .await;
+        assert!(peer.reads.load(Ordering::Relaxed) > before);
     }));
 }
 
@@ -395,10 +406,31 @@ fn cached_scope_restarts_offline_and_executes_real_reads_and_control() {
             })
             .await;
             control.clock.automatic.store(false, Ordering::Relaxed);
-            let packets = peer.packets.load(Ordering::Relaxed);
+            let reads = peer.reads.load(Ordering::Relaxed);
+            let business = peer.business.load(Ordering::Relaxed);
+            peer.values.lock().unwrap().insert((8, 1), json!(72));
             control.clock.advance(Duration::from_secs(120));
-            async_io::Timer::after(Duration::from_millis(50)).await;
-            assert_eq!(peer.packets.load(Ordering::Relaxed), packets);
+            control.clock.automatic.store(true, Ordering::Relaxed);
+            until(|| fan.snapshot().fan().unwrap().speed.value == Some(72)).await;
+            until(|| {
+                [(2, 1), (2, 3), (2, 4), (8, 1)].iter().all(|(siid, piid)| {
+                    !work.refresh.borrow().contains(
+                        "fan:2",
+                        crate::xiaomi::capability::PropertyBinding {
+                            siid: *siid,
+                            piid: *piid,
+                        },
+                    )
+                })
+            })
+            .await;
+            control.clock.automatic.store(false, Ordering::Relaxed);
+            let additional_reads = peer.reads.load(Ordering::Relaxed) - reads;
+            assert!(additional_reads > 0);
+            assert_eq!(
+                peer.business.load(Ordering::Relaxed) - business,
+                additional_reads
+            );
         })
     }));
 }
@@ -1248,7 +1280,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
 }
 
 #[test]
-fn failed_device_has_one_backoff_recovery_and_no_healthy_polling() {
+fn failed_device_has_one_backoff_recovery_and_no_healthy_probe() {
     use std::sync::atomic::Ordering;
     let instance = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/miot/dmaker-p5c.json"

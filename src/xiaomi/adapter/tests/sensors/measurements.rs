@@ -49,7 +49,7 @@ fn initial_reads_keep_independent_values_and_upstream_update_times() {
 }
 
 #[test]
-fn native_silence_keeps_readings_without_polling_or_marking_unavailable() {
+fn native_silence_polls_measurements_and_battery_without_marking_unavailable() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
         let peer = sensor_peer(21.5, 45.0);
@@ -65,26 +65,58 @@ fn native_silence_keeps_readings_without_polling_or_marking_unavailable() {
                         == Some(PathKind::Local)
             })
             .await;
-            let physical = work(&control.context, "sensor").physical();
-            let before = physical
-                .functions()
-                .iter()
-                .map(|function| function.snapshot())
-                .collect::<Vec<_>>();
-            let battery_before = physical.battery_snapshot();
+            let current = work(&control.context, "sensor");
+            until(|| {
+                !current
+                    .refresh
+                    .borrow()
+                    .contains("temperature:3:1001", TEMPERATURE)
+                    && !current
+                        .refresh
+                        .borrow()
+                        .contains("humidity:3:1008", HUMIDITY)
+                    && !current.refresh.borrow().contains("battery", BATTERY)
+            })
+            .await;
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             let reads = (
                 peer.count("get", "sensor", 3),
                 peer.count("get", "sensor", 2),
             );
-            control.clock.advance(Duration::from_secs(30 * 60));
-            for _ in 0..50 {
-                future::yield_now().await;
-            }
-            assert_eq!(physical.availability(), Availability::Available);
-            for (function, expected) in physical.functions().iter().zip(before) {
-                assert_eq!(function.snapshot(), expected);
-            }
-            assert_eq!(physical.battery_snapshot(), battery_before);
+            peer.value("sensor", TEMPERATURE, json!(22.0));
+            peer.value("sensor", HUMIDITY, json!(46.0));
+            peer.value("sensor", BATTERY, json!(56));
+            control.clock.advance(Duration::from_secs(61));
+            control
+                .clock
+                .automatic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            until(|| {
+                measurement(&control.context, "sensor", "temperature:3:1001").value == Some(22.0)
+                    && measurement(&control.context, "sensor", "humidity:3:1008").value
+                        == Some(46.0)
+                    && battery(&control.context, "sensor").and_then(|b| b.value) == Some(56.0)
+                    && peer.count("get", "sensor", 3) >= reads.0 + 2
+                    && peer.count("get", "sensor", 2) > reads.1
+            })
+            .await;
+
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let reads = (
+                peer.count("get", "sensor", 3),
+                peer.count("get", "sensor", 2),
+            );
+            peer.value("sensor", TEMPERATURE, json!(23.0));
+            peer.value("sensor", HUMIDITY, json!(47.0));
+            peer.value("sensor", BATTERY, json!(57));
+            control.clock.advance(Duration::from_secs(55));
+            async_io::Timer::after(Duration::from_millis(30)).await;
             assert_eq!(
                 (
                     peer.count("get", "sensor", 3),
@@ -92,6 +124,22 @@ fn native_silence_keeps_readings_without_polling_or_marking_unavailable() {
                 ),
                 reads
             );
+            control.clock.advance(Duration::from_secs(6));
+            control
+                .clock
+                .automatic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            until(|| {
+                measurement(&control.context, "sensor", "temperature:3:1001").value == Some(23.0)
+                    && measurement(&control.context, "sensor", "humidity:3:1008").value
+                        == Some(47.0)
+                    && battery(&control.context, "sensor").and_then(|b| b.value) == Some(57.0)
+                    && peer.count("get", "sensor", 3) >= reads.0 + 2
+                    && peer.count("get", "sensor", 2) > reads.1
+            })
+            .await;
+            assert_eq!(current.physical().availability(), Availability::Available);
+            assert_eq!(peer.count("rpcReq", "sensor", 0), 0);
         })
         .await;
     }));
@@ -213,6 +261,69 @@ fn an_earlier_read_cannot_overwrite_a_later_notification() {
             let value = measurement(&control.context, "sensor", "temperature:3:1001");
             assert_eq!(value.value, Some(30.0));
             assert_eq!(value.source_time, Some(300));
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn retained_measurement_and_battery_cannot_override_or_retire_fresh_reads() {
+    block_on(Rig::sensors(&["sensor"]).run(|c| async move {
+        c.announce();
+        let peer = sensor_peer(20.0, 40.0);
+        peer.value("sensor", BATTERY, json!(55));
+        let control = &c;
+        c.peer(peer, |_| async move {
+            let id = "temperature:3:1001";
+            until(|| {
+                measurement(&control.context, "sensor", id).value == Some(20.0)
+                    && battery(&control.context, "sensor").and_then(|v| v.value) == Some(55.0)
+                    && !work(&control.context, "sensor")
+                        .refresh
+                        .borrow()
+                        .contains(id, TEMPERATURE)
+                    && !work(&control.context, "sensor")
+                        .refresh
+                        .borrow()
+                        .contains("battery", BATTERY)
+            })
+            .await;
+            let current = work(&control.context, "sensor");
+            let temperature = measurement(&control.context, "sensor", id);
+            let battery_before = battery(&control.context, "sensor").unwrap();
+            let temperature_stamp = current.observations.read_stamp(id, TEMPERATURE);
+            let battery_stamp = current.observations.read_stamp("battery", BATTERY);
+            current.notify_value_at(TEMPERATURE, &json!(30.0), Some(100), true, false, 1);
+            current.notify_value_at(BATTERY, &json!(10), Some(100), true, false, 1);
+            assert_eq!(measurement(&control.context, "sensor", id), temperature);
+            assert_eq!(battery(&control.context, "sensor").unwrap(), battery_before);
+
+            for (id, binding, stamp, value) in [
+                (id, TEMPERATURE, &temperature_stamp, json!(21.0)),
+                ("battery", BATTERY, &battery_stamp, json!(66)),
+            ] {
+                current
+                    .observe_read_at(
+                        id,
+                        binding,
+                        stamp,
+                        &value,
+                        Observation {
+                            source: PathKind::Local,
+                            source_time: Some(101),
+                            received_at: control.clock.unix_now(),
+                        },
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                measurement(&control.context, "sensor", id).value,
+                Some(21.0)
+            );
+            assert_eq!(
+                battery(&control.context, "sensor").unwrap().value,
+                Some(66.0)
+            );
         })
         .await;
     }));

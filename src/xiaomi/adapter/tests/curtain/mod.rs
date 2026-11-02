@@ -93,4 +93,5 @@ mod commands;
 mod diagnostics;
 mod lifecycle;
 mod observations;
+mod polling;
 mod sources;

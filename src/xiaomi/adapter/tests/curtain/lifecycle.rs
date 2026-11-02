@@ -165,7 +165,11 @@ fn curtain_cloud_failure_and_timeout_do_not_retry_or_infer_motion() {
                 future::yield_now().await;
             }
             assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 2);
-            assert_eq!(function.snapshot().curtain(), before);
+            let before = before.unwrap();
+            let after = function.snapshot().curtain().unwrap();
+            assert_eq!(after.current_position.value, before.current_position.value);
+            assert_eq!(after.target_position.value, before.target_position.value);
+            assert_eq!(after.status.value, before.status.value);
             let last = c.context.diagnostics().devices[0].commands[0]
                 .last
                 .clone()

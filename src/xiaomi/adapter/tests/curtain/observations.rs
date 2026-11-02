@@ -14,8 +14,17 @@ fn external_stop_converges_without_writes_and_cached_target_does_not_resume_it()
             peer.notify_value_at("one", CURRENT, json!(57), Some(701), false);
             until(|| curtain(control).current_position.source_time == Some(701)).await;
             assert_eq!(function.matter_curtain().1, Some(57));
-            peer.notify_value_at("one", TARGET, json!(80), Some(702), true);
-            until(|| curtain(control).target_position.source_time == Some(702)).await;
+            let target = curtain(control).target_position;
+            let source = work(control).function_observer("curtain:2").unwrap();
+            control.context.property_value_event(
+                &source,
+                "one",
+                TARGET,
+                &json!(80),
+                Some(702),
+                true,
+            );
+            assert_eq!(curtain(control).target_position, target);
             assert_eq!(function.matter_curtain().1, Some(57));
             peer.notify_value_at("one", TARGET, json!(80), Some(703), false);
             until(|| curtain(control).target_position.source_time == Some(703)).await;
@@ -32,6 +41,72 @@ fn external_stop_converges_without_writes_and_cached_target_does_not_resume_it()
                     .iter()
                     .any(|(op, _)| op == "rpcReq")
             );
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn retained_snapshot_can_seed_unknown_position_without_cancelling_its_baseline() {
+    let mut rig = rig();
+    rig.source.request_timeout = Duration::from_secs(2);
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = peer();
+        peer.state
+            .borrow_mut()
+            .read_timeout
+            .insert(("one".into(), CURRENT.siid, CURRENT.piid));
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                work(control).function_observer("curtain:2").is_some()
+                    && peer.state.borrow().held.iter().any(|(publish, _)| {
+                        let payload = decode_mips(&publish.payload).unwrap().payload;
+                        payload["siid"] == CURRENT.siid && payload["piid"] == CURRENT.piid
+                    })
+            })
+            .await;
+            assert_eq!(curtain(control).current_position.value, None);
+            let source = work(control).function_observer("curtain:2").unwrap();
+            control.context.property_value_event(
+                &source,
+                "one",
+                CURRENT,
+                &json!(10),
+                Some(100),
+                true,
+            );
+            assert_eq!(curtain(control).current_position.value, Some(10));
+            assert!(
+                work(control)
+                    .refresh
+                    .borrow()
+                    .contains("curtain:2", CURRENT)
+            );
+
+            peer.release_property("one", CURRENT, json!({"value": 48, "updateTime": 101}))
+                .await;
+            until(|| curtain(control).current_position.value == Some(48)).await;
+            let confirmed = curtain(control).current_position;
+            control.context.property_value_event(
+                &source,
+                "one",
+                CURRENT,
+                &json!(12),
+                Some(102),
+                true,
+            );
+            assert_eq!(curtain(control).current_position, confirmed);
+            control.context.property_value_event(
+                &source,
+                "one",
+                CURRENT,
+                &json!(64),
+                Some(103),
+                false,
+            );
+            assert_eq!(curtain(control).current_position.value, Some(64));
         })
         .await;
     }));
@@ -162,27 +237,6 @@ fn curtain_local_notification_wins_over_old_read_and_failures_keep_observations(
                     .property_problem("curtain:2", CURRENT)
                     .is_none()
             );
-            let before = peer
-                .state
-                .borrow()
-                .seen
-                .iter()
-                .filter(|(op, _)| op == "get")
-                .count();
-            control.clock.advance(Duration::from_secs(600));
-            for _ in 0..50 {
-                future::yield_now().await;
-            }
-            assert_eq!(
-                peer.state
-                    .borrow()
-                    .seen
-                    .iter()
-                    .filter(|(op, _)| op == "get")
-                    .count(),
-                before
-            );
-            assert_eq!(curtain(control), observed);
         })
         .await;
     }));

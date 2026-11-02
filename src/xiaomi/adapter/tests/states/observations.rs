@@ -40,7 +40,7 @@ fn native_state_initial_reads_and_local_notifications_are_read_only() {
 }
 
 #[test]
-fn native_motion_events_and_duration_share_state_without_polling_or_event_illuminance() {
+fn native_motion_events_and_polled_duration_share_state_without_event_illuminance() {
     block_on(motion_rig().run(|c| async move {
         c.announce();
         let control = &c;
@@ -82,11 +82,15 @@ fn native_motion_events_and_duration_share_state_without_polling_or_event_illumi
                 assert_eq!(state(control, "motion:2:1024").active, Some(false));
             }
             let before = reads(&peer, DURATION);
-            control.clock.advance(Duration::from_secs(600));
-            for _ in 0..50 {
-                future::yield_now().await;
-            }
-            assert_eq!(reads(&peer, DURATION), before);
+            control.clock.advance(Duration::from_secs(61));
+            until(|| reads(&peer, DURATION) > before).await;
+            until(|| {
+                !work(control)
+                    .refresh
+                    .borrow()
+                    .contains("motion:2:1024", DURATION)
+            })
+            .await;
             assert_eq!(state(control, "motion:2:1024").active, Some(false));
         })
         .await;

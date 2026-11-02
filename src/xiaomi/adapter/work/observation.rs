@@ -89,9 +89,15 @@ impl DeviceWork {
         origin: Origin,
     ) {
         let state = function.state().unwrap();
+        if !self
+            .observations
+            .permits(function.id(), state.property(), origin)
+        {
+            return;
+        }
         self.observations
             .observed(self, function.id(), state.property(), origin);
-        if !matches!(origin, Origin::Read) {
+        if matches!(origin, Origin::Notification) {
             self.refresh
                 .borrow_mut()
                 .satisfy_baseline(function.id(), state.property());
@@ -207,7 +213,12 @@ impl DeviceWork {
             }
         } else {
             if let Some(value) = value.as_bool() {
-                self.observations.notify(self, &id, value);
+                let origin = if cached_report {
+                    Origin::Cache
+                } else {
+                    Origin::Notification
+                };
+                self.observations.notify(self, &id, value, origin);
             }
             false
         }
@@ -365,6 +376,9 @@ impl DeviceWork {
             return;
         }
         let id = function.id();
+        if !self.observations.permits(id, binding, origin) {
+            return;
+        }
         let function = self.physical().function(id).unwrap();
         if matches!(origin, Origin::Cache) {
             // A retained projection must not cancel or stale fresh baseline reads.
@@ -430,8 +444,11 @@ impl DeviceWork {
             return;
         }
         let id = function.id();
+        if !self.observations.permits(id, binding, origin) {
+            return;
+        }
         self.observations.observed(self, id, binding, origin);
-        if !matches!(origin, Origin::Read) {
+        if matches!(origin, Origin::Notification) {
             self.refresh.borrow_mut().satisfy_baseline(id, binding);
         }
         match value {
@@ -503,8 +520,11 @@ impl DeviceWork {
             return;
         }
         let id = function.id();
+        if !self.observations.permits(id, binding, origin) {
+            return;
+        }
         self.observations.observed(self, id, binding, origin);
-        if !matches!(origin, Origin::Read) {
+        if matches!(origin, Origin::Notification) {
             self.refresh.borrow_mut().satisfy_baseline(id, binding);
         }
         let physical = self.physical();
@@ -552,6 +572,9 @@ fn observe_battery(
     received_at: i64,
     origin: Origin,
 ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
+    if !work.observations.permits(BATTERY_CHANNEL, binding, origin) {
+        return Ok(());
+    }
     let battery = work
         .native
         .device()
@@ -566,7 +589,9 @@ fn observe_battery(
     work.physical()
         .observe_battery(decoded, source_time, received_at)
         .map_err(|_| crate::xiaomi::capability::CapabilityError::InvalidValue("battery"))?;
-    work.set_battery_read_problem(None);
+    if !matches!(origin, Origin::Cache) {
+        work.set_battery_read_problem(None);
+    }
     Ok(())
 }
 
@@ -579,6 +604,10 @@ fn observe_measurement(
     received_at: i64,
     origin: Origin,
 ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
+    let id = function.id();
+    if !work.observations.permits(id, binding, origin) {
+        return Ok(());
+    }
     let measurement = function
         .measurement()
         .expect("caller selected a measurement function");
@@ -586,7 +615,6 @@ fn observe_measurement(
     if work.life.is_closed() {
         return Ok(());
     }
-    let id = function.id();
     work.observations.observed(work, id, binding, origin);
     work.physical()
         .function(id)

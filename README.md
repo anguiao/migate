@@ -6,7 +6,7 @@ MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（X
 
 功能识别与通信接口分层：初始 IP 局域网直连支持 `dmaker.fan.p5c` 的标准 MIoT 属性，以及 `lumi.acpartner.mcn02` 通过共用旧 miIO 转换器和内置映射进行的读写。其他型号能否识别为某种功能，不代表已支持该型号的直连协议；BLE 和代理子设备沿用既有中枢或云端路径，不通过 IP 直连。直连沿用同一设备及既有功能、身份、名称、端点和配对，不增加电功率功能。
 
-控制与读取正常按中枢（`hub`）→ 直连（`direct`）→ 云端（`cloud`）选择可用路径；中枢业务降级时优先直连和云端，中枢恢复后重新获得优先级，用户控制保留原有中枢后备。通知独立选择可用的中枢或云端，直连读写成功不表示存在直连推送。可读的控制功能在整次命令步骤处理完毕且至少一步明确受理后，若有直连受理或没有可用通知则刷新反馈；读取复用既有队列及有限重试，控制回执不等待刷新，也不重放控制。灯光、灯组及渐变已有回读继续沿用；使用旧 miIO 直连映射时每 30 秒读取状态，标准 MIoT 路径不增加周期轮询。详见[运行指南](docs/running.md)与[已知限制](docs/known-limitations.md)。
+控制与读取正常按中枢（`hub`）→ 直连（`direct`）→ 云端（`cloud`）选择可用路径；中枢业务降级时优先直连和云端，中枢恢复后重新获得优先级，用户控制保留原有中枢后备。通知独立选择可用的中枢或云端，直连读写成功不表示存在直连推送。可读状态同时通过实际可用路径周期读取，以补充通知；窗帘约 10 秒，风扇核心状态约 16 秒，其他状态约 60 秒。控制后的反馈读取和灯光、灯组及渐变已有回读继续沿用；控制回执不等待刷新，也不重放控制。详见[运行指南](docs/running.md)与[已知限制](docs/known-limitations.md)。
 
 能力描述样本包括插座 `cuco.plug.v3`、`xiaomi.plug.04`、`zimi.plug.zncz01`、`qmi.plug.psv3`，灯具 `devcea.light.ls2307`、`yeelink.light.light3`、`yeelink.light.ml9`、`yeelink.light.spot2`、`xiaomi.light.ceil04`、`xiaomi.light.bar2`、`lemesh.light.wy0c15`，窗帘 `xiaomi.curtain.acn010`，风扇 `dmaker.fan.p5c`，空调伴侣 `lumi.acpartner.mcn04`，以及温湿度传感器 `miaomiaoce.sensor_ht.t6`、`xiaomi.sensor_ht.new3pr` 和门窗、运动、存在等设备的公开描述。内置补丁处理已确认的差异：`ls2307` 的跨服务 RGB 和颜色模式、`cuco.plug.cp7pd` 的开关 1、开关 2、USB 三个独立通道与总控刷新，已支持 `dmaker` 风扇的直吹模式与风速行为，以及 `lumi.acpartner.mcn04` 的空调状态与控制范围。
 

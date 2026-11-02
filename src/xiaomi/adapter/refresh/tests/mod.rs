@@ -14,40 +14,52 @@ fn dirty_again_produces_exactly_one_follow_up_read() {
 }
 
 #[test]
-fn legacy_poll_does_not_move_to_cloud_unless_an_ordinary_read_is_requested() {
+fn periodic_read_uses_the_selected_route_and_yields_to_foreground_reads() {
     let mut state = RefreshState::default();
     let binding = PropertyBinding { siid: 2, piid: 1 };
-    assert!(state.request_legacy_poll("main", &[binding]));
-
-    assert!(state.next_due(ReadQueue::Cloud, |_| true).is_none());
-    assert!(
-        state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
-            .is_none()
-    );
-
-    state.request("main", binding);
-    assert!(
-        state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
-            .is_some()
-    );
+    let other = PropertyBinding { siid: 2, piid: 2 };
+    assert!(state.request_poll("main", binding));
+    state.request("main", other);
+    let (foreground, _) = state
+        .reserve(
+            Duration::ZERO,
+            |_| Some(cloud_path()),
+            ReadQueue::Cloud,
+            ReadKind::Any,
+        )
+        .unwrap();
+    assert_eq!(foreground.binding, other);
+    let (periodic, _) = state
+        .reserve(
+            Duration::ZERO,
+            |_| Some(cloud_path()),
+            ReadQueue::Cloud,
+            ReadKind::Any,
+        )
+        .unwrap();
+    assert_eq!(periodic.binding, binding);
+    assert!(periodic.periodic);
 }
 
 #[test]
-fn failed_legacy_poll_waits_for_the_next_period() {
+fn failed_poll_waits_for_the_next_period() {
     use crate::xiaomi::lan::{Client, Token};
 
     let mut state = RefreshState::default();
     let binding = PropertyBinding { siid: 2, piid: 1 };
-    assert!(state.request_legacy_poll("main", &[binding]));
+    assert!(state.request_poll("main", binding));
     let path = ControlPath::Direct(Client::new(
         1,
         "127.0.0.1:54321".parse().unwrap(),
         Token::parse("00112233445566778899aabbccddeeff").unwrap(),
     ));
     let (read, _) = state
-        .reserve(Duration::ZERO, |_| Some(path.clone()), ReadQueue::Direct)
+        .reserve(
+            Duration::ZERO,
+            |_| Some(path.clone()),
+            ReadQueue::Direct,
+            ReadKind::Any,
+        )
         .unwrap();
     state.complete(
         read,
@@ -73,7 +85,12 @@ fn satisfying_one_property_baseline_preserves_the_others() {
         state.request_baseline("main", binding);
     }
     let (reserved, _) = state
-        .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+        .reserve(
+            Duration::ZERO,
+            |_| Some(cloud_path()),
+            ReadQueue::Cloud,
+            ReadKind::Any,
+        )
         .unwrap();
     state.satisfy_baseline("main", bindings[0]);
     state.complete(reserved, ReadResult::Retired, Duration::ZERO);
@@ -99,7 +116,12 @@ fn a_satisfied_reserved_baseline_is_not_requeued_when_withdrawn() {
     };
     state.request_baseline("motion", binding);
     let (read, _) = state
-        .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+        .reserve(
+            Duration::ZERO,
+            |_| Some(cloud_path()),
+            ReadQueue::Cloud,
+            ReadKind::Any,
+        )
         .unwrap();
 
     state.satisfy_baseline("motion", binding);
@@ -148,7 +170,12 @@ fn an_unpolled_baseline_lease_is_not_returned_after_notification() {
         let mut state = work.refresh.borrow_mut();
         state.request_baseline("motion", binding);
         state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+            .reserve(
+                Duration::ZERO,
+                |_| Some(cloud_path()),
+                ReadQueue::Cloud,
+                ReadKind::Any,
+            )
             .unwrap()
     };
     // This lease exists before the read future's first poll.
@@ -182,7 +209,12 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
             state.request_baseline("motion", binding);
         }
         let (read, _) = state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+            .reserve(
+                Duration::ZERO,
+                |_| Some(cloud_path()),
+                ReadQueue::Cloud,
+                ReadKind::Any,
+            )
             .unwrap();
         if ordinary {
             state.satisfy_baseline("motion", binding);
@@ -194,7 +226,12 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
     let mut state = RefreshState::default();
     state.request_baseline("motion", binding);
     let (old, _) = state
-        .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+        .reserve(
+            Duration::ZERO,
+            |_| Some(cloud_path()),
+            ReadQueue::Cloud,
+            ReadKind::Any,
+        )
         .unwrap();
     state.satisfy_baseline("motion", binding);
     state.request_baseline("motion", binding);
@@ -202,7 +239,12 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
     assert_eq!(state.pending.len(), 1);
     state.inflight.clear();
     let (new, _) = state
-        .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+        .reserve(
+            Duration::ZERO,
+            |_| Some(cloud_path()),
+            ReadQueue::Cloud,
+            ReadKind::Any,
+        )
         .unwrap();
     state.complete(new, ReadResult::Retired, Duration::ZERO);
     assert_eq!(state.pending.len(), 1);
@@ -222,7 +264,12 @@ fn returned_ordinary_demand_survives_a_pending_baseline(drop_lease: bool) {
         let mut state = work.refresh.borrow_mut();
         state.request("motion", binding);
         state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+            .reserve(
+                Duration::ZERO,
+                |_| Some(cloud_path()),
+                ReadQueue::Cloud,
+                ReadKind::Any,
+            )
             .unwrap()
     };
     let mut cleanup = ReadCleanup {
@@ -246,7 +293,12 @@ fn returned_ordinary_demand_survives_a_pending_baseline(drop_lease: bool) {
     state.satisfy_baseline("motion", binding);
     assert!(
         state
-            .reserve(Duration::ZERO, |_| Some(cloud_path()), ReadQueue::Cloud)
+            .reserve(
+                Duration::ZERO,
+                |_| Some(cloud_path()),
+                ReadQueue::Cloud,
+                ReadKind::Any
+            )
             .is_some()
     );
 }

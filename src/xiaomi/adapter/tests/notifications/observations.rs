@@ -32,6 +32,34 @@ fn same_value_notification_invalidates_an_inflight_read() {
 }
 
 #[test]
+fn retained_outlet_snapshot_neither_replaces_state_nor_invalidates_a_read() {
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            let one = function(&control.context.registry, "one", "outlet:2");
+            let work = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let binding = work.binding("outlet:2");
+            peer.state.borrow_mut().hold_reads = true;
+            let reads = peer.count("get", "one", 2);
+            work.refresh();
+            until(|| peer.count("get", "one", 2) == reads + 1).await;
+            assert_eq!(one.snapshot().power(), Some(Power::Off));
+            work.notify_value_at(binding, &json!(true), None, true, false, 0);
+            assert_eq!(one.snapshot().power(), Some(Power::Off));
+            peer.release("one", 2, json!({"value": true})).await;
+            until(|| one.snapshot().power() == Some(Power::On)).await;
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn notification_after_write_preserves_state_and_advances_the_channel_fifo() {
     block_on(Rig::new(true, &["one", "two"]).run(|c| async move {
         c.announce();

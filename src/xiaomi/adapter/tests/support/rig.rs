@@ -41,6 +41,7 @@ pub(in super::super) struct CloudState {
     pub(in super::super) property_gate: Option<flume::Receiver<()>>,
     pub(in super::super) property_writes: Vec<(String, u32, u32, bool, String)>,
     pub(in super::super) property_reads: Vec<(String, u32, u32)>,
+    pub(in super::super) read_batches: Vec<Vec<(String, u32, u32)>>,
     pub(in super::super) raw_values: BTreeMap<(String, u32, u32), Value>,
     pub(in super::super) update_times: BTreeMap<(String, u32, u32), i64>,
     pub(in super::super) property_codes: BTreeMap<(String, u32, u32), i64>,
@@ -293,23 +294,33 @@ impl Rig {
             }
             let value = if request.target.ends_with("/miotspec/prop/get") {
                 let body: Value = serde_json::from_str(&request.body).unwrap();
-                let item = &body["params"][0];
-                let key = (
-                    item["did"].as_str().unwrap().to_string(),
-                    item["siid"].as_u64().unwrap() as u32,
-                    item["piid"].as_u64().unwrap() as u32,
-                );
-                state.property_reads.push(key.clone());
-                let value = state.raw_values.get(&key).cloned().unwrap_or_else(|| {
-                    json!(state.read_values.get(&key).copied().unwrap_or(false))
-                });
-                let mut reading = json!({"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":0,"value":value});
-                if let Some(update_time) = state.update_times.get(&key) {
-                    reading["updateTime"] = json!(update_time);
+                let mut batch = Vec::new();
+                let mut readings = Vec::new();
+                let mut gate = None;
+                for item in body["params"].as_array().unwrap() {
+                    let key = (
+                        item["did"].as_str().unwrap().to_string(),
+                        item["siid"].as_u64().unwrap() as u32,
+                        item["piid"].as_u64().unwrap() as u32,
+                    );
+                    state.property_reads.push(key.clone());
+                    batch.push(key.clone());
+                    let value = state.raw_values.get(&key).cloned().unwrap_or_else(|| {
+                        json!(state.read_values.get(&key).copied().unwrap_or(false))
+                    });
+                    let mut reading = json!({"did":item["did"],"siid":item["siid"],"piid":item["piid"],"code":0,"value":value});
+                    if let Some(update_time) = state.update_times.get(&key) {
+                        reading["updateTime"] = json!(update_time);
+                    }
+                    if gate.is_none() {
+                        gate = state.read_gates.get(&key).cloned();
+                    }
+                    readings.push(reading);
                 }
-                let result = json!({"code":0,"result":[reading]});
+                state.read_batches.push(batch);
+                let result = json!({"code":0,"result":readings});
                 let mut response = MockResponse::json(state.read_status, &result.to_string());
-                if let Some(gate) = state.read_gates.get(&key).cloned() {
+                if let Some(gate) = gate {
                     response = response.gated(gate);
                 }
                 return response;

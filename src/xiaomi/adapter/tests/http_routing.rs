@@ -16,6 +16,170 @@ async fn cloud_ready(c: &Control, dids: &[&str]) {
     .await;
 }
 
+async fn background_property_error(status: u16, code: i64) -> crate::xiaomi::cloud::CloudError {
+    let body = json!({"code":0,"result":[{"did":"one","siid":2,"piid":1,"code":code}]}).to_string();
+    let (base, _) = dynamic_mock_server(1, move |_| MockResponse::json(status, &body));
+    CloudClient::for_test(&base, Duration::from_secs(1))
+        .unwrap()
+        .read_property_observation(
+            "token",
+            "one",
+            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+        )
+        .await
+        .unwrap_err()
+}
+
+async fn background_transport_error(timeout: bool) -> crate::xiaomi::cloud::CloudError {
+    let (base, _) = dynamic_mock_server(1, move |_| {
+        if timeout {
+            MockResponse::json(200, "{}").delayed(Duration::from_millis(150))
+        } else {
+            MockResponse::raw("")
+        }
+    });
+    CloudClient::for_test(&base, Duration::from_millis(50))
+        .unwrap()
+        .read_property_observation(
+            "token",
+            "one",
+            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+        )
+        .await
+        .unwrap_err()
+}
+
+#[test]
+fn background_property_http_failure_keeps_both_cloud_controls_available() {
+    let rig = Rig::new(true, &["one", "two"]);
+    rig.cloud
+        .lock()
+        .unwrap()
+        .online
+        .extend(["one".into(), "two".into()]);
+    block_on(rig.run(|c| async move {
+        cloud_ready(&c, &["one", "two"]).await;
+        let token = c
+            .context
+            .live
+            .borrow()
+            .credentials
+            .as_ref()
+            .unwrap()
+            .tokens
+            .access_token
+            .clone();
+        let work = c.context.live.borrow().devices["one"]
+            .admitted
+            .clone()
+            .unwrap();
+        let mut errors = Vec::new();
+        for status in [408, 429, 500, 503] {
+            errors.push(background_property_error(status, 0).await);
+        }
+        let network = background_transport_error(false).await;
+        assert_eq!(
+            network.kind(),
+            &crate::xiaomi::cloud::CloudErrorKind::Network
+        );
+        errors.push(network);
+        let timeout = background_transport_error(true).await;
+        assert_eq!(
+            timeout.kind(),
+            &crate::xiaomi::cloud::CloudErrorKind::Timeout
+        );
+        errors.push(timeout);
+        for error in errors {
+            c.context
+                .cloud_background_property_error(&token, &work, &error)
+                .unwrap();
+            assert!(!c.context.http_paused.get());
+            assert!(c.context.cloud_candidate("one", true).is_ok());
+            assert!(c.context.cloud_candidate("two", true).is_ok());
+        }
+        function(&c.context.registry, "one", "outlet:2")
+            .execute(Command::On)
+            .await
+            .unwrap();
+        function(&c.context.registry, "two", "outlet:2")
+            .execute(Command::On)
+            .await
+            .unwrap();
+        assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
+    }));
+}
+
+#[test]
+fn background_property_device_errors_revoke_only_current_device_access() {
+    for code in [-704_042_011, -704_010_000, -704_012_904, -704_012_905] {
+        let rig = Rig::new(true, &["one", "two"]);
+        rig.cloud
+            .lock()
+            .unwrap()
+            .online
+            .extend(["one".into(), "two".into()]);
+        block_on(rig.run(|c| async move {
+            cloud_ready(&c, &["one", "two"]).await;
+            let token = c
+                .context
+                .live
+                .borrow()
+                .credentials
+                .as_ref()
+                .unwrap()
+                .tokens
+                .access_token
+                .clone();
+            let work = c.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let error = background_property_error(200, code).await;
+
+            c.context
+                .cloud_background_property_error("stale-token", &work, &error)
+                .unwrap();
+            assert!(c.context.cloud_candidate("one", true).is_ok());
+            c.context
+                .cloud_background_property_error(&token, &work, &error)
+                .unwrap();
+            assert!(c.context.cloud_candidate("one", true).is_err());
+            assert!(c.context.cloud_candidate("two", true).is_ok());
+            assert!(!c.context.http_paused.get());
+        }));
+    }
+}
+
+#[test]
+fn retired_background_read_keeps_device_access_but_current_token_rejection_is_processed() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().online.insert("one".into());
+    block_on(rig.run(|c| async move {
+        cloud_ready(&c, &["one"]).await;
+        let token = c.context.live.borrow().credentials.as_ref().unwrap().tokens.access_token.clone();
+        let work = c.context.live.borrow().devices["one"].admitted.clone().unwrap();
+        let offline = background_property_error(200, -704_042_011).await;
+        let unauthorized = background_property_error(401, 0).await;
+        work.life.close();
+        c.context
+            .cloud_background_property_error(&token, &work, &offline)
+            .unwrap();
+        assert!(c.context.live.borrow().devices["one"]
+            .cloud_access
+            .as_ref()
+            .unwrap()
+            .online);
+        c.context
+            .cloud_background_property_error("stale-token", &work, &unauthorized)
+            .unwrap();
+        assert!(matches!(*c.context.cloud_sync.borrow(), super::super::cloud::CloudSync::Idle));
+        c.context
+            .cloud_background_property_error(&token, &work, &unauthorized)
+            .unwrap();
+        assert!(matches!(&*c.context.cloud_sync.borrow(), super::super::cloud::CloudSync::Rejected(rejected) if rejected == &token));
+    }));
+}
+
 #[test]
 fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
     let rig = Rig::new(true, &["one"]);

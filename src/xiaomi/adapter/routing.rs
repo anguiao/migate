@@ -103,10 +103,6 @@ impl Context {
                 )
             })
     }
-    pub(super) fn local_reads_allowed(&self, did: &str, handle: &SessionHandle) -> bool {
-        self.priority() == PathPriority::LocalFirst
-            && matches!(self.read_path(did), Some(ControlPath::Local(selected)) if selected.same_connection(handle))
-    }
     pub(super) fn local_function_reads_allowed(
         &self,
         did: &str,
@@ -126,6 +122,21 @@ impl Context {
             return;
         }
         self.local_outcome(handle, outcome);
+        self.local_device_access_outcome(work, outcome);
+    }
+    /// A single periodic read timeout says nothing about the shared hub session.
+    pub(super) fn local_background_property_outcome<T>(
+        &self,
+        handle: &SessionHandle,
+        work: &DeviceWork,
+        outcome: &RequestOutcome<T>,
+    ) {
+        if work.life.is_closed() || !self.current_local(handle) {
+            return;
+        }
+        self.local_device_access_outcome(work, outcome);
+    }
+    fn local_device_access_outcome<T>(&self, work: &DeviceWork, outcome: &RequestOutcome<T>) {
         // Xiaomi's device offline/missing errors revoke this device, not the shared gateway.
         if outcome.stage != RequestStage::BusinessResult
             || !matches!(
@@ -775,6 +786,41 @@ impl Context {
         self.changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
         Ok(())
+    }
+    /// Temporary periodic-read errors are retried by the reader, not account sync.
+    pub(super) fn cloud_background_property_error(
+        &self,
+        token: &str,
+        work: &DeviceWork,
+        error: &CloudError,
+    ) -> Result<(), AdapterError> {
+        if error.is_temporary() {
+            return Ok(());
+        }
+        let (current_token, current_work) = {
+            let live = self.live.borrow();
+            (
+                live.credentials
+                    .as_ref()
+                    .is_some_and(|credentials| credentials.tokens.access_token == token),
+                !work.life.is_closed()
+                    && live
+                        .devices
+                        .get(&work.key.id)
+                        .and_then(|slot| slot.admitted.as_deref())
+                        .is_some_and(|current| std::ptr::eq(current, work)),
+            )
+        };
+        if !current_token {
+            return Ok(());
+        }
+        if error.is_unauthorized() {
+            self.cloud_error(token, None, error)
+        } else if current_work {
+            self.cloud_error(token, Some(&work.key.id), error)
+        } else {
+            Ok(())
+        }
     }
     pub(super) fn token_rejected(
         &self,

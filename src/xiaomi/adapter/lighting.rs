@@ -212,6 +212,9 @@ pub(super) fn observe(
     origin: Origin,
     takeover: bool,
 ) -> Result<(), CapabilityError> {
+    if !work.observations.permits(id, binding, origin) {
+        return Ok(());
+    }
     let description = work
         .native
         .device()

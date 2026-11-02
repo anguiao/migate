@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn retained_light_snapshot_cannot_replace_or_invalidate_a_fresh_read() {
+    block_on(Rig::light("devcea.light.ls2307").run(|c| async move {
+        c.announce();
+        let peer = peer_values(&c);
+        let control = &c;
+        c.peer(peer, |_| async move {
+            let light = ready_light(control).await;
+            let work = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            let stamp = work.observations.read_stamp("light:2", BRIGHTNESS);
+            let before = light.snapshot().lighting().unwrap().brightness_percent;
+            work.notify_value_at(BRIGHTNESS, &json!(30), Some(1), true, true, 1);
+            assert_eq!(
+                light.snapshot().lighting().unwrap().brightness_percent,
+                before
+            );
+            work.observe_read_at(
+                "light:2",
+                BRIGHTNESS,
+                &stamp,
+                &json!(55),
+                Observation {
+                    source: PathKind::Local,
+                    source_time: Some(2),
+                    received_at: control.clock.unix_now(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                light.snapshot().lighting().unwrap().brightness_percent,
+                Some(55.0)
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn own_echo_cache_same_value_and_invalid_notifications_do_not_take_over_but_external_change_does() {
     block_on(Rig::light("devcea.light.ls2307").run(|c| async move {
         c.announce();
@@ -14,10 +54,17 @@ fn own_echo_cache_same_value_and_invalid_notifications_do_not_take_over_but_exte
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
             until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(60.0)).await;
             assert!(light.light_action_current(action.token()));
-            peer.notify_value("one", BRIGHTNESS, json!(65), true);
-            until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(65.0)).await;
+            let work = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            work.notify_value_at(BRIGHTNESS, &json!(65), None, true, true, 0);
+            assert_eq!(
+                light.snapshot().lighting().unwrap().brightness_percent,
+                Some(60.0)
+            );
             assert!(light.light_action_current(action.token()));
-            peer.notify_value("one", BRIGHTNESS, json!(65), false);
+            peer.notify_value("one", BRIGHTNESS, json!(60), false);
             peer.notify_value("one", BRIGHTNESS, json!(200), false);
             peer.notify_value("one", BRIGHTNESS, json!("67"), false);
             for _ in 0..30 {
@@ -91,8 +138,15 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             assert!(new.light_action_current(next.token()));
             assert!(poll_once(next.accepted()).await.is_none());
             assert_eq!(peer.count("rpcReq", "one", 0), 1);
-            peer.notify_value("one", BRIGHTNESS, json!(55), true);
-            until(|| new.snapshot().lighting().unwrap().brightness_percent == Some(55.0)).await;
+            let work = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            work.notify_value_at(BRIGHTNESS, &json!(55), None, true, true, 0);
+            assert_eq!(
+                new.snapshot().lighting().unwrap().brightness_percent,
+                Some(60.0)
+            );
             // The old write may have changed this same device after the new
             // instance's cached report, so the queued target must still send.
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
@@ -102,7 +156,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             until(|| peer.count("rpcReq", "one", 0) == 2).await;
             assert_eq!(
                 new.snapshot().lighting().unwrap().brightness_percent,
-                Some(55.0)
+                Some(60.0)
             );
             assert!(poll_once(next.accepted()).await.is_none());
             peer.release_property("one", BRIGHTNESS, accepted_items(&[(BRIGHTNESS, 0)]))
@@ -111,7 +165,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             assert_eq!(peer.count("rpcReq", "one", 0), 2);
             assert_eq!(
                 new.snapshot().lighting().unwrap().brightness_percent,
-                Some(55.0)
+                Some(60.0)
             );
             control
                 .clock
@@ -258,13 +312,14 @@ fn cloud_late_echo_after_two_accepted_frames_does_not_cancel_action() {
                 .admitted
                 .clone()
                 .unwrap();
-            // Cached reports must leave receipt history intact even when they
-            // temporarily restore an older accepted frame's value.
+            // Cached reports must preserve both the observed value and the
+            // receipt history for the subsequent real notifications.
+            let before_cache = light.snapshot().lighting().unwrap().brightness_percent;
             for value in [20, 40] {
                 work.notify_value(BRIGHTNESS, &json!(value), true, true);
                 assert_eq!(
                     light.snapshot().lighting().unwrap().brightness_percent,
-                    Some(f64::from(value))
+                    before_cache
                 );
                 assert!(light.light_action_current(action.token()));
             }

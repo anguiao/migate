@@ -41,6 +41,7 @@ mod commands;
 mod failures;
 mod freshness;
 mod lifecycle;
+mod polling;
 
 fn cloud_rig() -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
     use crate::xiaomi::adapter::notifications::NotificationConnector;

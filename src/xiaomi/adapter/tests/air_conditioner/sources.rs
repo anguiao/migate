@@ -156,7 +156,7 @@ fn retained_mode_keeps_recovery_reads_and_commands_require_the_fresh_mode() {
             control
                 .context
                 .property_value_event(&source, "one", MODE, &json!(2), Some(1), true);
-            assert_eq!(snapshot(control).mode.value, Some(Mode::Auto));
+            assert_eq!(snapshot(control).mode.value, Some(Mode::Cool));
             assert!(work(control).refresh.borrow().contains(ID, MODE));
 
             peer.release_property("one", POWER, json!({"value":true,"updateTime":2}))
@@ -165,7 +165,7 @@ fn retained_mode_keeps_recovery_reads_and_commands_require_the_fresh_mode() {
             control
                 .context
                 .property_value_event(&source, "one", MODE, &json!(4), Some(3), true);
-            assert_eq!(snapshot(control).mode.value, Some(Mode::Dry));
+            assert_eq!(snapshot(control).mode.value, Some(Mode::Cool));
             let function = function(&control.context.registry, "one", ID);
             for command in [Command::Temperature(26), Command::Speed(Speed::High)] {
                 assert_eq!(

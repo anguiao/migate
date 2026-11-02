@@ -128,7 +128,11 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
 
 #[test]
 fn binding_change_retires_old_feedback_authority() {
-    block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
+    let mut rig = Rig::light("xiaomi.light.ceil04");
+    // This scenario deliberately holds the old receipt while replacing the
+    // binding; its correctness does not depend on the short timeout fixture.
+    rig.source.request_timeout = Duration::from_secs(2);
+    block_on(rig.run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
         let control = &c;

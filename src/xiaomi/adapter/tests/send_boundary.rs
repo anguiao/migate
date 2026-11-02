@@ -126,6 +126,76 @@ fn response_timeout() -> RequestOutcome<()> {
 }
 
 #[test]
+fn background_property_timeout_keeps_the_hub_route_but_device_offline_still_revokes_it() {
+    for code in [-10_007, -704_042_001, -704_042_011, -704_090_001] {
+        block_on(Rig::new(true, &["one"]).run(|c| async move {
+            let (handle, _) = local(&c, Rc::new(Wire::default()));
+            let work = c.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            c.context
+                .local_background_property_outcome(&handle, &work, &response_timeout());
+            assert_eq!(c.context.priority(), PathPriority::LocalFirst);
+            assert!(c.context.local_candidate("one", false).is_ok());
+
+            c.context.local_background_property_outcome(
+                &handle,
+                &work,
+                &RequestOutcome::<()> {
+                    result: Err(CentralError::Rejected(code)),
+                    stage: RequestStage::BusinessResult,
+                    timeout: None,
+                },
+            );
+            assert_eq!(c.context.priority(), PathPriority::LocalFirst);
+            assert!(c.context.local_candidate("one", false).is_err());
+            assert!(
+                !c.context.live.borrow().devices["one"]
+                    .access
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .online
+            );
+        }));
+    }
+}
+
+#[test]
+fn stale_background_property_errors_do_not_revoke_a_new_hub_connection() {
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        let (old, _) = local(&c, Rc::new(Wire::default()));
+        let work = c.context.live.borrow().devices["one"]
+            .admitted
+            .clone()
+            .unwrap();
+        let (current, _) = local(&c, Rc::new(Wire::default()));
+        let offline = RequestOutcome::<()> {
+            result: Err(CentralError::Rejected(-704_042_011)),
+            stage: RequestStage::BusinessResult,
+            timeout: None,
+        };
+        c.context
+            .local_background_property_outcome(&old, &work, &offline);
+        assert!(c.context.local_candidate("one", false).is_ok());
+        work.life.close();
+        c.context
+            .local_background_property_outcome(&current, &work, &offline);
+        assert!(
+            c.context.live.borrow().devices["one"]
+                .access
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .online
+        );
+    }));
+}
+
+#[test]
 fn stale_local_device_errors_cannot_revoke_current_access() {
     for stale in 0..2 {
         block_on(Rig::new(true, &["one"]).run(|c| async move {
