@@ -1,5 +1,6 @@
 use crate::xiaomi::capability::PropertyBinding;
 use serde_json::{Value, json};
+use std::fmt;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::xiaomi) struct Mapping {
@@ -19,6 +20,30 @@ pub(in crate::xiaomi) enum Conversion {
     OnOff,
     Enum(&'static [&'static str]),
     Temperature { min: i64, max: i64 },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(in crate::xiaomi) struct FeedbackError {
+    field: &'static Field,
+    value: Value,
+}
+
+impl fmt::Display for FeedbackError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid legacy miIO feedback for {}: expected ",
+            self.field.name
+        )?;
+        match self.field.conversion {
+            Conversion::OnOff => formatter.write_str("\"on\" or \"off\"")?,
+            Conversion::Enum(names) => write!(formatter, "one of {names:?}")?,
+            Conversion::Temperature { min, max } => {
+                write!(formatter, "an integer from {min} to {max}")?;
+            }
+        }
+        write!(formatter, ", received {}", self.value)
+    }
 }
 
 impl Mapping {
@@ -49,7 +74,10 @@ impl Mapping {
         Some((field.setter, native))
     }
 
-    pub(in crate::xiaomi) fn decode(&self, result: &Value) -> Result<Vec<Result<Value, ()>>, ()> {
+    pub(in crate::xiaomi) fn decode(
+        &self,
+        result: &Value,
+    ) -> Result<Vec<Result<Value, FeedbackError>>, ()> {
         let values = result
             .as_array()
             .filter(|values| values.len() == self.fields.len())
@@ -58,20 +86,26 @@ impl Mapping {
             .fields
             .iter()
             .zip(values)
-            .map(|(field, value)| match field.conversion {
-                Conversion::OnOff => match value.as_str() {
-                    Some("on") => Ok(json!(true)),
-                    Some("off") => Ok(json!(false)),
-                    _ => Err(()),
-                },
-                Conversion::Enum(names) => names
-                    .iter()
-                    .position(|name| Some(*name) == value.as_str())
-                    .map(|index| json!(index))
-                    .ok_or(()),
-                Conversion::Temperature { min, max } => temperature(value, min, max)
-                    .map(|value| json!(value))
-                    .ok_or(()),
+            .map(|(field, value)| {
+                (match field.conversion {
+                    Conversion::OnOff => match value.as_str() {
+                        Some("on") => Ok(json!(true)),
+                        Some("off") => Ok(json!(false)),
+                        _ => Err(()),
+                    },
+                    Conversion::Enum(names) => names
+                        .iter()
+                        .position(|name| Some(*name) == value.as_str())
+                        .map(|index| json!(index))
+                        .ok_or(()),
+                    Conversion::Temperature { min, max } => temperature(value, min, max)
+                        .map(|value| json!(value))
+                        .ok_or(()),
+                })
+                .map_err(|()| FeedbackError {
+                    field,
+                    value: value.clone(),
+                })
             })
             .collect())
     }

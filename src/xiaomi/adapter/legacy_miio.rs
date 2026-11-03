@@ -1,4 +1,7 @@
-use crate::xiaomi::{capability::PropertyBinding, legacy_miio::Mapping};
+use crate::xiaomi::{
+    capability::PropertyBinding,
+    legacy_miio::{FeedbackError, Mapping},
+};
 use serde_json::{Value, json};
 
 #[derive(Debug)]
@@ -47,7 +50,7 @@ pub(super) async fn read(
     mapping: &Mapping,
     client: &crate::xiaomi::lan::Client,
     guard: impl Fn() -> bool,
-) -> Result<Vec<Result<Value, ()>>, crate::xiaomi::lan::RequestError> {
+) -> Result<Vec<Result<Value, FeedbackError>>, crate::xiaomi::lan::RequestError> {
     use crate::xiaomi::lan::{Failure, RequestError, SendStage};
     let result =
         Box::pin(client.request_guarded("get_prop", json!(mapping.fields()), guard, || {})).await?;

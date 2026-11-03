@@ -224,11 +224,7 @@ fn read_legacy(
                             ReadResult::Failed(work.problem("read", read.binding, &error))
                         }
                     },
-                    Err(()) => ReadResult::Failed(work.problem(
-                        "read",
-                        read.binding,
-                        &"invalid legacy miIO feedback",
-                    )),
+                    Err(error) => ReadResult::Failed(work.problem("read", read.binding, error)),
                 },
             };
             let current = !matches!(outcome, ReadResult::Failed(_))

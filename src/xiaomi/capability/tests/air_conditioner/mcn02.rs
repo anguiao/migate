@@ -130,7 +130,7 @@ fn invalid_shapes_types_enums_and_temperatures_are_not_defaulted() {
         let mut input = json!(["on", "cool", 24, "small_fan", "off"]);
         input[index] = bad;
         let values = mapping.decode(&input).unwrap();
-        assert_eq!(values[index], Err(()));
+        assert!(values[index].is_err());
         assert_eq!(values.iter().filter(|value| value.is_err()).count(), 1);
     }
     for (binding, value) in [
@@ -142,5 +142,33 @@ fn invalid_shapes_types_enums_and_temperatures_are_not_defaulted() {
         (BINDINGS[4], json!("off")),
     ] {
         assert!(mapping.encode(binding, &value).is_none());
+    }
+}
+
+#[test]
+fn invalid_feedback_diagnostics_preserve_the_field_value_and_expected_format() {
+    let source = SourceFixture::new("one", "lumi.acpartner.mcn02", instance());
+    let mapping = source.legacy_profile().unwrap().mapping();
+    for (index, value, expected) in [
+        (
+            4,
+            json!("on\n"),
+            r#"invalid legacy miIO feedback for ver_swing: expected "on" or "off", received "on\n""#,
+        ),
+        (
+            1,
+            json!(null),
+            r#"invalid legacy miIO feedback for mode: expected one of ["auto", "cool", "dry", "heat", "wind"], received null"#,
+        ),
+        (
+            2,
+            json!("24"),
+            r#"invalid legacy miIO feedback for tar_temp: expected an integer from 16 to 30, received "24""#,
+        ),
+    ] {
+        let mut input = json!(["on", "cool", 24, "small_fan", "off"]);
+        input[index] = value;
+        let values = mapping.decode(&input).unwrap();
+        assert_eq!(values[index].as_ref().unwrap_err().to_string(), expected);
     }
 }

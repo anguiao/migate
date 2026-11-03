@@ -414,6 +414,13 @@ fn mcn02_unknown_swing_does_not_block_offline_direct_and_recovers() {
 
         assert_eq!(ac.snapshot().air_conditioner().unwrap().swing.value, None);
         assert_eq!(work.property_source(id, swing), None);
+        assert_eq!(
+            work.refresh.borrow().property_problem(id, swing).as_deref(),
+            Some(concat!(
+                "308540429 read 3.2: invalid legacy miIO feedback for ver_swing: ",
+                "expected \"on\" or \"off\", received \"unknown\""
+            ))
+        );
         for binding in [
             PropertyBinding { siid: 2, piid: 1 },
             PropertyBinding { siid: 2, piid: 2 },
