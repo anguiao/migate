@@ -381,6 +381,11 @@ impl Context {
         let (had_active, initial_failure) = start;
         let mut backoff = Backoff::new(1, 30);
         let mut fallback = stored.filter(|record| record != &candidate);
+        // A transiently failed preferred candidate must survive fallback probing.
+        let mut retry_candidate = None;
+        let terminal = |error: &RequestError| {
+            matches!(error.failure, Failure::Identity | Failure::Rejected(_))
+        };
         if let Some(error) = initial_failure {
             let delay = backoff.failed();
             self.lan_failed(
@@ -429,33 +434,40 @@ impl Context {
                         client,
                         profile.protocol,
                         "direct LAN authenticated",
+                        retry_candidate.is_some(),
                     )?;
                     return Ok(());
                 }
-                Err(error) => {
+                Err(mut error) => {
                     if !self.lan_current(&did, &candidate.scope, &life) {
                         return Ok(());
                     }
-                    if had_active {
+                    if had_active && terminal(&error) {
                         let mut live = self.live.borrow_mut();
                         let lan = &mut live.devices.get_mut(&did).unwrap().lan;
                         lan.task = None;
                         if let Some(status) = &mut lan.status {
                             status.problem = Some(format!("candidate validation failed: {error}"));
+                            status.recovery = RecoveryStatus::None;
                         }
                         drop(live);
                         self.status_changed.notify(usize::MAX);
                         return Ok(());
                     }
-                    if let Some(previous) = fallback.take() {
+                    if !had_active && let Some(previous) = fallback.take() {
+                        if !terminal(&error) {
+                            retry_candidate = Some((candidate, error));
+                        }
                         candidate = previous;
                         continue;
                     }
-                    if matches!(
-                        error.failure,
-                        Failure::Identity | Failure::Io | Failure::Timeout
-                    ) && let Some(address) =
-                        self.lan_discovery.address(did.parse().unwrap()).await
+                    if !had_active
+                        && matches!(
+                            error.failure,
+                            Failure::Identity | Failure::Io | Failure::Timeout
+                        )
+                        && let Some(address) =
+                            self.lan_discovery.address(did.parse().unwrap()).await
                         && address != candidate.address
                     {
                         let mut moved = candidate.clone();
@@ -478,6 +490,7 @@ impl Context {
                                 client,
                                 profile.protocol,
                                 "direct LAN authenticated after discovery",
+                                retry_candidate.is_some(),
                             )?;
                             return Ok(());
                         }
@@ -485,7 +498,14 @@ impl Context {
                     if !self.lan_current(&did, &candidate.scope, &life) {
                         return Ok(());
                     }
-                    if matches!(error.failure, Failure::Identity | Failure::Rejected(_)) {
+                    if let Some((next, previous_error)) = retry_candidate.take() {
+                        if !terminal(&error) {
+                            fallback = Some(candidate);
+                        }
+                        candidate = next;
+                        error = previous_error;
+                    }
+                    if terminal(&error) {
                         self.lan_failed(&did, &error, RecoveryStatus::None);
                         self.live
                             .borrow_mut()
@@ -498,11 +518,25 @@ impl Context {
                     }
                     let delay = backoff.failed();
                     let deadline = self.clock.now() + delay;
-                    self.lan_failed(
-                        &did,
-                        &error,
-                        RecoveryStatus::Scheduled(self.clock.unix_now() + delay.as_secs() as i64),
-                    );
+                    let recovery =
+                        RecoveryStatus::Scheduled(self.clock.unix_now() + delay.as_secs() as i64);
+                    if had_active {
+                        if let Some(status) = &mut self
+                            .live
+                            .borrow_mut()
+                            .devices
+                            .get_mut(&did)
+                            .unwrap()
+                            .lan
+                            .status
+                        {
+                            status.problem = Some(format!("candidate validation failed: {error}"));
+                            status.recovery = recovery;
+                        }
+                        self.status_changed.notify(usize::MAX);
+                    } else {
+                        self.lan_failed(&did, &error, recovery);
+                    }
                     let network_changed = self.lan_network_changed.listen();
                     future::or(self.clock.wait_until(deadline), async {
                         network_changed.await;
@@ -535,6 +569,7 @@ impl Context {
         client: Client,
         protocol: LanProtocol,
         reason: &str,
+        retry_desired: bool,
     ) -> Result<(), AdapterError> {
         self.store.lan().save(&record)?;
         let status = LanStatus {
@@ -546,6 +581,10 @@ impl Context {
         };
         let mut live = self.live.borrow_mut();
         let lan = &mut live.devices.get_mut(did).unwrap().lan;
+        if retry_desired {
+            // Reconciliation will retry the preferred candidate while this client stays active.
+            lan.desired = Some(record.clone());
+        }
         lan.active = Some((record, client));
         lan.task = None;
         lan.status = Some(status);

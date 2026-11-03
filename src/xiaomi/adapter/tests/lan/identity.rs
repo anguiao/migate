@@ -1,5 +1,183 @@
 use super::*;
 
+fn retry_new_credentials_after_temporary_failure(
+    old_is_active: bool,
+    old_usable: bool,
+    reject_after_timeout: bool,
+) {
+    use std::sync::atomic::Ordering;
+
+    let instance = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/miot/dmaker-p5c.json"
+    ))
+    .unwrap();
+    let rig = Rig::custom_lights(&[("656878122", "dmaker.fan.p5c", instance)]);
+    let scope = rig
+        .store
+        .devices()
+        .load_configuration()
+        .unwrap()
+        .scope
+        .unwrap();
+    let old = Token::parse("00112233445566778899aabbccddeeff").unwrap();
+    let new = Token::parse("11223344556677889900aabbccddeeff").unwrap();
+    let invalid = Token::parse("ffeeddccbbaa99887766554433221100").unwrap();
+    let peer = FakeDevice::new(if old_usable { old.clone() } else { invalid }, new.clone());
+    peer.accept_replacement.store(true, Ordering::Relaxed);
+    let record = LanRecord {
+        scope: scope.clone(),
+        did: "656878122".into(),
+        model: "dmaker.fan.p5c".into(),
+        address: "127.0.0.1".parse().unwrap(),
+        token: old,
+    };
+    rig.store.lan().save(&record).unwrap();
+    let context = rig.source.context.clone();
+    context.lan_port.set(peer.address.port());
+    context.lan_timeout.set(Duration::from_millis(80));
+    context
+        .lan_discovery
+        .configure_test(peer.address, Duration::from_millis(20));
+    let new_info = CloudDeviceInfo {
+        did: record.did.clone(),
+        model: record.model.clone(),
+        instance_type: "fan".into(),
+        online: false,
+        lan: LanCredentials::Candidate(LanCandidate {
+            address: record.address,
+            token: new.clone(),
+        }),
+    };
+    if !old_is_active {
+        peer.drop_replacement.store(true, Ordering::Relaxed);
+        context
+            .live
+            .borrow_mut()
+            .devices
+            .get_mut(&record.did)
+            .unwrap()
+            .cloud_access = Some(new_info.clone());
+    }
+
+    block_on(async {
+        future::or(
+            async {
+                future::or(
+                    async {
+                        future::or(
+                            super::super::super::lan::run(context.clone()),
+                            context.tasks.run(),
+                        )
+                        .await
+                        .unwrap();
+                        panic!("LAN runner stopped");
+                    },
+                    async {
+                        if old_is_active {
+                            until(|| context.direct_candidate(&record.did).is_ok()).await;
+                            peer.drop_replacement.store(true, Ordering::Relaxed);
+                            context
+                                .live
+                                .borrow_mut()
+                                .devices
+                                .get_mut(&record.did)
+                                .unwrap()
+                                .cloud_access = Some(new_info);
+                            context.changed.notify(usize::MAX);
+                        }
+                        until(|| {
+                            context.live.borrow().devices[&record.did]
+                                .lan
+                                .status
+                                .as_ref()
+                                .is_some_and(|status| status.problem.is_some())
+                        })
+                        .await;
+                        let status = context.live.borrow().devices[&record.did]
+                            .lan
+                            .status
+                            .clone()
+                            .unwrap();
+                        assert!(matches!(status.recovery, RecoveryStatus::Scheduled(_)));
+                        assert_eq!(context.direct_candidate(&record.did).is_ok(), old_usable);
+                        assert_eq!(
+                            rig.store.lan().load(&scope, &record.did).unwrap(),
+                            Some(record.clone())
+                        );
+                        let deadline = rig.clock.now() + Duration::from_secs(1);
+                        until(|| rig.clock.deadlines.lock().unwrap().contains(&deadline)).await;
+                        peer.drop_replacement.store(false, Ordering::Relaxed);
+                        if reject_after_timeout {
+                            peer.accept_replacement.store(false, Ordering::Relaxed);
+                        }
+                        rig.clock.advance(Duration::from_secs(1));
+                        if reject_after_timeout {
+                            until(|| {
+                                context.live.borrow().devices[&record.did]
+                                    .lan
+                                    .status
+                                    .as_ref()
+                                    .is_some_and(|status| {
+                                        status.recovery == RecoveryStatus::None
+                                            && status.problem.as_ref().is_some_and(|problem| {
+                                                problem.contains("identity does not match")
+                                            })
+                                    })
+                            })
+                            .await;
+                            let packets = peer.packets.load(Ordering::Relaxed);
+                            rig.clock.advance(Duration::from_secs(120));
+                            context.changed.notify(usize::MAX);
+                            async_io::Timer::after(Duration::from_millis(40)).await;
+                            assert_eq!(peer.packets.load(Ordering::Relaxed), packets);
+                            assert_eq!(
+                                rig.store.lan().load(&scope, &record.did).unwrap(),
+                                Some(record.clone())
+                            );
+                        } else {
+                            until(|| {
+                                rig.store
+                                    .lan()
+                                    .load(&scope, &record.did)
+                                    .unwrap()
+                                    .is_some_and(|saved| saved.token == new)
+                            })
+                            .await;
+                        }
+                        assert!(context.direct_candidate(&record.did).is_ok());
+                    },
+                )
+                .await;
+            },
+            async {
+                async_io::Timer::after(Duration::from_secs(3)).await;
+                panic!("credential recovery stalled");
+            },
+        )
+        .await;
+    });
+}
+
+#[test]
+fn temporary_new_credential_failure_retries_after_unavailable_stored_credentials() {
+    retry_new_credentials_after_temporary_failure(false, false, false);
+}
+
+#[test]
+fn temporary_new_credential_failure_retries_after_stored_credentials_recover() {
+    retry_new_credentials_after_temporary_failure(false, true, false);
+}
+
+#[test]
+fn temporary_new_credential_failure_retries_while_old_connection_remains_usable() {
+    retry_new_credentials_after_temporary_failure(true, true, false);
+}
+
+#[test]
+fn rejected_new_credential_stops_retrying_and_preserves_old_connection() {
+    retry_new_credentials_after_temporary_failure(true, true, true);
+}
+
 #[test]
 fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them() {
     let instance = serde_json::from_str(include_str!(

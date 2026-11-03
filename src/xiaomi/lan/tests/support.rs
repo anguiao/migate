@@ -29,6 +29,7 @@ pub(crate) struct FakeDevice {
     pub(crate) drop_business: Arc<AtomicBool>,
     pub(crate) reject_read: Arc<AtomicBool>,
     pub(crate) accept_replacement: Arc<AtomicBool>,
+    pub(crate) drop_replacement: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -82,6 +83,8 @@ impl FakeDevice {
         let rejecting = reject_read.clone();
         let accept_replacement = Arc::new(AtomicBool::new(false));
         let accepting = accept_replacement.clone();
+        let drop_replacement = Arc::new(AtomicBool::new(false));
+        let dropping_replacement = drop_replacement.clone();
         let thread = thread::spawn(move || {
             let mut buffer = [0; 4096];
             while !stopped.load(Ordering::Relaxed) {
@@ -108,6 +111,9 @@ impl FakeDevice {
                 let (decoded, used, model) = if let Some(decoded) = wire::decode(packet, &token) {
                     (decoded, &token, "dmaker.fan.p5c")
                 } else if let Some(decoded) = wire::decode(packet, &replacement) {
+                    if dropping_replacement.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     (
                         decoded,
                         &replacement,
@@ -232,6 +238,7 @@ impl FakeDevice {
             drop_business,
             reject_read,
             accept_replacement,
+            drop_replacement,
             stop,
             thread: Some(thread),
         }
