@@ -14,7 +14,7 @@ use crate::{
 };
 use futures_lite::future;
 use std::{
-    net::{SocketAddr, SocketAddrV4},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     rc::Rc,
     time::Duration,
 };
@@ -390,6 +390,7 @@ impl Context {
             let delay = backoff.failed();
             self.lan_failed(
                 &did,
+                candidate.address,
                 &error,
                 RecoveryStatus::Scheduled(self.clock.unix_now() + delay.as_secs() as i64),
             );
@@ -472,7 +473,7 @@ impl Context {
                     {
                         let mut moved = candidate.clone();
                         moved.address = address;
-                        if let Ok(client) = Box::pin(probe(
+                        match Box::pin(probe(
                             &moved,
                             self.lan_endpoint(address),
                             profile.binding,
@@ -481,18 +482,24 @@ impl Context {
                         ))
                         .await
                         {
-                            if !self.lan_current(&did, &candidate.scope, &life) {
+                            Ok(client) => {
+                                if !self.lan_current(&did, &candidate.scope, &life) {
+                                    return Ok(());
+                                }
+                                self.activate_lan(
+                                    &did,
+                                    moved,
+                                    client,
+                                    profile.protocol,
+                                    "direct LAN authenticated after discovery",
+                                    retry_candidate.is_some(),
+                                )?;
                                 return Ok(());
                             }
-                            self.activate_lan(
-                                &did,
-                                moved,
-                                client,
-                                profile.protocol,
-                                "direct LAN authenticated after discovery",
-                                retry_candidate.is_some(),
-                            )?;
-                            return Ok(());
+                            Err(discovered_error) => {
+                                candidate = moved;
+                                error = discovered_error;
+                            }
                         }
                     }
                     if !self.lan_current(&did, &candidate.scope, &life) {
@@ -506,7 +513,7 @@ impl Context {
                         error = previous_error;
                     }
                     if terminal(&error) {
-                        self.lan_failed(&did, &error, RecoveryStatus::None);
+                        self.lan_failed(&did, candidate.address, &error, RecoveryStatus::None);
                         self.live
                             .borrow_mut()
                             .devices
@@ -535,7 +542,7 @@ impl Context {
                         }
                         self.status_changed.notify(usize::MAX);
                     } else {
-                        self.lan_failed(&did, &error, recovery);
+                        self.lan_failed(&did, candidate.address, &error, recovery);
                     }
                     let network_changed = self.lan_network_changed.listen();
                     future::or(self.clock.wait_until(deadline), async {
@@ -656,7 +663,13 @@ impl Context {
         Ok(())
     }
 
-    fn lan_failed(&self, did: &str, error: &RequestError, recovery: RecoveryStatus) {
+    fn lan_failed(
+        &self,
+        did: &str,
+        address: Ipv4Addr,
+        error: &RequestError,
+        recovery: RecoveryStatus,
+    ) {
         if let Some(status) = &mut self
             .live
             .borrow_mut()
@@ -667,6 +680,7 @@ impl Context {
             .status
         {
             status.state = LanState::Failed;
+            status.address = Some(address);
             status.problem = Some(format!(
                 "{} ({})",
                 error,

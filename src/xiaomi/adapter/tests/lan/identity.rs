@@ -569,6 +569,134 @@ fn discovered_new_address_is_saved_only_after_authenticated_read() {
     });
 }
 
+fn discovered_address_error_controls_recovery(rejected: bool) {
+    use std::sync::atomic::Ordering;
+
+    let instance = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/miot/dmaker-p5c.json"
+    ))
+    .unwrap();
+    let rig = Rig::custom_lights(&[("656878122", "dmaker.fan.p5c", instance)]);
+    let scope = rig
+        .store
+        .devices()
+        .load_configuration()
+        .unwrap()
+        .scope
+        .unwrap();
+    let token = Token::parse("00112233445566778899aabbccddeeff").unwrap();
+    let other = Token::parse("11223344556677889900aabbccddeeff").unwrap();
+    let peer = FakeDevice::new(token.clone(), token.clone());
+    peer.reject_read.store(rejected, Ordering::Relaxed);
+    peer.drop_business.store(!rejected, Ordering::Relaxed);
+    let old = (!rejected).then(|| FakeDevice::new(other, token.clone()));
+    let record = LanRecord {
+        scope: scope.clone(),
+        did: "656878122".into(),
+        model: "dmaker.fan.p5c".into(),
+        address: "127.0.0.2".parse().unwrap(),
+        token,
+    };
+    rig.store.lan().save(&record).unwrap();
+    let context = rig.source.context.clone();
+    context.lan_port.set(peer.address.port());
+    context.lan_timeout.set(Duration::from_millis(80));
+    if let Some(old) = &old {
+        context
+            .lan_test_endpoints
+            .borrow_mut()
+            .insert(record.address, old.address);
+    }
+    context
+        .lan_discovery
+        .configure_test(peer.address, Duration::from_millis(20));
+
+    block_on(async {
+        future::or(
+            async {
+                future::or(
+                    async {
+                        future::or(
+                            super::super::super::lan::run(context.clone()),
+                            context.tasks.run(),
+                        )
+                        .await
+                        .unwrap();
+                        panic!("LAN runner stopped");
+                    },
+                    async {
+                        until(|| {
+                            context.live.borrow().devices[&record.did]
+                                .lan
+                                .status
+                                .as_ref()
+                                .is_some_and(|status| status.state == LanState::Failed)
+                        })
+                        .await;
+                        let status = context.live.borrow().devices[&record.did]
+                            .lan
+                            .status
+                            .clone()
+                            .unwrap();
+                        assert_eq!(
+                            rig.store.lan().load(&scope, &record.did).unwrap(),
+                            Some(record.clone())
+                        );
+                        if rejected {
+                            assert_eq!(status.recovery, RecoveryStatus::None);
+                            assert!(
+                                status
+                                    .problem
+                                    .unwrap()
+                                    .contains("device rejected LAN request")
+                            );
+                            let packets = peer.packets.load(Ordering::Relaxed);
+                            rig.clock.advance(Duration::from_secs(120));
+                            context.changed.notify(usize::MAX);
+                            async_io::Timer::after(Duration::from_millis(40)).await;
+                            assert_eq!(peer.packets.load(Ordering::Relaxed), packets);
+                        } else {
+                            assert!(matches!(status.recovery, RecoveryStatus::Scheduled(_)));
+                            assert!(status.problem.unwrap().contains("timed out"));
+                            let deadline = rig.clock.now() + Duration::from_secs(1);
+                            until(|| rig.clock.deadlines.lock().unwrap().contains(&deadline)).await;
+                            peer.drop_business.store(false, Ordering::Relaxed);
+                            rig.clock.advance(Duration::from_secs(1));
+                            until(|| context.direct_candidate(&record.did).is_ok()).await;
+                            assert_eq!(
+                                rig.store
+                                    .lan()
+                                    .load(&scope, &record.did)
+                                    .unwrap()
+                                    .unwrap()
+                                    .address,
+                                std::net::Ipv4Addr::LOCALHOST,
+                            );
+                        }
+                        assert_eq!(status.address, Some(std::net::Ipv4Addr::LOCALHOST));
+                    },
+                )
+                .await;
+            },
+            async {
+                async_io::Timer::after(Duration::from_secs(3)).await;
+                panic!("discovered address recovery stalled");
+            },
+        )
+        .await;
+    });
+}
+
+#[test]
+fn discovered_address_rejection_stops_retrying() {
+    discovered_address_error_controls_recovery(true);
+}
+
+#[test]
+fn discovered_address_timeout_retries_after_old_identity_mismatch() {
+    discovered_address_error_controls_recovery(false);
+}
+
 fn occupied_address_recovers(old: &FakeDevice, expected_old_business: usize, token: Token) {
     use std::sync::atomic::Ordering;
     let instance = serde_json::from_str(include_str!(
