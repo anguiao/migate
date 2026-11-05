@@ -1,3 +1,4 @@
+mod account;
 mod bridge;
 mod check;
 mod login;
@@ -5,6 +6,10 @@ mod report;
 mod service;
 mod tokens;
 
+pub use account::{
+    AccountClient, AccountClientIdentity, AccountCredentials, AccountError, AccountErrorKind,
+    AccountGrant, AccountStage, AuthenticatedAccount, QrAttempt, RestoredAccount,
+};
 pub(crate) use bridge::BridgeCertificate;
 pub use login::LoginAttempt;
 pub use report::{AuthError, AuthReport, AuthenticationState, CertificateUpdate, FailureReason};
