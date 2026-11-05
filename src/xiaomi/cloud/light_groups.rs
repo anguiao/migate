@@ -6,8 +6,9 @@
 //! the caller, which owns the authoritative home directory.
 
 use super::{
-    CloudClient, CloudError,
+    CloudError,
     catalog::Pagination,
+    device::DeviceTransport,
     response::{description, null_list, valid_description},
 };
 use serde::{
@@ -118,7 +119,7 @@ struct RawMemberList {
     is_physical: bool,
 }
 
-impl CloudClient {
+pub(super) trait CatalogApi: DeviceTransport {
     /// Read every page of the account device directory, including native
     /// group membership, without a DID filter.
     ///
@@ -126,9 +127,9 @@ impl CloudClient {
     /// and envelope failures return `Err` instead of a partial result. The
     /// caller selects the owned home by comparing record DIDs with its home
     /// directory; the response is never labeled as belonging to one home.
-    pub async fn get_device_catalog(
+    async fn get_device_catalog(
         &self,
-        access_token: &str,
+        credential: &Self::Credential,
     ) -> Result<CloudDeviceCatalog, CloudError> {
         let operation = "read Xiaomi device catalog";
         let mut devices = Vec::new();
@@ -141,12 +142,7 @@ impl CloudClient {
                 body["start_did"] = json!(start_did);
             }
             let raw = self
-                .protected_post_raw(
-                    operation,
-                    "/app/v2/home/device_list_page",
-                    access_token,
-                    body,
-                )
+                .protected_post_raw(operation, "/app/v2/home/device_list_page", credential, body)
                 .await?;
             let response: CatalogResponse =
                 serde_json::from_str(raw.get()).map_err(|_| CloudError::protocol(operation))?;
@@ -180,6 +176,8 @@ impl CloudClient {
         Ok(CloudDeviceCatalog { devices })
     }
 }
+
+impl<T: DeviceTransport> CatalogApi for T {}
 
 /// Treat an empty instance type as an absent description. Control characters
 /// and non-string types remain boundary errors.

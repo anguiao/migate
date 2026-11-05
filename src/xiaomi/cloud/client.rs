@@ -325,7 +325,7 @@ fn validate_token(value: &str, operation: &'static str) -> Result<(), CloudError
     Ok(())
 }
 
-fn response_read_error_kind(error: &std::io::Error) -> CloudErrorKind {
+pub(in crate::xiaomi) fn response_read_error_kind(error: &std::io::Error) -> CloudErrorKind {
     if error.kind() == std::io::ErrorKind::TimedOut {
         return CloudErrorKind::Timeout;
     }

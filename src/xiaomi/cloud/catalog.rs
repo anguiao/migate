@@ -1,5 +1,6 @@
 use super::{
     CloudClient, CloudError,
+    device::DeviceTransport,
     response::{Identifier, Members, Room, description, null_list, valid_description},
 };
 use crate::xiaomi::lan::Token;
@@ -201,12 +202,15 @@ impl Pagination {
     }
 }
 
-impl CloudClient {
+pub(super) trait HomeApi: DeviceTransport {
     /// Read only owned homes. Other homes can be returned by the API, but no
     /// device details are requested while collecting this directory.
-    pub async fn get_owned_homes(&self, access_token: &str) -> Result<OwnedHomes, CloudError> {
+    async fn get_owned_homes(
+        &self,
+        credential: &Self::Credential,
+    ) -> Result<OwnedHomes, CloudError> {
         let operation = "read owned Xiaomi homes";
-        let result: HomesResponse = self.protected_post(operation, "/app/v2/homeroom/gethome", access_token, json!({
+        let result: HomesResponse = self.protected_post(operation, "/app/v2/homeroom/gethome", credential, json!({
             "limit":150, "fetch_share":false, "fetch_share_dev":false, "plat_form":0, "app_ver":9
         })).await?;
         let mut catalog = OwnedHomes {
@@ -255,7 +259,7 @@ impl CloudClient {
                 .protected_post(
                     operation,
                     "/app/v2/homeroom/get_dev_room_page",
-                    access_token,
+                    credential,
                     json!({"start_id":start_id,"limit":150}),
                 )
                 .await?;
@@ -281,9 +285,9 @@ impl CloudClient {
     /// Read every device-information page for the requested home members.
     /// Missing members remain absent from this result: only the owned-home
     /// directory establishes membership, and an absent record is not online.
-    pub async fn get_home_devices(
+    async fn get_home_devices(
         &self,
-        access_token: &str,
+        credential: &Self::Credential,
         home: &OwnedHome,
         requested_dids: &[String],
     ) -> Result<Vec<CloudDeviceInfo>, CloudError> {
@@ -309,12 +313,7 @@ impl CloudClient {
                     body["start_did"] = json!(start_did);
                 }
                 let result: HomeDevicesResponse = self
-                    .protected_post(
-                        operation,
-                        "/app/v2/home/device_list_page",
-                        access_token,
-                        body,
-                    )
+                    .protected_post(operation, "/app/v2/home/device_list_page", credential, body)
                     .await?;
                 for record in result.list {
                     if !targets.contains(record.did.as_str()) {
@@ -349,9 +348,9 @@ impl CloudClient {
 
     /// The caller selects a home using local discovery before reaching this
     /// boundary. Restrict every page to the requested member DID.
-    pub async fn get_device(
+    async fn get_device(
         &self,
-        access_token: &str,
+        credential: &Self::Credential,
         home: &OwnedHome,
         did: &str,
     ) -> Result<Option<CloudDevice>, CloudError> {
@@ -369,12 +368,7 @@ impl CloudClient {
                 body["start_did"] = json!(start_did);
             }
             let result: DevicesResponse = self
-                .protected_post(
-                    operation,
-                    "/app/v2/home/device_list_page",
-                    access_token,
-                    body,
-                )
+                .protected_post(operation, "/app/v2/home/device_list_page", credential, body)
                 .await?;
             for record in result.list {
                 if record.did == did {
@@ -397,7 +391,11 @@ impl CloudClient {
             }
         }
     }
+}
 
+impl<T: DeviceTransport> HomeApi for T {}
+
+impl CloudClient {
     pub async fn get_instance(&self, instance_type: &str) -> Result<Value, CloudError> {
         let operation = "read MIoT instance description";
         if instance_type.is_empty() {

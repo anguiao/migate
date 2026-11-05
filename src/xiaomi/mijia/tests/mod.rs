@@ -1,0 +1,134 @@
+use super::*;
+use crate::xiaomi::{
+    capability::PropertyBinding,
+    cloud::{CloudErrorKind, CloudGroupStatus, LanCredentials},
+    test_support::{MockResponse, ReceivedRequest, dynamic_mock_server, mock_server},
+};
+use futures_lite::future::block_on;
+use serde_json::json;
+use std::{collections::HashMap, time::Duration};
+
+mod directory;
+mod requests;
+
+fn session() -> MijiaSession {
+    MijiaSession::new(
+        "123".into(),
+        "service+token/secret".into(),
+        "MDEyMzQ1Njc4OWFiY2RlZg==".into(),
+        "Mijia-Test/1".into(),
+    )
+    .unwrap()
+}
+
+fn client(base: &str, timeout: Duration) -> MijiaClient {
+    let mut client = MijiaClient::build(base, timeout).unwrap();
+    client.fixed_nonce = Some(([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77], 28_333_333));
+    client
+}
+
+fn form(request: &ReceivedRequest) -> HashMap<String, String> {
+    url::form_urlencoded::parse(request.body.as_bytes())
+        .into_owned()
+        .collect()
+}
+
+fn data(request: &ReceivedRequest) -> Value {
+    serde_json::from_str(&form(request)["data"]).unwrap()
+}
+
+fn assert_signed(request: &ReceivedRequest) {
+    let fields = form(request);
+    assert_eq!(fields.len(), 3);
+    assert_eq!(fields["_nonce"], "ABEiM0RVZncBsFUV");
+    let signed_nonce = STANDARD
+        .decode("0Ny4eATjlcPNVrJgvScGXPztKlGn5VzLtuoj/0zojbU=")
+        .unwrap();
+    let signature_input = format!(
+        "{}&{}&{}&data={}",
+        request.target.strip_prefix("/app").unwrap(),
+        "0Ny4eATjlcPNVrJgvScGXPztKlGn5VzLtuoj/0zojbU=",
+        fields["_nonce"],
+        fields["data"]
+    );
+    let mut mac = Hmac::<Sha256>::new_from_slice(&signed_nonce).unwrap();
+    mac.update(signature_input.as_bytes());
+    assert_eq!(
+        fields["signature"],
+        STANDARD.encode(mac.finalize().into_bytes())
+    );
+}
+
+fn response(result: Value) -> MockResponse {
+    MockResponse::json(200, &json!({"code":0,"result":result}).to_string())
+}
+
+#[test]
+fn signed_form_uses_binary_hmac_key_and_exact_json_path_and_minute_nonce() {
+    let (nonce, signature) = signed_fields(
+        b"0123456789abcdef",
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77],
+        28_333_333,
+        "/app/miotspec/prop/get",
+        "{\"name\":\"A&B + /中文\",\"value\":true}",
+    );
+    assert_eq!(nonce, "ABEiM0RVZncBsFUV");
+    assert_eq!(signature, "2nnuksC5chgtjTkiegPnjtWkm0pcVQgTZKunQIrtM2Y=");
+}
+
+#[test]
+fn signed_http_reads_owned_home_directory() {
+    let (base, requests) = mock_server(vec![response(
+        json!({"homelist":[{"uid":"123","id":"9","dids":["one"],"roomlist":[]}],"has_more":false}),
+    )]);
+    let client = client(&base, Duration::from_secs(1));
+    let homes = block_on(client.get_owned_homes(&session())).unwrap();
+    assert_eq!(homes.homes[0].dids, ["one"]);
+    let request = requests.recv().unwrap();
+    assert_eq!(request.target, "/app/v2/homeroom/gethome");
+    let headers = request.headers.to_ascii_lowercase();
+    assert!(headers.starts_with("post "));
+    assert!(headers.contains("content-type: application/x-www-form-urlencoded"));
+    assert!(headers.contains("user-agent: mijia-test/1"));
+    assert!(headers.contains("x-xiaomi-protocal-flag-cli: protocal-http2"));
+    assert!(headers.contains("cookie: userid=123; servicetoken=service+token/secret"));
+    let fields = form(&request);
+    assert_eq!(fields.len(), 3);
+    assert_eq!(
+        fields["data"],
+        r#"{"app_ver":9,"fetch_share":false,"fetch_share_dev":false,"limit":150,"plat_form":0}"#
+    );
+    assert_eq!(fields["_nonce"], "ABEiM0RVZncBsFUV");
+    assert_eq!(
+        fields["signature"],
+        "c4QaSx6bHoubYvX5TkcyQQIy6OCEefxqqXtlKfx6lhY="
+    );
+    assert!(request.body.contains("_nonce=ABEiM0RVZncBsFUV"));
+    assert!(request.body.contains("%3D"));
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn session_rejects_invalid_fields_and_redacts_credentials() {
+    let good = session();
+    let debug = format!("{good:?}");
+    assert!(!debug.contains(good.service_token()));
+    assert!(!debug.contains(good.ssecurity()));
+    for (uid, token, key, agent) in [
+        ("", "token", "c2VjcmV0", "UA"),
+        ("bad;user", "token", "c2VjcmV0", "UA"),
+        ("user", "bad\ntoken", "c2VjcmV0", "UA"),
+        ("user", "bad token", "c2VjcmV0", "UA"),
+        ("user", "token", "", "UA"),
+        ("user", "token", "not base64", "UA"),
+        ("user", "token", "c2VjcmV0", ""),
+        ("user", "token", "c2VjcmV0", "bad\nUA"),
+    ] {
+        let error =
+            MijiaSession::new(uid.into(), token.into(), key.into(), agent.into()).unwrap_err();
+        assert_eq!(error.kind(), &CloudErrorKind::InvalidInput);
+        if !key.is_empty() {
+            assert!(!format!("{error:?} {error}").contains(key));
+        }
+    }
+}

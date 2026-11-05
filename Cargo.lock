@@ -1728,6 +1728,7 @@ dependencies = [
  "futures-lite",
  "futures-rustls",
  "futures-util",
+ "hmac",
  "if-addrs",
  "isahc",
  "log",

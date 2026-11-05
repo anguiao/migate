@@ -1,4 +1,4 @@
-use super::{CloudClient, CloudError, CloudErrorKind, response::valid_description};
+use super::{CloudError, CloudErrorKind, device::DeviceTransport, response::valid_description};
 use crate::xiaomi::{
     capability::PropertyBinding,
     property::{
@@ -9,34 +9,34 @@ use crate::xiaomi::{
 use serde_json::{Value, json};
 use std::time::Duration;
 
-impl CloudClient {
-    pub async fn read_property_value(
+pub(super) trait PropertyApi: DeviceTransport {
+    async fn read_property_value(
         &self,
-        access_token: &str,
+        credential: &Self::Credential,
         did: &str,
         binding: PropertyBinding,
     ) -> Result<Value, CloudError> {
         Ok(self
-            .read_property_observation(access_token, did, binding)
+            .read_property_observation(credential, did, binding)
             .await?
             .value)
     }
 
-    pub async fn read_property_observation(
+    async fn read_property_observation(
         &self,
-        access_token: &str,
+        credential: &Self::Credential,
         did: &str,
         binding: PropertyBinding,
     ) -> Result<PropertyReading, CloudError> {
         single_result(
             "read Xiaomi property",
-            self.read_properties(access_token, did, &[binding]).await?,
+            self.read_properties(credential, did, &[binding]).await?,
         )
     }
 
-    pub async fn read_properties(
+    async fn read_properties(
         &self,
-        access_token: &str,
+        credential: &Self::Credential,
         did: &str,
         bindings: &[PropertyBinding],
     ) -> Result<PropertyResults<PropertyReading, CloudError>, CloudError> {
@@ -49,8 +49,8 @@ impl CloudClient {
         let result: Vec<Value> = self
             .protected_post_with_timeout(
                 operation,
-                "/app/v2/miotspec/prop/get",
-                access_token,
+                self.read_property_path(),
+                credential,
                 json!({"datasource":2,"params":params}),
                 Duration::from_secs(30),
             )
@@ -74,23 +74,23 @@ impl CloudClient {
         ))
     }
 
-    pub async fn set_property(
+    async fn set_property(
         &self,
-        access_token: &str,
+        credential: &Self::Credential,
         did: &str,
         binding: PropertyBinding,
         value: bool,
     ) -> Result<(), CloudError> {
         single_result(
             "write Xiaomi property",
-            self.set_properties(access_token, did, &[(binding, json!(value))])
+            self.set_properties(credential, did, &[(binding, json!(value))])
                 .await?,
         )
     }
 
-    pub async fn set_properties(
+    async fn set_properties(
         &self,
-        access_token: &str,
+        credential: &Self::Credential,
         did: &str,
         properties: &[(PropertyBinding, Value)],
     ) -> Result<PropertyResults<(), CloudError>, CloudError> {
@@ -106,8 +106,8 @@ impl CloudClient {
         let result: Vec<Value> = self
             .protected_post_with_timeout(
                 operation,
-                "/app/v2/miotspec/prop/set",
-                access_token,
+                self.write_property_path(),
+                credential,
                 json!({"params":params}),
                 Duration::from_secs(15),
             )
@@ -121,6 +121,8 @@ impl CloudClient {
         ))
     }
 }
+
+impl<T: DeviceTransport> PropertyApi for T {}
 
 fn accepted_code(
     operation: &'static str,

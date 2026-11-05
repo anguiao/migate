@@ -8,6 +8,7 @@ pub mod cloud;
 pub mod discovery;
 pub(crate) mod lan;
 mod legacy_miio;
+pub mod mijia;
 mod mqtt;
 pub(crate) mod property;
 

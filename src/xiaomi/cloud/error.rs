@@ -17,21 +17,28 @@ pub struct CloudError {
     operation: &'static str,
     kind: CloudErrorKind,
     oauth_code: Option<i64>,
+    invalid_signature: bool,
 }
 
 impl CloudError {
-    pub(super) fn new(operation: &'static str, kind: CloudErrorKind) -> Self {
+    pub(in crate::xiaomi) fn new(operation: &'static str, kind: CloudErrorKind) -> Self {
         Self {
             operation,
             kind,
             oauth_code: None,
+            invalid_signature: false,
         }
     }
-    pub(super) fn input(operation: &'static str) -> Self {
+    pub(in crate::xiaomi) fn input(operation: &'static str) -> Self {
         Self::new(operation, CloudErrorKind::InvalidInput)
     }
     pub(in crate::xiaomi) fn protocol(operation: &'static str) -> Self {
         Self::new(operation, CloudErrorKind::Protocol)
+    }
+    pub(in crate::xiaomi) fn invalid_signature(operation: &'static str) -> Self {
+        let mut error = Self::protocol(operation);
+        error.invalid_signature = true;
+        error
     }
     pub(super) fn with_oauth_code(mut self, code: Option<i64>) -> Self {
         if matches!(self.kind, CloudErrorKind::Business(_)) {
@@ -89,9 +96,7 @@ impl fmt::Display for CloudError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "Failed to {}: ", self.operation)?;
         match self.kind {
-            CloudErrorKind::Unauthorized => {
-                formatter.write_str("authorization was rejected (HTTP 401)")
-            }
+            CloudErrorKind::Unauthorized => formatter.write_str("authorization was rejected"),
             CloudErrorKind::HttpStatus(status) => write!(formatter, "HTTP status {status}"),
             CloudErrorKind::Business(code) => {
                 write!(formatter, "cloud business code {code}")?;
@@ -108,6 +113,9 @@ impl fmt::Display for CloudError {
             }
             CloudErrorKind::PropertyRejected(code) => {
                 write!(formatter, "cloud property rejected with code {code}")
+            }
+            CloudErrorKind::Protocol if self.invalid_signature => {
+                formatter.write_str("cloud rejected the request signature")
             }
             CloudErrorKind::Protocol => formatter.write_str("invalid cloud response"),
             CloudErrorKind::Network => formatter.write_str("network request failed"),
