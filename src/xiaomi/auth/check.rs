@@ -20,8 +20,12 @@ impl AuthService {
             .ha_authorization()
             .map(|authorization| self.ha_generation(authorization))
             .transpose()?;
+        let mijia_generation = self
+            .store
+            .mijia_generation(&stored.record.uid)?
+            .ok_or(AuthError::Missing("Mijia credentials changed during check"))?;
         let mut report = self.local_status()?;
-        report.mijia = match self.maintain_mijia(&stored.record).await {
+        report.mijia = match self.maintain_mijia(&stored.record, &mijia_generation).await {
             Ok(_) => AuthenticationState::Authenticated,
             Err(error) => state_for_error(error)?,
         };

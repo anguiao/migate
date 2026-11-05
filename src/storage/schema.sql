@@ -11,7 +11,8 @@ CREATE TABLE blobs (
 CREATE TABLE xiaomi_account (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     uid TEXT NOT NULL,
-    region TEXT NOT NULL
+    region TEXT NOT NULL,
+    mijia_generation TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE xiaomi_account_recovery (

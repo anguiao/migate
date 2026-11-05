@@ -265,9 +265,9 @@ impl XiaomiStore {
             let tx = self.store.connection().unchecked_transaction()?;
             tx.execute("DELETE FROM xiaomi_lan WHERE uid <> ?1", [&record.uid])?;
             tx.execute(
-                "INSERT INTO xiaomi_account (id, uid, region) VALUES (1, ?1, ?2)
-                ON CONFLICT (id) DO UPDATE SET uid = excluded.uid, region = excluded.region",
-                (&record.uid, &record.region),
+                "INSERT INTO xiaomi_account (id, uid, region, mijia_generation) VALUES (1, ?1, ?2, ?3)
+                ON CONFLICT (id) DO UPDATE SET uid = excluded.uid, region = excluded.region, mijia_generation = excluded.mijia_generation",
+                (&record.uid, &record.region, Uuid::new_v4().to_string()),
             )?;
             for table in [
                 "xiaomi_account_recovery",
@@ -334,7 +334,7 @@ impl XiaomiStore {
             if old_client.as_deref().is_some_and(|uuid| uuid != client_uuid) {
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            tx.execute("INSERT INTO xiaomi_account (id, uid, region) VALUES (1, ?1, 'cn') ON CONFLICT(id) DO NOTHING", [&candidate.uid])?;
+            tx.execute("INSERT INTO xiaomi_account (id, uid, region, mijia_generation) VALUES (1, ?1, 'cn', ?2) ON CONFLICT(id) DO UPDATE SET mijia_generation = excluded.mijia_generation", (&candidate.uid, Uuid::new_v4().to_string()))?;
             write_recovery(&tx, credentials, None)?;
             write_session(&tx, session)?;
             write_ha(&tx, candidate.ha.as_ref().expect("candidate includes HA client"))?;
@@ -361,11 +361,84 @@ impl XiaomiStore {
         let stop = current.recovery.as_ref().and_then(|recovery| recovery.stop);
         (|| {
             let tx = self.store.connection().unchecked_transaction()?;
+            tx.execute(
+                "UPDATE xiaomi_account SET mijia_generation = ?1 WHERE id = 1",
+                [Uuid::new_v4().to_string()],
+            )
+            .and_then(require_record)?;
             write_recovery(&tx, credentials, stop)?;
             write_session(&tx, session)?;
             tx.commit()
         })()
         .map_err(|error| self.store.database_error("update Xiaomi recovery", error))
+    }
+
+    /// Capture the generation alongside an account snapshot before starting
+    /// asynchronous device requests or account recovery.
+    pub(crate) fn mijia_generation(&self, uid: &str) -> Result<Option<String>, StorageError> {
+        self.store
+            .connection()
+            .query_row(
+                "SELECT mijia_generation FROM xiaomi_account WHERE id = 1 AND uid = ?1",
+                [uid],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                self.store
+                    .database_error("read Mijia session generation", error)
+            })
+    }
+
+    pub(crate) fn update_recovery_if_current(
+        &self,
+        credentials: &AccountCredentials,
+        session: &MijiaSession,
+        generation: &str,
+    ) -> Result<bool, StorageError> {
+        if credentials.user_id() != session.user_id() {
+            return Err(StorageError::new(
+                self.path(),
+                "validate Xiaomi recovery",
+                InvalidCredentials,
+            ));
+        }
+        (|| {
+            let tx = self.store.connection().unchecked_transaction()?;
+            let changed = tx.execute(
+                "UPDATE xiaomi_account SET mijia_generation = ?1
+                 WHERE id = 1 AND uid = ?2 AND mijia_generation = ?3
+                   AND EXISTS (SELECT 1 FROM xiaomi_account_recovery WHERE id = 1 AND stopped IS NULL)",
+                (Uuid::new_v4().to_string(), credentials.user_id(), generation),
+            )?;
+            if changed == 0 {
+                return Ok(false);
+            }
+            write_recovery(&tx, credentials, None)?;
+            write_session(&tx, session)?;
+            tx.commit()?;
+            Ok(true)
+        })()
+        .map_err(|error| self.store.database_error("update Xiaomi recovery", error))
+    }
+
+    pub(crate) fn stop_recovery_if_current(
+        &self,
+        uid: &str,
+        generation: &str,
+        stop: RecoveryStop,
+    ) -> Result<bool, StorageError> {
+        self.store
+            .connection()
+            .execute(
+                "UPDATE xiaomi_account_recovery SET stopped = ?1
+                 WHERE id = 1 AND stopped IS NULL
+                   AND EXISTS (SELECT 1 FROM xiaomi_account
+                               WHERE id = 1 AND uid = ?2 AND mijia_generation = ?3)",
+                (stop.as_str(), uid, generation),
+            )
+            .map(|changed| changed == 1)
+            .map_err(|error| self.store.database_error("stop Xiaomi recovery", error))
     }
 
     pub fn stop_recovery(&self, stop: RecoveryStop) -> Result<(), StorageError> {

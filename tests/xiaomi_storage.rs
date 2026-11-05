@@ -77,7 +77,7 @@ fn account_identity_can_exist_without_any_service_credentials() {
     Connection::open(store.path())
         .unwrap()
         .execute(
-            "INSERT INTO xiaomi_account (id, uid, region) VALUES (1, 'uid-only', 'cn')",
+            "INSERT INTO xiaomi_account (id, uid, region, mijia_generation) VALUES (1, 'uid-only', 'cn', 'test-generation')",
             [],
         )
         .unwrap();
@@ -284,6 +284,16 @@ fn login_commit_rolls_back_all_groups_and_stops_on_storage_failure_or_wrong_acco
         .unwrap();
     store.xiaomi().stop_ha_refresh().unwrap();
     let before = store.xiaomi().load().unwrap();
+    let db = Connection::open(store.path()).unwrap();
+    let generation = || -> String {
+        db.query_row(
+            "SELECT mijia_generation FROM xiaomi_account WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let before_generation = generation();
     let oauth = HaAuthorization {
         redirect_uri: REDIRECT.into(),
         tokens: tokens("new"),
@@ -300,6 +310,7 @@ fn login_commit_rolls_back_all_groups_and_stops_on_storage_failure_or_wrong_acco
             .is_err()
     );
     assert_eq!(store.xiaomi().load().unwrap(), before);
+    assert_eq!(generation(), before_generation);
     Connection::open(store.path()).unwrap().execute_batch(
         "CREATE TRIGGER reject_login BEFORE UPDATE ON xiaomi_ha_oauth BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
     assert!(
@@ -314,6 +325,7 @@ fn login_commit_rolls_back_all_groups_and_stops_on_storage_failure_or_wrong_acco
             .is_err()
     );
     assert_eq!(store.xiaomi().load().unwrap(), before);
+    assert_eq!(generation(), before_generation);
 }
 
 #[test]
@@ -337,6 +349,55 @@ fn recovery_credentials_and_mijia_session_roll_back_together() {
             .is_err()
     );
     assert_eq!(store.xiaomi().load().unwrap(), before);
+}
+
+#[test]
+fn mijia_generation_changes_for_identical_writes_and_rolls_back_with_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let original = record("same");
+    store.xiaomi().replace(&original).unwrap();
+    let db = Connection::open(store.path()).unwrap();
+    let generation = || -> String {
+        db.query_row(
+            "SELECT mijia_generation FROM xiaomi_account WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let before_login = generation();
+    let credentials = &original.recovery.as_ref().unwrap().credentials;
+    let session = original.mijia.as_ref().unwrap();
+    let ha = original.ha.as_ref().unwrap();
+    store
+        .xiaomi()
+        .commit_login(
+            credentials,
+            session,
+            &ha.client_uuid,
+            ha.authorization.as_ref().unwrap(),
+        )
+        .unwrap();
+    let after_login = generation();
+    assert_ne!(before_login, after_login);
+    store
+        .xiaomi()
+        .update_recovery(credentials, session)
+        .unwrap();
+    let after_recovery = generation();
+    assert_ne!(after_login, after_recovery);
+    assert_eq!(store.xiaomi().load().unwrap(), Some(original.clone()));
+
+    db.execute_batch("CREATE TRIGGER reject_session_generation BEFORE UPDATE ON xiaomi_mijia_session BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
+    assert!(
+        store
+            .xiaomi()
+            .update_recovery(credentials, session)
+            .is_err()
+    );
+    assert_eq!(generation(), after_recovery);
+    assert_eq!(store.xiaomi().load().unwrap(), Some(original));
 }
 
 #[test]

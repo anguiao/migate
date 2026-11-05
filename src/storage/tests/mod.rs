@@ -10,3 +10,4 @@ mod validity;
 mod configuration_states;
 
 mod lan;
+mod xiaomi;
