@@ -370,27 +370,41 @@ async fn send_power(
                 break;
             }
             ControlPath::Cloud(credentials) => {
+                if !context.current_mijia(&credentials)? {
+                    command.0.reject(
+                        request,
+                        CommandError::Unavailable("Mijia session changed".into()),
+                    );
+                    break;
+                }
                 let read_pending = work.refresh.borrow().contains(function_id, binding);
                 let stamp = work
                     .observations
                     .write_stamp(function_id, binding, read_pending);
                 command.0.submitted(super::model::PathKind::Cloud);
                 match context
-                    .cloud
-                    .set_property(&credentials.access_token, &did, binding, target)
+                    .mijia
+                    .set_property(&credentials.session, &did, binding, target)
                     .await
                 {
                     Ok(()) => {
                         command.0.receipts(vec![StepReceipt::Accepted]);
-                        let result = work.observations.accept_write(
-                            &work,
-                            &sink,
-                            function_id,
-                            &stamp,
-                            !refresh::notifications_ready(&context, &work, function_id),
-                            request,
-                        );
-                        command.0.schedule_feedback(&context, &work, &sink);
+                        let current = context.current_mijia(&credentials)?;
+                        let result = if current {
+                            work.observations.accept_write(
+                                &work,
+                                &sink,
+                                function_id,
+                                &stamp,
+                                !refresh::notifications_ready(&context, &work, function_id),
+                                request,
+                            )
+                        } else {
+                            request.accept().map(|_| ())
+                        };
+                        if current {
+                            command.0.schedule_feedback(&context, &work, &sink);
+                        }
                         command.0.finish(result);
                     }
                     Err(error) => {
@@ -400,7 +414,7 @@ async fn send_power(
                         let current = !work.life.is_closed() && !sink.life.is_closed();
                         // Account failures remain relevant after a binding is replaced.
                         context.cloud_error(
-                            &credentials.access_token,
+                            &credentials,
                             current.then_some(did.as_str()),
                             &error,
                         )?;

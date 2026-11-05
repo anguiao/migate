@@ -9,6 +9,9 @@ pub(in super::super) struct CloudState {
     pub(in super::super) home_delay: Duration,
     pub(in super::super) home_gate: Option<flume::Receiver<()>>,
     pub(in super::super) home_status: u16,
+    pub(in super::super) home_bad_signature: bool,
+    pub(in super::super) home_more: bool,
+    pub(in super::super) member_pages: usize,
     pub(in super::super) foreign: bool,
     pub(in super::super) missing_home: bool,
     pub(in super::super) other_home: bool,
@@ -31,6 +34,11 @@ pub(in super::super) struct CloudState {
     pub(in super::super) token_done: usize,
     pub(in super::super) token_lifetime: u64,
     pub(in super::super) homes: usize,
+    pub(in super::super) home_requests: Vec<(String, String)>,
+    pub(in super::super) restores: usize,
+    pub(in super::super) restore_status: u16,
+    pub(in super::super) restore_gate: Option<flume::Receiver<()>>,
+    pub(in super::super) sts_requests: usize,
     pub(in super::super) online: BTreeSet<String>,
     pub(in super::super) infos: usize,
     pub(in super::super) info_status: u16,
@@ -99,6 +107,22 @@ pub(in super::super) struct Control {
 impl Rig {
     pub(in super::super) fn new(restore: bool, members: &[&str]) -> Self {
         Self::build(restore, members, None)
+    }
+    pub(in super::super) fn enable_recovery(&self) {
+        use crate::xiaomi::auth::{AccountClientIdentity, AccountCredentials};
+        let mut record = self.store.xiaomi().load().unwrap().unwrap();
+        record.recovery = Some(crate::storage::AccountRecovery {
+            credentials: AccountCredentials::new(
+                record.uid.clone(),
+                "cuser".into(),
+                "pass".into(),
+                AccountClientIdentity::new("device-id".into(), "test-agent".into()).unwrap(),
+            )
+            .unwrap(),
+            stop: None,
+        });
+        self.store.xiaomi().replace(&record).unwrap();
+        self.source.context.adopt_credentials(record).unwrap();
     }
     /// A fresh catalog containing one real on/off light among ordinary devices.
     pub(in super::super) fn unrestored_with_member_light(members: &[&str]) -> Self {
@@ -219,6 +243,15 @@ impl Rig {
             .unwrap()
             .tokens
             .expires_at = now + 2_000_000;
+        credentials.mijia = Some(
+            crate::xiaomi::mijia::MijiaSession::new(
+                uid.clone(),
+                "device-session".into(),
+                "c2VjdXJpdHk=".into(),
+                "test-agent".into(),
+            )
+            .unwrap(),
+        );
         store.xiaomi().replace(&credentials).unwrap();
         let mut data = vec![
             cached(&uid, "one", false),
@@ -277,6 +310,7 @@ impl Rig {
             detail_status: 200,
             cert_status: 200,
             token_status: 200,
+            restore_status: 200,
             token_lifetime: 1_000_000,
             property_status: 200,
             read_status: 200,
@@ -314,11 +348,53 @@ impl Rig {
             let detail_finished = responses.clone();
             let token_finished = responses.clone();
             let mut state = responses.lock().unwrap();
+            if request.target.ends_with("/gethome")
+                && request
+                    .headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer")
+            {
+                return MockResponse::json(
+                    200,
+                    &json!({"code":0,"result":{"homelist":[{"uid":account_uid}]}}).to_string(),
+                );
+            }
             if state.status != 200 {
                 return MockResponse::json(state.status, "{}");
             }
+            let data = || {
+                let data = url::form_urlencoded::parse(request.body.as_bytes())
+                    .find_map(|(key, value)| (key == "data").then(|| value.into_owned()))
+                    .unwrap();
+                serde_json::from_str::<Value>(&data).unwrap()
+            };
+            if request.target.starts_with("/pass/serviceLogin?") {
+                state.restores += 1;
+                let (status, body) = match state.restore_status {
+                    401 => (200, json!({"code":70002})),
+                    403 => (
+                        200,
+                        json!({"notificationUrl":"https://account.xiaomi.com/verify?ticket=test"}),
+                    ),
+                    status => (
+                        status,
+                        json!({"code":0,"userId":account_uid,"cUserId":"new-cuser","passToken":"new-pass","ssecurity":"bmV3LXNlY3VyaXR5","location":"https://sts.api.io.mi.com/sts?ticket=test"}),
+                    ),
+                };
+                let mut response = MockResponse::json(status, &body.to_string());
+                if let Some(gate) = state.restore_gate.clone() {
+                    response = response.gated(gate);
+                }
+                return response;
+            }
+            if request.target.starts_with("/sts?") {
+                state.sts_requests += 1;
+                return MockResponse::raw(
+                    "HTTP/1.1 200 Test\r\nSet-Cookie: serviceToken=restored-service; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
             let value = if request.target.ends_with("/miotspec/prop/get") {
-                let body: Value = serde_json::from_str(&request.body).unwrap();
+                let body = data();
                 let mut batch = Vec::new();
                 let mut readings = Vec::new();
                 let mut gate = None;
@@ -352,7 +428,7 @@ impl Rig {
                 }
                 return response;
             } else if request.target.ends_with("/miotspec/prop/set") {
-                let body: Value = serde_json::from_str(&request.body).unwrap();
+                let body = data();
                 let items = body["params"].as_array().unwrap();
                 let did = items[0]["did"].as_str().unwrap();
                 let native_group = state.catalog_groups.iter().any(|record| {
@@ -414,8 +490,17 @@ impl Rig {
                     return response;
                 }
                 json!({"code":0,"result":{"cert":state.cert_pem.as_deref().unwrap_or(&certificate)}})
+            } else if request.target.ends_with("/get_dev_room_page") {
+                state.member_pages += 1;
+                json!({"code":0,"result":{"info":[{"id":"local","dids":[]}],"has_more":false}})
             } else if request.target.ends_with("/gethome") {
                 state.homes += 1;
+                state
+                    .home_requests
+                    .push((request.headers.clone(), request.body.clone()));
+                if state.home_bad_signature {
+                    return MockResponse::json(200, r#"{"code":1,"message":"invalid signature"}"#);
+                }
                 if state.home_status != 200 {
                     let mut response = MockResponse::json(state.home_status, "{}");
                     if let Some(gate) = state.home_gate.clone() {
@@ -428,10 +513,15 @@ impl Rig {
                 } else if state.missing_home {
                     json!({"code":0,"result":{"homelist":[],"has_more":false}})
                 } else {
-                    json!({"code":0,"result":{"homelist":[{"id":if state.other_home {"other"} else {"local"},"uid":if state.foreign {"foreign"}else {&account_uid},"roomlist":[],"dids":state.members}]}})
+                    let mut result = json!({"homelist":[{"id":if state.other_home {"other"} else {"local"},"uid":if state.foreign {"foreign"}else {&account_uid},"roomlist":[],"dids":state.members}]});
+                    if state.home_more {
+                        result["has_more"] = json!(true);
+                        result["max_id"] = json!("next-page");
+                    }
+                    json!({"code":0,"result":result})
                 }
             } else if request.target.ends_with("/device_list_page") {
-                let body: Value = serde_json::from_str(&request.body).unwrap();
+                let body = data();
                 let requested = body.get("dids").and_then(Value::as_array);
                 if requested.is_none() {
                     // Full unfiltered account catalog. Ordinary home members are
@@ -549,8 +639,19 @@ impl Rig {
         clock
             .automatic
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let (mut source, ready) =
-            XiaomiAdapter::build(store.clone(), client, discovery.clone(), clock.clone()).unwrap();
+        let auth = crate::xiaomi::auth::AuthService::for_adapter_test(
+            store.xiaomi(),
+            client.clone(),
+            &base,
+        );
+        let (mut source, ready) = XiaomiAdapter::build_with_auth(
+            store.clone(),
+            client,
+            discovery.clone(),
+            clock.clone(),
+            auth,
+        )
+        .unwrap();
         source.test_ca = Some(tls.ca_pem.clone());
         source.request_timeout = Duration::from_millis(150);
         Self {

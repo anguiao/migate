@@ -106,7 +106,15 @@ fn partial_cloud_preparation_keeps_local_and_preparing_qos2_cannot_cross_activat
                 cloud.state.borrow_mut().hold.remove(held);
                 cloud.release(held);
                 until(|| cloud_active(control, "multi")).await;
+                control
+                    .clock
+                    .automatic
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 until(|| outlet.snapshot().power() == Some(Power::Off)).await;
+                control
+                    .clock
+                    .automatic
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 cloud.send(Packet::PubRel(PubRel::new(41)));
                 until(|| cloud.received(41, true)).await;
                 assert_eq!(outlet.snapshot().power(), Some(Power::Off));
@@ -328,11 +336,19 @@ fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
                             timeout: Some(crate::xiaomi::central::RequestTimeout::Response),
                         },
                     );
+                    control
+                        .clock
+                        .automatic
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     until(|| {
                         cloud_active(control, "one")
                             && control.cloud.lock().unwrap().property_reads.len() > reads
                     })
                     .await;
+                    control
+                        .clock
+                        .automatic
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                     let work = control.context.live.borrow().devices["one"]
                         .admitted
                         .clone()

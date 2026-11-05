@@ -216,7 +216,7 @@ fn foreground_cloud_read_unauthorized_rejects_current_credentials() {
 
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
-    let (release, gate) = flume::bounded(1);
+    let (release, _gate) = flume::bounded::<()>(1);
     block_on(rig.run(|c| async move {
         until(|| {
             c.context.cloud_candidate("one", true).is_ok()
@@ -231,37 +231,16 @@ fn foreground_cloud_read_unauthorized_rejects_current_credentials() {
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let token = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .access_token
-            .clone();
-        {
-            let mut cloud = c.cloud.lock().unwrap();
-            cloud.read_status = 401;
-            cloud.token_gate = Some(gate);
-        }
+        let token = c.context.mijia_path().unwrap();
+        c.cloud.lock().unwrap().read_status = 401;
         let before = c.cloud.lock().unwrap().tokens;
         work(&c, "one").refresh_property("outlet:2", PropertyBinding { siid: 2, piid: 1 });
         c.clock.advance(Duration::from_millis(201));
-        until(|| c.cloud.lock().unwrap().tokens > before).await;
-        assert!(matches!(
-            &*c.context.cloud_sync.borrow(),
-            super::super::cloud::CloudSync::Rejected(rejected) if rejected == &token
-        ));
+        until(|| c.context.mijia_rejected.borrow().as_deref() == Some(token.generation.as_str()))
+            .await;
+        assert_eq!(c.cloud.lock().unwrap().tokens, before);
         assert!(c.context.cloud_candidate("one", true).is_err());
-        assert!(!c.context.http_paused.get());
+        assert!(c.context.http_paused.get());
         drop(release);
     }));
 }

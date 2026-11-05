@@ -3,6 +3,34 @@ use super::*;
 mod errors;
 
 #[test]
+fn directory_uses_mijia_session_and_signed_form() {
+    let rig = Rig::new(true, &["one"]);
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    record.mijia = Some(
+        crate::xiaomi::mijia::MijiaSession::new(
+            record.uid.clone(),
+            "device-session".into(),
+            "c2VjdXJpdHk=".into(),
+            "test-agent".into(),
+        )
+        .unwrap(),
+    );
+    rig.store.xiaomi().replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record).unwrap();
+    block_on(rig.run(|c| async move {
+        until(|| !c.cloud.lock().unwrap().home_requests.is_empty()).await;
+        let cloud = c.cloud.lock().unwrap();
+        let (headers, body) = &cloud.home_requests[0];
+        assert!(headers.contains("serviceToken=device-session"), "{headers}");
+        let fields = url::form_urlencoded::parse(body.as_bytes())
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert!(fields.contains_key("data"));
+        assert!(fields.contains_key("_nonce"));
+        assert!(fields.contains_key("signature"));
+    }));
+}
+
+#[test]
 fn published_cloud_only_device_is_refreshed_without_a_local_subscription() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());

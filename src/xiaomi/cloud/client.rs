@@ -1,6 +1,6 @@
 use super::{
     AuthorizationAttempt, CLIENT_ID, CloudError, CloudErrorKind,
-    response::{ApiResponse, Identifier, Members, RawApiResponse},
+    response::{ApiResponse, Identifier},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use isahc::{
@@ -8,12 +8,11 @@ use isahc::{
     config::{Configurable as _, RedirectPolicy},
 };
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::{Map, Value, json, value::RawValue};
-use std::{collections::HashSet, error::Error as StdError, fmt, time::Duration};
+use serde_json::{Value, json};
+use std::{error::Error as StdError, fmt, time::Duration};
 use url::Url;
 
 pub const CLOUD_BASE_URL: &str = "https://ha.api.io.mi.com";
-const PROBE_DEVICE_LIMIT: usize = 150;
 
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 pub struct TokenResponse {
@@ -36,7 +35,6 @@ impl fmt::Debug for TokenResponse {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HomePage {
     pub uid: Option<String>,
-    pub dids: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -48,6 +46,11 @@ pub struct CloudClient {
 }
 
 impl CloudClient {
+    #[cfg(test)]
+    pub(in crate::xiaomi) fn test_base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub fn new() -> Result<Self, CloudError> {
         Self::build(CLOUD_BASE_URL, Duration::from_secs(30))
     }
@@ -144,16 +147,12 @@ impl CloudClient {
         #[derive(Deserialize)]
         struct ProbeHome {
             uid: Option<Identifier>,
-            #[serde(flatten)]
-            members: Members,
         }
         let operation = "read Xiaomi homes";
         let result: ProbeHomes = self.protected_post(operation, "/app/v2/homeroom/gethome", access_token, json!({
             "limit": 150, "fetch_share": false, "fetch_share_dev": false, "plat_form": 0, "app_ver": 9
         })).await?;
         let mut uid = None;
-        let mut dids = Vec::new();
-        let mut seen = HashSet::new();
         for home in result.homelist {
             if let Some(candidate) = home
                 .uid
@@ -165,28 +164,8 @@ impl CloudClient {
                 }
                 uid = Some(candidate);
             }
-            for did in home.members.into_dids() {
-                if dids.len() < PROBE_DEVICE_LIMIT && seen.insert(did.clone()) {
-                    dids.push(did);
-                }
-            }
         }
-        Ok(HomePage { uid, dids })
-    }
-
-    pub async fn get_devices(&self, access_token: &str, dids: &[String]) -> Result<(), CloudError> {
-        #[derive(Deserialize)]
-        struct DeviceProbe {
-            #[serde(rename = "list")]
-            _devices: Vec<Map<String, Value>>,
-        }
-        if dids.is_empty() {
-            return Ok(());
-        }
-        self.protected_post::<DeviceProbe>("read Xiaomi devices", "/app/v2/home/device_list_page", access_token, json!({
-            "limit": 200, "get_split_device": true, "get_third_device": true, "dids": &dids[..dids.len().min(PROBE_DEVICE_LIMIT)]
-        })).await?;
-        Ok(())
+        Ok(HomePage { uid })
     }
 
     pub async fn get_certificate(
@@ -241,21 +220,6 @@ impl CloudClient {
         self.send::<ApiResponse>(request, operation)
             .await?
             .into_result(operation)
-    }
-
-    /// Send a protected POST and keep the raw `result` field unparsed so
-    /// duplicate object keys survive until the caller validates them.
-    pub(super) async fn protected_post_raw(
-        &self,
-        operation: &'static str,
-        path: &str,
-        access_token: &str,
-        body: Value,
-    ) -> Result<Box<RawValue>, CloudError> {
-        let request = self.protected_request(operation, path, access_token, body, self.timeout)?;
-        self.send::<RawApiResponse>(request, operation)
-            .await?
-            .into_raw_result(operation)
     }
 
     fn protected_request(

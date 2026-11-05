@@ -168,6 +168,11 @@ pub(super) fn format_device(status: &DeviceStatus) -> String {
         status.selected_read.map(path).unwrap_or("none"),
         status.notification_source.map(path).unwrap_or("none")
     );
+    if status.usable_control_paths.contains(&PathKind::Cloud)
+        || status.usable_read_paths.contains(&PathKind::Cloud)
+    {
+        report.push_str("\n  Cloud HTTP backend: mijia.");
+    }
     if let Some(lan) = &status.lan {
         let _ = write!(
             report,
@@ -444,6 +449,8 @@ pub(super) fn format_authentication(label: &str, authentication: &Authentication
     match authentication {
         AuthenticationState::NotSignedIn => format!("{label}: not signed in."),
         AuthenticationState::Checking => format!("{label}: checking."),
+        AuthenticationState::Restoring => format!("{label}: restoring."),
+        AuthenticationState::Refreshing => format!("{label}: refreshing."),
         AuthenticationState::Authenticated => format!("{label}: available."),
         AuthenticationState::SignInRequired(reason) => {
             format!("{label}: sign-in required. {reason}.")

@@ -8,9 +8,9 @@
 use super::{
     CloudError,
     catalog::Pagination,
-    device::DeviceTransport,
     response::{description, null_list, valid_description},
 };
+use crate::xiaomi::mijia::{MijiaClient, MijiaSession};
 use serde::{
     Deserialize, Deserializer,
     de::{self, MapAccess, Visitor},
@@ -119,7 +119,7 @@ struct RawMemberList {
     is_physical: bool,
 }
 
-pub(super) trait CatalogApi: DeviceTransport {
+impl MijiaClient {
     /// Read every page of the account device directory, including native
     /// group membership, without a DID filter.
     ///
@@ -127,9 +127,9 @@ pub(super) trait CatalogApi: DeviceTransport {
     /// and envelope failures return `Err` instead of a partial result. The
     /// caller selects the owned home by comparing record DIDs with its home
     /// directory; the response is never labeled as belonging to one home.
-    async fn get_device_catalog(
+    pub async fn get_device_catalog(
         &self,
-        credential: &Self::Credential,
+        credential: &MijiaSession,
     ) -> Result<CloudDeviceCatalog, CloudError> {
         let operation = "read Xiaomi device catalog";
         let mut devices = Vec::new();
@@ -176,8 +176,6 @@ pub(super) trait CatalogApi: DeviceTransport {
         Ok(CloudDeviceCatalog { devices })
     }
 }
-
-impl<T: DeviceTransport> CatalogApi for T {}
 
 /// Treat an empty instance type as an absent description. Control characters
 /// and non-string types remain boundary errors.

@@ -376,7 +376,7 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
 }
 
 #[test]
-fn incomplete_foreign_or_failed_cloud_sync_cannot_remove_published_devices() {
+fn incomplete_foreign_or_failed_directory_sync_cannot_remove_published_devices() {
     for failure in 0..4 {
         block_on(Rig::new(true, &["one"]).run(|c| async move {
             c.announce();

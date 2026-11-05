@@ -642,18 +642,27 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
 }
 
 #[test]
-fn repaired_group_unauthorized_member_path_recovers_after_token_refresh() {
+fn repaired_group_unauthorized_member_path_recovers_after_mijia_recovery() {
     let rig = repair_rig(0, true);
+    rig.enable_recovery();
+    let (release, gate) = flume::bounded(1);
+    rig.cloud.lock().unwrap().restore_gate = Some(gate);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "light:2");
         c.cloud.lock().unwrap().property_status = 401;
         let denied = light.begin_light_action(rgb(0x00ff00), true).unwrap();
         assert!(denied.accepted().await.is_err());
-        // The existing cloud coordination refreshes the rejected token.
-        until(|| c.cloud.lock().unwrap().tokens > 0).await;
+        until(|| c.cloud.lock().unwrap().restores == 1).await;
+        let writes_before_recovery = c.cloud.lock().unwrap().numeric_writes.len();
         c.cloud.lock().unwrap().property_status = 200;
-        until(|| c.context.token_usable()).await;
+        release.send(()).unwrap();
+        until(|| c.context.cloud_candidate("member-a", true).is_ok()).await;
+        assert_eq!(
+            c.cloud.lock().unwrap().numeric_writes.len(),
+            writes_before_recovery
+        );
+        assert_eq!(c.cloud.lock().unwrap().tokens, 0);
         until(|| {
             ["member-a", "member-b"].iter().all(|did| {
                 function(&c.context.registry, did, "light:2")
@@ -672,7 +681,7 @@ fn repaired_group_unauthorized_member_path_recovers_after_token_refresh() {
                     .cloned()
                     == Some(json!(0x0000ff))
             },
-            "member writes did not recover after token refresh",
+            "member writes did not recover after Mijia recovery",
         )
         .await;
     }));

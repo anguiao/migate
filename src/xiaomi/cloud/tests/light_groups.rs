@@ -42,8 +42,8 @@ fn catalog_page(records: Vec<Value>, has_more: bool, cursor: Option<&str>) -> Va
 
 fn read_catalog(responses: Vec<MockResponse>) -> Result<CloudDeviceCatalog, CloudError> {
     let (base, _) = mock_server(responses);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    future::block_on(cloud.get_device_catalog("access-secret"))
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+    future::block_on(cloud.get_device_catalog(&session("access-secret")))
 }
 
 fn confirmed(catalog: &CloudDeviceCatalog, did: &str) -> CloudGroupMembership {
@@ -111,8 +111,8 @@ fn device_catalog_reads_the_full_account_directory_without_dids_filter() {
         )),
     ];
     let (base, requests) = mock_server(responses);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let catalog = future::block_on(cloud.get_device_catalog("access-secret")).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+    let catalog = future::block_on(cloud.get_device_catalog(&session("access-secret"))).unwrap();
 
     assert_eq!(
         catalog
@@ -160,13 +160,13 @@ fn device_catalog_reads_the_full_account_directory_without_dids_filter() {
             request
                 .headers
                 .to_ascii_lowercase()
-                .contains("authorization: beareraccess-secret")
+                .contains("servicetoken=access-secret")
         );
         let mut expected = json!({"limit":200,"get_split_device":true,"get_third_device":true});
         if index == 1 {
             expected["start_did"] = json!("cursor-1");
         }
-        let body: Value = serde_json::from_str(&request.body).unwrap();
+        let body: Value = form_data(&request.body);
         assert_eq!(body, expected);
         assert!(body.get("dids").is_none());
     }
@@ -611,9 +611,9 @@ fn device_catalog_rejects_duplicate_records_and_invalidates_duplicate_group_iden
         response(catalog_page(vec![ordinary("plain")], false, None)),
     ];
     let (base, requests) = mock_server(responses);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.get_device_catalog("token"))
+        future::block_on(cloud.get_device_catalog(&session("token")))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -734,8 +734,8 @@ fn device_catalog_invalidates_the_snapshot_when_any_page_or_cursor_fails() {
         ),
     ] {
         let (base, requests) = mock_server(responses);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        let error = future::block_on(cloud.get_device_catalog("token")).unwrap_err();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+        let error = future::block_on(cloud.get_device_catalog(&session("token"))).unwrap_err();
         assert_eq!(error.kind(), &expected_kind, "{label}");
         assert_eq!(requests.try_iter().count(), expected_requests, "{label}");
     }

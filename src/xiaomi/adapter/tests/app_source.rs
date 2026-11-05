@@ -105,8 +105,12 @@ impl AppSource {
         }
         let (_, events) = flume::unbounded();
         let (discovery, _driver) = Discovery::with_events(events);
-        let (adapter, _) =
-            XiaomiAdapter::new(store.clone(), CloudClient::new().unwrap(), discovery).unwrap();
+        let (adapter, _) = XiaomiAdapter::new(
+            store.clone(),
+            CloudClient::for_test("http://127.0.0.1:9", std::time::Duration::from_secs(1)).unwrap(),
+            discovery,
+        )
+        .unwrap();
         let derived = configuration.derive();
         let revocations = store.devices().load_revocations().unwrap();
         let mut recovery = configuration.clone();

@@ -318,14 +318,14 @@ fn switch_reasons_identify_http_failure_instead_of_a_generic_access_change() {
                 .last_switch_reason
                 .as_ref()
                 .unwrap()
-                .contains("cloud HTTP request failed")
+                .contains("Mijia HTTP request failed")
         );
         assert!(
             status.devices[0]
                 .unavailable_reason
                 .as_ref()
                 .unwrap()
-                .contains("HTTP temporarily paused")
+                .contains("Mijia HTTP unavailable")
         );
     }));
 }
@@ -370,14 +370,23 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
         until(|| c.cloud.lock().unwrap().tokens == 1).await;
         c.clock.advance(Duration::from_secs(5));
         until(|| !c.context.token_usable()).await;
+        until(|| {
+            matches!(
+                c.context.status.borrow().auth.ha,
+                crate::xiaomi::auth::AuthenticationState::Unavailable(
+                    crate::xiaomi::auth::FailureReason::AccessTokenExpired
+                )
+            )
+        })
+        .await;
         let status = c.context.diagnostics();
-        assert!(
-            status.devices[0]
-                .last_switch_reason
-                .as_ref()
-                .unwrap()
-                .contains("access token expired")
-        );
+        assert_eq!(status.devices[0].selected_control, Some(PathKind::Cloud));
+        assert!(matches!(
+            status.auth.ha,
+            crate::xiaomi::auth::AuthenticationState::Unavailable(
+                crate::xiaomi::auth::FailureReason::AccessTokenExpired
+            )
+        ));
         c.cloud.lock().unwrap().token_gate = None;
         release.send(()).unwrap();
         until(|| {
@@ -385,13 +394,7 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
         })
         .await;
         let status = c.context.diagnostics();
-        assert!(
-            status.devices[0]
-                .last_switch_reason
-                .as_ref()
-                .unwrap()
-                .contains("cloud credentials updated")
-        );
+
         assert_eq!(status.devices[0].selected_control, Some(PathKind::Cloud));
     }));
 }

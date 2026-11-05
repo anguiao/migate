@@ -42,7 +42,7 @@ impl Context {
     pub(super) fn sync_groups(
         self: &Rc<Self>,
         cloud: &CloudClient,
-        token: &str,
+        token: &super::routing::CloudPath,
         active: &[ConfirmedGroup],
     ) -> Result<(), AdapterError> {
         let wanted = active
@@ -153,7 +153,7 @@ impl Context {
             };
             let context = self.clone();
             let client = cloud.clone();
-            let token = token.to_string();
+            let token = token.clone();
             let model = group.model.clone();
             let record_did = group.record_did.clone();
             let group_did = did.clone();
@@ -165,19 +165,16 @@ impl Context {
                 // as its loading token.
                 let wait_life = life.clone();
                 let result = future::or(
-                    async { Some(client.get_instance(&instance_type).await) },
+                    async { context.mijia_retired(&token).await.map(|()| None) },
                     future::or(
                         async {
-                            context.token_retired(&token).await;
-                            None
-                        },
-                        async {
                             wait_life.ended().await;
-                            None
+                            Ok(None)
                         },
+                        async { Ok(Some(client.get_instance(&instance_type).await)) },
                     ),
                 )
-                .await;
+                .await?;
                 let cleared = {
                     let mut live = context.live.borrow_mut();
                     let Some(slot) = live.devices.get_mut(&group_did) else {
@@ -189,9 +186,10 @@ impl Context {
                     return Ok::<(), AdapterError>(());
                 }
                 let Some(result) = result else {
+                    context.request_sync();
                     return Ok(());
                 };
-                let current = context.current_token(&token)
+                let current = context.current_mijia(&token)?
                     && context.live.borrow().scope.as_ref().is_some_and(|scope| {
                         scope.uid == captured_scope.uid && scope.home_id == captured_scope.home_id
                     })
@@ -202,6 +200,7 @@ impl Context {
                         &instance_type,
                     );
                 if !current {
+                    context.request_sync();
                     return Ok::<(), AdapterError>(());
                 }
                 match result {
@@ -234,9 +233,6 @@ impl Context {
                     }
                     Err(error) => {
                         context.pending_description(&group_did, error.to_string());
-                        if error.is_unauthorized() {
-                            context.cloud_error(&token, None, &error)?;
-                        }
                     }
                 }
                 Ok::<(), AdapterError>(())

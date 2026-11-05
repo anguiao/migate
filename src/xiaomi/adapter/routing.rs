@@ -23,16 +23,20 @@ impl ControlPath {
         match (self, other) {
             (Self::Local(a), Self::Local(b)) => a.same_connection(b),
             (Self::Direct(a), Self::Direct(b)) => a.same(b),
-            (Self::Cloud(a), Self::Cloud(b)) => a.uid == b.uid && a.access_token == b.access_token,
+            (Self::Cloud(a), Self::Cloud(b)) => {
+                a.uid == b.uid && a.generation == b.generation && a.home_id == b.home_id
+            }
             _ => false,
         }
     }
 }
-/// Only the account and token identify an HTTP route; local credentials stay in account state.
+/// A captured device session and its committed credential generation.
 #[derive(Clone)]
 pub(super) struct CloudPath {
     pub(super) uid: String,
-    pub(super) access_token: String,
+    pub(super) generation: String,
+    pub(super) home_id: Option<String>,
+    pub(super) session: crate::xiaomi::mijia::MijiaSession,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathPriority {
@@ -217,11 +221,24 @@ impl Context {
             })
     }
     fn cloud_candidate_for(&self, did: &str, http: bool, sensor: bool) -> Result<(), String> {
-        self.cloud_authentication()?;
-        if http && self.http_paused.get() {
-            return Err("HTTP temporarily paused".into());
+        if http {
+            if !self.cloud_scope_valid.get() {
+                return Err("account/home scope not validated".into());
+            }
+            if self.http_paused.get() || self.mijia_path().is_none() {
+                return Err("Mijia HTTP unavailable".into());
+            }
+        } else {
+            self.cloud_authentication()?;
         }
         let live = self.live.borrow();
+        if !live.credentials.as_ref().is_some_and(|credentials| {
+            live.scope
+                .as_ref()
+                .is_some_and(|scope| scope.uid == credentials.uid)
+        }) {
+            return Err("account/home identity mismatch".into());
+        }
         let slot = live
             .devices
             .get(did)
@@ -236,10 +253,13 @@ impl Context {
         if slot.cloud_forbidden {
             return Err("device access forbidden".into());
         }
-        let access = slot
-            .cloud_access
-            .as_ref()
-            .ok_or("device information not available")?;
+        let Some(access) = slot.cloud_access.as_ref() else {
+            return if !http && (self.mijia_path().is_none() || self.http_paused.get()) {
+                Ok(())
+            } else {
+                Err("device information not available".into())
+            };
+        };
         // BLE and proxy-child devices have no reliable cloud state signal.
         // Account, membership, authorization, retirement and explicitly
         // forbidden access still decide here; ordinary devices stay offline.
@@ -267,17 +287,9 @@ impl Context {
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
             _ if direct.is_some() => direct.map(ControlPath::Direct),
-            _ if self.cloud_observation_candidate(did, true).is_ok() => self
-                .live
-                .borrow()
-                .credentials
-                .as_ref()
-                .and_then(|credentials| {
-                    Some(ControlPath::Cloud(CloudPath {
-                        uid: credentials.uid.clone(),
-                        access_token: credentials.ha_authorization()?.tokens.access_token.clone(),
-                    }))
-                }),
+            _ if self.cloud_observation_candidate(did, true).is_ok() => {
+                self.mijia_path().map(ControlPath::Cloud)
+            }
             _ => local.map(ControlPath::Local),
         }
     }
@@ -311,17 +323,9 @@ impl Context {
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
             _ if direct.is_some() => direct.map(ControlPath::Direct),
-            _ if self.cloud_candidate(did, true).is_ok() => self
-                .live
-                .borrow()
-                .credentials
-                .as_ref()
-                .and_then(|credentials| {
-                    Some(ControlPath::Cloud(CloudPath {
-                        uid: credentials.uid.clone(),
-                        access_token: credentials.ha_authorization()?.tokens.access_token.clone(),
-                    }))
-                }),
+            _ if self.cloud_candidate(did, true).is_ok() => {
+                self.mijia_path().map(ControlPath::Cloud)
+            }
             _ => local.map(ControlPath::Local),
         }
     }

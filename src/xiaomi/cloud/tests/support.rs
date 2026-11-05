@@ -18,9 +18,28 @@ pub(super) fn response(result: Value) -> MockResponse {
 }
 
 pub(super) async fn get_home_devices(
-    cloud: &CloudClient,
+    cloud: &crate::xiaomi::mijia::MijiaClient,
     token: &str,
     home: &OwnedHome,
 ) -> Result<Vec<CloudDeviceInfo>, CloudError> {
-    cloud.get_home_devices(token, home, &home.dids).await
+    cloud
+        .get_home_devices(&session(token), home, &home.dids)
+        .await
+}
+
+pub(super) fn session(token: &str) -> crate::xiaomi::mijia::MijiaSession {
+    crate::xiaomi::mijia::MijiaSession::new(
+        "account".into(),
+        token.into(),
+        "c2VjdXJpdHk=".into(),
+        "test-agent".into(),
+    )
+    .unwrap()
+}
+pub(super) fn form_data(body: &str) -> Value {
+    let data = url::form_urlencoded::parse(body.as_bytes())
+        .find(|(key, _)| key == "data")
+        .unwrap()
+        .1;
+    serde_json::from_str(&data).unwrap()
 }

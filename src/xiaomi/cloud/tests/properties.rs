@@ -23,13 +23,14 @@ fn numeric_property_reads_and_batch_writes_preserve_partial_acceptance() {
             r#"{"code":0,"result":[{"did":"target","siid":4,"piid":2,"code":-704},{"did":"target","siid":2,"piid":2,"code":1}]}"#,
         ),
     ]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.read_property_value("token", "target", brightness)).unwrap(),
+        future::block_on(cloud.read_property_value(&session("token"), "target", brightness))
+            .unwrap(),
         json!(65535)
     );
     let result = future::block_on(cloud.set_properties(
-        "token",
+        &session("token"),
         "target",
         &[(brightness, json!(50)), (mode, json!(1))],
     ))
@@ -43,7 +44,7 @@ fn numeric_property_reads_and_batch_writes_preserve_partial_acceptance() {
     requests.recv().unwrap();
     let request = requests.recv().unwrap();
     assert_eq!(
-        serde_json::from_str::<Value>(&request.body).unwrap(),
+        form_data(&request.body),
         json!({"params":[{"did":"target","siid":2,"piid":2,"value":50},{"did":"target","siid":4,"piid":2,"value":1}]})
     );
     assert!(requests.try_recv().is_err());
@@ -63,9 +64,9 @@ fn batch_property_identity_errors_keep_confirmed_items() {
         items.extend(invalid.as_array().unwrap().iter().cloned());
         let body = json!({"code":0,"result":items}).to_string();
         let (base, _) = mock_server(vec![MockResponse::json(200, &body)]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         let result = future::block_on(cloud.set_properties(
-            "token",
+            &session("token"),
             "target",
             &[(POWER, json!(true)), (brightness, json!(50))],
         ))
@@ -87,9 +88,10 @@ fn batch_reads_correlate_numeric_and_boolean_values_in_request_order() {
         200,
         r#"{"code":0,"result":[{"did":"target","siid":2,"piid":2,"code":0,"value":35.5},{"did":"target","siid":2,"piid":1,"code":0,"value":true}]}"#,
     )]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let result =
-        future::block_on(cloud.read_properties("token", "target", &[POWER, brightness])).unwrap();
+        future::block_on(cloud.read_properties(&session("token"), "target", &[POWER, brightness]))
+            .unwrap();
     assert!(!result.protocol_error);
     assert_eq!(
         result
@@ -100,9 +102,9 @@ fn batch_reads_correlate_numeric_and_boolean_values_in_request_order() {
         vec![Ok(json!(true)), Ok(json!(35.5))]
     );
     let request = requests.recv().unwrap();
-    assert_eq!(request.target, "/app/v2/miotspec/prop/get");
+    assert_eq!(request.target, "/app/miotspec/prop/get");
     assert_eq!(
-        serde_json::from_str::<Value>(&request.body).unwrap(),
+        form_data(&request.body),
         json!({"datasource":2,"params":[{"did":"target","siid":2,"piid":1},{"did":"target","siid":2,"piid":2}]})
     );
 }
@@ -110,7 +112,7 @@ fn batch_reads_correlate_numeric_and_boolean_values_in_request_order() {
 #[test]
 fn general_property_writes_reject_invalid_inputs_without_sending() {
     let (base, requests) = mock_server(vec![MockResponse::json(200, "{}")]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     for items in [
         vec![],
         vec![(POWER, json!(true)), (POWER, json!(false))],
@@ -118,7 +120,8 @@ fn general_property_writes_reject_invalid_inputs_without_sending() {
         vec![(POWER, json!("1"))],
         vec![(POWER, json!([]))],
     ] {
-        let error = future::block_on(cloud.set_properties("token", "target", &items)).unwrap_err();
+        let error = future::block_on(cloud.set_properties(&session("token"), "target", &items))
+            .unwrap_err();
         assert_eq!(error.kind(), &CloudErrorKind::InvalidInput);
     }
     assert!(requests.try_recv().is_err());
@@ -140,35 +143,36 @@ fn property_requests_use_official_paths_and_correlated_boolean_results() {
             r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":1}]}"#,
         ),
     ]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.read_property_value("access-secret", "target", POWER)).unwrap(),
+        future::block_on(cloud.read_property_value(&session("access-secret"), "target", POWER))
+            .unwrap(),
         json!(false)
     );
-    future::block_on(cloud.set_property("access-secret", "target", POWER, true)).unwrap();
-    future::block_on(cloud.set_property("access-secret", "target", POWER, false)).unwrap();
+    future::block_on(cloud.set_property(&session("access-secret"), "target", POWER, true)).unwrap();
+    future::block_on(cloud.set_property(&session("access-secret"), "target", POWER, false))
+        .unwrap();
     for (path, body) in [
         (
-            "/app/v2/miotspec/prop/get",
+            "/app/miotspec/prop/get",
             json!({"datasource":2,"params":[{"did":"target","siid":2,"piid":1}]}),
         ),
         (
-            "/app/v2/miotspec/prop/set",
+            "/app/miotspec/prop/set",
             json!({"params":[{"did":"target","siid":2,"piid":1,"value":true}]}),
         ),
         (
-            "/app/v2/miotspec/prop/set",
+            "/app/miotspec/prop/set",
             json!({"params":[{"did":"target","siid":2,"piid":1,"value":false}]}),
         ),
     ] {
         let request = requests.recv().unwrap();
         assert_eq!(request.target, path);
-        assert_eq!(serde_json::from_str::<Value>(&request.body).unwrap(), body);
+        assert_eq!(form_data(&request.body), body);
         let headers = request.headers.to_ascii_lowercase();
         assert!(headers.starts_with("post "));
-        assert!(headers.contains("authorization: beareraccess-secret"));
-        assert!(headers.contains("x-client-bizid: haapi"));
-        assert!(headers.contains(&format!("x-client-appid: {CLIENT_ID}")));
+        assert!(headers.contains("servicetoken=access-secret"));
+        assert!(headers.contains("content-type: application/x-www-form-urlencoded"));
     }
 }
 
@@ -189,13 +193,14 @@ fn realtime_read_failures_are_returned_without_a_cached_retry() {
                 r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":true}]}"#,
             ),
         ]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        let error = future::block_on(cloud.read_property_observation("token", "target", POWER))
-            .unwrap_err();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+        let error =
+            future::block_on(cloud.read_property_observation(&session("token"), "target", POWER))
+                .unwrap_err();
         assert_eq!(error.kind(), &expected);
         let request = requests.recv().unwrap();
         assert_eq!(
-            serde_json::from_str::<Value>(&request.body).unwrap(),
+            form_data(&request.body),
             json!({"datasource":2,"params":[{"did":"target","siid":2,"piid":1}]})
         );
         assert!(requests.recv_timeout(Duration::from_millis(20)).is_err());
@@ -216,9 +221,10 @@ fn property_reads_accept_scalar_values_with_successful_item_codes() {
             json!({"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":value}]})
                 .to_string();
         let (base, _) = mock_server(vec![MockResponse::json(200, &body)]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.read_property_value("token", "target", POWER)).unwrap(),
+            future::block_on(cloud.read_property_value(&session("token"), "target", POWER))
+                .unwrap(),
             value
         );
     }
@@ -227,9 +233,9 @@ fn property_reads_accept_scalar_values_with_successful_item_codes() {
             json!({"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":value}]})
                 .to_string();
         let (base, _) = mock_server(vec![MockResponse::json(200, &body)]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.read_property_value("token", "target", POWER))
+            future::block_on(cloud.read_property_value(&session("token"), "target", POWER))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -239,9 +245,9 @@ fn property_reads_accept_scalar_values_with_successful_item_codes() {
         200,
         r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0}]}"#,
     )]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.read_property_value("token", "target", POWER))
+        future::block_on(cloud.read_property_value(&session("token"), "target", POWER))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -250,9 +256,9 @@ fn property_reads_accept_scalar_values_with_successful_item_codes() {
         200,
         r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":1,"value":true}]}"#,
     )]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.read_property_value("token", "target", POWER))
+        future::block_on(cloud.read_property_value(&session("token"), "target", POWER))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::PropertyRejected(1)
@@ -303,10 +309,12 @@ fn property_operations_reject_invalid_envelopes_and_unassociated_results() {
             MockResponse::json(200, &body.to_string()),
             MockResponse::json(200, &body.to_string()),
         ]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         let errors = [
-            future::block_on(cloud.read_property_value("token", "target", POWER)).unwrap_err(),
-            future::block_on(cloud.set_property("token", "target", POWER, true)).unwrap_err(),
+            future::block_on(cloud.read_property_value(&session("token"), "target", POWER))
+                .unwrap_err(),
+            future::block_on(cloud.set_property(&session("token"), "target", POWER, true))
+                .unwrap_err(),
         ];
         for error in errors {
             assert_eq!(error.kind(), &CloudErrorKind::Protocol, "{body}");
@@ -338,11 +346,11 @@ fn property_failures_preserve_official_business_codes_and_failure_scope() {
             MockResponse::json(200, &body),
             MockResponse::json(200, &body),
         ]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         for error in [
-            future::block_on(cloud.read_property_value("access-secret", "target", POWER))
+            future::block_on(cloud.read_property_value(&session("access-secret"), "target", POWER))
                 .unwrap_err(),
-            future::block_on(cloud.set_property("access-secret", "target", POWER, true))
+            future::block_on(cloud.set_property(&session("access-secret"), "target", POWER, true))
                 .unwrap_err(),
         ] {
             assert_eq!(error.kind(), &CloudErrorKind::PropertyRejected(code));
@@ -371,9 +379,10 @@ fn property_http_failures_are_classified_without_automatic_retries() {
             MockResponse::json(status, "response-secret"),
             MockResponse::json(200, r#"{"code":0,"result":[]}"#),
         ]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        let error = future::block_on(cloud.set_property("access-secret", "target", POWER, true))
-            .unwrap_err();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+        let error =
+            future::block_on(cloud.set_property(&session("access-secret"), "target", POWER, true))
+                .unwrap_err();
         assert_eq!(error.is_temporary(), temporary);
         assert_eq!(error.is_unauthorized(), unauthorized);
         assert!(!error.is_device_offline());
@@ -391,9 +400,9 @@ fn property_outer_rejections_remain_distinct_from_correlated_device_rejections()
             200,
             &json!({"code":code,"message":"secret"}).to_string(),
         )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        let error =
-            future::block_on(cloud.set_property("token", "target", POWER, true)).unwrap_err();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+        let error = future::block_on(cloud.set_property(&session("token"), "target", POWER, true))
+            .unwrap_err();
         assert_eq!(error.kind(), &CloudErrorKind::Business(code));
         assert_eq!(error.is_unauthorized(), code == -704_012_901);
         assert!(!error.is_device_offline());
@@ -417,9 +426,9 @@ fn property_timeouts_cover_headers_and_body_and_do_not_replay_writes() {
         ),
     ] {
         let (base, requests) = mock_server(vec![response, MockResponse::json(200, "{}")]);
-        let cloud = CloudClient::for_test(&base, Duration::from_millis(10)).unwrap();
-        let error =
-            future::block_on(cloud.set_property("token", "target", POWER, true)).unwrap_err();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_millis(10));
+        let error = future::block_on(cloud.set_property(&session("token"), "target", POWER, true))
+            .unwrap_err();
         assert!(error.is_timeout());
         assert!(error.is_temporary());
         requests.recv().unwrap();
@@ -428,9 +437,9 @@ fn property_timeouts_cover_headers_and_body_and_do_not_replay_writes() {
     let (base, _) = mock_server(vec![
         MockResponse::json(200, "{}").delayed(Duration::from_millis(100)),
     ]);
-    let cloud = CloudClient::for_test(&base, Duration::from_millis(10)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_millis(10));
     assert!(
-        future::block_on(cloud.read_property_value("token", "target", POWER))
+        future::block_on(cloud.read_property_value(&session("token"), "target", POWER))
             .unwrap_err()
             .is_timeout()
     );
@@ -439,21 +448,29 @@ fn property_timeouts_cover_headers_and_body_and_do_not_replay_writes() {
 #[test]
 fn invalid_property_targets_fail_before_sending_http() {
     let (base, requests) = mock_server(vec![MockResponse::json(200, "{}")]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     for (token, did, binding) in [
-        ("", "target", POWER),
         ("token", "", POWER),
         ("token", "bad\n", POWER),
         ("token", "target", PropertyBinding { siid: 0, piid: 1 }),
         ("token", "target", PropertyBinding { siid: 2, piid: 0 }),
     ] {
         for error in [
-            future::block_on(cloud.read_property_value(token, did, binding)).unwrap_err(),
-            future::block_on(cloud.set_property(token, did, binding, true)).unwrap_err(),
+            future::block_on(cloud.read_property_value(&session(token), did, binding)).unwrap_err(),
+            future::block_on(cloud.set_property(&session(token), did, binding, true)).unwrap_err(),
         ] {
             assert_eq!(error.kind(), &CloudErrorKind::InvalidInput);
         }
     }
+    assert!(
+        crate::xiaomi::mijia::MijiaSession::new(
+            "account".into(),
+            "".into(),
+            "c2VjdXJpdHk=".into(),
+            "agent".into()
+        )
+        .is_err()
+    );
     assert!(requests.try_recv().is_err());
 }
 
@@ -469,13 +486,15 @@ fn property_reads_preserve_a_supplied_upstream_update_time() {
             r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0,"value":22.5}]}"#,
         ),
     ]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let reading =
-        future::block_on(cloud.read_property_observation("token", "target", POWER)).unwrap();
+        future::block_on(cloud.read_property_observation(&session("token"), "target", POWER))
+            .unwrap();
     assert_eq!(reading.value, json!(21.5));
     assert_eq!(reading.update_time, Some(1_700_000_100));
     let reading =
-        future::block_on(cloud.read_property_observation("token", "target", POWER)).unwrap();
+        future::block_on(cloud.read_property_observation(&session("token"), "target", POWER))
+            .unwrap();
     assert_eq!(reading.value, json!(22.5));
     assert_eq!(reading.update_time, None);
 }

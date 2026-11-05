@@ -1,6 +1,5 @@
 mod catalog;
 pub(super) mod client;
-pub(super) mod device;
 mod error;
 mod light_groups;
 mod notifications;

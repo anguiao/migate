@@ -80,7 +80,13 @@ fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
         return None;
     }
     let work = slot.admitted.as_ref()?;
-    if work.life.is_closed() || slot.cloud_forbidden || slot.cloud_access.is_none() {
+    if work.life.is_closed()
+        || slot.cloud_forbidden
+        || context.lan_scope_invalid.get()
+        || slot.cloud_access.is_none()
+            && context.mijia_path().is_some()
+            && !context.http_paused.get()
+    {
         return None;
     }
     Some(work.clone())
@@ -289,6 +295,8 @@ async fn changed_credentials(context: &Context, key: &ConnectionKey) {
 pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
     let mut backoff = Backoff::new(10, 600);
     loop {
+        #[cfg(test)]
+        context.mqtt_retry_deadline.set(None);
         let changed = context.changed.listen();
         let credentials = context.credentials_changed.listen();
         let Some((key, record)) = connection_credentials(&context) else {
@@ -442,6 +450,8 @@ pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError
             continue;
         }
         let due = context.clock.now() + backoff.failed();
+        #[cfg(test)]
+        context.mqtt_retry_deadline.set(Some(due));
         future::or(
             context.clock.wait_until(due),
             changed_credentials(&context, &key),

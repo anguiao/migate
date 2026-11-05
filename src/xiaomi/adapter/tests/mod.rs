@@ -21,6 +21,7 @@ mod local_device_errors;
 mod local_recovery;
 mod local_sessions;
 mod membership;
+mod mijia_recovery;
 mod notifications;
 mod observation_lifetimes;
 mod property_refresh;

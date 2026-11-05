@@ -1,6 +1,4 @@
-use crate::xiaomi::cloud::{
-    CloudError, CloudErrorKind, client::response_read_error_kind, device::DeviceTransport,
-};
+use crate::xiaomi::cloud::{CloudError, CloudErrorKind, client::response_read_error_kind};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, KeyInit, Mac};
 use isahc::{
@@ -372,15 +370,18 @@ fn present_raw<'de, D: serde::Deserializer<'de>>(
     Box::<RawValue>::deserialize(deserializer).map(Some)
 }
 
-impl DeviceTransport for MijiaClient {
-    type Credential = MijiaSession;
-    fn read_property_path(&self) -> &'static str {
-        "/app/miotspec/prop/get"
+impl MijiaClient {
+    pub(in crate::xiaomi) async fn protected_post<T: DeserializeOwned>(
+        &self,
+        operation: &'static str,
+        path: &str,
+        session: &MijiaSession,
+        body: Value,
+    ) -> Result<T, CloudError> {
+        self.protected_post_with_timeout(operation, path, session, body, READ_TIMEOUT)
+            .await
     }
-    fn write_property_path(&self) -> &'static str {
-        "/app/miotspec/prop/set"
-    }
-    async fn protected_post_with_timeout<T: DeserializeOwned>(
+    pub(in crate::xiaomi) async fn protected_post_with_timeout<T: DeserializeOwned>(
         &self,
         operation: &'static str,
         path: &str,
@@ -395,7 +396,7 @@ impl DeviceTransport for MijiaClient {
             .ok_or_else(|| CloudError::protocol(operation))?;
         serde_json::from_str(raw.get()).map_err(|_| CloudError::protocol(operation))
     }
-    async fn protected_post_raw(
+    pub(in crate::xiaomi) async fn protected_post_raw(
         &self,
         operation: &'static str,
         path: &str,

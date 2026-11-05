@@ -10,6 +10,8 @@ use std::{error::Error as StdError, fmt};
 pub enum AuthenticationState {
     NotSignedIn,
     Checking,
+    Restoring,
+    Refreshing,
     Authenticated,
     SignInRequired(FailureReason),
     Unavailable(FailureReason),

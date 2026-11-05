@@ -714,7 +714,7 @@ fn partial_credentials_restore_topology_and_maintenance_tasks_keep_running() {
         assert_eq!(rig.cloud.lock().unwrap().certs, 0);
         if missing_ha {
             assert_eq!(rig.cloud.lock().unwrap().tokens, 0);
-            assert_eq!(rig.cloud.lock().unwrap().homes, 0);
+            assert!(rig.cloud.lock().unwrap().homes > 0);
         }
     }
 }

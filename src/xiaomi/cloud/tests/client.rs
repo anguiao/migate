@@ -61,13 +61,12 @@ fn cloud_errors_are_classified_and_sanitized() {
 }
 
 #[test]
-fn certificate_request_sends_only_base64_csr_and_empty_devices_skip_http() {
+fn certificate_request_sends_only_base64_csr() {
     let (base, requests) = mock_server(vec![MockResponse::json(
         200,
         r#"{"code":0,"result":{"cert":"certificate-pem"}}"#,
     )]);
     let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    future::block_on(client.get_devices("access", &[])).unwrap();
     assert_eq!(
         future::block_on(client.get_certificate("access", "csr-pem")).unwrap(),
         "certificate-pem"

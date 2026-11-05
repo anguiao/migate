@@ -1,6 +1,69 @@
 use super::support::{cloud_active, with_cloud_peer};
 use super::*;
 
+#[test]
+fn ha_identity_is_checked_while_mijia_directory_is_unavailable() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().home_status = 503;
+    block_on(rig.run(|c| async move {
+        until(|| {
+            matches!(
+                c.context.status.borrow().auth.ha,
+                crate::xiaomi::auth::AuthenticationState::Authenticated
+            )
+        })
+        .await;
+        assert!(c.cloud.lock().unwrap().homes > 0);
+        assert!(c.context.cloud_candidate("one", true).is_err());
+    }));
+}
+
+#[test]
+fn ha_rejection_and_refresh_do_not_request_an_extra_mijia_directory_round() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().online.insert("one".into());
+    block_on(rig.run(|c| async move {
+        until(|| {
+            c.context.cloud_candidate("one", true).is_ok() && c.cloud.lock().unwrap().catalogs > 0
+        })
+        .await;
+        c.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let before = c.cloud.lock().unwrap().homes;
+        let token = c
+            .context
+            .live
+            .borrow()
+            .credentials
+            .as_ref()
+            .unwrap()
+            .ha_authorization()
+            .unwrap()
+            .tokens
+            .access_token
+            .clone();
+        c.context
+            .token_rejected(
+                &token,
+                crate::xiaomi::auth::FailureReason::CloudNotification(
+                    crate::xiaomi::cloud::NotificationError::Unauthorized,
+                ),
+            )
+            .unwrap();
+        until(|| c.cloud.lock().unwrap().tokens == 1).await;
+        until(|| {
+            matches!(
+                c.context.status.borrow().auth.ha,
+                crate::xiaomi::auth::AuthenticationState::Authenticated
+            )
+        })
+        .await;
+        async_io::Timer::after(Duration::from_millis(20)).await;
+        assert_eq!(c.cloud.lock().unwrap().homes, before);
+    }));
+}
+
 fn token_deadlines(rig: &Rig, refresh: i64, expiry: i64) {
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
     record
@@ -65,7 +128,10 @@ fn background_distinguishes_missing_invalid_and_repaired_certificates() {
     record.ha.as_mut().unwrap().authorization = None;
     record.hub.as_mut().unwrap().certificate_pem = None;
     rig.store.xiaomi().replace(&record).unwrap();
-    rig.source.context.adopt_credentials(record.clone());
+    rig.source
+        .context
+        .adopt_credentials(record.clone())
+        .unwrap();
     block_on(rig.run(|control| async move {
         until(|| control.context.status.borrow().auth.certificate.is_none()).await;
         assert_eq!(
@@ -109,7 +175,7 @@ fn background_distinguishes_missing_invalid_and_repaired_certificates() {
             control.context.status.borrow().auth.certificate_update,
             crate::xiaomi::auth::CertificateUpdate::NotNeeded
         );
-        assert_eq!(control.cloud.lock().unwrap().homes, 0);
+        assert!(control.cloud.lock().unwrap().homes > 0);
         assert_eq!(control.cloud.lock().unwrap().certs, 0);
     }));
 }
@@ -120,7 +186,7 @@ fn saved_hub_control_works_without_ha_authorization() {
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
     record.ha.as_mut().unwrap().authorization = None;
     rig.store.xiaomi().replace(&record).unwrap();
-    rig.source.context.adopt_credentials(record);
+    rig.source.context.adopt_credentials(record).unwrap();
     block_on(rig.run(|control| async move {
         control.announce();
         let peer = Rc::new(Peer::default());
@@ -132,7 +198,7 @@ fn saved_hub_control_works_without_ha_authorization() {
                     .execute(Command::On)
                     .await
                     .unwrap();
-                assert_eq!(current.cloud.lock().unwrap().homes, 0);
+                assert!(current.cloud.lock().unwrap().homes > 0);
                 assert_eq!(current.cloud.lock().unwrap().tokens, 0);
             })
             .await;
@@ -178,7 +244,7 @@ fn token_deadline_is_polled_while_initial_home_identity_is_pending() {
         })
         .await;
         assert_eq!(c.cloud.lock().unwrap().tokens, 1);
-        assert_eq!(c.cloud.lock().unwrap().certs, 0);
+        assert_eq!(c.cloud.lock().unwrap().certs, 1);
         assert_eq!(
             c.context
                 .live
@@ -212,7 +278,7 @@ fn certificate_failure_does_not_delay_cloud_directory_or_control() {
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().certs == 1).await;
         let one = function(&c.context.registry, "one", "outlet:2");
-        assert_eq!(one.snapshot().availability, Availability::Available);
+        until(|| one.snapshot().availability == Availability::Available).await;
         one.execute(Command::On).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
         assert_eq!(c.cloud.lock().unwrap().tokens, 0);
@@ -262,7 +328,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
             assert!(
                 c.cloud.lock().unwrap().property_writes[0]
                     .4
-                    .contains("fresh-access")
+                    .contains("serviceToken=device-session")
             );
             assert_eq!(c.cloud.lock().unwrap().tokens, 1);
             c.cloud.lock().unwrap().cert_gate = None;
@@ -328,24 +394,25 @@ fn expiry_wakes_availability_and_closes_mqtt_while_refresh_hangs() {
             let one = function(&c.context.registry, "one", "outlet:2");
             c.clock.advance(Duration::from_secs(5));
             until(|| c.cloud.lock().unwrap().tokens == 1).await;
+            assert_eq!(
+                format!("{:?}", c.context.status.borrow().auth.ha),
+                "Refreshing"
+            );
             assert_eq!(one.snapshot().availability, Availability::Available);
             one.execute(Command::On).await.unwrap();
             c.clock.advance(Duration::from_secs(5));
             until(|| c.context.notifications.borrow().is_none()).await;
-            assert!(matches!(
-                one.snapshot().availability,
-                Availability::Unavailable(_)
-            ));
+            assert_eq!(one.snapshot().availability, Availability::Available);
             assert!(!c.context.token_usable());
-            assert!(one.execute(Command::Off).await.is_err());
-            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+            one.execute(Command::Off).await.unwrap();
+            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
             assert_eq!(peer.state.borrow().connects.len(), 1);
             c.cloud.lock().unwrap().token_gate = None;
             release.send(()).unwrap();
             until(|| cloud_active(&c, "one")).await;
             assert_eq!(peer.state.borrow().connects[1], "fresh-access");
             assert_eq!(one.snapshot().availability, Availability::Available);
-            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
         })
         .await;
     }));
@@ -384,7 +451,7 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
                 .tokens
                 .expires_at = control.clock.wall() + 10;
             control.store.xiaomi().replace(&record).unwrap();
-            control.context.adopt_credentials(record);
+            control.context.adopt_credentials(record).unwrap();
             control.cloud.lock().unwrap().token_status = 503;
             control.clock.advance(Duration::from_secs(5));
             until(|| control.cloud.lock().unwrap().tokens == 1).await;
@@ -452,9 +519,10 @@ fn expired_local_certificate_revokes_only_the_local_candidate() {
 }
 
 #[test]
-fn home_and_info_rejection_of_the_fresh_token_keep_the_login_prompt() {
+fn home_and_info_rejection_stop_only_mijia_recovery_after_account_rejection() {
     for home_failure in [true, false] {
         let rig = Rig::new(true, &["one"]);
+        rig.enable_recovery();
         rig.cloud.lock().unwrap().online.insert("one".into());
         block_on(rig.run(|c| async move {
             until(|| c.context.cloud_candidate("one", true).is_ok()).await;
@@ -468,26 +536,34 @@ fn home_and_info_rejection_of_the_fresh_token_keep_the_login_prompt() {
                 } else {
                     state.info_status = 401;
                 }
+                state.restore_status = 401;
             }
             c.context.request_sync();
-            until(|| c.cloud.lock().unwrap().tokens == 1).await;
-            c.clock.advance(Duration::from_secs(1));
             until(|| {
                 matches!(
-                    *c.context.cloud_sync.borrow(),
-                    super::super::cloud::CloudSync::Paused
+                    c.context.status.borrow().auth.mijia,
+                    crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 )
             })
             .await;
-            assert!(matches!(
-                c.context.status.borrow().auth.ha,
-                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
-            ));
+            assert_eq!(c.cloud.lock().unwrap().restores, 1);
+            assert_eq!(c.cloud.lock().unwrap().tokens, 0);
+            assert_eq!(
+                c.store
+                    .xiaomi()
+                    .load()
+                    .unwrap()
+                    .unwrap()
+                    .recovery
+                    .unwrap()
+                    .stop,
+                Some(crate::storage::RecoveryStop::Rejected)
+            );
             c.context.request_sync();
             c.clock.advance(Duration::from_secs(30));
             async_io::Timer::after(Duration::from_millis(20)).await;
-            assert_eq!(c.cloud.lock().unwrap().tokens, 1);
-            assert!(matches!(
+            assert_eq!(c.cloud.lock().unwrap().restores, 1);
+            assert!(!matches!(
                 c.context.status.borrow().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
@@ -570,8 +646,8 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
         .await;
         assert_eq!(c.cloud.lock().unwrap().tokens, 1);
         assert!(!matches!(
-            *c.context.cloud_sync.borrow(),
-            super::super::cloud::CloudSync::Paused
+            *c.context.ha_sync.borrow(),
+            super::super::credentials::HaSync::Paused
         ));
         assert!(!matches!(
             c.context.status.borrow().auth.ha,
@@ -607,49 +683,10 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
         }
         c.context.request_sync();
         until(|| c.cloud.lock().unwrap().infos == before + 1).await;
-        let token = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .access_token
-            .clone();
         c.cloud.lock().unwrap().info_gate = Some(new_gate);
-        c.context
-            .token_rejected(
-                &token,
-                crate::xiaomi::auth::FailureReason::CloudNotification(
-                    crate::xiaomi::cloud::NotificationError::Unauthorized,
-                ),
-            )
-            .unwrap();
-        until(|| {
-            c.context
-                .live
-                .borrow()
-                .credentials
-                .as_ref()
-                .unwrap()
-                .ha
-                .as_ref()
-                .unwrap()
-                .authorization
-                .as_ref()
-                .unwrap()
-                .tokens
-                .access_token
-                == "fresh-access"
-        })
-        .await;
+        let record = c.store.xiaomi().load().unwrap().unwrap();
+        c.store.xiaomi().replace(&record).unwrap();
+        c.context.adopt_credentials(record).unwrap();
         until(|| c.cloud.lock().unwrap().infos == before + 2).await;
         c.cloud.lock().unwrap().property_status = 503;
         assert!(
@@ -678,7 +715,7 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
                 .contains(&DeviceKey::new("xiaomi", "two"))
         );
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
-        assert_eq!(c.cloud.lock().unwrap().tokens, 1);
+        assert_eq!(c.cloud.lock().unwrap().tokens, 0);
     }));
 }
 
@@ -763,39 +800,27 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
 }
 
 #[test]
-fn candidate_unauthorized_requests_coalesce_into_one_token_refresh_and_resume_preparation() {
+fn candidate_unauthorized_requests_coalesce_into_one_mijia_recovery_and_resume_preparation() {
     let rig = Rig::new(true, &["one"]);
+    rig.enable_recovery();
     let (release, gate) = flume::bounded(1);
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.members = vec!["one".into(), "multi".into(), "two".into()];
         cloud.detail_status = 401;
-        cloud.token_gate = Some(gate);
+        cloud.restore_gate = Some(gate);
     }
     block_on(rig.run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());
         let control = &c;
         c.peer(peer, |peer| async move {
-            until(|| {
-                control.cloud.lock().unwrap().tokens == 1
-                    && control
-                        .context
-                        .live
-                        .borrow()
-                        .devices
-                        .values()
-                        .all(|slot| slot.loading.is_none())
-            })
-            .await;
+            until(|| control.cloud.lock().unwrap().restores == 1).await;
             control.cloud.lock().unwrap().detail_status = 200;
             release.send(()).unwrap();
             initialized(control, &peer, &["one", "multi", "two"]).await;
-            assert_eq!(control.cloud.lock().unwrap().tokens, 1);
-            assert!(!matches!(
-                control.context.status.borrow().auth.ha,
-                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
-            ));
+            assert_eq!(control.cloud.lock().unwrap().restores, 1);
+            assert_eq!(control.cloud.lock().unwrap().tokens, 0);
             assert_eq!(
                 control
                     .store
@@ -803,15 +828,10 @@ fn candidate_unauthorized_requests_coalesce_into_one_token_refresh_and_resume_pr
                     .load()
                     .unwrap()
                     .unwrap()
-                    .ha
-                    .as_ref()
+                    .mijia
                     .unwrap()
-                    .authorization
-                    .as_ref()
-                    .unwrap()
-                    .tokens
-                    .access_token,
-                "fresh-access"
+                    .service_token(),
+                "restored-service"
             );
             function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
@@ -823,170 +843,79 @@ fn candidate_unauthorized_requests_coalesce_into_one_token_refresh_and_resume_pr
 }
 
 #[test]
-fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials() {
-    for late in [false, true] {
-        let rig = Rig::new(true, &["one"]);
-        let (detail_release, detail_gate) = flume::bounded(1);
-        let (token_release, token_gate) = flume::bounded(1);
-        {
-            let mut cloud = rig.cloud.lock().unwrap();
-            cloud.members = vec!["one".into(), "multi".into()];
-            cloud.detail_status = 401;
-            cloud.detail_gate = Some(detail_gate);
-            if !late {
-                cloud.token_gate = Some(token_gate);
-            }
-        }
-        block_on(rig.run(|c| async move {
-            c.announce();
-            let peer = Rc::new(Peer::default());
-            let control = &c;
-            c.peer(peer, |peer| async move {
-                initialized(control, &peer, &["one"]).await;
-                until(|| control.cloud.lock().unwrap().details > 0).await;
-                let mut record = control.store.xiaomi().load().unwrap().unwrap();
-                record
-                    .ha
-                    .as_mut()
-                    .unwrap()
-                    .authorization
-                    .as_mut()
-                    .unwrap()
-                    .tokens
-                    .refresh_at = time::OffsetDateTime::now_utc().unix_timestamp() - 1;
-                control.store.xiaomi().replace(&record).unwrap();
-                control.context.request_sync();
-                until(|| control.cloud.lock().unwrap().tokens == 1).await;
-                {
-                    let mut cloud = control.cloud.lock().unwrap();
-                    cloud.detail_status = 200;
-                    cloud.detail_gate = None;
-                }
-                if late {
-                    until(|| {
-                        control
-                            .store
-                            .xiaomi()
-                            .load()
-                            .unwrap()
-                            .unwrap()
-                            .ha
-                            .as_ref()
-                            .unwrap()
-                            .authorization
-                            .as_ref()
-                            .unwrap()
-                            .tokens
-                            .access_token
-                            == "fresh-access"
-                    })
-                    .await;
-                    assert_eq!(control.cloud.lock().unwrap().detail_done, 0);
-                    detail_release.send(()).unwrap();
-                } else {
-                    detail_release.send(()).unwrap();
-                    until(|| control.context.sync_requested.get()).await;
-                    assert_eq!(control.cloud.lock().unwrap().token_done, 0);
-                    assert_eq!(
-                        control
-                            .store
-                            .xiaomi()
-                            .load()
-                            .unwrap()
-                            .unwrap()
-                            .ha
-                            .as_ref()
-                            .unwrap()
-                            .authorization
-                            .as_ref()
-                            .unwrap()
-                            .tokens
-                            .access_token,
-                        "unused"
-                    );
-                    token_release.send(()).unwrap();
-                }
-                until(|| {
-                    control
-                        .store
-                        .xiaomi()
-                        .load()
-                        .unwrap()
-                        .unwrap()
-                        .ha
-                        .as_ref()
-                        .unwrap()
-                        .authorization
-                        .as_ref()
-                        .unwrap()
-                        .tokens
-                        .access_token
-                        == "fresh-access"
-                        && control
-                            .context
-                            .live
-                            .borrow()
-                            .devices
-                            .values()
-                            .all(|slot| slot.loading.is_none())
-                })
-                .await;
-                assert_eq!(control.cloud.lock().unwrap().detail_done, 1);
-                control.context.request_sync();
-                initialized(control, &peer, &["one", "multi"]).await;
-                assert_eq!(control.cloud.lock().unwrap().tokens, 1);
-                assert!(!matches!(
-                    control.context.status.borrow().auth.ha,
-                    crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
-                ));
-                assert!(matches!(
-                    control.context.status.borrow().auth.ha,
-                    crate::xiaomi::auth::AuthenticationState::Authenticated
-                ));
-            })
-            .await;
-        }));
+fn stale_candidate_401_cannot_pause_identical_replacement_session() {
+    let rig = Rig::new(true, &["one"]);
+    rig.enable_recovery();
+    let (release, gate) = flume::bounded(1);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.members = vec!["one".into(), "multi".into()];
+        cloud.detail_status = 401;
+        cloud.detail_gate = Some(gate);
     }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            until(|| control.cloud.lock().unwrap().details > 0).await;
+            {
+                let mut cloud = control.cloud.lock().unwrap();
+                cloud.detail_status = 200;
+                cloud.detail_gate = None;
+            }
+            let record = control.store.xiaomi().load().unwrap().unwrap();
+            control.store.xiaomi().replace(&record).unwrap();
+            control.context.adopt_credentials(record).unwrap();
+            release.send(()).unwrap();
+            initialized(control, &peer, &["one", "multi"]).await;
+            assert_eq!(control.cloud.lock().unwrap().restores, 0);
+            assert_eq!(control.cloud.lock().unwrap().tokens, 0);
+            assert!(control.context.mijia_rejected.borrow().is_none());
+        })
+        .await;
+    }));
 }
 
 #[test]
-fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopping_local_access() {
-    for refresh_rejected in 0..3 {
+fn rejected_or_verification_recovery_preserves_local_access_and_stops_only_mijia() {
+    for (response, expected) in [
+        (401, crate::storage::RecoveryStop::Rejected),
+        (403, crate::storage::RecoveryStop::VerificationRequired),
+    ] {
         let rig = Rig::new(true, &["one"]);
+        rig.enable_recovery();
         {
             let mut cloud = rig.cloud.lock().unwrap();
             cloud.members = vec!["one".into(), "multi".into()];
             cloud.detail_status = 401;
-            if refresh_rejected == 1 {
-                cloud.token_status = 401;
-            } else if refresh_rejected == 2 {
-                cloud.token_access = Some("unused".into());
-            }
+            cloud.restore_status = response;
         }
         block_on(rig.run(|c| async move {
             c.announce();
-            let peer = Rc::new(Peer::default());
             let control = &c;
-            c.peer(peer, |peer| async move {
+            c.peer(Rc::new(Peer::default()), |peer| async move {
                 initialized(control, &peer, &["one"]).await;
                 until(|| {
                     matches!(
-                        control.context.status.borrow().auth.ha,
+                        control.context.status.borrow().auth.mijia,
                         crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                     )
                 })
                 .await;
-                assert_eq!(control.cloud.lock().unwrap().tokens, 1);
-                assert!(
+                assert_eq!(control.cloud.lock().unwrap().restores, 1);
+                assert_eq!(control.cloud.lock().unwrap().tokens, 0);
+                assert_eq!(
                     control
                         .store
                         .xiaomi()
                         .load()
                         .unwrap()
                         .unwrap()
-                        .ha
+                        .recovery
                         .unwrap()
-                        .stopped
+                        .stop,
+                    Some(expected)
                 );
                 control.clock.advance(Duration::from_secs(600));
                 control.context.request_sync();
@@ -997,8 +926,8 @@ fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopp
                 for _ in 0..10 {
                     future::yield_now().await;
                 }
-                assert_eq!(control.cloud.lock().unwrap().tokens, 1);
-                assert!(matches!(
+                assert_eq!(control.cloud.lock().unwrap().restores, 1);
+                assert!(!matches!(
                     control.context.status.borrow().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 ));
@@ -1009,13 +938,13 @@ fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopp
 }
 
 #[test]
-fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
+fn coalesced_candidate_401s_preserve_the_temporary_recovery_backoff() {
     let rig = Rig::new(true, &["one"]);
+    rig.enable_recovery();
     block_on(rig.run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
         let control = &c;
-        c.peer(peer, |peer| async move {
+        c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one"]).await;
             control
                 .clock
@@ -1026,41 +955,26 @@ fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
                 let mut cloud = control.cloud.lock().unwrap();
                 cloud.members = vec!["one".into(), "multi".into(), "two".into()];
                 cloud.detail_status = 401;
-                cloud.token_status = 503;
+                cloud.restore_status = 503;
             }
             control.context.request_sync();
             until(|| {
-                control.cloud.lock().unwrap().tokens == 1
-                    && control
-                        .context
-                        .live
-                        .borrow()
-                        .devices
-                        .values()
-                        .all(|slot| slot.loading.is_none())
-            })
-            .await;
-            assert_eq!(control.cloud.lock().unwrap().details, 2);
-            until(|| {
-                matches!(
-                    control.context.status.borrow().auth.ha,
-                    crate::xiaomi::auth::AuthenticationState::Unavailable(_)
-                )
+                control.cloud.lock().unwrap().restores == 1
+                    && matches!(
+                        control.context.status.borrow().auth.mijia,
+                        crate::xiaomi::auth::AuthenticationState::Unavailable(_)
+                    )
             })
             .await;
             {
                 let mut cloud = control.cloud.lock().unwrap();
-                cloud.token_status = 200;
+                cloud.restore_status = 200;
                 cloud.detail_status = 200;
             }
             for _ in 0..10 {
                 future::yield_now().await;
             }
-            assert_eq!(control.cloud.lock().unwrap().tokens, 1);
-            assert!(!matches!(
-                control.context.status.borrow().auth.ha,
-                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
-            ));
+            assert_eq!(control.cloud.lock().unwrap().restores, 1);
             function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
@@ -1069,15 +983,16 @@ fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
             for _ in 0..10 {
                 future::yield_now().await;
             }
-            assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+            assert_eq!(control.cloud.lock().unwrap().restores, 1);
             advance_to(&control.clock, retry_deadline).await;
-            until(|| control.cloud.lock().unwrap().tokens == 2).await;
+            until(|| control.cloud.lock().unwrap().restores == 2).await;
             control
                 .clock
                 .automatic
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             initialized(control, &peer, &["one", "multi", "two"]).await;
-            assert_eq!(control.cloud.lock().unwrap().tokens, 2);
+            assert_eq!(control.cloud.lock().unwrap().restores, 2);
+            assert_eq!(control.cloud.lock().unwrap().tokens, 0);
         })
         .await;
     }));

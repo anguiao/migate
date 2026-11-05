@@ -6,6 +6,21 @@ use crate::terminal::bridge::tests::support;
 use crate::xiaomi::auth::AuthReport;
 
 #[test]
+fn restoring_mijia_and_refreshing_ha_are_reported_independently() {
+    let mut report = AuthReport::for_test(
+        AuthenticationState::Checking,
+        None,
+        CertificateUpdate::NotNeeded,
+        0,
+    );
+    report.mijia = AuthenticationState::Restoring;
+    report.ha = AuthenticationState::Refreshing;
+    let output = format_report(&report, 0, Path::new("/bin/migate"), Path::new("/data"));
+    assert!(output.contains("Mijia session: restoring."));
+    assert!(output.contains("HA OAuth: refreshing."));
+}
+
+#[test]
 fn sign_in_required_preserves_the_login_hint() {
     let report = AuthReport::for_test(
         AuthenticationState::SignInRequired(
@@ -231,6 +246,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
         "{output}"
     );
     assert!(output.contains("Selected control: cloud."), "{output}");
+    assert!(output.contains("Cloud HTTP backend: mijia."), "{output}");
     assert!(output.contains("Direct LAN: unavailable"), "{output}");
     assert!(output.contains("Notification source: hub."), "{output}");
     assert!(

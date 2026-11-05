@@ -11,9 +11,9 @@ fn owned_catalog_rejects_incomplete_initial_room_membership() {
             200,
             &json!({"code":0,"result":{"homelist":[home]}}).to_string(),
         )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_owned_homes("token"))
+            future::block_on(cloud.get_owned_homes(&session("token")))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -31,9 +31,9 @@ fn owned_catalog_rejects_undeclared_home_on_any_member_page() {
             MockResponse::json(200, &json!({"code":0,"result":{"homelist":[{"uid":"account","id":"home","roomlist":[]}],"has_more":true,"max_id":"next"}}).to_string()),
             MockResponse::json(200, &json!({"code":0,"result":page}).to_string()),
         ]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_owned_homes("token"))
+            future::block_on(cloud.get_owned_homes(&session("token")))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -87,9 +87,9 @@ fn owned_catalog_validates_identifiers_in_initial_and_paged_membership() {
             ));
         }
         let (base, _) = mock_server(responses);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_owned_homes("token"))
+            future::block_on(cloud.get_owned_homes(&session("token")))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -107,9 +107,9 @@ fn owned_catalog_accepts_legal_empty_membership_and_terminal_page() {
             200,
             &json!({"code":0,"result":{"homelist":[initial]}}).to_string(),
         )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert!(
-            future::block_on(cloud.get_owned_homes("token"))
+            future::block_on(cloud.get_owned_homes(&session("token")))
                 .unwrap()
                 .homes[0]
                 .dids
@@ -124,9 +124,9 @@ fn owned_catalog_accepts_legal_empty_membership_and_terminal_page() {
             MockResponse::json(200, &json!({"code":0,"result":{"homelist":[{"uid":"account","id":"home","roomlist":[]}],"has_more":true,"max_id":"next"}}).to_string()),
             MockResponse::json(200, &json!({"code":0,"result":terminal}).to_string()),
         ]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert!(
-            future::block_on(cloud.get_owned_homes("token"))
+            future::block_on(cloud.get_owned_homes(&session("token")))
                 .unwrap()
                 .homes[0]
                 .dids
@@ -145,8 +145,8 @@ fn owned_catalog_rejects_failed_or_truncated_member_page_without_partial_result(
             MockResponse::json(200, &json!({"code":0,"result":{"homelist":[{"uid":"account","id":"home","roomlist":[],"dids":["first"]}],"has_more":true,"max_id":"next"}}).to_string()),
             page,
         ]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        assert!(future::block_on(cloud.get_owned_homes("token")).is_err());
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+        assert!(future::block_on(cloud.get_owned_homes(&session("token"))).is_err());
         assert_eq!(requests.try_iter().count(), 2);
     }
 }
@@ -170,8 +170,8 @@ fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
             .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
             .collect(),
     );
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let catalog = future::block_on(cloud.get_owned_homes("token")).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+    let catalog = future::block_on(cloud.get_owned_homes(&session("token"))).unwrap();
     assert_eq!(catalog.uid.as_deref(), Some("account"));
     let local = catalog
         .homes
@@ -180,11 +180,11 @@ fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
         .unwrap();
     assert_eq!(local.dids, ["first", "target"]);
     assert!(
-        future::block_on(cloud.get_device("token", local, "remote-did"))
+        future::block_on(cloud.get_device(&session("token"), local, "remote-did"))
             .unwrap()
             .is_none()
     );
-    let device = future::block_on(cloud.get_device("token", local, "target"))
+    let device = future::block_on(cloud.get_device(&session("token"), local, "target"))
         .unwrap()
         .unwrap();
     assert_eq!(device.did, "target");
@@ -194,13 +194,13 @@ fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
     assert!(!format!("{catalog:?} {device:?}").contains("private name"));
     let captured = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(captured.len(), 5);
-    let page: Value = serde_json::from_str(&captured[1].body).unwrap();
+    let page: Value = form_data(&captured[1].body);
     assert_eq!(page["start_id"], "cursor-1");
     for request in &captured[3..] {
-        let body: Value = serde_json::from_str(&request.body).unwrap();
+        let body: Value = form_data(&request.body);
         assert_eq!(body["dids"], json!(["target"]));
     }
-    let body: Value = serde_json::from_str(&captured[4].body).unwrap();
+    let body: Value = form_data(&captured[4].body);
     assert_eq!(body["start_did"], "device-cursor");
 }
 
@@ -211,9 +211,9 @@ fn catalog_rejects_invalid_or_repeated_cursors_and_accepts_null_lists() {
             200,
             &json!({"code":0,"result":result}).to_string(),
         )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert!(
-            future::block_on(cloud.get_owned_homes("token"))
+            future::block_on(cloud.get_owned_homes(&session("token")))
                 .unwrap()
                 .homes
                 .is_empty()
@@ -230,9 +230,9 @@ fn catalog_rejects_invalid_or_repeated_cursors_and_accepts_null_lists() {
             200,
             &json!({"code":0,"result":result}).to_string(),
         )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_owned_homes("token"))
+            future::block_on(cloud.get_owned_homes(&session("token")))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -244,9 +244,9 @@ fn catalog_rejects_invalid_or_repeated_cursors_and_accepts_null_lists() {
         MockResponse::json(200, &initial.to_string()),
         MockResponse::json(200, &repeated.to_string()),
     ]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.get_owned_homes("token"))
+        future::block_on(cloud.get_owned_homes(&session("token")))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -258,9 +258,9 @@ fn catalog_rejects_invalid_or_repeated_cursors_and_accepts_null_lists() {
         MockResponse::json(200, &initial.to_string()),
         MockResponse::json(200, &repeated.to_string()),
     ]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.get_owned_homes("token"))
+        future::block_on(cloud.get_owned_homes(&session("token")))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -287,9 +287,9 @@ fn device_pages_reject_missing_fields_and_repeated_cursors() {
             200,
             &json!({"code":0,"result":result}).to_string(),
         )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_device("token", &home, "target"))
+            future::block_on(cloud.get_device(&session("token"), &home, "target"))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -305,9 +305,9 @@ fn device_pages_reject_missing_fields_and_repeated_cursors() {
             .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
             .collect(),
     );
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.get_device("token", &home, "target"))
+        future::block_on(cloud.get_device(&session("token"), &home, "target"))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -317,9 +317,9 @@ fn device_pages_reject_missing_fields_and_repeated_cursors() {
         200,
         r#"{"code":0,"result":{"list":null}}"#,
     )]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert!(
-        future::block_on(cloud.get_device("token", &home, "target"))
+        future::block_on(cloud.get_device(&session("token"), &home, "target"))
             .unwrap()
             .is_none()
     );
@@ -339,8 +339,8 @@ fn owned_catalog_reads_past_empty_and_overlapping_pages_before_returning_members
             .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
             .collect(),
     );
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let catalog = future::block_on(cloud.get_owned_homes("token")).unwrap();
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+    let catalog = future::block_on(cloud.get_owned_homes(&session("token"))).unwrap();
     assert_eq!(catalog.homes[0].dids, ["first", "last"]);
     assert_eq!(requests.try_iter().count(), 4);
 }
@@ -365,8 +365,8 @@ fn device_lookup_reads_past_empty_and_overlapping_pages_without_broadening_dids(
             .map(|result| MockResponse::json(200, &json!({"code":0,"result":result}).to_string()))
             .collect(),
     );
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let device = future::block_on(cloud.get_device("token", &home, "target"))
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+    let device = future::block_on(cloud.get_device(&session("token"), &home, "target"))
         .unwrap()
         .unwrap();
     assert_eq!(device.did, "target");
@@ -374,7 +374,7 @@ fn device_lookup_reads_past_empty_and_overlapping_pages_without_broadening_dids(
     let requests = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(requests.len(), 4);
     for request in requests {
-        let body: Value = serde_json::from_str(&request.body).unwrap();
+        let body: Value = form_data(&request.body);
         assert_eq!(body["dids"], json!(["target"]));
     }
 }
@@ -393,8 +393,8 @@ fn device_lookup_leaves_missing_or_unusable_names_unset() {
             200,
             &json!({"code":0,"result":result}).to_string(),
         )]);
-        let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-        let device = future::block_on(cloud.get_device("token", &home, "target"))
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+        let device = future::block_on(cloud.get_device(&session("token"), &home, "target"))
             .unwrap()
             .unwrap();
         assert_eq!(device.name, None);
@@ -402,20 +402,15 @@ fn device_lookup_leaves_missing_or_unusable_names_unset() {
 }
 
 #[test]
-fn home_and_device_requests_are_minimal_and_bounded() {
+fn ha_identity_probe_is_minimal() {
     let dids = (0..160)
         .map(|index| format!("did-{index}"))
         .collect::<Vec<_>>();
     let home = json!({"code":0,"result":{"homelist":[{"uid":123,"dids":dids,"roomlist":[{"dids":["did-0","room-only"]}]}],"share_home_list":[{"uid":"shared"}],"has_more":true}});
-    let (base, requests) = mock_server(vec![
-        MockResponse::json(200, &home.to_string()),
-        MockResponse::json(200, r#"{"code":0,"result":{"list":[],"has_more":true}}"#),
-    ]);
+    let (base, requests) = mock_server(vec![MockResponse::json(200, &home.to_string())]);
     let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
     let page = future::block_on(client.get_home("access-secret")).unwrap();
     assert_eq!(page.uid.as_deref(), Some("123"));
-    assert_eq!(page.dids.len(), 150);
-    future::block_on(client.get_devices("access-secret", &page.dids)).unwrap();
     let home_request = requests.recv().unwrap();
     assert!(home_request.target.ends_with("/app/v2/homeroom/gethome"));
     assert!(
@@ -428,10 +423,7 @@ fn home_and_device_requests_are_minimal_and_bounded() {
         serde_json::from_str::<Value>(&home_request.body).unwrap(),
         json!({"limit":150,"fetch_share":false,"fetch_share_dev":false,"plat_form":0,"app_ver":9})
     );
-    let device_request = requests.recv().unwrap();
-    let body: Value = serde_json::from_str(&device_request.body).unwrap();
-    assert_eq!(body["dids"].as_array().unwrap().len(), 150);
-    assert_eq!(body["limit"], 200);
+    assert!(requests.try_recv().is_err());
 }
 
 #[test]

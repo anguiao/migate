@@ -79,7 +79,7 @@ impl From<AuthError> for AdapterError {
 impl From<CatalogError> for AdapterError {
     fn from(e: CatalogError) -> Self {
         match e {
-            CatalogError::Cloud(e) => Self::Cloud(e),
+            CatalogError::Cloud(e) | CatalogError::Description(e) => Self::Cloud(e),
             e => Self::Unavailable(e.to_string()),
         }
     }

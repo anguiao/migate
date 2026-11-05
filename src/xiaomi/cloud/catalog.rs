@@ -1,9 +1,11 @@
 use super::{
     CloudClient, CloudError,
-    device::DeviceTransport,
     response::{Identifier, Members, Room, description, null_list, valid_description},
 };
-use crate::xiaomi::lan::Token;
+use crate::xiaomi::{
+    lan::Token,
+    mijia::{MijiaClient, MijiaSession},
+};
 use isahc::Request;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -202,12 +204,12 @@ impl Pagination {
     }
 }
 
-pub(super) trait HomeApi: DeviceTransport {
+impl MijiaClient {
     /// Read only owned homes. Other homes can be returned by the API, but no
     /// device details are requested while collecting this directory.
-    async fn get_owned_homes(
+    pub async fn get_owned_homes(
         &self,
-        credential: &Self::Credential,
+        credential: &MijiaSession,
     ) -> Result<OwnedHomes, CloudError> {
         let operation = "read owned Xiaomi homes";
         let result: HomesResponse = self.protected_post(operation, "/app/v2/homeroom/gethome", credential, json!({
@@ -285,9 +287,9 @@ pub(super) trait HomeApi: DeviceTransport {
     /// Read every device-information page for the requested home members.
     /// Missing members remain absent from this result: only the owned-home
     /// directory establishes membership, and an absent record is not online.
-    async fn get_home_devices(
+    pub async fn get_home_devices(
         &self,
-        credential: &Self::Credential,
+        credential: &MijiaSession,
         home: &OwnedHome,
         requested_dids: &[String],
     ) -> Result<Vec<CloudDeviceInfo>, CloudError> {
@@ -348,9 +350,9 @@ pub(super) trait HomeApi: DeviceTransport {
 
     /// The caller selects a home using local discovery before reaching this
     /// boundary. Restrict every page to the requested member DID.
-    async fn get_device(
+    pub async fn get_device(
         &self,
-        credential: &Self::Credential,
+        credential: &MijiaSession,
         home: &OwnedHome,
         did: &str,
     ) -> Result<Option<CloudDevice>, CloudError> {
@@ -392,8 +394,6 @@ pub(super) trait HomeApi: DeviceTransport {
         }
     }
 }
-
-impl<T: DeviceTransport> HomeApi for T {}
 
 impl CloudClient {
     pub async fn get_instance(&self, instance_type: &str) -> Result<Value, CloudError> {

@@ -402,6 +402,20 @@ pub(super) async fn submit_properties(
             }
         }
         ControlPath::Cloud(credentials) => {
+            match context.current_mijia(&credentials) {
+                Ok(true) => (),
+                Ok(false) => {
+                    return settled(Err(CommandError::Unavailable(
+                        "Mijia session changed".into(),
+                    )));
+                }
+                Err(error) => {
+                    return BatchAttempt::Settled(BatchReceipt {
+                        result: Err(CommandError::Cancelled),
+                        maintenance: Some(error),
+                    });
+                }
+            }
             if frame_current.is_some_and(|frame| !frame()) {
                 return BatchAttempt::Withdrawn;
             }
@@ -413,11 +427,23 @@ pub(super) async fn submit_properties(
             }
             operation.submitted(PathKind::Cloud);
             let result = context
-                .cloud
-                .set_properties(&credentials.access_token, &did, &properties)
+                .mijia
+                .set_properties(&credentials.session, &did, &properties)
                 .await;
-            if let Some(after_write) = after_write {
+            let still_current = match context.current_mijia(&credentials) {
+                Ok(current) => current,
+                Err(error) => {
+                    return BatchAttempt::Settled(BatchReceipt {
+                        result: Err(CommandError::Cancelled),
+                        maintenance: Some(error),
+                    });
+                }
+            };
+            if still_current && let Some(after_write) = after_write {
                 after_write(context, work, function_id, &properties, gate, authority);
+            }
+            if !still_current {
+                gate.cancel_feedback();
             }
             let receipt = match &result {
                 Ok(results) => {
@@ -431,17 +457,15 @@ pub(super) async fn submit_properties(
                             })
                             .collect(),
                     );
-                    gate.finish_feedback_for(authority, &properties, results, retain_feedback);
-                    let current = alive(work, sink);
+                    if still_current {
+                        gate.finish_feedback_for(authority, &properties, results, retain_feedback);
+                    }
+                    let current = still_current && alive(work, sink);
                     let mut maintenance = None;
                     for error in results.items.iter().filter_map(|item| item.as_ref().err()) {
                         if maintenance.is_none() {
                             maintenance = context
-                                .cloud_error(
-                                    &credentials.access_token,
-                                    current.then_some(did.as_str()),
-                                    error,
-                                )
+                                .cloud_error(&credentials, current.then_some(did.as_str()), error)
                                 .err();
                         }
                     }
@@ -464,7 +488,7 @@ pub(super) async fn submit_properties(
                     gate.cancel_feedback();
                     let maintenance = context
                         .cloud_error(
-                            &credentials.access_token,
+                            &credentials,
                             alive(work, sink).then_some(did.as_str()),
                             error,
                         )

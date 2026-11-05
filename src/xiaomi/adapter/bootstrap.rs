@@ -9,11 +9,7 @@ use crate::{
     configuration::DerivedConfiguration,
     device::{Availability, DeviceRegistry, PhysicalDevice},
     storage::Store,
-    xiaomi::{
-        auth::{AuthError, AuthService},
-        cloud::CloudClient,
-        discovery::Discovery,
-    },
+    xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
 };
 use event_listener::Event;
 use std::{
@@ -55,8 +51,33 @@ impl XiaomiAdapter {
         discovery: Discovery,
         clock: Arc<dyn Clock>,
     ) -> Result<(Self, TopologyReady), AdapterError> {
-        let auth = AuthService::new(store.xiaomi(), cloud.clone()).map_err(AuthError::Cloud)?;
+        #[cfg(not(test))]
+        let auth = AuthService::new(store.xiaomi(), cloud.clone())
+            .map_err(crate::xiaomi::auth::AuthError::Cloud)?;
+        #[cfg(test)]
+        let base = if cloud.test_base_url().starts_with("http://127.0.0.1:") {
+            cloud.test_base_url()
+        } else {
+            "http://127.0.0.1:9"
+        };
+        #[cfg(test)]
+        let auth = AuthService::for_adapter_test(store.xiaomi(), cloud.clone(), base);
+        Self::build_with_auth(store, cloud, discovery, clock, auth)
+    }
+
+    pub(super) fn build_with_auth(
+        store: Store,
+        cloud: CloudClient,
+        discovery: Discovery,
+        clock: Arc<dyn Clock>,
+        auth: AuthService,
+    ) -> Result<(Self, TopologyReady), AdapterError> {
         let credentials = auth.saved_bridge_credentials()?;
+        let mijia_generation = credentials
+            .as_ref()
+            .map(|record| store.xiaomi().mijia_generation(&record.uid))
+            .transpose()?
+            .flatten();
         let stored = store.devices().load_configuration()?;
         let scope = credentials
             .as_ref()
@@ -139,12 +160,16 @@ impl XiaomiAdapter {
             write_gates: super::commands::DeviceWriteGates::default(),
             relations: RefCell::new(relations),
             notifications: RefCell::new(None),
+            #[cfg(test)]
+            mqtt_retry_deadline: Cell::new(None),
             credentials_changed: Event::new(),
             #[cfg(test)]
             notification_connector: Cell::new(
                 super::notifications::NotificationConnector::Disabled,
             ),
             priority: Cell::new(super::routing::PathPriority::LocalFirst),
+            mijia: auth.mijia_client(),
+            #[cfg(test)]
             cloud: cloud.clone(),
             lan_discovery: crate::xiaomi::lan::Discovery::default(),
             lan_scope_invalid: Cell::new(false),
@@ -155,7 +180,9 @@ impl XiaomiAdapter {
             lan_test_endpoints: RefCell::new(BTreeMap::new()),
             #[cfg(test)]
             lan_timeout: Cell::new(Duration::from_secs(10)),
-            cloud_sync: RefCell::new(super::cloud::CloudSync::default()),
+            ha_sync: RefCell::new(super::credentials::HaSync::default()),
+            mijia_rejected: RefCell::new(None),
+            mijia_changed: Event::new(),
             http_paused: Cell::new(false),
             cloud_scope_valid: Cell::new(false),
             sync_not_before: Cell::new(None),
@@ -164,6 +191,7 @@ impl XiaomiAdapter {
             initial_reads_changed: Rc::new(Event::new()),
             live: RefCell::new(Live {
                 credentials,
+                mijia_generation,
                 scope,
                 devices: BTreeMap::new(),
                 session: None,

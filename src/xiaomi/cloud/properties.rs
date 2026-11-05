@@ -1,6 +1,7 @@
-use super::{CloudError, CloudErrorKind, device::DeviceTransport, response::valid_description};
+use super::{CloudError, CloudErrorKind, response::valid_description};
 use crate::xiaomi::{
     capability::PropertyBinding,
+    mijia::{MijiaClient, MijiaSession},
     property::{
         PropertyReading, PropertyResults, correlate, update_time, valid_bindings,
         valid_observation, valid_value,
@@ -9,10 +10,10 @@ use crate::xiaomi::{
 use serde_json::{Value, json};
 use std::time::Duration;
 
-pub(super) trait PropertyApi: DeviceTransport {
-    async fn read_property_value(
+impl MijiaClient {
+    pub async fn read_property_value(
         &self,
-        credential: &Self::Credential,
+        credential: &MijiaSession,
         did: &str,
         binding: PropertyBinding,
     ) -> Result<Value, CloudError> {
@@ -22,9 +23,9 @@ pub(super) trait PropertyApi: DeviceTransport {
             .value)
     }
 
-    async fn read_property_observation(
+    pub async fn read_property_observation(
         &self,
-        credential: &Self::Credential,
+        credential: &MijiaSession,
         did: &str,
         binding: PropertyBinding,
     ) -> Result<PropertyReading, CloudError> {
@@ -34,9 +35,9 @@ pub(super) trait PropertyApi: DeviceTransport {
         )
     }
 
-    async fn read_properties(
+    pub async fn read_properties(
         &self,
-        credential: &Self::Credential,
+        credential: &MijiaSession,
         did: &str,
         bindings: &[PropertyBinding],
     ) -> Result<PropertyResults<PropertyReading, CloudError>, CloudError> {
@@ -49,7 +50,7 @@ pub(super) trait PropertyApi: DeviceTransport {
         let result: Vec<Value> = self
             .protected_post_with_timeout(
                 operation,
-                self.read_property_path(),
+                "/app/miotspec/prop/get",
                 credential,
                 json!({"datasource":2,"params":params}),
                 Duration::from_secs(30),
@@ -74,9 +75,9 @@ pub(super) trait PropertyApi: DeviceTransport {
         ))
     }
 
-    async fn set_property(
+    pub async fn set_property(
         &self,
-        credential: &Self::Credential,
+        credential: &MijiaSession,
         did: &str,
         binding: PropertyBinding,
         value: bool,
@@ -88,9 +89,9 @@ pub(super) trait PropertyApi: DeviceTransport {
         )
     }
 
-    async fn set_properties(
+    pub async fn set_properties(
         &self,
-        credential: &Self::Credential,
+        credential: &MijiaSession,
         did: &str,
         properties: &[(PropertyBinding, Value)],
     ) -> Result<PropertyResults<(), CloudError>, CloudError> {
@@ -106,7 +107,7 @@ pub(super) trait PropertyApi: DeviceTransport {
         let result: Vec<Value> = self
             .protected_post_with_timeout(
                 operation,
-                self.write_property_path(),
+                "/app/miotspec/prop/set",
                 credential,
                 json!({"params":params}),
                 Duration::from_secs(15),
@@ -121,8 +122,6 @@ pub(super) trait PropertyApi: DeviceTransport {
         ))
     }
 }
-
-impl<T: DeviceTransport> PropertyApi for T {}
 
 fn accepted_code(
     operation: &'static str,

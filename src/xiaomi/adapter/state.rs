@@ -1,20 +1,23 @@
 use super::{
     bootstrap::Clock,
-    cloud::CloudSync,
+    credentials::HaSync,
     model::{AdapterStatus, Ready},
     tasks::TaskSet,
     work::DeviceWork,
 };
 use crate::xiaomi::capability::SourceDescription;
+#[cfg(test)]
+use crate::xiaomi::cloud::CloudClient;
 use crate::{
     configuration::{DerivedConfiguration, Scope},
     device::{DeviceRegistry, PhysicalDevice},
     storage::{Store, XiaomiRecord},
     xiaomi::{
-        auth::{AuthenticationState, CertificateUpdate},
+        auth::{AuthenticationState, CertificateUpdate, FailureReason},
         central::{CentralError, DeviceAccess, SessionHandle},
         certificate::CertificateValidity,
-        cloud::{CloudClient, CloudDeviceInfo},
+        cloud::CloudDeviceInfo,
+        mijia::MijiaClient,
     },
 };
 use event_listener::Event;
@@ -280,6 +283,7 @@ impl AccessRefresh {
 }
 pub(super) struct Live {
     pub(super) credentials: Option<XiaomiRecord>,
+    pub(super) mijia_generation: Option<String>,
     pub(super) scope: Option<Scope>,
     pub(super) devices: BTreeMap<String, DeviceSlot>,
     pub(super) session: Option<Session>,
@@ -289,10 +293,14 @@ pub(super) struct Context {
     pub(super) write_gates: super::commands::DeviceWriteGates,
     pub(super) relations: RefCell<super::relations::Relations>,
     pub(super) notifications: RefCell<Option<Rc<super::notifications::CloudSession>>>,
+    #[cfg(test)]
+    pub(super) mqtt_retry_deadline: Cell<Option<Duration>>,
     pub(super) credentials_changed: Event,
     #[cfg(test)]
     pub(super) notification_connector: Cell<super::notifications::NotificationConnector>,
     pub(super) priority: Cell<super::routing::PathPriority>,
+    pub(super) mijia: MijiaClient,
+    #[cfg(test)]
     pub(super) cloud: CloudClient,
     pub(super) lan_discovery: crate::xiaomi::lan::Discovery,
     pub(super) lan_scope_invalid: Cell<bool>,
@@ -303,7 +311,9 @@ pub(super) struct Context {
     pub(super) lan_test_endpoints: RefCell<BTreeMap<std::net::Ipv4Addr, std::net::SocketAddr>>,
     #[cfg(test)]
     pub(super) lan_timeout: Cell<Duration>,
-    pub(super) cloud_sync: RefCell<CloudSync>,
+    pub(super) ha_sync: RefCell<HaSync>,
+    pub(super) mijia_rejected: RefCell<Option<String>>,
+    pub(super) mijia_changed: Event,
     pub(super) http_paused: Cell<bool>,
     pub(super) cloud_scope_valid: Cell<bool>,
     pub(super) sync_not_before: Cell<Option<Duration>>,
@@ -330,11 +340,48 @@ pub(super) struct Context {
     pub(super) sync_changed: Event,
 }
 impl Context {
-    pub(super) fn adopt_credentials(&self, credentials: XiaomiRecord) {
+    pub(super) fn adopt_credentials(
+        &self,
+        credentials: XiaomiRecord,
+    ) -> Result<(), super::model::AdapterError> {
+        let generation = self.store.xiaomi().mijia_generation(&credentials.uid)?;
+        let recovery_stop = credentials
+            .recovery
+            .as_ref()
+            .and_then(|recovery| recovery.stop);
+        let has_session = credentials.mijia.is_some();
         let mut live = self.live.borrow_mut();
-        let changed = live.credentials.as_ref() != Some(&credentials);
+        let generation_changed = live.mijia_generation != generation;
+        let changed = live.credentials.as_ref() != Some(&credentials) || generation_changed;
         live.credentials = Some(credentials);
+        live.mijia_generation = generation;
         drop(live);
+        {
+            let mut status = self.status.borrow_mut();
+            let status_changed = status.auth.recovery_stop != recovery_stop || generation_changed;
+            status.auth.recovery_stop = recovery_stop;
+            if generation_changed {
+                status.auth.mijia = if has_session {
+                    AuthenticationState::Checking
+                } else if let Some(stop) = recovery_stop {
+                    AuthenticationState::SignInRequired(FailureReason::RecoveryStopped(stop))
+                } else {
+                    AuthenticationState::Unavailable(FailureReason::MissingMijiaSession)
+                };
+            }
+            if status_changed {
+                status.auth.set_completed_at(self.clock.unix_now());
+                self.status_changed.notify(usize::MAX);
+            }
+        }
+        if generation_changed {
+            *self.mijia_rejected.borrow_mut() = None;
+            self.http_paused.set(false);
+            self.sync_not_before.set(None);
+            *self.sync_backoff.borrow_mut() = Backoff::new(1, 30);
+            self.mijia_changed.notify(usize::MAX);
+            self.request_sync();
+        }
         if changed {
             self.credentials_changed.notify(usize::MAX);
             self.changed.notify(usize::MAX);
@@ -342,6 +389,31 @@ impl Context {
             self.update_all_availability();
             self.update_routing("cloud credentials updated");
         }
+        Ok(())
+    }
+    pub(super) fn reload_credentials(&self) -> Result<(), super::model::AdapterError> {
+        let record = self.store.xiaomi().load()?.ok_or_else(|| {
+            super::model::AdapterError::Unavailable("Xiaomi sign-in is required".into())
+        })?;
+        if self
+            .live
+            .borrow()
+            .credentials
+            .as_ref()
+            .is_some_and(|current| current.uid != record.uid)
+        {
+            return Err(super::model::AdapterError::Unavailable(
+                "Xiaomi account changed; restart after sign-in".into(),
+            ));
+        }
+        self.adopt_credentials(record)
+    }
+    pub(super) fn mijia_authentication(&self, authentication: AuthenticationState) {
+        let mut status = self.status.borrow_mut();
+        status.auth.mijia = authentication;
+        status.auth.set_completed_at(self.clock.unix_now());
+        drop(status);
+        self.status_changed.notify(usize::MAX);
     }
     pub(super) fn ha_authentication(&self, authentication: AuthenticationState) {
         let mut status = self.status.borrow_mut();

@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn restored_home_receives_ha_notifications_without_a_mijia_session() {
+    let (rig, listener, peer) = with_cloud_peer(&["one"]);
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    record.mijia = None;
+    rig.store.xiaomi().replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record).unwrap();
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| cloud_active(&c, "one")).await;
+            let one = function(&c.context.registry, "one", "outlet:2");
+            peer.property("one", 2, true);
+            until(|| one.snapshot().power() == Some(Power::On)).await;
+            assert_eq!(c.cloud.lock().unwrap().homes, 0);
+            assert!(c.context.cloud_candidate("one", true).is_err());
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn http_pause_keeps_cloud_notifications_and_online_reports_cannot_resume_http() {
     let (rig, listener, peer) = with_cloud_peer(&["one"]);
     block_on(rig.run(|c| async move {
@@ -56,10 +76,19 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
             future::or(peer.run(&listener), async {
                 until(|| cloud_active(&c, "one")).await;
                 let one = function(&c.context.registry, "one", "outlet:2");
+                let handle = c
+                    .context
+                    .notifications
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .handle
+                    .clone();
                 c.clock
                     .automatic
                     .store(false, std::sync::atomic::Ordering::Relaxed);
                 if scope_failure {
+                    c.context.lan_scope_invalid.set(true);
                     c.context.cloud_scope_valid.set(false);
                     c.context.update_all_availability();
                     c.context.changed.notify(usize::MAX);
@@ -69,8 +98,19 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
                 }
                 until(|| !cloud_active(&c, "one")).await;
                 let snapshot = one.snapshot();
-                peer.property("one", 2, true);
-                peer.online("one", true);
+                if scope_failure {
+                    c.context.property_value_event(
+                        &super::super::super::notifications::NotificationSource::Cloud(handle),
+                        "one",
+                        crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                        &json!(true),
+                        None,
+                        false,
+                    );
+                } else {
+                    peer.property("one", 2, true);
+                    peer.online("one", true);
+                }
                 async_io::Timer::after(Duration::from_millis(20)).await;
                 assert_eq!(one.snapshot(), snapshot);
                 if !scope_failure {
@@ -149,8 +189,8 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                     }
                     until(|| {
                         matches!(
-                            *control.context.cloud_sync.borrow(),
-                            super::super::super::cloud::CloudSync::Paused
+                            *control.context.ha_sync.borrow(),
+                            super::super::super::credentials::HaSync::Paused
                         )
                     })
                     .await;
@@ -164,7 +204,12 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                         .execute(Command::On)
                         .await
                         .unwrap();
-                    assert_eq!(local.count("rpcReq", "one", 2), 1);
+                    if rejection == 1 {
+                        assert_eq!(control.cloud.lock().unwrap().property_writes.len(), 1);
+                    } else {
+                        assert_eq!(local.count("rpcReq", "one", 2), 1);
+                    }
+                    until(|| control.context.cloud_candidate("one", true).is_ok()).await;
                     let old = cloud.state.borrow().connects[0].clone();
                     control
                         .context
@@ -176,7 +221,10 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                         )
                         .unwrap();
                     assert_eq!(control.cloud.lock().unwrap().tokens, 1);
-                    assert!(control.cloud.lock().unwrap().property_writes.is_empty());
+                    assert_eq!(
+                        control.cloud.lock().unwrap().property_writes.len(),
+                        usize::from(rejection == 1)
+                    );
                 })
                 .await;
             })
@@ -200,8 +248,8 @@ fn driver_authorization_rejection_rebuilds_with_fresh_token_then_pauses_on_secon
             peer.send(Packet::Disconnect(disconnect));
             until(|| {
                 matches!(
-                    *c.context.cloud_sync.borrow(),
-                    super::super::super::cloud::CloudSync::Paused
+                    *c.context.ha_sync.borrow(),
+                    super::super::super::credentials::HaSync::Paused
                 ) && c.context.notifications.borrow().is_none()
             })
             .await;

@@ -26,7 +26,15 @@ fn credentials() -> XiaomiRecord {
         uid: "account".into(),
         region: "cn".into(),
         recovery: None,
-        mijia: None,
+        mijia: Some(
+            crate::xiaomi::mijia::MijiaSession::new(
+                "account".into(),
+                "processed-token".into(),
+                "c2VjdXJpdHk=".into(),
+                "test-agent".into(),
+            )
+            .unwrap(),
+        ),
         ha: Some(crate::storage::HaClient {
             client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
             authorization: Some(crate::storage::HaAuthorization {
@@ -154,6 +162,7 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
     }
     let (base, requests) = mock_server(responses);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let selected = select_local_home(
         &snapshot(),
         &[home("remote", &["remote-only"]), selected],
@@ -164,7 +173,7 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
     let records = block_on(async {
         let mut records = Vec::new();
         for did in &selected.dids {
-            let record = load_device(&cloud, &credentials(), &selected, did)
+            let record = load_device(&cloud, &mijia, &credentials(), &selected, did)
                 .await
                 .unwrap();
             assert_eq!(record.raw.name, None);
@@ -195,7 +204,13 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
     assert_eq!(captured.len(), 6);
     for (request, did) in captured.iter().step_by(2).zip(&selected.dids) {
         assert_eq!(
-            serde_json::from_str::<Value>(&request.body).unwrap()["dids"],
+            serde_json::from_str::<Value>(
+                &url::form_urlencoded::parse(request.body.as_bytes())
+                    .find(|(key, _)| key == "data")
+                    .unwrap()
+                    .1
+            )
+            .unwrap()["dids"],
             json!([did])
         );
     }
@@ -211,16 +226,29 @@ fn fixed_home_loads_all_members_with_independent_single_and_multi_channel_bindin
 fn scoped_load_rejects_foreign_accounts_and_members_without_network_requests() {
     let (base, requests) = mock_server(vec![MockResponse::json(500, "unused")]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let local = home("local", &["target"]);
     assert!(matches!(
-        block_on(load_device(&cloud, &credentials(), &local, "remote-only")),
+        block_on(load_device(
+            &cloud,
+            &mijia,
+            &credentials(),
+            &local,
+            "remote-only"
+        )),
         Err(CatalogError::TargetMissing)
     ));
     let mut foreign = local.clone();
     foreign.uid = "foreign".into();
     foreign.group_id = group_id("foreign", "local");
     assert!(matches!(
-        block_on(load_device(&cloud, &credentials(), &foreign, "target")),
+        block_on(load_device(
+            &cloud,
+            &mijia,
+            &credentials(),
+            &foreign,
+            "target"
+        )),
         Err(CatalogError::InvalidScope)
     ));
     assert_eq!(requests.try_iter().count(), 0);
@@ -235,9 +263,11 @@ fn fixed_home_load_reports_incompatible_capability() {
         MockResponse::json(200, &unsupported.to_string()),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert!(matches!(
         block_on(load_device(
             &cloud,
+            &mijia,
             &credentials(),
             &home("local", &["target"]),
             "target"
@@ -256,6 +286,7 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
         MockResponse::json(200, &instance.to_string()),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let homes = [
         home("remote", &["target", "remote-only"]),
         home("local", &["target"]),
@@ -267,6 +298,7 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
         &credentials(),
         &key(),
         &cloud,
+        &mijia,
     ))
     .unwrap();
     assert_eq!(
@@ -282,9 +314,15 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
     assert_eq!(captured.len(), 3);
     for request in &captured[..2] {
         assert_eq!(request.target, "/app/v2/home/device_list_page");
-        assert!(request.headers.contains("Bearerprocessed-token"));
+        assert!(request.headers.contains("serviceToken=processed-token"));
         assert_eq!(
-            serde_json::from_str::<Value>(&request.body).unwrap()["dids"],
+            serde_json::from_str::<Value>(
+                &url::form_urlencoded::parse(request.body.as_bytes())
+                    .find(|(key, _)| key == "data")
+                    .unwrap()
+                    .1
+            )
+            .unwrap()["dids"],
             json!(["target"])
         );
     }
@@ -305,6 +343,7 @@ fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
 fn no_local_home_remote_target_or_different_account_makes_no_request() {
     let (base, requests) = mock_server(vec![MockResponse::json(500, "unused")]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let credentials = credentials();
     let homes = [home("remote", &["target"]), home("local", &["different"])];
     let absent = DiscoverySnapshot {
@@ -312,7 +351,14 @@ fn no_local_home_remote_target_or_different_account_makes_no_request() {
         revision: 0,
     };
     assert!(matches!(
-        block_on(load_local(&absent, &homes, &credentials, &key(), &cloud)),
+        block_on(load_local(
+            &absent,
+            &homes,
+            &credentials,
+            &key(),
+            &cloud,
+            &mijia
+        )),
         Err(CatalogError::NoLocalHome)
     ));
     assert!(matches!(
@@ -321,7 +367,8 @@ fn no_local_home_remote_target_or_different_account_makes_no_request() {
             &homes,
             &credentials,
             &key(),
-            &cloud
+            &cloud,
+            &mijia
         )),
         Err(CatalogError::TargetMissing)
     ));
@@ -334,7 +381,8 @@ fn no_local_home_remote_target_or_different_account_makes_no_request() {
             &[other_account],
             &credentials,
             &key(),
-            &cloud
+            &cloud,
+            &mijia
         )),
         Err(CatalogError::NoLocalHome)
     ));
@@ -359,12 +407,14 @@ fn missing_target_and_cloud_failure_are_returned_without_cache_fallback() {
     ] {
         let (base, requests) = mock_server(vec![response]);
         let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         let result = block_on(load_local(
             &snapshot(),
             &[home("local", &["target"])],
             &credentials(),
             &key(),
             &cloud,
+            &mijia,
         ));
         match (result, expected) {
             (Err(CatalogError::TargetMissing), None) => {}
@@ -386,8 +436,10 @@ fn unsupported_new_description_is_cached_with_a_recognition_diagnostic() {
         MockResponse::json(200, &unsupported.to_string()),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let description = block_on(load_device(
         &cloud,
+        &mijia,
         &credentials(),
         &home("local", &["target"]),
         "target",
@@ -417,12 +469,14 @@ fn damaged_cloud_description_fails_before_requesting_an_instance() {
             &json!({"code":0,"result":{"list":[device]}}).to_string(),
         )]);
         let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+        let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         let result = block_on(load_local(
             &snapshot(),
             &[home("local", &["target"])],
             &credentials(),
             &key(),
             &cloud,
+            &mijia,
         ));
         assert!(
             matches!(result, Err(CatalogError::Cloud(error)) if *error.kind() == CloudErrorKind::Protocol)
@@ -437,9 +491,10 @@ async fn load_local(
     credentials: &XiaomiRecord,
     key: &DeviceKey,
     cloud: &CloudClient,
+    mijia: &crate::xiaomi::mijia::MijiaClient,
 ) -> Result<(NativeDescription, Option<String>), CatalogError> {
     let home = select_local_home(snapshot, homes, &credentials.uid)?;
-    let description = load_device(cloud, credentials, &home, &key.id).await?;
+    let description = load_device(cloud, mijia, credentials, &home, &key.id).await?;
     Ok((
         description.native.ok_or(CatalogError::Capability(
             crate::xiaomi::capability::CapabilityError::UnsupportedDevice,
@@ -459,8 +514,10 @@ fn light_catalog_uses_cloud_model_for_the_exact_ls2307_color_adapter() {
         MockResponse::json(200, &instance.to_string()),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let description = block_on(load_device(
         &cloud,
+        &mijia,
         &credentials(),
         &home("local", &["target"]),
         "target",
@@ -487,8 +544,10 @@ fn light_group_descriptors_load_for_confirmed_group_dids() {
         MockResponse::json(200, &instance.to_string()),
     ]);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
+    let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let description = block_on(load_device(
         &cloud,
+        &mijia,
         &credentials(),
         &home("local", &["group.42"]),
         "group.42",

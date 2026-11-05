@@ -1,4 +1,4 @@
-use super::super::{cloud::CloudSync, model::AdapterError};
+use super::super::{credentials::HaSync, model::AdapterError};
 use super::*;
 use crate::xiaomi::{
     auth::{AuthenticationState, FailureReason},
@@ -11,8 +11,8 @@ impl Context {
         self.cloud_authentication().is_ok()
     }
     pub(in crate::xiaomi::adapter) fn cloud_authentication(&self) -> Result<(), String> {
-        if !self.cloud_scope_valid.get() {
-            return Err("account/home scope not validated".into());
+        if self.lan_scope_invalid.get() {
+            return Err("account/home scope revoked".into());
         }
         if !self.token_usable() {
             return Err("credentials unavailable, expired or rejected".into());
@@ -28,16 +28,16 @@ impl Context {
         Ok(())
     }
     pub(in crate::xiaomi::adapter) fn token_usable(&self) -> bool {
-        !matches!(
-            *self.cloud_sync.borrow(),
-            CloudSync::Rejected(_) | CloudSync::Paused
-        ) && self
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .and_then(|credentials| credentials.ha_authorization())
-            .is_some_and(|authorization| authorization.tokens.expires_at > self.clock.unix_now())
+        !matches!(*self.ha_sync.borrow(), HaSync::Rejected(_) | HaSync::Paused)
+            && self
+                .live
+                .borrow()
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.ha_authorization())
+                .is_some_and(|authorization| {
+                    authorization.tokens.expires_at > self.clock.unix_now()
+                })
     }
     pub(in crate::xiaomi::adapter) fn current_token(&self, token: &str) -> bool {
         self.token_usable()
@@ -49,24 +49,71 @@ impl Context {
                 .and_then(|credentials| credentials.ha_authorization())
                 .is_some_and(|authorization| authorization.tokens.access_token == token)
     }
-    pub(in crate::xiaomi::adapter) async fn token_retired(&self, token: &str) {
+    pub(in crate::xiaomi::adapter) fn mijia_path(&self) -> Option<super::CloudPath> {
+        let live = self.live.borrow();
+        let credentials = live.credentials.as_ref()?;
+        let generation = live.mijia_generation.as_ref()?;
+        if self.mijia_rejected.borrow().as_ref() == Some(generation) {
+            return None;
+        }
+        Some(super::CloudPath {
+            uid: credentials.uid.clone(),
+            generation: generation.clone(),
+            home_id: live.scope.as_ref().map(|scope| scope.home_id.clone()),
+            session: credentials.mijia.clone()?,
+        })
+    }
+    pub(in crate::xiaomi::adapter) fn current_mijia(
+        &self,
+        path: &super::CloudPath,
+    ) -> Result<bool, AdapterError> {
+        Ok(
+            self.store.xiaomi().mijia_generation(&path.uid)?.as_deref() == Some(&path.generation)
+                && self.mijia_path().is_some_and(|current| {
+                    current.uid == path.uid
+                        && current.generation == path.generation
+                        && (path.home_id.is_none() || current.home_id == path.home_id)
+                }),
+        )
+    }
+    pub(in crate::xiaomi::adapter) async fn mijia_retired(
+        &self,
+        path: &super::CloudPath,
+    ) -> Result<(), AdapterError> {
         loop {
-            let listener = self.credentials_changed.listen();
-            if !self.current_token(token) {
-                return;
+            let credentials = self.credentials_changed.listen();
+            let changed = self.mijia_changed.listen();
+            let result = futures_lite::future::or(
+                std::future::poll_fn(|_| match self.current_mijia(path) {
+                    Ok(true) => std::task::Poll::Pending,
+                    Ok(false) => std::task::Poll::Ready(Some(Ok(()))),
+                    Err(error) => std::task::Poll::Ready(Some(Err(error))),
+                }),
+                async {
+                    futures_lite::future::or(credentials, changed).await;
+                    None
+                },
+            )
+            .await;
+            if let Some(result) = result {
+                return result;
             }
-            listener.await;
         }
     }
-    /// Token rejection and HTTP failure share one account maintenance entry point.
     pub(in crate::xiaomi::adapter) fn cloud_error(
         &self,
-        token: &str,
+        path: &super::CloudPath,
         did: Option<&str>,
         error: &CloudError,
     ) -> Result<(), AdapterError> {
+        if !self.current_mijia(path)? {
+            return Ok(());
+        }
         if error.is_unauthorized() {
-            self.token_rejected(token, FailureReason::Cloud(error.clone()))?;
+            *self.mijia_rejected.borrow_mut() = Some(path.generation.clone());
+            self.http_paused.set(true);
+            self.mijia_authentication(AuthenticationState::Checking);
+            self.mijia_changed.notify(usize::MAX);
         } else if error.is_temporary() {
             if !self.http_paused.replace(true) {
                 self.sync_not_before.set(Some(
@@ -88,54 +135,33 @@ impl Context {
             }
         }
         self.update_all_availability();
-        let reason = if error.is_unauthorized() {
-            "cloud access token rejected"
-        } else if error.is_temporary() {
-            "cloud HTTP request failed"
-        } else if error.is_device_offline() {
-            "cloud device reported offline"
-        } else if error.is_device_forbidden() {
-            "cloud device access forbidden"
-        } else {
-            "cloud request failed"
-        };
-        self.update_routing(&format!("{reason}: {error}"));
+        self.update_routing(&format!("Mijia HTTP request failed: {error}"));
         self.changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
         Ok(())
     }
-    /// Temporary property-read errors are retried by the reader, not account sync.
     pub(in crate::xiaomi::adapter) fn cloud_property_read_error(
         &self,
-        token: &str,
+        path: &super::CloudPath,
         work: &DeviceWork,
         error: &CloudError,
     ) -> Result<(), AdapterError> {
-        if error.is_temporary() {
+        if error.is_temporary() || !self.current_mijia(path)? {
             return Ok(());
         }
-        let (current_token, current_work) = {
+        let current_work = {
             let live = self.live.borrow();
-            (
-                live.credentials
-                    .as_ref()
-                    .and_then(|credentials| credentials.ha_authorization())
-                    .is_some_and(|authorization| authorization.tokens.access_token == token),
-                !work.life.is_closed()
-                    && live
-                        .devices
-                        .get(&work.key.id)
-                        .and_then(|slot| slot.admitted.as_deref())
-                        .is_some_and(|current| std::ptr::eq(current, work)),
-            )
+            !work.life.is_closed()
+                && live
+                    .devices
+                    .get(&work.key.id)
+                    .and_then(|slot| slot.admitted.as_deref())
+                    .is_some_and(|current| std::ptr::eq(current, work))
         };
-        if !current_token {
-            return Ok(());
-        }
         if error.is_unauthorized() {
-            self.cloud_error(token, None, error)
+            self.cloud_error(path, None, error)
         } else if current_work {
-            self.cloud_error(token, Some(&work.key.id), error)
+            self.cloud_error(path, Some(&work.key.id), error)
         } else {
             Ok(())
         }
@@ -151,18 +177,17 @@ impl Context {
             .and_then(|record| record.ha_authorization())
             .is_some_and(|authorization| authorization.tokens.access_token == token)
         {
-            let mut sync = self.cloud_sync.borrow_mut();
+            let mut sync = self.ha_sync.borrow_mut();
             match &*sync {
-                CloudSync::Refreshed(fresh) if fresh == token => {
+                HaSync::Refreshed(fresh) if fresh == token => {
                     self.store.xiaomi().stop_ha_refresh()?;
-                    *sync = CloudSync::Paused;
+                    *sync = HaSync::Paused;
                     self.status.borrow_mut().auth.ha = AuthenticationState::SignInRequired(reason);
                     self.status_changed.notify(usize::MAX);
                 }
-                CloudSync::Rejected(_) | CloudSync::Paused => {}
+                HaSync::Rejected(_) | HaSync::Paused => {}
                 _ => {
-                    *sync = CloudSync::Rejected(token.into());
-                    self.request_sync();
+                    *sync = HaSync::Rejected(token.into());
                 }
             }
         }

@@ -9,6 +9,7 @@ use crate::{
         capability::CapabilityError,
         cloud::{CloudClient, CloudError, OwnedHome},
         discovery::DiscoverySnapshot,
+        mijia::MijiaClient,
     },
 };
 
@@ -19,6 +20,7 @@ pub enum CatalogError {
     MissingAuthorization,
     TargetMissing,
     Cloud(CloudError),
+    Description(CloudError),
     Capability(CapabilityError),
 }
 
@@ -32,10 +34,8 @@ impl fmt::Display for CatalogError {
                 formatter.write_str("target device is missing from locally matched Xiaomi homes")
             }
             Self::InvalidScope => formatter.write_str("invalid Xiaomi account or home scope"),
-            Self::MissingAuthorization => {
-                formatter.write_str("HA OAuth credentials are unavailable")
-            }
-            Self::Cloud(error) => error.fmt(formatter),
+            Self::MissingAuthorization => formatter.write_str("Mijia session is unavailable"),
+            Self::Cloud(error) | Self::Description(error) => error.fmt(formatter),
             Self::Capability(error) => error.fmt(formatter),
         }
     }
@@ -44,7 +44,7 @@ impl fmt::Display for CatalogError {
 impl Error for CatalogError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Cloud(error) => Some(error),
+            Self::Cloud(error) | Self::Description(error) => Some(error),
             Self::Capability(error) => Some(error),
             _ => None,
         }
@@ -85,6 +85,7 @@ pub(crate) fn current_home(homes: &[OwnedHome], scope: &Scope) -> Result<OwnedHo
 /// Persistence and availability belong to the adapter.
 pub(crate) async fn load_device(
     cloud: &CloudClient,
+    mijia: &MijiaClient,
     credentials: &XiaomiRecord,
     home: &OwnedHome,
     did: &str,
@@ -95,18 +96,19 @@ pub(crate) async fn load_device(
     if !home.dids.iter().any(|member| member == did) {
         return Err(CatalogError::TargetMissing);
     }
-    let authorization = credentials
-        .ha_authorization()
+    let session = credentials
+        .mijia
+        .as_ref()
         .ok_or(CatalogError::MissingAuthorization)?;
-    let details = cloud
-        .get_device(&authorization.tokens.access_token, home, did)
+    let details = mijia
+        .get_device(session, home, did)
         .await
         .map_err(CatalogError::Cloud)?
         .ok_or(CatalogError::TargetMissing)?;
     let instance = cloud
         .get_instance(&details.instance_type)
         .await
-        .map_err(CatalogError::Cloud)?;
+        .map_err(CatalogError::Description)?;
     let raw = RawDescription::new(
         DeviceKey::new("xiaomi", did),
         details.model,

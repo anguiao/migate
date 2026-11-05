@@ -13,17 +13,15 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| peer.state.borrow().connects.len() == 1).await;
-            let mut cursor = 0;
             for (index, seconds) in [10, 20, 40, 80, 160, 320, 600].into_iter().enumerate() {
                 let due = c.clock.now() + Duration::from_secs(seconds);
-                until(|| c.clock.deadlines.lock().unwrap()[cursor..].contains(&due)).await;
-                cursor = c.clock.deadlines.lock().unwrap().len();
+                until(|| c.context.mqtt_retry_deadline.get() == Some(due)).await;
                 c.clock.advance(Duration::from_secs(seconds));
                 until(|| peer.state.borrow().connects.len() == index + 2).await;
                 assert!(!c.context.http_paused.get());
             }
             let capped = c.clock.now() + Duration::from_secs(600);
-            until(|| c.clock.deadlines.lock().unwrap()[cursor..].contains(&capped)).await;
+            until(|| c.context.mqtt_retry_deadline.get() == Some(capped)).await;
             let mut record = c.store.xiaomi().load().unwrap().unwrap();
             record
                 .ha
@@ -36,13 +34,13 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
                 .access_token = "replacement-token".into();
             c.store.xiaomi().replace(&record).unwrap();
             c.context.live.borrow_mut().credentials = Some(record);
-            cursor = c.clock.deadlines.lock().unwrap().len();
             c.context.credentials_changed.notify(usize::MAX);
             until(|| peer.state.borrow().connects.len() == 9).await;
             assert_eq!(peer.state.borrow().connects[8], "replacement-token");
             let due = c.clock.now() + Duration::from_secs(10);
-            until(|| c.clock.deadlines.lock().unwrap()[cursor..].contains(&due)).await;
+            until(|| c.context.mqtt_retry_deadline.get() == Some(due)).await;
             c.clock.advance(Duration::from_secs(10));
+
             until(|| cloud_active(&c, "one")).await;
             let old = c
                 .context
@@ -52,11 +50,10 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
                 .unwrap()
                 .handle
                 .clone();
-            cursor = c.clock.deadlines.lock().unwrap().len();
             peer.send(Packet::Disconnect(Disconnect::new()));
             until(|| c.context.notifications.borrow().is_none()).await;
             let due = c.clock.now() + Duration::from_secs(10);
-            until(|| c.clock.deadlines.lock().unwrap()[cursor..].contains(&due)).await;
+            until(|| c.context.mqtt_retry_deadline.get() == Some(due)).await;
             c.clock.advance(Duration::from_secs(10));
             until(|| cloud_active(&c, "one")).await;
             let one = function(&c.context.registry, "one", "outlet:2");

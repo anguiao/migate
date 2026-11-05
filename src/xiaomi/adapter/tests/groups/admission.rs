@@ -34,7 +34,7 @@ fn native_group_description_restarts_after_its_loading_token_is_retired() {
             .tokens
             .access_token = "replacement-access".into();
         c.store.xiaomi().replace(&credentials).unwrap();
-        c.context.adopt_credentials(credentials);
+        c.context.adopt_credentials(credentials).unwrap();
         future::or(
             async {
                 until(|| {

@@ -16,13 +16,119 @@ async fn cloud_ready(c: &Control, dids: &[&str]) {
     .await;
 }
 
+#[test]
+fn successful_write_from_replaced_identical_session_does_not_change_new_generation_state() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().online.insert("one".into());
+    let (release, gate) = flume::bounded(1);
+    block_on(rig.run(|c| async move {
+        cloud_ready(&c, &["one"]).await;
+        let one = function(&c.context.registry, "one", "outlet:2");
+        until(|| one.snapshot().power() == Some(Power::Off)).await;
+        c.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        c.cloud.lock().unwrap().property_gate = Some(gate);
+        let mut command = Box::pin(one.execute(Command::On));
+        assert!(poll_once(command.as_mut()).await.is_none());
+        until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
+        let record = c.store.xiaomi().load().unwrap().unwrap();
+        c.store.xiaomi().replace(&record).unwrap();
+        c.context.adopt_credentials(record).unwrap();
+        release.send(()).unwrap();
+        command.await.unwrap();
+        assert_eq!(one.snapshot().power(), Some(Power::Off));
+        assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+    }));
+}
+
+#[test]
+fn concurrent_unauthorized_writes_share_one_mijia_recovery_without_replay() {
+    let rig = Rig::new(true, &["one", "two"]);
+    rig.enable_recovery();
+    rig.cloud
+        .lock()
+        .unwrap()
+        .online
+        .extend(["one".into(), "two".into()]);
+    let (release_writes, writes_gate) = flume::bounded(2);
+    let (release_restore, restore_gate) = flume::bounded(1);
+    block_on(rig.run(|c| async move {
+        cloud_ready(&c, &["one", "two"]).await;
+        let old_generation = c.store.xiaomi().mijia_generation(&c.uid).unwrap().unwrap();
+        let before_tokens = c.cloud.lock().unwrap().tokens;
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.property_status = 401;
+            cloud.property_gate = Some(writes_gate);
+            cloud.restore_gate = Some(restore_gate);
+        }
+        let one = function(&c.context.registry, "one", "outlet:2");
+        let two = function(&c.context.registry, "two", "outlet:2");
+        let writes = async {
+            let (first, second) =
+                future::zip(one.execute(Command::On), two.execute(Command::On)).await;
+            assert!(first.is_err());
+            assert!(second.is_err());
+        };
+        let restore = async {
+            until(|| c.cloud.lock().unwrap().property_writes.len() == 2).await;
+            release_writes.send(()).unwrap();
+            release_writes.send(()).unwrap();
+            until(|| c.cloud.lock().unwrap().restores == 1).await;
+            assert_eq!(c.cloud.lock().unwrap().tokens, before_tokens);
+            c.cloud.lock().unwrap().property_status = 200;
+            release_restore.send(()).unwrap();
+            until(|| {
+                c.store
+                    .xiaomi()
+                    .mijia_generation(&c.uid)
+                    .unwrap()
+                    .as_deref()
+                    != Some(&old_generation)
+            })
+            .await;
+            until(|| c.context.cloud_candidate("one", true).is_ok()).await;
+            let cloud = c.cloud.lock().unwrap();
+            assert_eq!(cloud.restores, 1);
+            assert_eq!(cloud.sts_requests, 1);
+            assert_eq!(cloud.property_writes.len(), 2);
+        };
+        future::zip(writes, restore).await;
+    }));
+}
+
+#[test]
+fn device_http_remains_usable_without_ha_authorization() {
+    let rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().online.insert("one".into());
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    record.ha = None;
+    rig.store.xiaomi().replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record).unwrap();
+    block_on(rig.run(|c| async move {
+        cloud_ready(&c, &["one"]).await;
+        function(&c.context.registry, "one", "outlet:2")
+            .execute(Command::On)
+            .await
+            .unwrap();
+        assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+        assert_eq!(c.cloud.lock().unwrap().tokens, 0);
+    }));
+}
+
 async fn background_property_error(status: u16, code: i64) -> crate::xiaomi::cloud::CloudError {
     let body = json!({"code":0,"result":[{"did":"one","siid":2,"piid":1,"code":code}]}).to_string();
     let (base, _) = dynamic_mock_server(1, move |_| MockResponse::json(status, &body));
-    CloudClient::for_test(&base, Duration::from_secs(1))
-        .unwrap()
+    crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1))
         .read_property_observation(
-            "token",
+            &crate::xiaomi::mijia::MijiaSession::new(
+                "account".into(),
+                "token".into(),
+                "c2VjdXJpdHk=".into(),
+                "agent".into(),
+            )
+            .unwrap(),
             "one",
             crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
         )
@@ -38,10 +144,15 @@ async fn background_transport_error(timeout: bool) -> crate::xiaomi::cloud::Clou
             MockResponse::raw("")
         }
     });
-    CloudClient::for_test(&base, Duration::from_millis(50))
-        .unwrap()
+    crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_millis(50))
         .read_property_observation(
-            "token",
+            &crate::xiaomi::mijia::MijiaSession::new(
+                "account".into(),
+                "token".into(),
+                "c2VjdXJpdHk=".into(),
+                "agent".into(),
+            )
+            .unwrap(),
             "one",
             crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
         )
@@ -59,22 +170,7 @@ fn background_property_http_failure_keeps_both_cloud_controls_available() {
         .extend(["one".into(), "two".into()]);
     block_on(rig.run(|c| async move {
         cloud_ready(&c, &["one", "two"]).await;
-        let token = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .access_token
-            .clone();
+        let token = c.context.mijia_path().unwrap();
         let work = c.context.live.borrow().devices["one"]
             .admitted
             .clone()
@@ -126,22 +222,9 @@ fn background_property_device_errors_revoke_only_current_device_access() {
             .extend(["one".into(), "two".into()]);
         block_on(rig.run(|c| async move {
             cloud_ready(&c, &["one", "two"]).await;
-            let token = c
-                .context
-                .live
-                .borrow()
-                .credentials
-                .as_ref()
-                .unwrap()
-                .ha
-                .as_ref()
-                .unwrap()
-                .authorization
-                .as_ref()
-                .unwrap()
-                .tokens
-                .access_token
-                .clone();
+            let token = c.context.mijia_path().unwrap();
+            let mut stale = token.clone();
+            stale.generation = "stale".into();
             let work = c.context.live.borrow().devices["one"]
                 .admitted
                 .clone()
@@ -149,7 +232,7 @@ fn background_property_device_errors_revoke_only_current_device_access() {
             let error = background_property_error(200, code).await;
 
             c.context
-                .cloud_property_read_error("stale-token", &work, &error)
+                .cloud_property_read_error(&stale, &work, &error)
                 .unwrap();
             assert!(c.context.cloud_candidate("one", true).is_ok());
             c.context
@@ -168,27 +251,37 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
         cloud_ready(&c, &["one"]).await;
-        let token = c.context.live.borrow().credentials.as_ref().unwrap().ha.as_ref().unwrap().authorization.as_ref().unwrap().tokens.access_token.clone();
-        let work = c.context.live.borrow().devices["one"].admitted.clone().unwrap();
+        let token = c.context.mijia_path().unwrap();
+        let mut stale = token.clone();
+        stale.generation = "stale".into();
+        let work = c.context.live.borrow().devices["one"]
+            .admitted
+            .clone()
+            .unwrap();
         let offline = background_property_error(200, -704_042_011).await;
         let unauthorized = background_property_error(401, 0).await;
         work.life.close();
         c.context
             .cloud_property_read_error(&token, &work, &offline)
             .unwrap();
-        assert!(c.context.live.borrow().devices["one"]
-            .cloud_access
-            .as_ref()
-            .unwrap()
-            .online);
+        assert!(
+            c.context.live.borrow().devices["one"]
+                .cloud_access
+                .as_ref()
+                .unwrap()
+                .online
+        );
         c.context
-            .cloud_property_read_error("stale-token", &work, &unauthorized)
+            .cloud_property_read_error(&stale, &work, &unauthorized)
             .unwrap();
-        assert!(matches!(*c.context.cloud_sync.borrow(), super::super::cloud::CloudSync::Idle));
+        assert!(c.context.mijia_rejected.borrow().is_none());
         c.context
             .cloud_property_read_error(&token, &work, &unauthorized)
             .unwrap();
-        assert!(matches!(&*c.context.cloud_sync.borrow(), super::super::cloud::CloudSync::Rejected(rejected) if rejected == &token));
+        assert_eq!(
+            c.context.mijia_rejected.borrow().as_deref(),
+            Some(token.generation.as_str())
+        );
     }));
 }
 
@@ -348,6 +441,7 @@ fn http_device_errors_only_suspend_the_target_and_other_business_errors_keep_it_
 #[test]
 fn concurrent_http_token_rejections_merge_refresh_and_never_replay_failed_writes() {
     let rig = Rig::new(true, &["one", "two"]);
+    rig.enable_recovery();
     rig.cloud
         .lock()
         .unwrap()
@@ -361,7 +455,7 @@ fn concurrent_http_token_rejections_merge_refresh_and_never_replay_failed_writes
             let mut cloud = c.cloud.lock().unwrap();
             cloud.property_status = 401;
             cloud.property_gate = Some(property_gate);
-            cloud.token_gate = Some(token_gate);
+            cloud.restore_gate = Some(token_gate);
         }
         let one = function(&c.context.registry, "one", "outlet:2");
         let two = function(&c.context.registry, "two", "outlet:2");
@@ -374,7 +468,7 @@ fn concurrent_http_token_rejections_merge_refresh_and_never_replay_failed_writes
         properties.send(()).unwrap();
         assert!(first.await.is_err());
         assert!(second.await.is_err());
-        until(|| c.cloud.lock().unwrap().tokens == 1).await;
+        until(|| c.cloud.lock().unwrap().restores == 1).await;
         {
             let mut cloud = c.cloud.lock().unwrap();
             cloud.property_status = 200;
@@ -382,20 +476,37 @@ fn concurrent_http_token_rejections_merge_refresh_and_never_replay_failed_writes
         }
         token.send(()).unwrap();
         cloud_ready(&c, &["one", "two"]).await;
-        assert_eq!(c.cloud.lock().unwrap().tokens, 1);
+        assert_eq!(c.cloud.lock().unwrap().restores, 1);
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 2);
         one.execute(Command::On).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 3);
-        c.cloud.lock().unwrap().property_status = 401;
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.property_status = 401;
+            cloud.restore_status = 401;
+            cloud.restore_gate = None;
+        }
         assert!(two.execute(Command::Off).await.is_err());
         until(|| {
             matches!(
-                c.context.status.borrow().auth.ha,
+                c.context.status.borrow().auth.mijia,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             )
         })
         .await;
-        assert_eq!(c.cloud.lock().unwrap().tokens, 1);
+        assert_eq!(c.cloud.lock().unwrap().restores, 2);
+        assert_eq!(c.cloud.lock().unwrap().tokens, 0);
+        assert!(
+            c.store
+                .xiaomi()
+                .load()
+                .unwrap()
+                .unwrap()
+                .recovery
+                .unwrap()
+                .stop
+                .is_some()
+        );
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 4);
     }));
 }
@@ -522,7 +633,7 @@ fn runtime_identity_and_home_scope_failures_retire_cloud_eligibility_and_preserv
                         control.context.status.borrow().catalog_problem.is_some()
                     } else {
                         matches!(
-                            control.context.status.borrow().auth.ha,
+                            control.context.status.borrow().auth.mijia,
                             crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                         )
                     }
@@ -594,7 +705,7 @@ fn temporary_directory_failures_pause_existing_http_candidates_until_sync_recove
         c.context.request_sync();
         until(|| {
             matches!(
-                c.context.status.borrow().auth.ha,
+                c.context.status.borrow().auth.mijia,
                 crate::xiaomi::auth::AuthenticationState::Unavailable(_)
             )
         })

@@ -1,4 +1,4 @@
-use super::{AuthError, AuthService, CertificateUpdate};
+use super::{AuthError, AuthService, CertificateUpdate, FailureReason};
 use crate::{storage::XiaomiRecord, xiaomi::certificate::CertificateValidity};
 
 #[derive(Debug)]
@@ -9,6 +9,23 @@ pub(crate) struct BridgeCertificate {
 }
 
 impl AuthService {
+    pub(crate) async fn validate_bridge_ha(&self, record: &XiaomiRecord) -> Result<(), AuthError> {
+        let authorization = record
+            .ha_authorization()
+            .ok_or(AuthError::Missing("HA OAuth credentials are unavailable"))?;
+        let home = self
+            .cloud
+            .get_home(&authorization.tokens.access_token)
+            .await?;
+        match home.uid.as_deref() {
+            Some(uid) if uid == record.uid => Ok(()),
+            Some(_) => Err(AuthError::Failure(FailureReason::AccountIdentityMismatch)),
+            None => Err(AuthError::Failure(
+                FailureReason::CannotDetermineAccountIdentity,
+            )),
+        }
+    }
+
     pub(crate) async fn refresh_bridge_tokens(
         &self,
         record: &XiaomiRecord,

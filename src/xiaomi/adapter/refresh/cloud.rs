@@ -18,19 +18,7 @@ pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<()
         let changed = context.changed.listen();
         let credentials = context.credentials_changed.listen();
         retire(&context);
-        let identity = context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .and_then(|credentials| {
-                credentials.ha_authorization().map(|authorization| {
-                    (
-                        credentials.uid.clone(),
-                        authorization.tokens.access_token.clone(),
-                    )
-                })
-            });
+        let identity = context.mijia_path().map(|path| (path.uid, path.generation));
         {
             let mut poll = poll.borrow_mut();
             if poll.identity != identity {

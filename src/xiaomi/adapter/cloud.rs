@@ -18,32 +18,22 @@ use std::{
     time::Duration,
 };
 
-#[derive(Default)]
-pub(super) enum CloudSync {
-    #[default]
-    Idle,
-    // Retained during refresh so concurrent failures coalesce into the same attempt.
-    Rejected(String),
-    Refreshed(String),
-    Paused,
-}
 pub(super) const MEMBER_INTERVAL: Duration = Duration::from_secs(300);
 pub(super) async fn run(
     cloud: &CloudClient,
     discovery: &Discovery,
     context: Rc<Context>,
 ) -> Result<(), AdapterError> {
-    let sync = &context.cloud_sync;
     let mut due = context.clock.now();
     loop {
         let listener = context.sync_changed.listen();
-        if matches!(*sync.borrow(), CloudSync::Paused) {
-            future::pending::<()>().await;
-        }
         if let Some(floor) = context.sync_not_before.get()
             && context.clock.now() < floor
         {
-            context.clock.wait_until(floor).await;
+            future::or(context.clock.wait_until(floor), async {
+                listener.await;
+            })
+            .await;
             continue;
         }
         context.sync_not_before.set(None);
@@ -54,7 +44,7 @@ pub(super) async fn run(
             .await;
             continue;
         }
-        if !context.token_usable() {
+        if context.mijia_path().is_none() {
             let credentials = context.credentials_changed.listen();
             future::or(
                 async {
@@ -70,20 +60,26 @@ pub(super) async fn run(
         let Some(credentials) = context.live.borrow().credentials.clone() else {
             continue;
         };
-        let Some(authorization) = credentials.ha_authorization() else {
+        let Some(path) = context.mijia_path() else {
             continue;
         };
         context.ready.finish(Ok(()));
-        let token = &authorization.tokens.access_token;
-        let Some(homes) = future::or(async { Some(cloud.get_owned_homes(token).await) }, async {
-            context.token_retired(token).await;
-            None
-        })
-        .await
+        let token = &path;
+        if !context.current_mijia(token)? {
+            context.reload_credentials()?;
+            continue;
+        }
+        let Some(homes) = future::or(
+            async { context.mijia_retired(token).await.map(|()| None) },
+            async { Ok(Some(context.mijia.get_owned_homes(&token.session).await)) },
+        )
+        .await?
         else {
+            context.reload_credentials()?;
+            context.request_sync();
             continue;
         };
-        if !context.current_token(token) {
+        if !context.current_mijia(token)? {
             continue;
         }
         let homes = match homes {
@@ -91,12 +87,10 @@ pub(super) async fn run(
             Err(error) => {
                 context.set_catalog_problem(Some(error.to_string()));
                 context.cloud_error(token, None, &error)?;
-                if !matches!(*context.cloud_sync.borrow(), CloudSync::Paused) {
-                    context.ha_authentication(if error.is_unauthorized() {
-                        AuthenticationState::Checking
-                    } else {
-                        AuthenticationState::Unavailable(FailureReason::Cloud(error))
-                    });
+                if !error.is_unauthorized() {
+                    context.mijia_authentication(AuthenticationState::Unavailable(
+                        FailureReason::Cloud(error),
+                    ));
                 }
                 due = context
                     .sync_not_before
@@ -115,7 +109,7 @@ pub(super) async fn run(
                 context.invalidate_lan_scope()?;
             }
             context.set_catalog_problem(Some(reason.to_string()));
-            context.ha_authentication(AuthenticationState::Unavailable(reason));
+            context.mijia_authentication(AuthenticationState::Unavailable(reason));
             context.cloud_scope_valid.set(false);
             context.update_all_availability();
             context.update_routing("cloud account identity invalidated");
@@ -124,6 +118,7 @@ pub(super) async fn run(
             due = context.clock.now() + MEMBER_INTERVAL;
             continue;
         }
+        context.mijia_authentication(AuthenticationState::Authenticated);
         let expected_scope = context.live.borrow().scope.clone();
         let selected = {
             let live = context.live.borrow();
@@ -162,17 +157,23 @@ pub(super) async fn run(
                 .collect::<Vec<_>>()
         };
         let Some(infos) = future::or(
-            async { Some(cloud.get_home_devices(token, &home, &requested).await) },
+            async { context.mijia_retired(token).await.map(|()| None) },
             async {
-                context.token_retired(token).await;
-                None
+                Ok(Some(
+                    context
+                        .mijia
+                        .get_home_devices(&token.session, &home, &requested)
+                        .await,
+                ))
             },
         )
-        .await
+        .await?
         else {
+            context.reload_credentials()?;
+            context.request_sync();
             continue;
         };
-        if !context.current_token(token) || context.live.borrow().scope != expected_scope {
+        if !context.current_mijia(token)? || context.live.borrow().scope != expected_scope {
             continue;
         }
         let infos = match infos {
@@ -245,7 +246,7 @@ pub(super) async fn run(
                 slot.cloud_forbidden = false;
             }
         }
-        context.ha_authentication(AuthenticationState::Authenticated);
+        context.mijia_authentication(AuthenticationState::Authenticated);
         context.cloud_scope_valid.set(true);
         context.http_paused.set(false);
         context.sync_not_before.set(None);
@@ -257,6 +258,10 @@ pub(super) async fn run(
         if membership_changed {
             super::local::refresh_access(&context);
         }
+        let path = context
+            .mijia_path()
+            .expect("the selected Mijia session is current");
+        let token = &path;
         let catalog_members = members.clone();
         for did in members {
             // Group-like records are admitted only by a confirmed catalog
@@ -307,18 +312,51 @@ pub(super) async fn run(
             let client = cloud.clone();
             let credentials = credentials.clone();
             let captured_token = token.clone();
+            let device = context.mijia.clone();
             let home = home.clone();
             let captured_scope = scope.clone();
             let task = async move {
+                if life.is_closed()
+                    || !current.current_mijia(&captured_token)?
+                    || current.live.borrow().scope.as_ref() != Some(&captured_scope)
+                {
+                    let cleared = current
+                        .live
+                        .borrow_mut()
+                        .devices
+                        .get_mut(&did)
+                        .is_some_and(|slot| slot.finish_loading(&life));
+                    if cleared {
+                        current.request_sync();
+                    }
+                    return Ok(());
+                }
                 let Some(result) = future::or(
-                    async {
-                        life.ended().await;
-                        None
-                    },
-                    async { Some(catalog::load_device(&client, &credentials, &home, &did).await) },
+                    async { current.mijia_retired(&captured_token).await.map(|()| None) },
+                    future::or(
+                        async {
+                            life.ended().await;
+                            Ok(None)
+                        },
+                        async {
+                            Ok(Some(
+                                catalog::load_device(&client, &device, &credentials, &home, &did)
+                                    .await,
+                            ))
+                        },
+                    ),
                 )
-                .await
+                .await?
                 else {
+                    let cleared = current
+                        .live
+                        .borrow_mut()
+                        .devices
+                        .get_mut(&did)
+                        .is_some_and(|slot| slot.finish_loading(&life));
+                    if cleared {
+                        current.request_sync();
+                    }
                     return Ok(());
                 };
                 // A retired/removed slot, a superseding load or a changed
@@ -336,11 +374,17 @@ pub(super) async fn run(
                             == target
                 };
                 if !current_loading
-                    || !current.current_token(&captured_token)
+                    || !current.current_mijia(&captured_token)?
                     || current.live.borrow().scope.as_ref() != Some(&captured_scope)
                 {
-                    if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
-                        slot.finish_loading(&life);
+                    let cleared = current
+                        .live
+                        .borrow_mut()
+                        .devices
+                        .get_mut(&did)
+                        .is_some_and(|slot| slot.finish_loading(&life));
+                    if cleared {
+                        current.request_sync();
                     }
                     return Ok(());
                 }
@@ -396,14 +440,16 @@ pub(super) async fn run(
         // binding (previously `None`) cannot discard the first catalog.
         let catalog_scope = context.live.borrow().scope.clone();
         let catalog = future::or(
-            async { Some(cloud.get_device_catalog(token).await) },
-            async {
-                context.token_retired(token).await;
-                None
-            },
+            async { context.mijia_retired(token).await.map(|()| None) },
+            async { Ok(Some(context.mijia.get_device_catalog(&token.session).await)) },
         )
-        .await;
-        if context.current_token(token) && context.live.borrow().scope == catalog_scope {
+        .await?;
+        if catalog.is_none() {
+            context.reload_credentials()?;
+            context.request_sync();
+            continue;
+        }
+        if context.current_mijia(token)? && context.live.borrow().scope == catalog_scope {
             match catalog {
                 Some(Ok(catalog)) => {
                     let update =
