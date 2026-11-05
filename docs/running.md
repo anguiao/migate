@@ -36,10 +36,11 @@ cargo build --locked --release
 cargo run --locked -- auth login
 ```
 
-1. 打开终端显示的授权链接，登录米家账号并授权 HA 应用，无须安装或运行 Home Assistant。
-2. 浏览器跳转到 `http://homeassistant.local:8123/api/webhook/…` 后，即使页面显示无法访问，也复制地址栏中的完整网址。
-3. 将完整网址粘贴回等待中的终端并回车。若授权已失效，重新执行登录命令，从新的授权链接开始。
-4. 终端显示 `Xiaomi: authenticated (cn).` 和 `Gateway certificate: valid until …` 后，登录完成。
+每次执行都会显示新的米家登录二维码；二维码过期后重新执行 `auth login`。使用米家 App 扫码并确认，程序会用本次账号会话自动完成 HA OAuth 授权，不需要安装或运行 Home Assistant。米家会话用于设备云端 HTTP，HA OAuth 是小米账号对官方 `Xiaomi Home (Home Assistant Integration)` 应用的授权，用于云端 MQTT 和中枢客户端证书。
+
+两套服务凭据和账号恢复凭据全部验证后才一起保存；取消或此前失败会保留已有记录，可用下方 `auth check` 查看当前状态。证书准备或续期在凭据保存后进行：若证书步骤失败或取消，执行下方 `auth check` 查看状态并重试证书维护。再次执行 `auth login` 总会重新扫码并重新取得两套服务凭据，不能从上次的进度续办。
+
+如果登录提示图形验证码、短信、邮箱或其他身份验证，本次尝试会结束。请在手机或电脑浏览器登录[小米官网](https://www.mi.com/)完成所需验证，优先使用与网桥同一网络，然后重新执行完整的 `auth login`。网桥所在机器无需桌面；官网验证不保证下次不再要求验证。
 
 ### 检查与退出登录
 
@@ -47,7 +48,9 @@ cargo run --locked -- auth login
 cargo run --locked -- auth check
 ```
 
-检查会显示账号与证书状态，并在需要时自动更新。要恢复云端同步而提示 `sign-in required` 时，重新执行 `auth login`，再使用原数据目录启动；网络故障时待恢复后重试。已经确认并保存直连凭据的设备，可在云端登录或中枢证书过期时按下文离线恢复直连。
+检查分别显示小米账号、米家会话、HA OAuth 和中枢证书状态，并在需要时执行免交互恢复、令牌刷新或证书续期。各项独立：HA OAuth 异常会影响云端 MQTT 和需要该授权的证书操作，但不等于米家设备 HTTP 失效；米家会话异常也不等于 HA OAuth 或中枢证书失效。已有有效中枢连接和已确认直连按各自条件使用。
+
+若明确提示需要重新登录，停止网桥并执行 `auth login`，完成后使用原数据目录启动。`Account recovery: stopped` 或 HA OAuth 停止恢复会跨 `auth check` 和进程重启保留；只有同账号重新登录并成功保存新凭据才会清除对应状态。若提示需要额外验证，先按上面的官网验证步骤处理；网络、限流或服务临时错误不直接要求重新登录，等待恢复后重试 `auth check`。已经确认并保存直连凭据的设备，可在云端登录或中枢证书过期时按下文离线恢复直连。
 
 退出登录：
 
@@ -74,7 +77,7 @@ Mac 与 iPhone / iPad 须处于同一局域网，并保持 Mac 唤醒。网络�
 
 MiGate 自动接入受支持的插座、灯光、米家原生灯组、窗帘、风扇、空调，以及只读环境温度、相对湿度、CO₂、照度、门窗开合、运动检测和整机人体存在状态。同一设备可接入多个控制或同类功能，以及测量和状态组合；共享电量按设备能力提供。插座提供开关，灯光按能力提供亮度、色温和彩色控制，窗帘提供位置控制，风扇提供开关、风速及设备支持的水平摇头，空调提供开关、模式、温度、风速及设备支持的上下摆风。用 `list` 查看实际功能和识别问题，代表型号见 [README](../README.md)，功能边界见[已知限制](known-limitations.md)。
 
-在米家加入、移出设备或调整灯组后，等待自动同步，必要时等待下一次五分钟同步；同步需要云端可用。断电、断网、改名或换房间不会删除设备。重启或重新加入时保留 MiGate 已保存的名称，米家后续改名不会覆盖；移出后重新加入，Home 中的房间、场景或自动化可能需要重新设置。
+在米家加入、移出设备或调整灯组后，等待自动同步，必要时等待下一次五分钟同步；同步需要米家设备 HTTP 可用。断电、断网、改名或换房间不会删除设备。重启或重新加入时保留 MiGate 已保存的名称，米家后续改名不会覆盖；移出后重新加入，Home 中的房间、场景或自动化可能需要重新设置。
 
 使用受支持的数据目录启动新版 MiGate 后，程序会按当前规则重新识别已有设备和灯组；用 `list` 或 `status DID` 查看结果。运行时型号或实例 URN 变化后，等待云端同步并检查更新结果；固件号变化本身不会触发重新获取描述，详见[已知限制](known-limitations.md#home-显示与恢复)。
 
@@ -82,11 +85,11 @@ MiGate 自动接入受支持的插座、灯光、米家原生灯组、窗帘、�
 
 首次仍按米家账号与家庭接入流程取得目录中的设备候选。当前 IP 直连只支持 `dmaker.fan.p5c` 和 `lumi.acpartner.mcn02`；设备须属于当前家庭，且目录提供有效地址和 token。程序验证设备身份及 token 并完成只读确认后，才使用和保存直连凭据。局域网发现只提供地址线索，不单独授予访问资格。BLE 和代理子设备继续通过现有中枢或云端路径接入。
 
-保留同一数据目录后，已确认资格及凭据的设备可在外网不可用、云端 OAuth 令牌或中枢证书过期时重启并重新认证直连，不必等待云端登录刷新或中枢上线。已知的访问撤销、设备移除、退出账号及家庭范围变化仍会生效；正常目录同步可提供更新的地址或 token，新候选通过验证后才替换已保存记录，无效候选不会覆盖有效记录。地址变化或连接断开时等待该设备自动发现和恢复，其他设备各自恢复；健康闲置时不会持续扫描。
+保留同一数据目录后，已确认资格及凭据的设备可在外网不可用、HA OAuth 令牌或中枢证书过期时重启并重新认证直连，不必等待云端登录刷新或中枢上线。已知的访问撤销、设备移除、退出账号及家庭范围变化仍会生效；正常目录同步可提供更新的地址或 token，新候选通过验证后才替换已保存记录，无效候选不会覆盖有效记录。地址变化或连接断开时等待该设备自动发现和恢复，其他设备各自恢复；健康闲置时不会持续扫描。
 
 控制与读取正常按中枢（`hub`）→ 直连（`direct`）→ 云端（`cloud`）选择可用路径。中枢业务降级时优先使用直连和云端；两者不可用时用户控制仍可按原有规则尝试合格的中枢，自动读取等待原有恢复调度。中枢恢复后重新获得优先级。通知独立选择可用中枢或云端；不要把直连读取成功当作通知已就绪。
 
-用 `status DID` 查看直连协议或映射、地址、身份是否确认、可用候选、选中的读取和控制路径、通知来源、恢复进度及最近命令的实际路径。正常同步或连接变化后等待自动恢复；若提示凭据无效，检查账号和目录同步，等待连接信息更新。命令超时的结果可能不确定，先核对设备实际状态，程序不会自动重放已经发出或可能发出的控制。
+用 `status DID` 查看直连协议或映射、地址、身份是否确认、可用候选、选中的读取和控制路径、通知来源、恢复进度及最近命令的实际路径。路径显示 `cloud` 时，设备 HTTP 后端为 `mijia`；云端 MQTT 通知需单独查看连接和订阅诊断。读取可用不代表通知也已就绪。正常同步或连接变化后等待自动恢复；若提示凭据无效，检查账号和目录同步，等待连接信息更新。命令超时的结果可能不确定，先核对设备实际状态，程序不会自动重放已经发出或可能发出的控制。
 
 mcn02 若个别反馈无法解析，可在 `status DID` 查看对应属性的读取诊断，其中包含旧 miIO 字段名、原始 JSON 值及预期格式。排查时记录该诊断和当时米家的对应状态；后续有效读取会清除该属性的读取诊断。电源或整体响应异常且没有可用直连时等待退避重试，其他有效路径仍按实际资格使用。
 
@@ -196,9 +199,9 @@ unbind-sensor 234567890 air-conditioner:3
 | 米家调整成员后又被组渐变覆盖 | 先在 Home 停止或替换组动作，再调整成员。 |
 | 描述获取或配置保存失败 | 用 `list`、`status` 和错误日志查看原因，检查网络、数据目录权限与可用空间；程序保留上次配置并继续重试。 |
 | 启动后提示缓存识别失败 | 用 `list` 或 `status DID` 查看原因并保留原数据目录。该设备继续使用旧配置，其他设备仍可更新；等待目录提供新描述，或更新 MiGate 后重启。相同输入不会定时重试。 |
-| 启动失败 | 检查错误日志、数据目录权限、可用空间、端口与网络；修复后用原目录启动，无须清空数据。schema-10 开发数据按下节停机备份后升级，其他旧格式按下节处理。 |
+| 启动失败 | 检查错误日志、数据目录权限、可用空间、端口与网络；修复后用原目录启动，无须清空数据。 |
 | 日志提示忽略了无法加载的 Matter 数据 | 保留数据目录，等待 Home 恢复订阅；若重新出现配对窗口，按下节使用原目录重新配对。恢复范围见[已知限制](known-limitations.md#home-显示与恢复)。 |
-| 提示需要重新登录 | 停止网桥，执行 `auth login`，然后用原目录重启。 |
+| 提示需要重新登录 | 停止网桥，使用原数据目录执行 `auth check` 查看受影响的凭据，再用同一目录执行 `auth login` 并重启。遇到额外安全验证时先按「米家账号」处理。 |
 | 提示数据目录正在使用 | 停止使用该目录的另一个 MiGate 进程，再重试；不要删除锁文件。 |
 | Apple Home 无法发现网桥 | 确认配对窗口仍有效、Mac 未休眠，且网络允许 mDNS 和 Matter UDP 通信。 |
 
@@ -224,129 +227,7 @@ RUST_LOG=info,migate=debug cargo run --locked
 
 相对路径按命令执行目录解析，启动日志会显示实际路径。异常退出后可直接使用原目录重启，无须删除 `instance.lock`。重启会恢复设备配置并重新识别已有设备，再同步目录和实际状态，不继续执行上次未完成的灯光动作，也不重放窗帘、风扇或空调命令。
 
-### 更早的 schema-10 环境温度配置调整
-
-从空调环境温度增强之前的开发版本升级时，若原 `state.db` 的配置尚无 `temperature_bindings`，先停止所有使用该目录的 MiGate 进程，再执行以下操作，之后继续下方 schema-11 升级。若已包含该字段，跳过本节，直接执行 schema-11 升级；下方脚本也会检查该字段。将 `.migate` 改为实际数据目录；需要 Python 3。操作备份数据库、补充空绑定，并为现有空调更新配置版本，保留身份、名称、端点和配对。备份同样包含凭据和配对信息，请妥善保管。
-
-```sh
-(
-  umask 077
-  MIGATE_ADJUST_DIR=".migate" python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-import sqlite3
-
-directory = Path(os.environ["MIGATE_ADJUST_DIR"]).resolve()
-database = directory / "state.db"
-backup_path = directory / "state.db.before-air-conditioner-enhancements"
-if backup_path.exists():
-    raise SystemExit("Backup already exists; check the data directory before continuing")
-
-db = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True)
-try:
-    if db.execute("PRAGMA user_version").fetchone()[0] != 10:
-        raise SystemExit("This operation is only for schema-10 data")
-    row = db.execute("SELECT json FROM bridge_configuration WHERE id = 1").fetchone()
-    if row is None:
-        raise SystemExit("Committed configuration is missing")
-    configuration = json.loads(row[0])
-    if "temperature_bindings" in configuration:
-        raise SystemExit("temperature_bindings already exists; do not repeat this operation")
-    affected = [
-        device for device in configuration["devices"]
-        if device["native"] is not None
-        and any(function["kind"] == "air_conditioner"
-                for function in device["native"]["functions"])
-    ]
-    if affected and (configuration["root_version"] >= 0xffffffff
-                     or any(device["configuration_version"] >= 0xffffffff for device in affected)):
-        raise SystemExit("Configuration version is exhausted")
-    with sqlite3.connect(backup_path) as backup:
-        db.backup(backup)
-    configuration["temperature_bindings"] = []
-    if affected:
-        configuration["root_version"] += 1
-        for device in affected:
-            device["configuration_version"] += 1
-    with db:
-        db.execute(
-            "UPDATE bridge_configuration SET json = ? WHERE id = 1",
-            (json.dumps(configuration, ensure_ascii=False, separators=(",", ":")),),
-        )
-    print(f"Updated configuration for {len(affected)} air-conditioner device(s); backup: {backup_path}")
-finally:
-    db.close()
-PY
-)
-```
-
-此操作只执行一次；若提示字段或备份已存在，先核对是否已经调整，不要清空已有绑定或再次增加版本。仍为 schema-10 的数据库完成此调整后，继续下方升级；全部完成后使用原数据目录启动，再按需绑定温度来源。若需撤销，停止 MiGate 后用备份恢复 `state.db`。
-
-### schema-10 升级到 schema-11
-
-现有 schema-10 开发数据不会自动迁移。先停止所有使用该目录的 MiGate 进程；如需上面的环境温度配置调整，须先完成，再执行以下操作。当前已包含 `temperature_bindings` 的 schema-10 数据无需再次修改 JSON 或配置版本。将 `.migate` 改为实际数据目录，保持指向原目录；需要 Python 3 且其 SQLite 版本至少为 3.37。
-
-脚本只打开已有的 `state.db`，在同一目录创建 `state.db.before-lan-schema-11` 备份，再将独立的设备直连凭据表和 schema 版本一起提交。已有认证、配置 JSON、设备身份、端点、名称、温度绑定、Matter 数据与配对、访问撤销记录均保留。备份包含敏感数据，请与原数据目录一样妥善保管，不要共享或提交。
-
-```sh
-(
-  umask 077
-  MIGATE_UPGRADE_DIR=".migate" python3 - <<'PY'
-from contextlib import closing
-import json
-import os
-from pathlib import Path
-import sqlite3
-
-if sqlite3.sqlite_version_info < (3, 37, 0):
-    raise SystemExit("SQLite 3.37 or newer is required")
-
-directory = Path(os.environ["MIGATE_UPGRADE_DIR"]).resolve()
-database = directory / "state.db"
-backup_path = directory / "state.db.before-lan-schema-11"
-db = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, isolation_level=None)
-try:
-    if db.execute("PRAGMA user_version").fetchone()[0] != 10:
-        raise SystemExit("This operation is only for schema-10 data")
-    row = db.execute("SELECT json FROM bridge_configuration WHERE id = 1").fetchone()
-    if row is None:
-        raise SystemExit("Committed configuration is missing")
-    if "temperature_bindings" not in json.loads(row[0]):
-        raise SystemExit("Run the earlier schema-10 temperature configuration adjustment first")
-
-    backup_fd = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    os.close(backup_fd)
-    with closing(sqlite3.connect(backup_path.as_uri() + "?mode=rw", uri=True)) as backup:
-        db.backup(backup)
-
-    try:
-        db.execute("BEGIN IMMEDIATE")
-        db.execute("""
-            CREATE TABLE xiaomi_lan (
-                did TEXT PRIMARY KEY,
-                uid TEXT NOT NULL,
-                home_id TEXT NOT NULL,
-                model TEXT NOT NULL,
-                address TEXT NOT NULL,
-                token BLOB NOT NULL CHECK (length(token) = 16)
-            ) STRICT
-        """)
-        db.execute("PRAGMA user_version = 11")
-        db.commit()
-    except BaseException:
-        db.rollback()
-        raise
-    print(f"Upgraded schema 10 to 11; backup: {backup_path}")
-finally:
-    db.close()
-PY
-)
-```
-
-成功后使用原数据目录启动。脚本拒绝其他 schema 版本、重复执行及覆盖已有备份；如果中途失败，原库不会完成升级，事务内失败会回滚，已创建的备份会保留，先检查备份和错误原因再处理。需要恢复备份时，停止 MiGate，将当前 `state.db` 及同名 `-wal`、`-shm` 文件（如存在）移至安全位置，再把备份复制为 `state.db` 并确认权限。恢复到 schema 10 后须重新完成升级，才能使用新版。
-
-当前列出的原目录升级步骤适用于 schema-10；其他不受支持的旧格式会被拒绝。若需要全新实例，可停止 MiGate 并选择一个为空或尚不存在的新目录，依次登录和启动。例如：
+若需要全新实例，可停止 MiGate 并选择一个为空或尚不存在的新目录，依次登录和启动。例如：
 
 ```sh
 cargo run --locked -- --data-dir .migate-new auth login

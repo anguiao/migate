@@ -16,7 +16,7 @@ MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（X
 
 有效原生灯组在 Apple Home 中显示为一盏灯。组成员能唯一定位到灯光功能时，仅隐藏该灯光入口，同机其他控制、测量和状态仍可发布；多个灯光无法确定归属时不任意选择或隐藏，可独立成立的原生组功能仍可用。原生能力优先使用组接口；缺少 RGB 时，原生组需已具备开关、亮度和色温，且已确认成员均具备适配后的 RGB 契约，才能从成员功能派生 RGB 并构成扩展彩灯，不要求成员型号相同。派生 RGB 只向发送时已确认开启的成员调色，被跳过的成员不会在开灯后补发；一个成员受理不保证其他成员完成，状态以实际反馈为准。
 
-终端使用 `list` 查询设备品类、功能标识、核心标记、能力、绑定、补丁与识别问题，再用 `on DID FUNCTION` 或 `off DID FUNCTION` 控制具体功能；单功能设备也须指定标识。核心标记只说明用途，可以有多项或没有，不决定控制目标或接入资格。`status DID` 还显示各功能的状态、路径和诊断，包括直连协议或映射、地址、身份确认、候选与恢复状态以及命令实际路径；灯组会说明原生能力与成员派生的来源。中国大陆服务区的 OAuth 令牌、客户端证书与设备直连凭据独立维护。已准备账号可以先运行空网桥，再等待设备接入；云端可能仍依赖物理网关。
+终端使用 `list` 查询设备品类、功能标识、核心标记、能力、绑定、补丁与识别问题，再用 `on DID FUNCTION` 或 `off DID FUNCTION` 控制具体功能；单功能设备也须指定标识。核心标记只说明用途，可以有多项或没有，不决定控制目标或接入资格。`status DID` 还显示各功能的状态、路径和诊断，包括直连协议或映射、地址、身份确认、候选与恢复状态以及命令实际路径；灯组会说明原生能力与成员派生的来源。中国大陆服务区的米家会话、HA OAuth、客户端证书与设备直连凭据独立维护。已准备账号可以先运行空网桥，再等待设备接入；云端可能仍依赖物理网关。
 
 MiGate 在数据目录保存型号、实例 URN 与完整原始 MIoT 描述，以及已提交配置、身份和灯组关系；有效描述暂时没有可发布功能时也会保留，但不创建运行实例，可用 `list` 或 `status DID` 查看识别原因。每次启动会用当前内置规则和补丁重新识别缓存并重新派生灯组，在对外服务前尝试应用结果；正常缓存重算无需访问描述服务。缓存识别失败时，该设备保留上次完整描述与有效配置并显示原因，其他设备仍可更新；取得新描述或下次启动时再识别，不定时重试相同输入。结果等价时不增加配置版本，不影响适配策略的纯元数据变化不重建订阅或重启 Matter 服务，实际绑定、适配策略或发布形状变化按需更新。
 
@@ -31,12 +31,10 @@ cargo run --locked
 
 仓库 Cargo 配置默认使用 `.migate/`；直接运行构建产物时目录规则不同，详见运行指南。
 
-已有 schema-10 开发数据可按[运行指南](docs/running.md#schema-10-升级到-schema-11)停机备份并一次性升级，保留原目录及配对。其他不受支持的旧格式和自愿建立全新实例的操作见[数据目录与重新配对](docs/running.md#数据目录与重新配对)；新目录会建立新的网桥配对身份。
-
 - [运行与 Apple Home 配对指南](docs/running.md)
 - [已知限制与恢复经验](docs/known-limitations.md)
 - [起步方案](docs/specs/2026-09-08-virtual-light-bootstrap/spec.md)
-- [米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md)
+- [统一小米登录与设备云端访问方案](docs/specs/2026-11-04-unified-xiaomi-cloud-access/spec.md)
 - [最小设备模型方案](docs/specs/2026-10-03-minimal-device-model/spec.md)
 - [多设备与生命周期方案](docs/specs/2026-10-04-multi-device-channel-bridge/spec.md)
 - [云端接入与统一选路方案](docs/specs/2026-10-06-cloud-access-routing/spec.md)
@@ -51,7 +49,7 @@ cargo run --locked
 - [空调控制与状态同步方案](docs/specs/2026-10-30-air-conditioner-control/spec.md)
 - [IP 局域网直连与旧 miIO 适配方案](docs/specs/2026-11-01-ip-lan-and-legacy-miio/spec.md)
 
-米家认证协议参考[小米官方 Home Assistant 集成](https://github.com/XiaoMi/ha_xiaomi_home)，使用该集成的 OAuth 应用配置。MiGate 是个人爱好项目，该授权归属于 HA 应用，不代表小米为 MiGate 提供独立授权或官方支持。参考来源与使用前提见[米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md#认证方案与云端依赖)；注明来源不会扩大[上游许可证](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/LICENSE.md)的授权范围。
+每次 `auth login` 使用新的米家二维码完成登录，并自动完成 HA OAuth 授权：米家会话用于设备云端 HTTP，HA OAuth 指小米账号对官方 `Xiaomi Home (Home Assistant Integration)` 应用的授权，用于云端 MQTT 和中枢客户端证书，无需运行 Home Assistant。认证协议参考[小米官方 Home Assistant 集成](https://github.com/XiaoMi/ha_xiaomi_home)，使用该集成的 OAuth 应用配置。MiGate 是个人爱好项目，该授权归属于 HA 应用，不代表小米为 MiGate 提供独立授权或官方支持。参考来源与使用前提见[米家认证方案](docs/specs/2026-09-11-xiaomi-authentication/spec.md#认证方案与云端依赖)；注明来源不会扩大[上游许可证](https://github.com/XiaoMi/ha_xiaomi_home/blob/main/LICENSE.md)的授权范围。
 
 后续继续覆盖开关、插座和其他传感器类别，仅暴露可自然映射为标准 Matter 能力的功能。
 
@@ -67,8 +65,9 @@ cargo run --locked
 | `src/lighting/` | 灯光轨迹、颜色数学、时间推进与原始动作进度。 |
 | `src/matter/` | 显式发布形状、协议命令规划、单位换算、属性投影、版本与报告、配对。 |
 | `src/storage/` | 完整配置的私有编码与事务、独立撤权记录、认证、桥接身份及协议数据存储。 |
-| `src/xiaomi/auth/` | 认证服务、登录、检查与刷新、状态报告。 |
-| `src/xiaomi/cloud/` | HTTP 请求、响应解析、云端目录、OAuth 与 MQTT 通知。 |
+| `src/xiaomi/auth/` | 米家扫码登录、HA OAuth 授权衔接、凭据恢复与分项状态报告。 |
+| `src/xiaomi/mijia/` | 米家设备 HTTP 签名、目录、属性、Action 和旧 miIO RPC 通信。 |
+| `src/xiaomi/cloud/` | HA OAuth、证书接口和云端 MQTT 通知。 |
 | `src/xiaomi/capability/`、`src/xiaomi/catalog/` | MIoT 能力解析与当前本地家庭的设备描述加载。 |
 | `src/xiaomi/discovery/` | mDNS 浏览、公告解析与合并、网关路由选择。 |
 | `src/xiaomi/lan/` | IP 直连握手、加密通信、发现及请求关联。 |
