@@ -314,12 +314,32 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
         {
             let mut state = peer.state.borrow_mut();
             state.omit.insert("multi".into());
+            state.sub_timeout.insert(("multi".into(), 3, 1));
             state.read_fail.insert(("one".into(), 2, 1));
         }
         let control = &c;
         c.peer(peer, |peer| async move {
             subscriptions_ready(control, &["one"]).await;
+            let one = control.context.live.borrow().devices["one"]
+                .admitted
+                .clone()
+                .unwrap();
+            until(|| {
+                matches!(
+                    one.function_observer("outlet:2"),
+                    Some(super::super::notifications::NotificationSource::Local(_))
+                )
+            })
+            .await;
             advance_to(&control.clock, Duration::from_millis(200)).await;
+            until(|| {
+                one.refresh.borrow().snapshot().pending.iter().any(|read| {
+                    read.id == "outlet:2"
+                        && read.attempts == 1
+                        && read.ready_at == Duration::from_millis(3200)
+                })
+            })
+            .await;
             wait_deadline(&control.clock, 3200).await;
 
             control.clock.advance(Duration::from_millis(500));
@@ -329,6 +349,32 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
             until(|| control.context.local_candidate("multi", false).is_ok()).await;
             wait_deadline(&control.clock, 900).await;
             advance_to(&control.clock, Duration::from_millis(710)).await;
+            // The route can become usable before its subscriptions activate.
+            // Keep the measured reads after activation, even when the ACK is delayed.
+            until(|| !peer.state.borrow().held_subs.is_empty()).await;
+            let sub = {
+                let mut state = peer.state.borrow_mut();
+                state.sub_timeout.remove(&("multi".into(), 3, 1));
+                state.held_subs.remove(0)
+            };
+            peer.send(Packet::SubAck(SubAck::new(
+                sub.pkid,
+                vec![SubscribeReasonCode::QoS2],
+            )));
+            let work = control.context.live.borrow().devices["multi"]
+                .admitted
+                .clone()
+                .unwrap();
+            until(|| {
+                work.test_local_subscribed_len() == work.bindings().len()
+                    && ["outlet:3", "outlet:4", "outlet:9"].iter().all(|id| {
+                        matches!(
+                            work.function_observer(id),
+                            Some(super::super::notifications::NotificationSource::Local(_))
+                        )
+                    })
+            })
+            .await;
             control.clock.advance(Duration::from_millis(189));
             settle_wire().await;
             assert_eq!(peer.count("get", "multi", 0), 0);
