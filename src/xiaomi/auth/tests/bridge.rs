@@ -16,7 +16,8 @@ fn bridge_refresh_saves_tokens_using_the_network_completion_clock_without_other_
     let auth = AuthService::new(
         store.xiaomi(),
         CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-    );
+    )
+    .unwrap();
     let refreshed =
         block_on(auth.refresh_bridge_tokens(&original, || clock.load(Ordering::SeqCst))).unwrap();
     assert_eq!(
@@ -92,7 +93,8 @@ fn bridge_helpers_return_a_single_unauthorized_response_without_refresh_or_retry
         let auth = AuthService::new(
             store.xiaomi(),
             CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-        );
+        )
+        .unwrap();
         let error = if certificate {
             block_on(auth.renew_bridge_certificate(&original, || NOW)).unwrap_err()
         } else {
@@ -128,7 +130,8 @@ fn a_late_bridge_certificate_preserves_tokens_saved_while_its_response_was_held(
     let auth = AuthService::new(
         store.xiaomi(),
         CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-    );
+    )
+    .unwrap();
     let fresh = TokenSet {
         access_token: "fresh-access".into(),
         refresh_token: "fresh-refresh".into(),
@@ -193,7 +196,8 @@ fn a_late_refresh_rejection_does_not_stop_new_credentials() {
         let auth = AuthService::new(
             store.xiaomi(),
             CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-        );
+        )
+        .unwrap();
         let fresh = if same_values {
             original
                 .ha
@@ -247,7 +251,8 @@ fn a_late_refresh_success_does_not_replace_new_credentials() {
         let auth = AuthService::new(
             store.xiaomi(),
             CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-        );
+        )
+        .unwrap();
         let fresh = if same_values {
             original
                 .ha
@@ -312,7 +317,8 @@ fn invalid_bridge_certificates_leave_saved_credentials_untouched() {
         let auth = AuthService::new(
             store.xiaomi(),
             CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-        );
+        )
+        .unwrap();
         let renewed = block_on(auth.renew_bridge_certificate(&original, || NOW)).unwrap();
         assert_eq!(
             renewed.update,
@@ -351,7 +357,8 @@ fn bridge_certificate_validity_is_checked_when_the_network_operation_completes()
     let auth = AuthService::new(
         store.xiaomi(),
         CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-    );
+    )
+    .unwrap();
     let renewed =
         block_on(auth.renew_bridge_certificate(&original, || clock.load(Ordering::SeqCst)))
             .unwrap();

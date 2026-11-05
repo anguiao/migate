@@ -1,7 +1,158 @@
 use super::*;
 
 #[test]
-fn check_reports_saved_certificate_defects_alongside_ha_result() {
+fn missing_mijia_session_does_not_make_ha_authorization_sufficient() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
+    record.mijia = None;
+    store.xiaomi().replace(&record).unwrap();
+    let (auth, requests) = service(
+        &store,
+        vec![MockResponse::json(200, &home_body(Some("uid"), &[]))],
+    );
+
+    let report = block_on(auth.check()).unwrap();
+
+    assert!(
+        !report.is_success(),
+        "missing Mijia session must fail check"
+    );
+    assert_eq!(requests.try_iter().count(), 1, "HA is still checked");
+}
+
+#[test]
+fn successful_certificate_renewal_does_not_hide_failed_due_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let original = valid_record("uid", "old", NOW, NOW + 60);
+    store.xiaomi().replace(&original).unwrap();
+    let (base, requests) = dynamic_mock_server(2, |request| {
+        if request.target.contains("get_token") {
+            MockResponse::json(503, "temporary failure")
+        } else {
+            certificate_response(request)
+        }
+    });
+    let auth = AuthService::with_clock(
+        store.xiaomi(),
+        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        now,
+    );
+    let report = block_on(auth.check()).unwrap();
+    assert!(!report.is_success());
+    assert!(matches!(report.mijia, AuthenticationState::Authenticated));
+    assert!(matches!(
+        report.ha,
+        AuthenticationState::Unavailable(FailureReason::Cloud(_))
+    ));
+    assert_eq!(report.certificate_update, CertificateUpdate::Updated);
+    let saved = store.xiaomi().load().unwrap().unwrap();
+    assert!(!saved.ha.unwrap().stopped);
+    assert_ne!(
+        saved.hub.unwrap().certificate_pem,
+        original.hub.unwrap().certificate_pem
+    );
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.target.ends_with("gethome"))
+    );
+}
+
+#[test]
+fn failed_refresh_followed_by_old_certificate_token_rejection_does_not_stop_ha() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let original = valid_record("uid", "old", NOW, NOW + 60);
+    store.xiaomi().replace(&original).unwrap();
+    let (auth, requests) = service(
+        &store,
+        vec![
+            MockResponse::json(503, "refresh unavailable"),
+            MockResponse::json(401, "old token rejected"),
+        ],
+    );
+    let report = block_on(auth.check()).unwrap();
+    assert!(!report.is_success());
+    assert!(matches!(report.mijia, AuthenticationState::Authenticated));
+    assert!(matches!(
+        report.ha,
+        AuthenticationState::Unavailable(FailureReason::Cloud(_))
+    ));
+    assert!(matches!(
+        report.certificate_update,
+        CertificateUpdate::Failed(_)
+    ));
+    assert!(!store.xiaomi().load().unwrap().unwrap().ha.unwrap().stopped);
+    assert_eq!(requests.try_iter().count(), 2);
+}
+
+#[test]
+fn late_home_rejection_cannot_stop_a_new_grant_with_identical_token_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let original = valid_record("uid", "same-access", NOW + 500, NOW + 1_000_000);
+    store.xiaomi().replace(&original).unwrap();
+    let (release, gate) = flume::bounded(1);
+    let (base, requests) = dynamic_mock_server(3, move |request| {
+        if request.target.ends_with("gethome") {
+            MockResponse::json(401, "late rejection").gated(gate.clone())
+        } else {
+            MockResponse::json(401, "refresh rejected")
+        }
+    });
+    let auth = AuthService::with_clock(
+        store.xiaomi(),
+        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        now,
+    );
+    block_on(async {
+        let (result, ()) = future::zip(auth.check(), async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Ok(request) = requests.try_recv() {
+                    assert!(request.target.ends_with("gethome"));
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                async_io::Timer::after(Duration::from_millis(1)).await;
+            }
+            let credentials = AccountCredentials::new(
+                "uid".into(),
+                "new-cuser".into(),
+                "new-pass".into(),
+                AccountClientIdentity::new("device".into(), "agent".into()).unwrap(),
+            )
+            .unwrap();
+            store
+                .xiaomi()
+                .commit_login(
+                    &credentials,
+                    original.mijia.as_ref().unwrap(),
+                    UUID,
+                    original
+                        .ha
+                        .as_ref()
+                        .unwrap()
+                        .authorization
+                        .as_ref()
+                        .unwrap(),
+                )
+                .unwrap();
+            release.send(()).unwrap();
+        })
+        .await;
+        assert!(matches!(result, Err(AuthError::Missing(_))));
+    });
+    assert!(!store.xiaomi().load().unwrap().unwrap().ha.unwrap().stopped);
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn check_reports_certificate_request_errors_without_hiding_other_ha_results() {
     for (certificate, expected) in [
         (None, FailureReason::MissingCertificate),
         (
@@ -16,79 +167,82 @@ fn check_reports_saved_certificate_defects_alongside_ha_result() {
             record.hub.as_mut().unwrap().certificate_pem = certificate.clone();
             if ha_state == "missing" {
                 record.ha.as_mut().unwrap().authorization = None;
-            } else if ha_state == "stopped" {
+            }
+            if ha_state == "stopped" {
                 record.ha.as_mut().unwrap().stopped = true;
             }
             store.xiaomi().replace(&record).unwrap();
-            let response = if ha_state == "network" {
-                MockResponse::json(503, "unavailable")
-            } else if ha_state == "mismatch" {
-                MockResponse::json(200, &home_body(Some("other-uid"), &[]))
-            } else {
-                MockResponse::json(200, &home_body(Some("uid"), &[]))
+            let home = match ha_state {
+                "network" => MockResponse::json(503, "unavailable"),
+                "mismatch" => MockResponse::json(200, &home_body(Some("other"), &[])),
+                _ => MockResponse::json(200, &home_body(Some("uid"), &[])),
             };
-            let (auth, requests) = service(&store, vec![response]);
+            let (auth, requests) = service(
+                &store,
+                vec![home, MockResponse::json(503, "certificate unavailable")],
+            );
             let report = block_on(auth.check()).unwrap();
             assert_eq!(report.certificate, None);
-            assert_eq!(
-                report.certificate_update,
-                CertificateUpdate::Failed(expected.clone())
-            );
+            if matches!(ha_state, "ok" | "network") {
+                assert!(matches!(
+                    report.certificate_update,
+                    CertificateUpdate::Failed(FailureReason::Cloud(_))
+                ));
+            } else {
+                assert_eq!(
+                    report.certificate_update,
+                    CertificateUpdate::Failed(expected.clone())
+                );
+            }
             match ha_state {
-                "ok" => assert!(matches!(
-                    report.authentication,
-                    AuthenticationState::Authenticated
-                )),
+                "ok" => assert!(matches!(report.ha, AuthenticationState::Authenticated)),
                 "missing" => assert!(matches!(
-                    report.authentication,
-                    AuthenticationState::Unavailable(FailureReason::MissingHaAuthorization)
+                    report.ha,
+                    AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
                 )),
                 "stopped" => assert!(matches!(
-                    report.authentication,
+                    report.ha,
                     AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
                 )),
                 "network" => assert!(matches!(
-                    report.authentication,
+                    report.ha,
                     AuthenticationState::Unavailable(FailureReason::Cloud(_))
                 )),
                 "mismatch" => assert!(matches!(
-                    report.authentication,
+                    report.ha,
                     AuthenticationState::Unavailable(FailureReason::AccountIdentityMismatch)
                 )),
                 _ => unreachable!(),
             }
-            assert_eq!(
-                requests.try_iter().count(),
-                usize::from(!matches!(ha_state, "missing" | "stopped"))
-            );
+            let count = match ha_state {
+                "missing" | "stopped" => 0,
+                "mismatch" => 1,
+                _ => 2,
+            };
+            assert_eq!(requests.try_iter().count(), count);
         }
     }
 }
 
 #[test]
-fn independent_check_keeps_its_cloud_device_probe_without_a_local_gateway() {
+fn independent_check_uses_ha_home_only_and_not_ha_device_directory() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     store
         .xiaomi()
-        .replace(&valid_record(
-            "uid",
-            "access",
-            NOW + 500,
-            NOW + 10 * 24 * 60 * 60,
-        ))
+        .replace(&valid_record("uid", "access", NOW + 500, NOW + 1_000_000))
         .unwrap();
     let (auth, requests) = service(
         &store,
-        vec![
-            MockResponse::json(200, &home_body(Some("uid"), &["target"])),
-            MockResponse::json(503, "device read unavailable"),
-        ],
+        vec![MockResponse::json(
+            200,
+            &home_body(Some("uid"), &["target"]),
+        )],
     );
-    assert!(!block_on(auth.check()).unwrap().is_success());
-    let requests = requests.try_iter().collect::<Vec<_>>();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1].target.ends_with("device_list_page"));
+    assert!(block_on(auth.check()).unwrap().is_success());
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].target.ends_with("gethome"));
 }
 
 #[test]
@@ -97,10 +251,7 @@ fn check_without_credentials_is_not_signed_in_and_makes_no_request() {
     let store = Store::open(dir.path()).unwrap();
     let (auth, requests) = service(&store, vec![]);
     let report = block_on(auth.check()).unwrap();
-    assert!(matches!(
-        report.authentication,
-        AuthenticationState::NotSignedIn
-    ));
+    assert!(matches!(report.ha, AuthenticationState::NotSignedIn));
     assert_eq!(report.certificate, None);
     assert!(!report.is_success());
     assert!(requests.try_recv().is_err());
@@ -114,7 +265,7 @@ fn stopped_refresh_survives_reopening_and_check_does_not_retry() {
     store.xiaomi().replace(&record).unwrap();
     let (auth, requests) = service(&store, vec![MockResponse::json(401, "denied")]);
     assert!(matches!(
-        block_on(auth.check()).unwrap().authentication,
+        block_on(auth.check()).unwrap().ha,
         AuthenticationState::SignInRequired(_)
     ));
     assert_eq!(requests.try_iter().count(), 1);
@@ -125,10 +276,7 @@ fn stopped_refresh_survives_reopening_and_check_does_not_retry() {
     let (auth, requests) = service(&reopened, vec![]);
     for _ in 0..2 {
         let report = block_on(auth.check()).unwrap();
-        assert!(matches!(
-            report.authentication,
-            AuthenticationState::SignInRequired(_)
-        ));
+        assert!(matches!(report.ha, AuthenticationState::SignInRequired(_)));
         assert_eq!(report.certificate.unwrap().not_after, NOW + 1_000_000);
     }
     assert!(requests.try_recv().is_err());
@@ -150,19 +298,13 @@ fn local_status_reports_checking_with_real_certificate_dates_without_http() {
     let store = Store::open(dir.path()).unwrap();
     let (auth, requests) = service(&store, vec![]);
     let empty = auth.local_status().unwrap();
-    assert!(matches!(
-        empty.authentication,
-        AuthenticationState::NotSignedIn
-    ));
+    assert!(matches!(empty.ha, AuthenticationState::NotSignedIn));
     assert_eq!(empty.certificate, None);
 
     let record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
     store.xiaomi().replace(&record).unwrap();
     let status = auth.local_status().unwrap();
-    assert!(matches!(
-        status.authentication,
-        AuthenticationState::Checking
-    ));
+    assert!(matches!(status.ha, AuthenticationState::Checking));
     assert_eq!(
         status.certificate,
         Some(CertificateValidity {
@@ -174,54 +316,7 @@ fn local_status_reports_checking_with_real_certificate_dates_without_http() {
 }
 
 #[test]
-fn empty_devices_skip_request_but_missing_uid_fails_with_specific_reason() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let (base, requests) = dynamic_mock_server(3, |request| {
-        if request.target.contains("get_token") {
-            MockResponse::json(200, &token_body("a", "r"))
-        } else if request.target.ends_with("gethome") {
-            MockResponse::json(200, &home_body(Some("uid"), &[]))
-        } else {
-            certificate_response(request)
-        }
-    });
-    let auth = AuthService::with_clock(
-        store.xiaomi(),
-        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-        now,
-    );
-    let attempt = auth.begin_login().unwrap();
-    let input = callback(&attempt);
-    assert!(
-        block_on(auth.complete_login(attempt, &input))
-            .unwrap()
-            .is_success()
-    );
-    assert!(
-        requests
-            .try_iter()
-            .all(|request| !request.target.ends_with("device_list_page"))
-    );
-
-    let (auth, _) = service(
-        &store,
-        vec![
-            MockResponse::json(200, &token_body("a", "r")),
-            MockResponse::json(200, &home_body(None, &[])),
-        ],
-    );
-    let attempt = auth.begin_login().unwrap();
-    let input = callback(&attempt);
-    let report = block_on(auth.complete_login(attempt, &input)).unwrap();
-    assert!(matches!(
-        report.certificate_update,
-        CertificateUpdate::Failed(FailureReason::CannotDetermineAccountIdentity)
-    ));
-}
-
-#[test]
-fn check_refreshes_at_deadline_and_retries_only_failed_device_after_401() {
+fn proactive_refresh_followed_by_rejected_home_stops_the_new_generation() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     store
@@ -232,58 +327,25 @@ fn check_refreshes_at_deadline_and_retries_only_failed_device_after_401() {
         &store,
         vec![
             MockResponse::json(200, &token_body("fresh", "rotated")),
-            MockResponse::json(200, &home_body(Some("uid"), &["did"])),
             MockResponse::json(401, "denied"),
         ],
     );
     let report = block_on(auth.check()).unwrap();
-    assert!(matches!(
-        report.authentication,
-        AuthenticationState::SignInRequired(_)
-    ));
+    assert!(matches!(report.ha, AuthenticationState::SignInRequired(_)));
+    let saved = store.xiaomi().load().unwrap().unwrap();
+    assert!(saved.ha.as_ref().unwrap().stopped);
     assert_eq!(
-        store
-            .xiaomi()
-            .load()
-            .unwrap()
-            .unwrap()
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .access_token,
+        saved.ha.unwrap().authorization.unwrap().tokens.access_token,
         "fresh"
     );
-    let paths = requests.try_iter().map(|r| r.target).collect::<Vec<_>>();
-    assert_eq!(paths.iter().filter(|p| p.ends_with("gethome")).count(), 1);
-
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    store
-        .xiaomi()
-        .replace(&valid_record("uid", "old", NOW + 500, NOW + 1_000_000))
-        .unwrap();
-    let (auth, requests) = service(
-        &store,
-        vec![
-            MockResponse::json(200, &home_body(Some("uid"), &["did"])),
-            MockResponse::json(401, "denied"),
-            MockResponse::json(200, &token_body("fresh", "rotated")),
-            MockResponse::json(200, devices_body()),
-        ],
-    );
-    assert!(block_on(auth.check()).unwrap().is_success());
-    let paths = requests.try_iter().map(|r| r.target).collect::<Vec<_>>();
-    assert_eq!(paths.iter().filter(|p| p.ends_with("gethome")).count(), 1);
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 2);
     assert_eq!(
-        paths
+        requests
             .iter()
-            .filter(|p| p.ends_with("device_list_page"))
+            .filter(|r| r.target.ends_with("gethome"))
             .count(),
-        2
+        1
     );
 }
 
@@ -321,117 +383,87 @@ fn home_401_refreshes_once_and_retries_home_with_new_token() {
 }
 
 #[test]
-fn home_or_device_refresh_exhausts_the_certificate_refresh_allowance() {
-    for rejected_home in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        let original = valid_record("uid", "old", NOW + 500, NOW + 60);
-        store.xiaomi().replace(&original).unwrap();
-        let mut responses = Vec::new();
-        if !rejected_home {
-            responses.push(MockResponse::json(200, &home_body(Some("uid"), &["did"])));
-        }
-        responses.extend([
-            MockResponse::json(401, "access denied"),
+fn home_refresh_exhausts_the_certificate_refresh_allowance() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let original = valid_record("uid", "old", NOW + 500, NOW + 60);
+    store.xiaomi().replace(&original).unwrap();
+    let (auth, requests) = service(
+        &store,
+        vec![
+            MockResponse::json(401, "home denied"),
             MockResponse::json(200, &token_body("fresh", "rotated")),
-        ]);
-        if rejected_home {
-            responses.push(MockResponse::json(200, &home_body(Some("uid"), &["did"])));
-        }
-        responses.extend([
-            MockResponse::json(200, devices_body()),
+            MockResponse::json(200, &home_body(Some("uid"), &[])),
             MockResponse::json(401, "certificate denied"),
-        ]);
-        let expected_requests = responses.len();
-        let (auth, requests) = service(&store, responses);
-        let report = block_on(auth.check()).unwrap();
-        assert!(matches!(
-            report.authentication,
-            AuthenticationState::SignInRequired(_)
-        ));
-        assert!(matches!(
-            report.certificate_update,
-            CertificateUpdate::Failed(_)
-        ));
-        let saved = store.xiaomi().load().unwrap().unwrap();
-        assert_eq!(
-            saved
-                .ha
-                .as_ref()
-                .unwrap()
-                .authorization
-                .as_ref()
-                .unwrap()
-                .tokens
-                .refresh_token,
-            "rotated"
-        );
-        assert_eq!(
-            saved.hub.as_ref().unwrap().certificate_pem,
-            original.hub.as_ref().unwrap().certificate_pem
-        );
-        let requests = requests.try_iter().collect::<Vec<_>>();
-        assert_eq!(requests.len(), expected_requests);
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.target.contains("get_token"))
-                .count(),
-            1
-        );
-        assert!(
-            requests
-                .last()
-                .unwrap()
-                .headers
-                .to_ascii_lowercase()
-                .contains("authorization: bearerfresh")
-        );
-    }
+        ],
+    );
+    let report = block_on(auth.check()).unwrap();
+    assert!(matches!(report.ha, AuthenticationState::SignInRequired(_)));
+    assert!(matches!(
+        report.certificate_update,
+        CertificateUpdate::Failed(_)
+    ));
+    let saved = store.xiaomi().load().unwrap().unwrap();
+    assert!(saved.ha.as_ref().unwrap().stopped);
+    assert_eq!(
+        saved
+            .ha
+            .unwrap()
+            .authorization
+            .unwrap()
+            .tokens
+            .refresh_token,
+        "rotated"
+    );
+    assert_eq!(
+        saved.hub.unwrap().certificate_pem,
+        original.hub.unwrap().certificate_pem
+    );
+    assert_eq!(
+        requests
+            .try_iter()
+            .filter(|r| r.target.contains("get_token"))
+            .count(),
+        1
+    );
 }
 
 #[test]
-fn refresh_is_saved_before_later_device_or_certificate_failure() {
-    for renewal in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        let expiry = if renewal { NOW + 60 } else { NOW + 1_000_000 };
+fn refresh_is_saved_before_later_certificate_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .xiaomi()
+        .replace(&valid_record("uid", "old", NOW, NOW + 60))
+        .unwrap();
+    let (auth, _) = service(
+        &store,
+        vec![
+            MockResponse::json(200, &token_body("fresh", "rotated")),
+            MockResponse::json(200, &home_body(Some("uid"), &[])),
+            MockResponse::json(403, "forbidden"),
+        ],
+    );
+    let report = block_on(auth.check()).unwrap();
+    assert!(!report.is_success());
+    assert!(matches!(
+        report.certificate_update,
+        CertificateUpdate::Failed(_)
+    ));
+    assert_eq!(
         store
             .xiaomi()
-            .replace(&valid_record("uid", "old", NOW, expiry))
-            .unwrap();
-        let mut responses = vec![
-            MockResponse::json(200, &token_body("fresh", "rotated")),
-            MockResponse::json(
-                200,
-                &home_body(Some("uid"), if renewal { &[] } else { &["did"] }),
-            ),
-        ];
-        responses.push(if renewal {
-            MockResponse::json(403, "forbidden")
-        } else {
-            MockResponse::json(500, "failed")
-        });
-        let (auth, _) = service(&store, responses);
-        let report = block_on(auth.check()).unwrap();
-        assert!(!report.is_success());
-        assert_eq!(
-            store
-                .xiaomi()
-                .load()
-                .unwrap()
-                .unwrap()
-                .ha
-                .as_ref()
-                .unwrap()
-                .authorization
-                .as_ref()
-                .unwrap()
-                .tokens
-                .refresh_token,
-            "rotated"
-        );
-    }
+            .load()
+            .unwrap()
+            .unwrap()
+            .ha
+            .unwrap()
+            .authorization
+            .unwrap()
+            .tokens
+            .refresh_token,
+        "rotated"
+    );
 }
 
 #[test]
@@ -448,13 +480,7 @@ fn refresh_403_and_business_failures_are_unavailable_not_sign_in_required() {
             .unwrap();
         let (auth, _) = service(&store, vec![response]);
         let report = block_on(auth.check()).unwrap();
-        assert!(matches!(
-            report.authentication,
-            AuthenticationState::Unavailable(_)
-        ));
-        assert!(!matches!(
-            report.authentication,
-            AuthenticationState::SignInRequired(_)
-        ));
+        assert!(matches!(report.ha, AuthenticationState::Unavailable(_)));
+        assert!(!matches!(report.ha, AuthenticationState::SignInRequired(_)));
     }
 }

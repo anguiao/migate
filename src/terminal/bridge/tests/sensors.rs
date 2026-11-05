@@ -49,6 +49,7 @@ fn status_shows_independent_values_and_cannot_control_a_sensor() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .unwrap()
             .local_status()
             .unwrap();
         let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
@@ -124,6 +125,7 @@ fn status_shows_shared_battery_value_and_separate_times() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .unwrap()
             .local_status()
             .unwrap();
         let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
@@ -161,6 +163,7 @@ fn co2_terminal_status_shows_native_ppm_and_independent_times() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .unwrap()
             .local_status()
             .unwrap();
         let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
@@ -207,6 +210,7 @@ fn illuminance_terminal_status_keeps_native_lux_and_independent_times() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .unwrap()
             .local_status()
             .unwrap();
         let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());

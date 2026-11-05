@@ -17,12 +17,7 @@ fn cached_local_control_survives_temporary_cloud_detail_failures() {
                     .values()
                     .all(|slot| slot.loading.is_none())
                     && matches!(
-                        control
-                            .context
-                            .status
-                            .borrow()
-                            .authentication
-                            .authentication,
+                        control.context.status.borrow().auth.ha,
                         crate::xiaomi::auth::AuthenticationState::Authenticated
                     )
                     && function(&control.context.registry, "one", "outlet:2")

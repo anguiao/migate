@@ -2,9 +2,10 @@ use super::format_report;
 use crate::{
     RuntimeError,
     storage::XiaomiStore,
-    xiaomi::auth::{AuthReport, AuthService},
+    xiaomi::auth::{AccountErrorKind, AuthError, AuthReport, AuthService},
 };
-use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt};
+use futures_lite::io::AsyncWriteExt;
+use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 use std::path::Path;
 
 pub fn logout(store: &XiaomiStore, mut output: impl std::io::Write) -> Result<(), RuntimeError> {
@@ -17,26 +18,99 @@ pub async fn login(
     service: &AuthService,
     executable: &Path,
     data_dir: &Path,
-    mut input: impl futures_lite::io::AsyncBufRead + Unpin,
     mut output: impl futures_lite::io::AsyncWrite + Unpin,
 ) -> Result<AuthReport, RuntimeError> {
-    let attempt = service.begin_login()?;
-    let prompt = format!(
-        "Authorization URL:\n{}\nOpen this URL in a browser and authorize the HA application.\nThe final homeassistant.local page may be unreachable.\nPaste the complete address-bar URL containing code and state:\n",
-        attempt.authorization().authorization_url()
-    );
-    output.write_all(prompt.as_bytes()).await?;
+    output.write_all(b"This login obtains a new Mijia session for device HTTP and HA OAuth for cloud MQTT and the gateway certificate.\n").await?;
     output.flush().await?;
-    let mut callback = String::new();
-    if input.read_line(&mut callback).await? == 0 {
-        return Err("Login cancelled before a callback URL was received".into());
+    let attempt = match service.begin_login().await {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            report_error(
+                &mut output,
+                service,
+                executable,
+                data_dir,
+                "QR request",
+                &error,
+            )
+            .await?;
+            return Err(error.into());
+        }
+    };
+    let mut scratch = [0; 16384];
+    let mut buffer = [0; 16384];
+    let qr = match QrCode::encode_text(
+        attempt.login_url(),
+        &mut scratch,
+        &mut buffer,
+        QrCodeEcc::Medium,
+        Version::MIN,
+        Version::MAX,
+        None,
+        false,
+    ) {
+        Ok(qr) => qr,
+        Err(_) => {
+            output
+                .write_all(b"Login failed during QR display: payload is too long.\n")
+                .await?;
+            write_report(&mut output, &service.local_status()?, executable, data_dir).await?;
+            return Err("Cannot render login QR code: payload is too long".into());
+        }
+    };
+    let mut text = String::from("\x1b[97;40m");
+    for y in (-4..qr.size() + 4).step_by(2) {
+        for x in -4..qr.size() + 4 {
+            let top = !qr.get_module(x, y);
+            let bottom = !qr.get_module(x, y + 1);
+            text.push(match (top, bottom) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
+        }
+        text.push('\n');
     }
-    let report = service.complete_login(attempt, callback.trim()).await?;
+    text.push_str("\x1b[0m");
+    let seconds = attempt.remaining().as_secs();
+    output.write_all(format!("Scan this QR code with the Xiaomi app (valid for up to {seconds} seconds):\n{text}Waiting for scan confirmation...\n").as_bytes()).await?;
+    output.flush().await?;
+    let report = match service.complete_login(attempt).await {
+        Ok(report) => report,
+        Err(error) => {
+            let (stage, detail) = match &error {
+                AuthError::LoginStep { stage, source } => (*stage, source.as_ref()),
+                _ => ("credential or certificate preparation", &error),
+            };
+            report_error(&mut output, service, executable, data_dir, stage, detail).await?;
+            return Err(error.into());
+        }
+    };
     write_report(&mut output, &report, executable, data_dir).await?;
     if !report.is_success() {
         return Err("Xiaomi login did not complete successfully".into());
     }
     Ok(report)
+}
+
+async fn report_error(
+    output: &mut (impl futures_lite::io::AsyncWrite + Unpin),
+    service: &AuthService,
+    executable: &Path,
+    data_dir: &Path,
+    stage: &str,
+    error: &AuthError,
+) -> Result<(), RuntimeError> {
+    output
+        .write_all(format!("Login failed during {stage}: {error}.\n").as_bytes())
+        .await?;
+    if matches!(error, AuthError::Account(error) if error.kind() == AccountErrorKind::VerificationRequired)
+    {
+        output.write_all(b"Complete the requested verification at https://www.mi.com/ on a phone or computer, preferably on the same network, then run auth login again. This may not prevent another verification request.\n").await?;
+    }
+    write_report(output, &service.local_status()?, executable, data_dir).await?;
+    Ok(())
 }
 
 pub async fn check(
@@ -51,6 +125,16 @@ pub async fn check(
         return Err("Xiaomi authentication check failed".into());
     }
     Ok(report)
+}
+
+pub async fn report_local_status(
+    service: &AuthService,
+    executable: &Path,
+    data_dir: &Path,
+    mut output: impl futures_lite::io::AsyncWrite + Unpin,
+) -> Result<(), RuntimeError> {
+    write_report(&mut output, &service.local_status()?, executable, data_dir).await?;
+    Ok(())
 }
 
 async fn write_report(

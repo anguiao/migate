@@ -112,6 +112,19 @@ impl MijiaClient {
         Self::build(MIJIA_BASE_URL, READ_TIMEOUT)
     }
 
+    #[cfg(test)]
+    pub(in crate::xiaomi) fn for_test(base: &str, timeout: Duration) -> Self {
+        assert_eq!(Url::parse(base).unwrap().host_str(), Some("127.0.0.1"));
+        let mut client = Self::build(base, timeout).unwrap();
+        client.client = HttpClient::builder()
+            .timeout(timeout)
+            .redirect_policy(RedirectPolicy::None)
+            .proxy(None)
+            .build()
+            .unwrap();
+        client
+    }
+
     fn build(base_url: &str, timeout: Duration) -> Result<Self, CloudError> {
         let operation = "configure Mijia client";
         let url = Url::parse(base_url).map_err(|_| CloudError::input(operation))?;

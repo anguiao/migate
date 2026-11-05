@@ -14,14 +14,6 @@ const SECURITY: &str = "c2VjdXJpdHk=";
 const PASS: &str = "pass-secret";
 const SERVICE: &str = "service-secret";
 
-impl AccountClient {
-    fn for_test(base: &str, timeout: Duration) -> Self {
-        Self {
-            timeout,
-            test_port: Some(Url::parse(base).unwrap().port().unwrap()),
-        }
-    }
-}
 fn identity() -> AccountClientIdentity {
     AccountClientIdentity::new(DEVICE_ID.into(), UA.into()).unwrap()
 }

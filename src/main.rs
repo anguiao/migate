@@ -9,12 +9,7 @@ use migate::{
     config::{AuthCommand, Command, Config},
     storage::{InstanceLock, Store, XiaomiStore},
     terminal::{self, AuthStatus},
-    xiaomi::{
-        adapter::XiaomiAdapter,
-        auth::{AuthService, AuthenticationState},
-        cloud::CloudClient,
-        discovery::Discovery,
-    },
+    xiaomi::{adapter::XiaomiAdapter, auth::AuthService, cloud::CloudClient, discovery::Discovery},
 };
 
 fn main() -> ExitCode {
@@ -65,36 +60,40 @@ fn run_auth(
     if command == AuthCommand::Logout {
         return terminal::auth::logout(&store, std::io::stdout().lock());
     }
-    let auth = AuthService::new(store, CloudClient::new()?);
+    let auth = AuthService::new(store, CloudClient::new()?)?;
     future::block_on(async {
-        let cancelled = async {
-            let signal = shutdown_signal().await?;
-            let message = match command {
-                AuthCommand::Login => format!("Login cancelled by {signal}"),
-                AuthCommand::Check => format!("Authentication check cancelled by {signal}"),
-                AuthCommand::Logout => unreachable!(),
-            };
-            Err::<(), RuntimeError>(message.into())
-        };
+        let cancelled = async { shutdown_signal().await.map(Some) };
         let operation = async {
             let output = blocking::Unblock::new(std::io::stdout());
             match command {
-                AuthCommand::Login => terminal::auth::login(
-                    &auth,
-                    executable,
-                    data_dir,
-                    BufReader::new(blocking::Unblock::new(std::io::stdin())),
-                    output,
-                )
-                .await
-                .map(|_| ()),
+                AuthCommand::Login => terminal::auth::login(&auth, executable, data_dir, output)
+                    .await
+                    .map(|_| ()),
                 AuthCommand::Check => terminal::auth::check(&auth, executable, data_dir, output)
                     .await
                     .map(|_| ()),
                 AuthCommand::Logout => unreachable!(),
-            }
+            }?;
+            Ok::<Option<&'static str>, RuntimeError>(None)
         };
-        future::or(cancelled, operation).await
+        let Some(signal) = future::or(cancelled, operation).await? else {
+            return Ok(());
+        };
+        let message = match command {
+            AuthCommand::Login => {
+                terminal::auth::report_local_status(
+                    &auth,
+                    executable,
+                    data_dir,
+                    blocking::Unblock::new(std::io::stdout()),
+                )
+                .await?;
+                format!("Login cancelled by {signal}")
+            }
+            AuthCommand::Check => format!("Authentication check cancelled by {signal}"),
+            AuthCommand::Logout => unreachable!(),
+        };
+        Err(message.into())
     })
 }
 
@@ -106,9 +105,9 @@ fn run_bridge(
     matter_port: u16,
 ) -> Result<(), RuntimeError> {
     let cloud = CloudClient::new()?;
-    let auth = AuthService::new(store.xiaomi(), cloud.clone());
+    let auth = AuthService::new(store.xiaomi(), cloud.clone())?;
     let report = auth.local_status()?;
-    if matches!(report.authentication, AuthenticationState::NotSignedIn) {
+    if report.account.is_none() {
         return Err(format!(
             "Xiaomi sign-in is required. Sign in with:\n  {}",
             terminal::login_command(&executable, &data_dir)

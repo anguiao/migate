@@ -1,9 +1,13 @@
-use super::{AuthError, AuthReport, AuthenticationState, CertificateUpdate, FailureReason, tokens};
+use super::{
+    AccountClient, AccountIdentity, AuthError, AuthReport, AuthenticationState, CertificateUpdate,
+    FailureReason, tokens,
+};
 use crate::{
-    storage::{StorageError, TokenSet, XiaomiRecord, XiaomiStore},
+    storage::{HaAuthorization, StorageError, TokenSet, XiaomiRecord, XiaomiStore},
     xiaomi::{
         certificate::{CertificateValidity, ClientIdentity, validate_certificate},
-        cloud::CloudClient,
+        cloud::{CloudClient, CloudError},
+        mijia::MijiaClient,
     },
 };
 use std::error::Error as StdError;
@@ -12,37 +16,67 @@ use time::OffsetDateTime;
 pub struct AuthService {
     pub(super) store: XiaomiStore,
     pub(super) cloud: CloudClient,
+    pub(super) account: AccountClient,
+    pub(super) mijia: MijiaClient,
     pub(super) now: fn() -> i64,
 }
 
 impl AuthService {
-    pub fn new(store: XiaomiStore, cloud: CloudClient) -> Self {
-        Self {
+    pub fn new(store: XiaomiStore, cloud: CloudClient) -> Result<Self, CloudError> {
+        Ok(Self {
             store,
             cloud,
+            account: AccountClient::new(),
+            mijia: MijiaClient::new()?,
             now: current_time,
-        }
+        })
     }
 
     pub fn local_status(&self) -> Result<AuthReport, AuthError> {
         let status = self.load_validated()?;
         Ok(match status {
             Some(stored) => AuthReport {
-                authentication: match &stored.record.ha {
+                account: Some(AccountIdentity {
+                    uid: stored.record.uid.clone(),
+                    region: stored.record.region.clone(),
+                }),
+                recovery_stop: stored
+                    .record
+                    .recovery
+                    .as_ref()
+                    .and_then(|recovery| recovery.stop),
+                mijia: if stored.record.mijia.is_some() {
+                    AuthenticationState::Checking
+                } else if let Some(stop) = stored
+                    .record
+                    .recovery
+                    .as_ref()
+                    .and_then(|recovery| recovery.stop)
+                {
+                    AuthenticationState::SignInRequired(FailureReason::RecoveryStopped(stop))
+                } else {
+                    AuthenticationState::Unavailable(FailureReason::MissingMijiaSession)
+                },
+                ha: match &stored.record.ha {
                     Some(ha) if ha.stopped => {
                         AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
                     }
                     Some(ha) if ha.authorization.is_some() => AuthenticationState::Checking,
-                    _ => AuthenticationState::Unavailable(FailureReason::MissingHaAuthorization),
+                    _ => AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization),
                 },
                 certificate: stored.validity,
                 certificate_update: stored.certificate_update,
+                login_failure: None,
                 completed_at: (self.now)(),
             },
             None => AuthReport {
-                authentication: AuthenticationState::NotSignedIn,
+                account: None,
+                recovery_stop: None,
+                mijia: AuthenticationState::NotSignedIn,
+                ha: AuthenticationState::NotSignedIn,
                 certificate: None,
                 certificate_update: CertificateUpdate::NotNeeded,
+                login_failure: None,
                 completed_at: (self.now)(),
             },
         })
@@ -89,6 +123,17 @@ impl AuthService {
             ));
         }
         Ok(replacement)
+    }
+
+    pub(super) fn ha_generation(
+        &self,
+        authorization: &HaAuthorization,
+    ) -> Result<String, AuthError> {
+        self.store
+            .ha_refresh_generation(&authorization.redirect_uri, &authorization.tokens)?
+            .ok_or(AuthError::Missing(
+                "HA OAuth credentials changed during authorization check",
+            ))
     }
 
     pub(super) fn client_identity(

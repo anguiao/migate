@@ -1,258 +1,187 @@
 use super::{
-    AuthError, AuthReport, AuthService, AuthenticationState, CertificateUpdate, FailureReason,
+    AccountClientIdentity, AccountError, AccountErrorKind, AccountStage, AuthError, AuthReport,
+    AuthService, AuthenticationState, FailureReason, LoginFailure, QrAttempt, check::CheckSession,
     service::StoredRecord, tokens,
 };
-use crate::{
-    storage::{HaAuthorization, HaClient, HubIdentity, XiaomiRecord},
-    xiaomi::{
-        certificate::{ClientIdentity, validate_certificate},
-        cloud::{AuthorizationAttempt, REGION},
-    },
-};
-
-use std::fmt;
+use crate::{storage::HaAuthorization, xiaomi::cloud::AuthorizationAttempt};
+use std::{fmt, time::Duration};
 
 pub struct LoginAttempt {
     previous: Option<StoredRecord>,
     authorization: AuthorizationAttempt,
+    qr: QrAttempt,
 }
-
 impl LoginAttempt {
-    pub fn authorization(&self) -> &AuthorizationAttempt {
-        &self.authorization
+    pub fn login_url(&self) -> &str {
+        self.qr.login_url()
+    }
+    pub fn remaining(&self) -> Duration {
+        self.qr.remaining()
     }
 }
-
 impl fmt::Debug for LoginAttempt {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LoginAttempt")
             .field("has_previous", &self.previous.is_some())
-            .field("authorization", &self.authorization)
+            .field("qr", &self.qr)
             .finish()
     }
 }
 
 impl AuthService {
-    pub fn begin_login(&self) -> Result<LoginAttempt, AuthError> {
+    pub async fn begin_login(&self) -> Result<LoginAttempt, AuthError> {
         let previous = self.load_validated()?;
         let authorization = AuthorizationAttempt::new(
             previous
                 .as_ref()
-                .and_then(|candidate| candidate.record.ha.as_ref())
+                .and_then(|value| value.record.ha.as_ref())
                 .map(|ha| ha.client_uuid.as_str()),
-        )
-        .map_err(AuthError::Cloud)?;
+        )?;
+        let identity = previous
+            .as_ref()
+            .and_then(|value| value.record.recovery.as_ref())
+            .map(|recovery| recovery.credentials.identity().clone())
+            .unwrap_or_else(AccountClientIdentity::generate);
+        let qr = self.account.start_qr(identity).await?;
         Ok(LoginAttempt {
             previous,
             authorization,
+            qr,
         })
     }
 
-    pub async fn complete_login(
-        &self,
-        attempt: LoginAttempt,
-        callback: &str,
-    ) -> Result<AuthReport, AuthError> {
-        let previous_update = attempt
+    pub async fn complete_login(&self, attempt: LoginAttempt) -> Result<AuthReport, AuthError> {
+        let expected_uid = attempt
             .previous
             .as_ref()
-            .map(|stored| stored.certificate_update.clone());
-        let mut report = self.complete_attempt(attempt, callback).await?;
-        if report.certificate.is_none()
-            && report.certificate_update == CertificateUpdate::NotNeeded
-            && let Some(previous_update) = previous_update
-        {
-            report.certificate_update = previous_update;
+            .map(|stored| stored.record.uid.as_str());
+        let account = match attempt.qr.poll(expected_uid).await {
+            Ok(account) => account,
+            Err(error) => return self.login_failure("QR login and STS", account_reason(error)),
+        };
+        let uid = account.credentials().user_id().to_owned();
+        if let Err(error) = self.validate_mijia(&uid, account.session()).await {
+            return self.login_error("Mijia session verification", error);
         }
-        Ok(report)
-    }
-
-    async fn complete_attempt(
-        &self,
-        attempt: LoginAttempt,
-        callback: &str,
-    ) -> Result<AuthReport, AuthError> {
-        let previous_certificate = attempt.previous.as_ref().and_then(|value| value.validity);
-        let code = match attempt.authorization.parse_callback(callback) {
-            Ok(code) => code,
+        let grant = match account.authorize(&attempt.authorization).await {
+            Ok(grant) => grant,
             Err(error) => {
-                return Ok(AuthReport::failed_cloud_auth(
-                    error,
-                    previous_certificate,
-                    (self.now)(),
-                ));
+                return self.login_failure("HA OAuth authorization", account_reason(error));
             }
         };
         let response = match self
             .cloud
-            .exchange_token(&attempt.authorization, &code)
+            .exchange_token(&attempt.authorization, grant.code())
             .await
         {
             Ok(response) => response,
             Err(error) => {
-                return Ok(AuthReport::failed_cloud_auth(
-                    error,
-                    previous_certificate,
-                    (self.now)(),
-                ));
+                return self.login_failure("HA OAuth token exchange", FailureReason::Cloud(error));
             }
         };
         let tokens = match tokens::from_response(response, (self.now)()) {
             Ok(tokens) => tokens,
             Err(error) => {
-                return Ok(AuthReport::failed_auth(
-                    FailureReason::Cloud(error),
-                    previous_certificate,
-                    (self.now)(),
-                ));
+                return self.login_failure("HA OAuth token exchange", FailureReason::Cloud(error));
             }
         };
         let home = match self.cloud.get_home(&tokens.access_token).await {
             Ok(home) => home,
             Err(error) => {
-                return Ok(AuthReport::failed_cloud_auth(
-                    error,
-                    previous_certificate,
-                    (self.now)(),
-                ));
+                return self
+                    .login_failure("HA OAuth account verification", FailureReason::Cloud(error));
             }
         };
-        if let Err(error) = self
-            .cloud
-            .get_devices(&tokens.access_token, &home.dids)
-            .await
-        {
-            return Ok(AuthReport::failed_cloud_auth(
-                error,
-                previous_certificate,
-                (self.now)(),
-            ));
-        }
-        let Some(uid) = home.uid else {
-            return Ok(AuthReport {
-                authentication: AuthenticationState::Authenticated,
-                certificate: previous_certificate,
-                certificate_update: CertificateUpdate::Failed(
+        match home.uid.as_deref() {
+            Some(actual) if actual == uid => (),
+            Some(_) => {
+                return self.login_failure(
+                    "HA OAuth account verification",
+                    FailureReason::AccountIdentityMismatch,
+                );
+            }
+            None => {
+                return self.login_failure(
+                    "HA OAuth account verification",
                     FailureReason::CannotDetermineAccountIdentity,
-                ),
-                completed_at: (self.now)(),
-            });
-        };
-
-        let certificate_decision_time = (self.now)();
-        let same_account = attempt
-            .previous
-            .as_ref()
-            .filter(|previous| previous.record.uid == uid);
-        if let Some(previous) = same_account
-            && previous.validity.is_some_and(|validity| {
-                validity.currently_valid(certificate_decision_time)
-                    && !validity.renewal_due(certificate_decision_time)
-            })
-        {
-            let mut record = previous.record.clone();
-            let stopped = record.ha.as_ref().is_some_and(|ha| ha.stopped);
-            record.ha = Some(HaClient {
-                client_uuid: attempt.authorization.oauth_client_uuid().to_owned(),
-                authorization: Some(HaAuthorization {
-                    redirect_uri: attempt.authorization.redirect_uri().to_owned(),
-                    tokens,
-                }),
-                stopped,
-            });
-            self.store.replace(&record).map_err(AuthError::Storage)?;
-            return Ok(AuthReport {
-                authentication: AuthenticationState::Authenticated,
-                certificate: previous.validity,
-                certificate_update: CertificateUpdate::NotNeeded,
-                completed_at: (self.now)(),
-            });
+                );
+            }
         }
+        let (credentials, mijia, _) = grant.into_parts();
+        let authorization = HaAuthorization {
+            redirect_uri: attempt.authorization.redirect_uri().to_owned(),
+            tokens,
+        };
+        self.store
+            .commit_login(
+                &credentials,
+                &mijia,
+                attempt.authorization.oauth_client_uuid(),
+                &authorization,
+            )
+            .map_err(|error| login_step("credential commit", error.into()))?;
 
-        let identity = match same_account.and_then(|previous| previous.record.hub.as_ref()) {
-            Some(hub) => {
-                ClientIdentity::from_private_key(&uid, &hub.virtual_did, &hub.private_key_pem)
-            }
-            None => ClientIdentity::generate(&uid),
+        let stored = self
+            .reload_credentials()
+            .map_err(|error| login_step("certificate preparation", error))?;
+        let mut report = self
+            .local_status()
+            .map_err(|error| login_step("certificate preparation", error))?;
+        report.mijia = AuthenticationState::Authenticated;
+        report.ha = AuthenticationState::Authenticated;
+        let generation = self
+            .ha_generation(&authorization)
+            .map_err(|error| login_step("certificate preparation", error))?;
+        let mut session = CheckSession {
+            auth: self,
+            redirect_uri: &authorization.redirect_uri,
+            tokens: authorization.tokens,
+            refreshed: false,
+            refresh_succeeded: false,
+            generation,
         };
-        let identity = match identity {
-            Ok(identity) => identity,
-            Err(_) => {
-                return Ok(AuthReport::failed_certificate(
-                    FailureReason::InvalidClientIdentity,
-                    previous_certificate,
-                    (self.now)(),
-                ));
-            }
-        };
-        let certificate_pem = match self
-            .cloud
-            .get_certificate(&tokens.access_token, &identity.csr_pem)
+        self.maintain_certificate(&stored.record, stored.validity, &mut session, &mut report)
             .await
-        {
-            Ok(certificate) => certificate,
-            Err(error) => {
-                return Ok(AuthReport::failed_certificate(
-                    FailureReason::Cloud(error),
-                    previous_certificate,
-                    (self.now)(),
-                ));
-            }
-        };
-        let validity = match validate_certificate(
-            &uid,
-            &identity.virtual_did,
-            &identity.private_key_pem,
-            &certificate_pem,
-        ) {
-            Ok(validity) => validity,
-            Err(_) => {
-                return Ok(AuthReport::failed_certificate(
-                    FailureReason::InvalidCertificate,
-                    previous_certificate,
-                    (self.now)(),
-                ));
-            }
-        };
-        let completed_at = (self.now)();
-        if !validity.currently_valid(completed_at) {
-            return Ok(AuthReport::failed_certificate(
-                FailureReason::CertificateNotCurrentlyValid,
-                previous_certificate,
-                completed_at,
-            ));
+            .map_err(|error| login_step("certificate preparation", error))?;
+        report.set_completed_at((self.now)());
+        Ok(report)
+    }
+
+    fn login_error(&self, stage: &'static str, error: AuthError) -> Result<AuthReport, AuthError> {
+        match error {
+            AuthError::Cloud(error) => self.login_failure(stage, FailureReason::Cloud(error)),
+            AuthError::Account(error) => self.login_failure(stage, account_reason(error)),
+            AuthError::Failure(reason) => self.login_failure(stage, reason),
+            error => Err(error),
         }
-        let mut record = same_account
-            .map(|previous| previous.record.clone())
-            .unwrap_or_else(|| XiaomiRecord {
-                uid,
-                region: REGION.to_owned(),
-                recovery: None,
-                mijia: None,
-                ha: None,
-                hub: None,
-            });
-        let stopped = record.ha.as_ref().is_some_and(|ha| ha.stopped);
-        record.ha = Some(HaClient {
-            client_uuid: attempt.authorization.oauth_client_uuid().to_owned(),
-            authorization: Some(HaAuthorization {
-                redirect_uri: attempt.authorization.redirect_uri().to_owned(),
-                tokens,
-            }),
-            stopped,
-        });
-        record.hub = Some(HubIdentity {
-            virtual_did: identity.virtual_did,
-            private_key_pem: identity.private_key_pem,
-            certificate_pem: Some(certificate_pem),
-        });
-        self.store.replace(&record).map_err(AuthError::Storage)?;
-        Ok(AuthReport {
-            authentication: AuthenticationState::Authenticated,
-            certificate: Some(validity),
-            certificate_update: CertificateUpdate::Updated,
-            completed_at,
-        })
+    }
+    fn login_failure(
+        &self,
+        stage: &'static str,
+        reason: FailureReason,
+    ) -> Result<AuthReport, AuthError> {
+        let mut report = self.local_status()?;
+        report.login_failure = Some(LoginFailure { stage, reason });
+        Ok(report)
+    }
+}
+
+fn account_reason(error: AccountError) -> FailureReason {
+    if error.kind() == AccountErrorKind::IdentityMismatch {
+        if error.stage() == AccountStage::QrPolling {
+            FailureReason::DifferentScannedAccount
+        } else {
+            FailureReason::AccountIdentityMismatch
+        }
+    } else {
+        FailureReason::Account(error)
+    }
+}
+
+fn login_step(stage: &'static str, source: AuthError) -> AuthError {
+    AuthError::LoginStep {
+        stage,
+        source: Box::new(source),
     }
 }

@@ -44,7 +44,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         until(|| c.cloud.lock().unwrap().catalogs > catalogs).await;
         assert_eq!(c.cloud.lock().unwrap().instance_reads[&urn], reads);
         let status = crate::terminal::AuthStatus::new(
-            c.context.status.borrow().authentication.clone(),
+            c.context.status.borrow().auth.clone(),
             "/bin/migate".into(),
             "/data".into(),
         );

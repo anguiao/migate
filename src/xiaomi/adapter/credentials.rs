@@ -38,7 +38,7 @@ fn eligibility_changed(context: &Context, reason: &str) {
     context
         .status
         .borrow_mut()
-        .authentication
+        .auth
         .set_completed_at(context.clock.unix_now());
     context.update_all_availability();
     context.update_routing(reason);
@@ -50,7 +50,7 @@ fn eligibility_changed(context: &Context, reason: &str) {
 
 fn token_expired(context: &Context) {
     if !matches!(*context.cloud_sync.borrow(), CloudSync::Paused) {
-        context.authentication(AuthenticationState::Unavailable(
+        context.ha_authentication(AuthenticationState::Unavailable(
             FailureReason::AccessTokenExpired,
         ));
     }
@@ -66,17 +66,11 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
         let sync_changed = context.sync_changed.listen();
         let record = saved(auth, &context)?;
         let Some(authorization) = record.ha_authorization() else {
-            if record.ha.as_ref().is_some_and(|ha| ha.stopped) {
-                if !matches!(
-                    context.status.borrow().authentication.authentication,
-                    AuthenticationState::SignInRequired(_)
-                ) {
-                    context.authentication(AuthenticationState::SignInRequired(
-                        FailureReason::MissingHaAuthorization,
-                    ));
-                }
-            } else {
-                context.authentication(AuthenticationState::Unavailable(
+            if !matches!(
+                context.status.borrow().auth.ha,
+                AuthenticationState::SignInRequired(_)
+            ) {
+                context.ha_authentication(AuthenticationState::SignInRequired(
                     FailureReason::MissingHaAuthorization,
                 ));
             }
@@ -131,7 +125,7 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                     *context.cloud_sync.borrow_mut() =
                         CloudSync::Refreshed(refreshed.tokens.access_token.clone());
                     context.adopt_credentials(replacement);
-                    context.authentication(AuthenticationState::Checking);
+                    context.ha_authentication(AuthenticationState::Checking);
                     context.request_sync();
                     // Extremely short grants can already be due at completion; keep maintenance bounded.
                     retry = already_due.then(|| context.clock.now() + Duration::from_secs(1));
@@ -145,11 +139,11 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                     };
                     if error.is_unauthorized() {
                         *context.cloud_sync.borrow_mut() = CloudSync::Paused;
-                        context.authentication(AuthenticationState::SignInRequired(
+                        context.ha_authentication(AuthenticationState::SignInRequired(
                             FailureReason::Cloud(error),
                         ));
                     } else {
-                        context.authentication(AuthenticationState::Unavailable(
+                        context.ha_authentication(AuthenticationState::Unavailable(
                             FailureReason::Cloud(error),
                         ));
                     }
@@ -161,7 +155,7 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                     let current = saved(auth, &context)?;
                     if current.ha_authorization().is_some() {
                         *context.cloud_sync.borrow_mut() = CloudSync::Idle;
-                        context.authentication(AuthenticationState::Checking);
+                        context.ha_authentication(AuthenticationState::Checking);
                         context.request_sync();
                     }
                     retry = None;
@@ -209,7 +203,7 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
             changed.await;
             continue;
         };
-        if context.status.borrow().authentication.certificate != Some(validity) {
+        if context.status.borrow().auth.certificate != Some(validity) {
             context.certificate(validity, CertificateUpdate::NotNeeded);
         }
         let now = context.clock.unix_now();

@@ -57,10 +57,7 @@ fn certificate_renewal_reuses_key_and_failure_is_independent_from_authentication
         ],
     );
     let report = block_on(auth.check()).unwrap();
-    assert!(matches!(
-        report.authentication,
-        AuthenticationState::Authenticated
-    ));
+    assert!(matches!(report.ha, AuthenticationState::Authenticated));
     assert!(matches!(
         report.certificate_update,
         CertificateUpdate::Failed(_)
@@ -164,15 +161,12 @@ fn certificate_401_refresh_failures_report_failed_renewal_and_cloud_state() {
         let (auth, _) = service(&store, responses);
         let report = block_on(auth.check()).unwrap();
         assert_eq!(
-            matches!(
-                report.authentication,
-                AuthenticationState::SignInRequired(_)
-            ),
+            matches!(report.ha, AuthenticationState::SignInRequired(_)),
             sign_in_required,
             "{report:?}"
         );
         assert_eq!(
-            matches!(report.authentication, AuthenticationState::Unavailable(_)),
+            matches!(report.ha, AuthenticationState::Unavailable(_)),
             !sign_in_required,
             "{report:?}"
         );
@@ -234,10 +228,7 @@ fn shared_refresh_budget_covers_certificate_and_classifies_401_403_and_business_
         let (auth, _) = service(&store, responses);
         let report = block_on(auth.check()).unwrap();
         assert_eq!(
-            matches!(
-                report.authentication,
-                AuthenticationState::SignInRequired(_)
-            ),
+            matches!(report.ha, AuthenticationState::SignInRequired(_)),
             expected_sign_in
         );
     }

@@ -658,10 +658,7 @@ fn invalid_certificate_keeps_account_and_topology_while_corrupt_topology_fails()
         if corrupt_credentials {
             let (adapter, ready) = result.unwrap();
             block_on(poll_once(ready.wait())).unwrap().unwrap();
-            assert_eq!(
-                adapter.context.status.borrow().authentication.certificate,
-                None
-            );
+            assert_eq!(adapter.context.status.borrow().auth.certificate, None);
             assert!(adapter.context.live.borrow().scope.is_some());
             assert!(adapter.context.live.borrow().devices.contains_key("one"));
         } else {
@@ -692,12 +689,12 @@ fn partial_credentials_restore_topology_and_maintenance_tasks_keep_running() {
         block_on(poll_once(ready.wait())).unwrap().unwrap();
         assert!(adapter.context.live.borrow().scope.is_some());
         assert!(adapter.context.live.borrow().devices.contains_key("one"));
-        let report = adapter.context.status.borrow().authentication.clone();
+        let report = adapter.context.status.borrow().auth.clone();
         assert_eq!(report.certificate.is_some(), missing_ha);
         if missing_ha {
             assert!(matches!(
-                report.authentication,
-                crate::xiaomi::auth::AuthenticationState::Unavailable(
+                report.ha,
+                crate::xiaomi::auth::AuthenticationState::SignInRequired(
                     crate::xiaomi::auth::FailureReason::MissingHaAuthorization
                 )
             ));

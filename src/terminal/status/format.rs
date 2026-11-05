@@ -10,23 +10,73 @@ use std::{fmt::Write as _, path::Path};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub fn format_report(report: &AuthReport, now: i64, executable: &Path, data_dir: &Path) -> String {
+    let account = match &report.account {
+        Some(account) => format!("Xiaomi account: {} ({}).", account.uid, account.region),
+        None => "Xiaomi account: not signed in (cn).".to_owned(),
+    };
     let mut output = format!(
-        "{}\n{}",
-        format_authentication(&report.authentication),
+        "{}\n{}\n{}\n{}",
+        account,
+        format_authentication("Mijia session", &report.mijia),
+        format_authentication("HA OAuth", &report.ha),
         format_certificate(report.certificate, now)
     );
+    if let Some(failure) = &report.login_failure {
+        let _ = write!(
+            output,
+            "\nLogin failed during {}: {}.",
+            failure.stage, failure.reason
+        );
+    }
+    if let Some(stop) = report.recovery_stop {
+        let _ = write!(
+            output,
+            "\nAccount recovery: stopped. {}.",
+            crate::xiaomi::auth::FailureReason::RecoveryStopped(stop)
+        );
+    }
     if let CertificateUpdate::Failed(reason) = &report.certificate_update {
         let _ = write!(output, "\nGateway certificate update failed: {reason}.");
     }
     if matches!(
-        report.authentication,
+        report.mijia,
         AuthenticationState::NotSignedIn | AuthenticationState::SignInRequired(_)
-    ) {
+    ) || report.login_failure.is_some()
+        || report.recovery_stop.is_some()
+        || matches!(
+            report.ha,
+            AuthenticationState::NotSignedIn | AuthenticationState::SignInRequired(_)
+        )
+    {
         let _ = write!(
             output,
             "\nSign in with:\n  {}",
             login_command(executable, data_dir)
         );
+    }
+    if matches!(report.mijia, AuthenticationState::Unavailable(_))
+        || matches!(report.ha, AuthenticationState::Unavailable(_))
+        || matches!(report.certificate_update, CertificateUpdate::Failed(_))
+    {
+        let _ = write!(
+            output,
+            "\nRetry maintenance with:\n  {}",
+            check_command(executable, data_dir)
+        );
+    }
+    let needs_verification = report.recovery_stop
+        == Some(crate::storage::RecoveryStop::VerificationRequired)
+        || report
+            .login_failure
+            .as_ref()
+            .is_some_and(|failure| failure.reason.requires_verification())
+        || [&report.mijia, &report.ha].iter().any(|state| match state {
+            AuthenticationState::SignInRequired(reason)
+            | AuthenticationState::Unavailable(reason) => reason.requires_verification(),
+            _ => false,
+        });
+    if needs_verification {
+        output.push_str("\nComplete the requested verification at https://www.mi.com/ on a phone or computer, preferably on the same network, then run auth login again. This may not prevent another verification request.");
     }
     output
 }
@@ -390,16 +440,16 @@ fn format_actions(channel: &str, actions: &crate::device::LightActionDiagnostics
     )
 }
 
-pub(super) fn format_authentication(authentication: &AuthenticationState) -> String {
+pub(super) fn format_authentication(label: &str, authentication: &AuthenticationState) -> String {
     match authentication {
-        AuthenticationState::NotSignedIn => "Xiaomi: not signed in (cn).".to_owned(),
-        AuthenticationState::Checking => "Xiaomi: checking authentication (cn)...".to_owned(),
-        AuthenticationState::Authenticated => "Xiaomi: authenticated (cn).".to_owned(),
+        AuthenticationState::NotSignedIn => format!("{label}: not signed in."),
+        AuthenticationState::Checking => format!("{label}: checking."),
+        AuthenticationState::Authenticated => format!("{label}: available."),
         AuthenticationState::SignInRequired(reason) => {
-            format!("Xiaomi: sign-in required (cn). {reason}.")
+            format!("{label}: sign-in required. {reason}.")
         }
         AuthenticationState::Unavailable(reason) => {
-            format!("Xiaomi: authentication unavailable (cn). {reason}.")
+            format!("{label}: unavailable. {reason}.")
         }
     }
 }
@@ -407,6 +457,14 @@ pub(super) fn format_authentication(authentication: &AuthenticationState) -> Str
 pub fn login_command(executable: &Path, data_dir: &Path) -> String {
     format!(
         "{} --data-dir {} auth login",
+        shell_quote(executable),
+        shell_quote(data_dir)
+    )
+}
+
+pub(super) fn check_command(executable: &Path, data_dir: &Path) -> String {
+    format!(
+        "{} --data-dir {} auth check",
         shell_quote(executable),
         shell_quote(data_dir)
     )

@@ -1742,6 +1742,7 @@ dependencies = [
  "md-5",
  "mdns-sd",
  "mqttbytes",
+ "qrcodegen-no-heap",
  "rand",
  "rcgen",
  "rs-matter",

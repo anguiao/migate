@@ -92,7 +92,7 @@ pub(super) async fn run(
                 context.set_catalog_problem(Some(error.to_string()));
                 context.cloud_error(token, None, &error)?;
                 if !matches!(*context.cloud_sync.borrow(), CloudSync::Paused) {
-                    context.authentication(if error.is_unauthorized() {
+                    context.ha_authentication(if error.is_unauthorized() {
                         AuthenticationState::Checking
                     } else {
                         AuthenticationState::Unavailable(FailureReason::Cloud(error))
@@ -115,7 +115,7 @@ pub(super) async fn run(
                 context.invalidate_lan_scope()?;
             }
             context.set_catalog_problem(Some(reason.to_string()));
-            context.authentication(AuthenticationState::Unavailable(reason));
+            context.ha_authentication(AuthenticationState::Unavailable(reason));
             context.cloud_scope_valid.set(false);
             context.update_all_availability();
             context.update_routing("cloud account identity invalidated");
@@ -245,7 +245,7 @@ pub(super) async fn run(
                 slot.cloud_forbidden = false;
             }
         }
-        context.authentication(AuthenticationState::Authenticated);
+        context.ha_authentication(AuthenticationState::Authenticated);
         context.cloud_scope_valid.set(true);
         context.http_paused.set(false);
         context.sync_not_before.set(None);

@@ -228,6 +228,7 @@ fn bridge_helper_child() {
             let identity = store.load_identity().unwrap();
             log::info!("Data directory: {}", directory.display());
             let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+                .unwrap()
                 .local_status()
                 .unwrap();
             let status = AuthStatus::new(report, "/bin/migate".into(), directory.clone());

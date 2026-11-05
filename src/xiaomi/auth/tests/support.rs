@@ -20,10 +20,6 @@ pub(super) fn home_body(uid: Option<&str>, dids: &[&str]) -> String {
     json!({"code":0,"result":{"homelist":homes}}).to_string()
 }
 
-pub(super) fn devices_body() -> &'static str {
-    r#"{"code":0,"result":{"list":[]}}"#
-}
-
 pub(super) fn certificate_response(
     request: &crate::xiaomi::test_support::ReceivedRequest,
 ) -> MockResponse {
@@ -49,7 +45,15 @@ pub(super) fn valid_record(
         uid: uid.into(),
         region: "cn".into(),
         recovery: None,
-        mijia: None,
+        mijia: Some(
+            crate::xiaomi::mijia::MijiaSession::new(
+                uid.into(),
+                "service-old".into(),
+                "c2VjdXJpdHk=".into(),
+                "test-agent".into(),
+            )
+            .unwrap(),
+        ),
         ha: Some(crate::storage::HaClient {
             client_uuid: UUID.into(),
             authorization: Some(crate::storage::HaAuthorization {
@@ -88,14 +92,6 @@ pub(super) fn service(
     )
 }
 
-pub(super) fn callback(attempt: &LoginAttempt) -> String {
-    format!(
-        "{}?code=code&state={}",
-        attempt.authorization().redirect_uri(),
-        attempt.authorization().state()
-    )
-}
-
 pub(super) async fn wait_for_signal(signal: Arc<AtomicBool>) {
     while !signal.load(Ordering::SeqCst) {
         async_io::Timer::after(Duration::from_millis(1)).await;
@@ -104,7 +100,28 @@ pub(super) async fn wait_for_signal(signal: Arc<AtomicBool>) {
 
 impl AuthService {
     pub(crate) fn with_clock(store: XiaomiStore, cloud: CloudClient, now: fn() -> i64) -> Self {
-        Self { store, cloud, now }
+        let (base, _) = dynamic_mock_server(20, |request| {
+            let cookie = request
+                .headers
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("cookie:"))
+                .unwrap();
+            let uid = cookie
+                .split("userId=")
+                .nth(1)
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap();
+            MockResponse::json(200, &json!({"code":0,"result":{"homelist":[{"uid":uid,"id":"1","dids":[],"roomlist":[]}],"has_more":false}}).to_string())
+        });
+        Self {
+            store,
+            cloud,
+            account: AccountClient::for_test("http://127.0.0.1:9", Duration::from_secs(1)),
+            mijia: crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1)),
+            now,
+        }
     }
 }
 
@@ -116,9 +133,18 @@ impl AuthReport {
         completed_at: i64,
     ) -> Self {
         Self {
-            authentication,
+            account: (!matches!(authentication, AuthenticationState::NotSignedIn)).then(|| {
+                AccountIdentity {
+                    uid: "uid".into(),
+                    region: "cn".into(),
+                }
+            }),
+            recovery_stop: None,
+            mijia: authentication.clone(),
+            ha: authentication,
             certificate,
             certificate_update,
+            login_failure: None,
             completed_at,
         }
     }

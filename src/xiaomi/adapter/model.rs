@@ -67,6 +67,11 @@ impl From<AuthError> for AdapterError {
         match e {
             AuthError::Storage(e) => Self::Storage(e),
             AuthError::Cloud(e) => Self::Cloud(e),
+            AuthError::Account(e) => Self::Unavailable(e.to_string()),
+            AuthError::Failure(e) => Self::Unavailable(e.to_string()),
+            AuthError::LoginStep { stage, source } => {
+                Self::Unavailable(format!("{stage}: {source}"))
+            }
             AuthError::Missing(message) => Self::Unavailable(message.into()),
         }
     }
@@ -372,7 +377,7 @@ pub struct DeviceStatus {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdapterStatus {
-    pub authentication: AuthReport,
+    pub auth: AuthReport,
     pub gateway: GatewayStatus,
     pub catalog_problem: Option<String>,
     pub pending: Vec<PendingDevice>,

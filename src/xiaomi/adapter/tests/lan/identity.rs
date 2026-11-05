@@ -230,16 +230,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
     )
     .unwrap();
     let context = adapter.context.clone();
-    assert!(
-        context
-            .status
-            .borrow()
-            .authentication
-            .certificate
-            .unwrap()
-            .not_after
-            < rig.clock.wall()
-    );
+    assert!(context.status.borrow().auth.certificate.unwrap().not_after < rig.clock.wall());
     context.lan_port.set(peer.address.port());
     context
         .lan_discovery

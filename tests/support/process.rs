@@ -98,6 +98,10 @@ impl TestProcess {
         (stdout, stderr)
     }
 
+    pub(crate) fn signal_failure(self, signal: &str) -> (std::process::ExitStatus, String, String) {
+        self.signal(signal)
+    }
+
     fn signal(mut self, signal: &str) -> (std::process::ExitStatus, String, String) {
         assert!(
             self.child.try_wait().unwrap().is_none(),

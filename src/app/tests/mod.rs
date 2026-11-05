@@ -27,6 +27,7 @@ fn outlet() -> PhysicalDeviceDescription {
 fn status(store: &Store) -> AuthStatus {
     AuthStatus::new(
         AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .unwrap()
             .local_status()
             .unwrap(),
         "/bin/migate".into(),

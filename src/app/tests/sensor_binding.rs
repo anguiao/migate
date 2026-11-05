@@ -105,7 +105,7 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
         sensor.set_temperature_source_available(true);
         sensor.observe_measurement(21.5, Some(100), 200).unwrap();
         status.update_adapter(crate::xiaomi::adapter::AdapterStatus {
-            authentication: crate::xiaomi::auth::AuthReport::for_test(
+            auth: crate::xiaomi::auth::AuthReport::for_test(
                 crate::xiaomi::auth::AuthenticationState::Authenticated,
                 None,
                 crate::xiaomi::auth::CertificateUpdate::NotNeeded,

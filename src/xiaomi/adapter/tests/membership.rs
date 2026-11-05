@@ -401,12 +401,7 @@ fn incomplete_foreign_or_failed_cloud_sync_cannot_remove_published_devices() {
                 until(|| {
                     control.context.status.borrow().catalog_problem.is_some()
                         || matches!(
-                            control
-                                .context
-                                .status
-                                .borrow()
-                                .authentication
-                                .authentication,
+                            control.context.status.borrow().auth.ha,
                             crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                         )
                 })

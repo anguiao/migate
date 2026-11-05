@@ -1,9 +1,9 @@
 #[path = "support/process.rs"]
 mod process_support;
 use migate::storage::{TokenSet, XiaomiRecord};
-use process_support::{POLL_INTERVAL, Stream, TIMEOUT, TestProcess};
+use process_support::{Stream, TIMEOUT, TestProcess};
 use rusqlite::Connection;
-use std::{process::Command, thread, time::Instant};
+use std::{process::Command, thread};
 
 #[test]
 fn invalid_arguments_exit_without_starting_services() {
@@ -44,6 +44,10 @@ fn every_auth_mode_requires_the_stored_bridge_identity() {
             .unwrap();
         drop(store);
         let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+            .env("https_proxy", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("no_proxy", "")
+            .env("NO_PROXY", "")
             .arg("--data-dir")
             .arg(directory.path())
             .args(["auth", auth_command])
@@ -72,7 +76,10 @@ fn auth_check_without_credentials_reports_both_states_and_quoted_login_command()
     let stdout = String::from_utf8(result.stdout).unwrap();
     let stderr = String::from_utf8(result.stderr).unwrap();
     assert!(!result.status.success());
-    assert!(stdout.contains("Xiaomi: not signed in (cn).\n"), "{stdout}");
+    assert!(
+        stdout.contains("Xiaomi account: not signed in (cn).\n"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("Gateway certificate: not prepared.\n"),
         "{stdout}"
@@ -179,94 +186,156 @@ fn logout_clears_corrupt_credentials_and_preserves_identity_and_matter_data() {
     );
 }
 
-#[test]
-fn login_explains_manual_callback_and_eof_fails_without_matter() {
-    let directory = tempfile::tempdir().unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+fn blocked_login(directory: &std::path::Path) -> TestProcess {
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0; 4096];
+        let size = stream.read(&mut buffer).unwrap();
+        sender
+            .send(String::from_utf8_lossy(&buffer[..size]).into_owned())
+            .unwrap();
+        while stream.read(&mut buffer).unwrap_or(0) > 0 {}
+    });
+    let proxy = format!("http://{address}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_migate"));
+    command
         .arg("--data-dir")
-        .arg(directory.path())
+        .arg(directory)
         .args(["auth", "login"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(result.stdout).unwrap();
-    let stderr = String::from_utf8(result.stderr).unwrap();
-    assert!(!result.status.success());
+        .env("https_proxy", &proxy)
+        .env("HTTPS_PROXY", &proxy)
+        .env("all_proxy", &proxy)
+        .env("ALL_PROXY", &proxy)
+        .env("no_proxy", "")
+        .env("NO_PROXY", "");
+    let mut process = TestProcess::spawn(&mut command);
+    process.wait_for_output(Stream::Stdout, "Mijia session for device HTTP");
+    let request = receiver.recv_timeout(TIMEOUT).unwrap();
     assert!(
-        stdout.contains("https://account.xiaomi.com/oauth2/authorize?"),
-        "{stdout}"
+        request.starts_with("CONNECT account.xiaomi.com:443"),
+        "{request}"
     );
-    assert!(
-        stdout.contains("Open this URL in a browser and authorize the HA application."),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("The final homeassistant.local page may be unreachable."),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("Paste the complete address-bar URL containing code and state:"),
-        "{stdout}"
-    );
-    assert!(
-        stderr.contains("Login cancelled before a callback URL was received"),
-        "{stderr}"
-    );
-    assert!(!stdout.contains("Manual pairing code"), "{stdout}");
-    assert!(!stderr.contains("bridge_id="), "{stderr}");
+    process
 }
 
 #[test]
-fn bad_login_callback_fails_without_echoing_sensitive_input() {
-    let directory = tempfile::tempdir().unwrap();
-    let secret = "sensitive-code-and-state";
-    let mut process = TestProcess::spawn(
-        Command::new(env!("CARGO_BIN_EXE_migate"))
-            .arg("--data-dir")
-            .arg(directory.path())
-            .args(["auth", "login"]),
-    );
-    process.send(&format!(
-        "http://homeassistant.local:8123/wrong?code={secret}&state={secret}\n"
-    ));
-    process.close_input();
-    let deadline = Instant::now() + TIMEOUT;
-    let status = loop {
-        if let Some(status) = process.child.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "bad callback did not exit");
-        thread::sleep(POLL_INTERVAL);
+fn login_signals_cancel_the_isolated_pending_request_without_matter() {
+    for signal in ["-INT", "-TERM"] {
+        let directory = tempfile::tempdir().unwrap();
+        let process = blocked_login(directory.path());
+        let (status, stdout, stderr) = process.signal_failure(signal);
+        assert!(!status.success());
+        assert!(stderr.contains("Login cancelled by"), "{stderr}");
+        assert!(
+            stdout.contains("Xiaomi account: not signed in (cn)."),
+            "{stdout}"
+        );
+        assert!(stdout.contains("Mijia session: not signed in."), "{stdout}");
+        assert!(stdout.contains("HA OAuth: not signed in."), "{stdout}");
+        assert!(
+            stdout.contains("Gateway certificate: not prepared."),
+            "{stdout}"
+        );
+        assert!(stdout.contains("auth login"), "{stdout}");
+        assert!(!stdout.contains("Manual pairing code"));
+        assert!(!stderr.contains("bridge_id="));
+    }
+}
+
+#[test]
+fn login_signal_reports_and_preserves_existing_credential_groups() {
+    use migate::{
+        storage::{AccountRecovery, HaAuthorization, HaClient, RecoveryStop},
+        xiaomi::{
+            auth::{AccountClientIdentity, AccountCredentials},
+            mijia::MijiaSession,
+        },
     };
-    let (stdout, stderr) = process.output();
-    assert!(!status.success());
-    assert!(!stdout.contains(secret), "{stdout}");
-    assert!(!stderr.contains(secret), "{stderr}");
-}
-
-#[test]
-fn ctrl_c_cancels_unfinished_login_with_failure() {
     let directory = tempfile::tempdir().unwrap();
-    let mut process = TestProcess::spawn(
-        Command::new(env!("CARGO_BIN_EXE_migate"))
-            .arg("--data-dir")
-            .arg(directory.path())
-            .args(["auth", "login"]),
+    let store = migate::storage::Store::open(directory.path()).unwrap();
+    let previous = XiaomiRecord {
+        uid: "uid".into(),
+        region: "cn".into(),
+        recovery: Some(AccountRecovery {
+            credentials: AccountCredentials::new(
+                "uid".into(),
+                "cuser-secret".into(),
+                "pass-secret".into(),
+                AccountClientIdentity::new("device-id".into(), "agent".into()).unwrap(),
+            )
+            .unwrap(),
+            stop: Some(RecoveryStop::VerificationRequired),
+        }),
+        mijia: Some(
+            MijiaSession::new(
+                "uid".into(),
+                "service-secret".into(),
+                "c2VjdXJpdHk=".into(),
+                "agent".into(),
+            )
+            .unwrap(),
+        ),
+        ha: Some(HaClient {
+            client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
+            authorization: Some(HaAuthorization {
+                redirect_uri:
+                    "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
+                        .into(),
+                tokens: TokenSet {
+                    access_token: "access-secret".into(),
+                    refresh_token: "refresh-secret".into(),
+                    expires_at: 2_000_000_000,
+                    refresh_at: 1_900_000_000,
+                },
+            }),
+            stopped: true,
+        }),
+        hub: None,
+    };
+    store.xiaomi().replace(&previous).unwrap();
+    drop(store);
+    let process = blocked_login(directory.path());
+    let (status, stdout, stderr) = process.signal_failure("-TERM");
+    assert!(!status.success());
+    assert!(stderr.contains("Login cancelled by SIGTERM"), "{stderr}");
+    assert!(stdout.contains("Xiaomi account: uid (cn)."), "{stdout}");
+    assert!(stdout.contains("Mijia session: checking."), "{stdout}");
+    assert!(stdout.contains("HA OAuth: sign-in required."), "{stdout}");
+    assert!(
+        stdout.contains("Gateway certificate: not prepared."),
+        "{stdout}"
     );
-    process.wait_for_output(Stream::Stdout, "Paste the complete address-bar URL");
-    let (_, stderr) = process.interrupt_failure();
-    assert!(stderr.contains("Login cancelled by Ctrl-C"), "{stderr}");
+    assert!(stdout.contains("Account recovery: stopped."), "{stdout}");
+    assert!(
+        stdout.contains("auth check") && stdout.contains("auth login"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Mijia session: available.") && !stdout.contains("HA OAuth: available.")
+    );
+    for secret in [
+        "cuser-secret",
+        "pass-secret",
+        "service-secret",
+        "access-secret",
+        "refresh-secret",
+    ] {
+        assert!(!stdout.contains(secret) && !stderr.contains(secret));
+    }
+    let reopened = migate::storage::Store::open(directory.path()).unwrap();
+    assert_eq!(reopened.xiaomi().load().unwrap(), Some(previous));
 }
 
 #[test]
 fn a_data_directory_cannot_be_used_by_two_processes_and_exit_releases_it() {
     let directory = tempfile::tempdir().unwrap();
-    let mut owner = TestProcess::spawn(
-        Command::new(env!("CARGO_BIN_EXE_migate"))
-            .arg("--data-dir")
-            .arg(directory.path())
-            .args(["auth", "login"]),
-    );
-    owner.wait_for_output(Stream::Stdout, "Paste the complete address-bar URL");
+    let mut owner = blocked_login(directory.path());
     for arguments in [vec![], vec!["auth", "check"], vec!["auth", "logout"]] {
         let result = Command::new(env!("CARGO_BIN_EXE_migate"))
             .arg("--data-dir")

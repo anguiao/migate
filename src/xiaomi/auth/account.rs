@@ -194,6 +194,14 @@ impl AccountClient {
         }
     }
 
+    #[cfg(test)]
+    pub(in crate::xiaomi) fn for_test(base: &str, timeout: Duration) -> Self {
+        Self {
+            timeout,
+            test_port: Some(Url::parse(base).unwrap().port().unwrap()),
+        }
+    }
+
     pub async fn start_qr(
         &self,
         identity: AccountClientIdentity,

@@ -155,11 +155,15 @@ impl CloudClient {
         let mut dids = Vec::new();
         let mut seen = HashSet::new();
         for home in result.homelist {
-            if uid.is_none() {
-                uid = home
-                    .uid
-                    .map(Identifier::into_string)
-                    .filter(|uid| !uid.is_empty());
+            if let Some(candidate) = home
+                .uid
+                .map(Identifier::into_string)
+                .filter(|uid| !uid.is_empty())
+            {
+                if uid.as_ref().is_some_and(|uid| uid != &candidate) {
+                    return Err(CloudError::protocol(operation));
+                }
+                uid = Some(candidate);
             }
             for did in home.members.into_dids() {
                 if dids.len() < PROBE_DEVICE_LIMIT && seen.insert(did.clone()) {

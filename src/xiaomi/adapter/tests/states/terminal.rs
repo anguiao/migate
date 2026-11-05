@@ -11,7 +11,7 @@ fn native_state_terminal_distinguishes_event_subscriptions_and_observation_metad
             event(&peer, false, Some(201));
             until(|| state(control, "motion:2:1024").source_time == Some(201)).await;
             let status = crate::terminal::AuthStatus::new(
-                control.context.status.borrow().authentication.clone(),
+                control.context.status.borrow().auth.clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );

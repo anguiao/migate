@@ -120,7 +120,7 @@ impl Context {
         if !self
             .status
             .borrow()
-            .authentication
+            .auth
             .certificate
             .is_some_and(|validity| validity.currently_valid(self.clock.unix_now()))
         {

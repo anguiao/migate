@@ -40,7 +40,7 @@ impl Context {
                 && self
                     .status
                     .borrow()
-                    .authentication
+                    .auth
                     .certificate
                     .is_some_and(|validity| validity.not_after <= self.clock.unix_now())
             {

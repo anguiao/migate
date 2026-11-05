@@ -343,22 +343,18 @@ impl Context {
             self.update_routing("cloud credentials updated");
         }
     }
-    pub(super) fn authentication(&self, authentication: AuthenticationState) {
+    pub(super) fn ha_authentication(&self, authentication: AuthenticationState) {
         let mut status = self.status.borrow_mut();
-        status.authentication.authentication = authentication;
-        status
-            .authentication
-            .set_completed_at(self.clock.unix_now());
+        status.auth.ha = authentication;
+        status.auth.set_completed_at(self.clock.unix_now());
         drop(status);
         self.status_changed.notify(usize::MAX);
     }
     pub(super) fn certificate(&self, validity: CertificateValidity, update: CertificateUpdate) {
         let mut status = self.status.borrow_mut();
-        status.authentication.certificate = Some(validity);
-        status.authentication.certificate_update = update;
-        status
-            .authentication
-            .set_completed_at(self.clock.unix_now());
+        status.auth.certificate = Some(validity);
+        status.auth.certificate_update = update;
+        status.auth.set_completed_at(self.clock.unix_now());
         drop(status);
         self.status_changed.notify(usize::MAX);
         self.update_all_availability();
@@ -368,16 +364,12 @@ impl Context {
 
     pub(super) fn certificate_unavailable(&self, update: CertificateUpdate) {
         let mut status = self.status.borrow_mut();
-        if status.authentication.certificate.is_none()
-            && status.authentication.certificate_update == update
-        {
+        if status.auth.certificate.is_none() && status.auth.certificate_update == update {
             return;
         }
-        status.authentication.certificate = None;
-        status.authentication.certificate_update = update;
-        status
-            .authentication
-            .set_completed_at(self.clock.unix_now());
+        status.auth.certificate = None;
+        status.auth.certificate_update = update;
+        status.auth.set_completed_at(self.clock.unix_now());
         drop(status);
         self.status_changed.notify(usize::MAX);
         self.update_all_availability();

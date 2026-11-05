@@ -9,7 +9,11 @@ use crate::{
     configuration::DerivedConfiguration,
     device::{Availability, DeviceRegistry, PhysicalDevice},
     storage::Store,
-    xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
+    xiaomi::{
+        auth::{AuthError, AuthService},
+        cloud::CloudClient,
+        discovery::Discovery,
+    },
 };
 use event_listener::Event;
 use std::{
@@ -51,7 +55,7 @@ impl XiaomiAdapter {
         discovery: Discovery,
         clock: Arc<dyn Clock>,
     ) -> Result<(Self, TopologyReady), AdapterError> {
-        let auth = AuthService::new(store.xiaomi(), cloud.clone());
+        let auth = AuthService::new(store.xiaomi(), cloud.clone()).map_err(AuthError::Cloud)?;
         let credentials = auth.saved_bridge_credentials()?;
         let stored = store.devices().load_configuration()?;
         let scope = credentials
@@ -173,7 +177,7 @@ impl XiaomiAdapter {
             snapshot_observer: RefCell::new(None),
             changed: Event::new(),
             status: RefCell::new(AdapterStatus {
-                authentication: report,
+                auth: report,
                 gateway: GatewayStatus::Discovering,
                 catalog_problem: None,
                 pending: Vec::new(),

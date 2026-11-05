@@ -1,8 +1,8 @@
 mod format;
 
 use format::{
-    format_authentication, format_certificate, format_command, format_device, format_gateway,
-    format_routing, path,
+    check_command, format_authentication, format_certificate, format_command, format_device,
+    format_gateway, format_routing, path,
 };
 pub use format::{format_report, login_command};
 pub(super) use format::{property_diagnostics, timestamp};
@@ -52,9 +52,13 @@ impl AuthStatus {
 
     pub fn replace(&self, report: AuthReport) -> bool {
         let mut current = self.report.borrow_mut();
-        let changed = current.authentication != report.authentication
+        let changed = current.account != report.account
+            || current.recovery_stop != report.recovery_stop
+            || current.mijia != report.mijia
+            || current.ha != report.ha
             || current.certificate != report.certificate
-            || current.certificate_update != report.certificate_update;
+            || current.certificate_update != report.certificate_update
+            || current.login_failure != report.login_failure;
         *current = report;
         changed
     }
@@ -70,10 +74,13 @@ impl AuthStatus {
             let _ = write!(report, "\n{}", format_routing(&adapter.routing));
         }
         if self.adapter.borrow().is_some()
-            && matches!(
-                self.report.borrow().authentication,
+            && (matches!(
+                self.report.borrow().ha,
                 AuthenticationState::SignInRequired(_)
-            )
+            ) || matches!(
+                self.report.borrow().mijia,
+                AuthenticationState::SignInRequired(_)
+            ))
         {
             report.push_str("\nStop MiGate, sign in with the same data directory, then restart.");
         }
@@ -162,7 +169,7 @@ impl AuthStatus {
     }
 
     pub fn update_adapter(&self, status: AdapterStatus) {
-        if self.replace(status.authentication) {
+        if self.replace(status.auth) {
             self.log(current_time());
         }
         let next = BridgeDiagnostics {
@@ -199,17 +206,28 @@ impl AuthStatus {
 
     pub fn log(&self, now: i64) {
         let report = self.report.borrow();
-        let authentication_level = match &report.authentication {
-            AuthenticationState::SignInRequired(_) | AuthenticationState::Unavailable(_) => {
+        if let Some(account) = &report.account {
+            log::info!("Xiaomi account: {} ({}).", account.uid, account.region);
+        } else {
+            log::info!("Xiaomi account: not signed in (cn).");
+        }
+        if let Some(stop) = report.recovery_stop {
+            log::warn!(
+                "Account recovery: stopped. {}.",
+                crate::xiaomi::auth::FailureReason::RecoveryStopped(stop)
+            );
+        }
+        for (label, state) in [("Mijia session", &report.mijia), ("HA OAuth", &report.ha)] {
+            let level = if matches!(
+                state,
+                AuthenticationState::SignInRequired(_) | AuthenticationState::Unavailable(_)
+            ) {
                 log::Level::Warn
-            }
-            _ => log::Level::Info,
-        };
-        log::log!(
-            authentication_level,
-            "{}",
-            format_authentication(&report.authentication)
-        );
+            } else {
+                log::Level::Info
+            };
+            log::log!(level, "{}", format_authentication(label, state));
+        }
         let certificate_level = match report.certificate.map(|validity| validity.status(now)) {
             Some(CertificateStatus::NotYetValid | CertificateStatus::Expired) => log::Level::Warn,
             _ => log::Level::Info,
@@ -223,12 +241,37 @@ impl AuthStatus {
             log::warn!("Gateway certificate update failed: {reason}.");
         }
         if matches!(
-            report.authentication,
+            report.ha,
             AuthenticationState::NotSignedIn | AuthenticationState::SignInRequired(_)
-        ) {
+        ) || report.recovery_stop.is_some()
+            || matches!(
+                report.mijia,
+                AuthenticationState::NotSignedIn | AuthenticationState::SignInRequired(_)
+            )
+        {
             log::info!(
                 "Sign in with: {}",
                 login_command(&self.executable, &self.data_dir)
+            );
+        }
+        if matches!(report.mijia, AuthenticationState::Unavailable(_))
+            || matches!(report.ha, AuthenticationState::Unavailable(_))
+            || matches!(report.certificate_update, CertificateUpdate::Failed(_))
+        {
+            log::info!(
+                "Retry maintenance with: {}",
+                check_command(&self.executable, &self.data_dir)
+            );
+        }
+        if report.recovery_stop == Some(crate::storage::RecoveryStop::VerificationRequired)
+            || [&report.mijia, &report.ha].iter().any(|state| match state {
+                AuthenticationState::SignInRequired(reason)
+                | AuthenticationState::Unavailable(reason) => reason.requires_verification(),
+                _ => false,
+            })
+        {
+            log::warn!(
+                "Complete the requested verification at https://www.mi.com/ on a phone or computer, preferably on the same network, then run auth login again. This may not prevent another verification request."
             );
         }
     }

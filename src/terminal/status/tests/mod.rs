@@ -35,7 +35,7 @@ fn connected_gateway_keeps_authentication_and_catalog_diagnostics_visible() {
         "/data".into(),
     );
     status.update_adapter(AdapterStatus {
-        authentication: AuthReport::for_test(
+        auth: AuthReport::for_test(
             AuthenticationState::SignInRequired(
                 crate::xiaomi::auth::FailureReason::AccountIdentityMismatch,
             ),
@@ -50,7 +50,7 @@ fn connected_gateway_keeps_authentication_and_catalog_diagnostics_visible() {
         devices: Vec::new(),
     });
     let report = status.render(0);
-    assert!(report.contains("Xiaomi: sign-in required"));
+    assert!(report.contains("HA OAuth: sign-in required"));
     assert!(report.contains("auth login"));
     assert!(report.contains("Gateway: connected (gateway)."));
     assert!(report.contains("Device description: refresh failed."));
@@ -74,7 +74,7 @@ fn certificate_dates_are_recomputed_for_each_render() {
             Path::new("/bin/migate"),
             Path::new("/data")
         ),
-        "Xiaomi: authenticated (cn).\nGateway certificate: valid until 2023-11-17T22:13:21Z."
+        "Xiaomi account: uid (cn).\nMijia session: available.\nHA OAuth: available.\nGateway certificate: valid until 2023-11-17T22:13:21Z."
     );
     assert_eq!(
         format_report(
@@ -83,7 +83,7 @@ fn certificate_dates_are_recomputed_for_each_render() {
             Path::new("/bin/migate"),
             Path::new("/data")
         ),
-        "Xiaomi: authenticated (cn).\nGateway certificate: valid until 2023-11-17T22:13:21Z; renewal due."
+        "Xiaomi account: uid (cn).\nMijia session: available.\nHA OAuth: available.\nGateway certificate: valid until 2023-11-17T22:13:21Z; renewal due."
     );
 }
 
@@ -109,7 +109,7 @@ fn bridge_help_reads_the_latest_report() {
         ))
         .unwrap()
         .unwrap()
-        .contains("Xiaomi: checking authentication (cn)...")
+        .contains("HA OAuth: checking.")
     );
 
     let authenticated = AuthReport::for_test(
@@ -131,8 +131,8 @@ fn bridge_help_reads_the_latest_report() {
     ))
     .unwrap()
     .unwrap();
-    assert!(help.contains("Xiaomi: authenticated (cn)."), "{help}");
-    assert!(!help.contains("checking authentication"), "{help}");
+    assert!(help.contains("HA OAuth: available."), "{help}");
+    assert!(!help.contains("HA OAuth: checking"), "{help}");
 
     let same_visible_status = AuthReport::for_test(
         AuthenticationState::Authenticated,
@@ -160,7 +160,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
     );
     let status = AuthStatus::new(report.clone(), "/bin/migate".into(), "/data".into());
     status.update_adapter(AdapterStatus {
-        authentication: report,
+        auth: report,
         gateway: GatewayStatus::Connected("gateway".into()),
         catalog_problem: None,
         pending: Vec::new(),
@@ -265,7 +265,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
     );
     let status = AuthStatus::new(report.clone(), "/bin/migate".into(), "/data".into());
     status.update_adapter(AdapterStatus {
-        authentication: report,
+        auth: report,
         gateway: GatewayStatus::Unavailable("transport disconnected".into()),
         catalog_problem: None,
         pending: Vec::new(),

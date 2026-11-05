@@ -77,7 +77,7 @@ fn cloud_rig() -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
 
 async fn terminal(c: &Control, command: &str) -> String {
     let status = crate::terminal::AuthStatus::new(
-        c.context.status.borrow().authentication.clone(),
+        c.context.status.borrow().auth.clone(),
         "/bin/migate".into(),
         "/data".into(),
     );

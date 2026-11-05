@@ -25,6 +25,7 @@ fn fixture() -> (
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+        .unwrap()
         .local_status()
         .unwrap();
     let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
@@ -229,7 +230,7 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         assert!(!selected.contains("one (name one)"));
         assert!(selected.contains("Live Home name"));
         assert!(!selected.contains("Saved Home name"));
-        assert!(selected.contains("Xiaomi: not signed in"));
+        assert!(selected.contains("Xiaomi account: not signed in"));
         registry.remove(physical.key());
         assert!(
             handle_line(&registry, &store.devices(), &status, "on multi outlet:9", 0)
@@ -523,10 +524,11 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             .unwrap()
             .set_label("Home edited name".into());
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .unwrap()
             .local_status()
             .unwrap();
         status.update_adapter(crate::xiaomi::adapter::AdapterStatus {
-            authentication: report,
+            auth: report,
             gateway: crate::xiaomi::adapter::GatewayStatus::Connected("hub".into()),
             catalog_problem: None,
             pending: vec![crate::xiaomi::adapter::PendingDevice {
@@ -560,10 +562,11 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
     block_on(async {
         let (_dir, store, status, registry, _receivers) = fixture();
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
+            .unwrap()
             .local_status()
             .unwrap();
         status.update_adapter(AdapterStatus {
-            authentication: report,
+            auth: report,
             gateway: GatewayStatus::Connected("hub".into()),
             catalog_problem: None,
             pending: Vec::new(),

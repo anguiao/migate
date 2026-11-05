@@ -33,7 +33,7 @@ fn a_missing_replacement_certificate_clears_previous_readiness() {
             .context
             .status
             .borrow()
-            .authentication
+            .auth
             .certificate
             .is_some()
     );
@@ -43,23 +43,9 @@ fn a_missing_replacement_certificate_clears_previous_readiness() {
     record.hub.as_mut().unwrap().certificate_pem = None;
     rig.store.xiaomi().replace(&record).unwrap();
     block_on(rig.run(|control| async move {
-        until(|| {
-            control
-                .context
-                .status
-                .borrow()
-                .authentication
-                .certificate
-                .is_none()
-        })
-        .await;
+        until(|| control.context.status.borrow().auth.certificate.is_none()).await;
         assert!(matches!(
-            control
-                .context
-                .status
-                .borrow()
-                .authentication
-                .certificate_update,
+            control.context.status.borrow().auth.certificate_update,
             crate::xiaomi::auth::CertificateUpdate::Failed(
                 crate::xiaomi::auth::FailureReason::MissingCertificate
             )
@@ -67,16 +53,7 @@ fn a_missing_replacement_certificate_clears_previous_readiness() {
         record.hub.as_mut().unwrap().certificate_pem = certificate;
         control.store.xiaomi().replace(&record).unwrap();
         control.context.changed.notify(usize::MAX);
-        until(|| {
-            control
-                .context
-                .status
-                .borrow()
-                .authentication
-                .certificate
-                .is_some()
-        })
-        .await;
+        until(|| control.context.status.borrow().auth.certificate.is_some()).await;
     }));
 }
 
@@ -90,23 +67,9 @@ fn background_distinguishes_missing_invalid_and_repaired_certificates() {
     rig.store.xiaomi().replace(&record).unwrap();
     rig.source.context.adopt_credentials(record.clone());
     block_on(rig.run(|control| async move {
-        until(|| {
-            control
-                .context
-                .status
-                .borrow()
-                .authentication
-                .certificate
-                .is_none()
-        })
-        .await;
+        until(|| control.context.status.borrow().auth.certificate.is_none()).await;
         assert_eq!(
-            control
-                .context
-                .status
-                .borrow()
-                .authentication
-                .certificate_update,
+            control.context.status.borrow().auth.certificate_update,
             crate::xiaomi::auth::CertificateUpdate::Failed(
                 crate::xiaomi::auth::FailureReason::MissingCertificate
             )
@@ -132,12 +95,7 @@ fn background_distinguishes_missing_invalid_and_repaired_certificates() {
         })
         .await;
         assert_eq!(
-            control
-                .context
-                .status
-                .borrow()
-                .authentication
-                .certificate_update,
+            control.context.status.borrow().auth.certificate_update,
             crate::xiaomi::auth::CertificateUpdate::Failed(
                 crate::xiaomi::auth::FailureReason::InvalidCertificate
             )
@@ -146,23 +104,9 @@ fn background_distinguishes_missing_invalid_and_repaired_certificates() {
         record.hub.as_mut().unwrap().certificate_pem = original;
         control.store.xiaomi().replace(&record).unwrap();
         control.context.changed.notify(usize::MAX);
-        until(|| {
-            control
-                .context
-                .status
-                .borrow()
-                .authentication
-                .certificate
-                .is_some()
-        })
-        .await;
+        until(|| control.context.status.borrow().auth.certificate.is_some()).await;
         assert_eq!(
-            control
-                .context
-                .status
-                .borrow()
-                .authentication
-                .certificate_update,
+            control.context.status.borrow().auth.certificate_update,
             crate::xiaomi::auth::CertificateUpdate::NotNeeded
         );
         assert_eq!(control.cloud.lock().unwrap().homes, 0);
@@ -325,7 +269,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
             cert_release.send(()).unwrap();
             until(|| {
                 matches!(
-                    c.context.status.borrow().authentication.certificate_update,
+                    c.context.status.borrow().auth.certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Updated
                 )
             })
@@ -446,12 +390,7 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
             until(|| control.cloud.lock().unwrap().tokens == 1).await;
             until(|| {
                 matches!(
-                    control
-                        .context
-                        .status
-                        .borrow()
-                        .authentication
-                        .authentication,
+                    control.context.status.borrow().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                 )
             })
@@ -492,7 +431,7 @@ fn expired_local_certificate_revokes_only_the_local_candidate() {
                 .context
                 .status
                 .borrow()
-                .authentication
+                .auth
                 .certificate
                 .unwrap()
                 .not_after;
@@ -541,7 +480,7 @@ fn home_and_info_rejection_of_the_fresh_token_keep_the_login_prompt() {
             })
             .await;
             assert!(matches!(
-                c.context.status.borrow().authentication.authentication,
+                c.context.status.borrow().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
             c.context.request_sync();
@@ -549,7 +488,7 @@ fn home_and_info_rejection_of_the_fresh_token_keep_the_login_prompt() {
             async_io::Timer::after(Duration::from_millis(20)).await;
             assert_eq!(c.cloud.lock().unwrap().tokens, 1);
             assert!(matches!(
-                c.context.status.borrow().authentication.authentication,
+                c.context.status.borrow().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
         }));
@@ -624,7 +563,7 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
         until(|| c.cloud.lock().unwrap().certs == 2).await;
         until(|| {
             matches!(
-                c.context.status.borrow().authentication.certificate_update,
+                c.context.status.borrow().auth.certificate_update,
                 crate::xiaomi::auth::CertificateUpdate::Updated
             )
         })
@@ -635,7 +574,7 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
             super::super::cloud::CloudSync::Paused
         ));
         assert!(!matches!(
-            c.context.status.borrow().authentication.authentication,
+            c.context.status.borrow().auth.ha,
             crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
         ));
     }));
@@ -755,12 +694,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             initialized(control, &peer, &["one"]).await;
             until(|| {
                 matches!(
-                    control
-                        .context
-                        .status
-                        .borrow()
-                        .authentication
-                        .certificate_update,
+                    control.context.status.borrow().auth.certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Failed(_)
                 )
             })
@@ -774,12 +708,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             until(|| {
                 control.cloud.lock().unwrap().certs > before
                     && matches!(
-                        control
-                            .context
-                            .status
-                            .borrow()
-                            .authentication
-                            .certificate_update,
+                        control.context.status.borrow().auth.certificate_update,
                         crate::xiaomi::auth::CertificateUpdate::Updated
                     )
             })
@@ -807,12 +736,7 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
             initialized(control, &peer, &["one"]).await;
             until(|| {
                 matches!(
-                    control
-                        .context
-                        .status
-                        .borrow()
-                        .authentication
-                        .authentication,
+                    control.context.status.borrow().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 )
             })
@@ -830,12 +754,7 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
             }
             assert_eq!(control.cloud.lock().unwrap().homes, before);
             assert!(matches!(
-                control
-                    .context
-                    .status
-                    .borrow()
-                    .authentication
-                    .authentication,
+                control.context.status.borrow().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
         })
@@ -874,12 +793,7 @@ fn candidate_unauthorized_requests_coalesce_into_one_token_refresh_and_resume_pr
             initialized(control, &peer, &["one", "multi", "two"]).await;
             assert_eq!(control.cloud.lock().unwrap().tokens, 1);
             assert!(!matches!(
-                control
-                    .context
-                    .status
-                    .borrow()
-                    .authentication
-                    .authentication,
+                control.context.status.borrow().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
             assert_eq!(
@@ -1022,21 +936,11 @@ fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials
                 initialized(control, &peer, &["one", "multi"]).await;
                 assert_eq!(control.cloud.lock().unwrap().tokens, 1);
                 assert!(!matches!(
-                    control
-                        .context
-                        .status
-                        .borrow()
-                        .authentication
-                        .authentication,
+                    control.context.status.borrow().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 ));
                 assert!(matches!(
-                    control
-                        .context
-                        .status
-                        .borrow()
-                        .authentication
-                        .authentication,
+                    control.context.status.borrow().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::Authenticated
                 ));
             })
@@ -1067,12 +971,7 @@ fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopp
                 initialized(control, &peer, &["one"]).await;
                 until(|| {
                     matches!(
-                        control
-                            .context
-                            .status
-                            .borrow()
-                            .authentication
-                            .authentication,
+                        control.context.status.borrow().auth.ha,
                         crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                     )
                 })
@@ -1100,12 +999,7 @@ fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopp
                 }
                 assert_eq!(control.cloud.lock().unwrap().tokens, 1);
                 assert!(matches!(
-                    control
-                        .context
-                        .status
-                        .borrow()
-                        .authentication
-                        .authentication,
+                    control.context.status.borrow().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 ));
             })
@@ -1149,12 +1043,7 @@ fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
             assert_eq!(control.cloud.lock().unwrap().details, 2);
             until(|| {
                 matches!(
-                    control
-                        .context
-                        .status
-                        .borrow()
-                        .authentication
-                        .authentication,
+                    control.context.status.borrow().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                 )
             })
@@ -1169,12 +1058,7 @@ fn coalesced_candidate_401s_preserve_the_temporary_refresh_backoff() {
             }
             assert_eq!(control.cloud.lock().unwrap().tokens, 1);
             assert!(!matches!(
-                control
-                    .context
-                    .status
-                    .borrow()
-                    .authentication
-                    .authentication,
+                control.context.status.borrow().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
             function(&control.context.registry, "one", "outlet:2")

@@ -156,8 +156,7 @@ impl Context {
                 CloudSync::Refreshed(fresh) if fresh == token => {
                     self.store.xiaomi().stop_ha_refresh()?;
                     *sync = CloudSync::Paused;
-                    self.status.borrow_mut().authentication.authentication =
-                        AuthenticationState::SignInRequired(reason);
+                    self.status.borrow_mut().auth.ha = AuthenticationState::SignInRequired(reason);
                     self.status_changed.notify(usize::MAX);
                 }
                 CloudSync::Rejected(_) | CloudSync::Paused => {}

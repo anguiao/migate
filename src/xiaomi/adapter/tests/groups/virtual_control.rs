@@ -11,7 +11,7 @@ fn terminal_controls_hidden_member_without_publishing_or_redirecting_it() {
         assert!(current.derived.visible_functions(&member).is_empty());
         let before = current.configuration.clone();
         let status = crate::terminal::AuthStatus::new(
-            c.context.status.borrow().authentication.clone(),
+            c.context.status.borrow().auth.clone(),
             "/bin/migate".into(),
             "/data".into(),
         );
